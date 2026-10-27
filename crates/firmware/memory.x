@@ -164,18 +164,21 @@ _stext = ADDR(.hotcode) + SIZEOF(.hotcode);
 SECTIONS
 {
   /* Shrink round 7 (2026-10-27): the 192 B alignment gap between the mailbox carve (ends 0x240)
-   * and the 256-aligned RAM vector table (0x300) holds the two DMA receive rings, which are
-   * exactly 128 + 64 = 192 B. They used to be `.bss` statics above the tables; here they are
-   * NOLOAD, so cortex-m-rt's zero loop never sees them and `main` zeroes each one explicitly
-   * before its ring is armed (`DMA_RING`, `BLE_DMA_RING` in crates/firmware/src/main.rs). Their
-   * contents never matter before that: a DMA ring's reader only ever reads bytes behind the live
-   * DMA write index. `_stack_end` falls by the full 192 B, which is stack. The section starts at
-   * ORIGIN(RAM), asserted below, and the SIZEOF assert pins the rings to the gap: a ring that grew
-   * would push the vector table to the NEXT 256 boundary and silently cost 256 B. */
+   * and the 256-aligned RAM vector table (0x300) holds the inter-board DMA receive ring (128 B).
+   * It used to be a `.bss` static above the tables; here it is NOLOAD, so cortex-m-rt's zero loop
+   * never sees it and `main` zeroes it explicitly before the ring is armed (`DMA_RING` in
+   * crates/firmware/src/main.rs). Its contents never matter before that: a DMA ring's reader only
+   * ever reads bytes behind the live DMA write index. The section starts at ORIGIN(RAM), asserted
+   * below, and the SIZEOF assert pins the ring to the gap: a ring that grew past 192 B would push
+   * the vector table to the NEXT 256 boundary and silently cost 256 B.
+   *
+   * The gap's other 64 B are FREE again (2026-10-27): they held the CC2541 port's ring until the
+   * port went (`specs/decision-cc2541-removal.md`). They are there for the next static of 64 B or
+   * less that wants them; until then the vector table still sits at 0x300 and they cost nothing
+   * but are nobody's. */
   .ramgap (NOLOAD) :
   {
     *(.uninit.DMA_RING)
-    *(.uninit.BLE_DMA_RING)
   } > RAM
 
   /* The two RAM vector tables OVERLAY each other (shrink round 7). The detect probe's 16-slot
@@ -197,7 +200,7 @@ SECTIONS
 } INSERT BEFORE .data;
 
 ASSERT(ADDR(.ramgap) == ORIGIN(RAM), "memory.x: .ramgap no longer starts at the mailbox carve; the ring gap-fill is lost");
-ASSERT(SIZEOF(.ramgap) == 192, "memory.x: .ramgap holds the two DMA rings, 128 + 64 B (a ring changed size? then the vector table moves to the next 256 boundary and costs 256 B)");
+ASSERT(SIZEOF(.ramgap) == 128, "memory.x: .ramgap holds the inter-board DMA ring, 128 B, with 64 B of the 192 B gap free (a static that grew past the gap moves the vector table to the next 256 boundary and costs 256 B)");
 ASSERT(ADDR(.ramvectors) == ORIGIN(RAM) + 192, "memory.x: the RAM vector table must follow the ring gap at the first 256 boundary");
 ASSERT(SIZEOF(.ramvectors) == 256, "memory.x: the RAM vector table is 256 B (64 slots)");
 ASSERT(ADDR(.probetable) == ADDR(.ramvectors), "memory.x: the detect-probe vector table must overlay the RAM vector table");

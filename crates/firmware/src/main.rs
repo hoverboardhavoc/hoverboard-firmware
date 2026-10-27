@@ -4,40 +4,26 @@
 //! silicon at runtime and adapts (specs/firmware.md).
 //!
 //! It wires the libraries it does not own (`store` + `FmcFlash`, `net`'s L3 `Responder`, `link`'s L2,
-//! the `swd-mailbox`, `ble`'s AT bring-up, and `runtime-hal`'s detect / clock / USART) into one
-//! cooperative service loop: boot-safe -> init the SWD mailbox -> detect -> 72 MHz clock -> mount the
-//! store -> **bring up the L2 links the spec's way** (the BT-probe BLE link + the link-listen UARTs)
-//! into `net` -> service them forever.
+//! the `swd-mailbox`, and `runtime-hal`'s detect / clock / USART) into one cooperative service loop:
+//! boot-safe -> init the SWD mailbox -> detect -> 72 MHz clock -> mount the store -> **bring up the
+//! L2 links** (the inter-board UART) into `net` -> service them forever.
 //!
-//! **Unconfigured bring-up (specs/l3.md, "Unconfigured bring-up").** A board with no `LINK_SET` finds
-//! its links over the *safe* USARTs (gate-capable pins denied) in two baud phases:
-//!   1. **BT-probe (active, polled, 9600).** Send `AT\r\n`; the one USART that answers `AT+OK\r\n` is a
-//!      CC2541 BLE module -> run the `ble.md` AT bring-up to transparent data mode and make it an L2
-//!      BLE link. Nothing else answers `AT`, so it is unambiguous.
-//!   2. **Link-listen (passive, DMA, `link::INTER_BOARD_BAUD`).** The remaining safe USARTs come up as L2 byte-stream
-//!      links and just listen for L3 PDUs.
+//! **Two ports** (specs/l3.md, "Ports"). The SWD mailbox is always port 0 (a debugger, a host or the
+//! hoverboard bridge attaches over MEM-AP, no wiring); **port 1 is the inter-board UART** (USART1
+//! PA2/PA3, the proven inter-board link), brought up on every boot whose `LINK_SET` does not clear
+//! it. A board stays at `0x00` until assigned, then persists its `LINK_SET` (the bitmask of live
+//! ports) alongside its `node_address`. A phone reaches the board through the bridge on its SWD
+//! header (`specs/hoverboard-bridge.md`); the onboard CC2541 is no longer driven
+//! (`specs/decision-cc2541-removal.md`).
 //!
-//! Each live port becomes one of the board's `net` ports; the board stays at `0x00` until assigned,
-//! then persists its `LINK_SET` (the bitmask of live ports) alongside its `node_address`. A
-//! **configured** boot (non-zero `LINK_SET`) brings up exactly that set, never re-running the probe.
+//! **One image, two board families, decided by staged data.** The IMU sits on mirrored pins across
+//! the fleet: the standard family puts it on I2C0's PB6/PB7, the classywalk offroad family on I2C1's
+//! PB10/PB11. The chip cannot tell them apart - a bench slave and an offroad board are the same
+//! GD32F130 part - so the persisted board layout decides (`imu.scl_pin`/`imu.sda_pin`).
 //!
-//! The SWD mailbox is always port 0 (a debugger/host attaches over MEM-AP, no wiring); the discovered
-//! USART links fill the remaining ports: **port 1 = the inter-board UART** (USART1 PA2/PA3, the proven
-//! inter-board link), **port 2 = the BLE module** (the onboard CC2541).
-//!
-//! **One image, two board families, decided by staged data.** The BLE module and the IMU sit on
-//! MIRRORED pins across the fleet: the standard family puts its CC2541 on USART2's PB10/PB11 and its
-//! IMU on I2C0's PB6/PB7, while the classywalk offroad family puts its CC2541 on USART0's PB6/PB7 and
-//! its IMU on I2C1's PB10/PB11. The chip cannot tell them apart - a bench slave and an offroad board
-//! are the same GD32F130 part - so neither peripheral is compiled in. The persisted board layout
-//! decides both: `LINK_SET` names which USART wiring carries the module, `imu.scl_pin`/`imu.sda_pin`
-//! name the IMU's bus, and `board::plumbing::resolve_ports` is the single owner that turns those
-//! into this boot's pin assignment (and refuses to hand any USART a pin the IMU holds).
-//!
-//! Pin safety (specs/l3.md, "Pin safety"): only the safe USARTs are touched (USART0 PB6/PB7, USART1
-//! PA2/PA3, USART2 PB10/PB11 - all clear of any advanced-timer gate pin; USART0's DEFAULT mapping
-//! PA9/PA10 is denied, being the high-side gates). Busy-spin, NEVER `wfi` (a wfi with
-//! `DBG_CTL0 = 0` locks GD32 SWD re-attach).
+//! Pin safety (specs/l3.md, "Pin safety"): only the safe USART is touched (USART1 PA2/PA3, clear of
+//! any advanced-timer gate pin). Busy-spin, NEVER `wfi` (a wfi with `DBG_CTL0 = 0` locks GD32 SWD
+//! re-attach).
 //!
 //! **The integrated control stack (specs/integration.md, slice 7).** On top of the link spine the
 //! image runs the orchestrated pipeline: the SysTick ISR ticks the ISR-safe `scheduler` static at
@@ -59,7 +45,6 @@
 #![cfg_attr(target_os = "none", no_main)]
 
 mod arm;
-mod ble_carrier;
 mod motor;
 mod odometer;
 /// The host tests' in-RAM `store::Flash`, one copy for the whole crate (see the module).
@@ -70,15 +55,12 @@ mod test_flash;
 mod firmware {
 
     use crate::arm;
-    use crate::ble_bringup::{self, BleProbeObs};
-    use crate::ble_name;
-    use crate::ble_wire::MeteredTx;
-    use crate::guest_tx::{emit_samples, GuestSlots, GuestStaged};
+    use crate::guest_tx::{emit_mailbox_samples, GuestSlots, GuestStaged};
     use crate::link_drain::bounded_drain;
     use crate::motor;
     use crate::odometer;
     use crate::probe_window::poll_window_elapsed;
-    use board::plumbing::{read_fields, reserved_set, resolve_ports, AllowlistPort, BoardObs};
+    use board::plumbing::{read_fields, reserved_set, AllowlistPort, BoardObs};
     use core::mem::MaybeUninit;
     use core::ptr::{addr_of, addr_of_mut};
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -88,7 +70,7 @@ mod firmware {
     use embedded_hal::digital::OutputPin;
     use link::{Link, SerialTransport};
     use linkctl::{ChipTag, CyclicState};
-    use net::walk::{Emits, Responder, MCU_F10X, MCU_F1X0, PORT_BLE, PORT_SWD, PORT_UART};
+    use net::walk::{Emits, Responder, MCU_F10X, MCU_F1X0, PORT_SWD, PORT_UART};
     use orchestrator::{
         ble_cyclic_tx, ble_peer_tx, control_task, cyclic_tx, input_task, BoardIdentity,
         InputSample, Obs, OrchestratorState,
@@ -97,12 +79,11 @@ mod firmware {
     // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
     // which cortex-m-rt no longer provides once its `device` feature is on.
     use runtime_hal::clock::{self, ClockConfig};
-    use runtime_hal::delay::Delay;
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
     use runtime_hal::{
-        detect_chip, DmaTx, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel, PolledSerial,
-        RingBufferedRx, SplitSerial, Usart, WdgTimeout,
+        detect_chip, DmaTx, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel, RingBufferedRx,
+        SplitSerial, Usart, WdgTimeout,
     };
     use scheduler::{systick_load, Scheduler};
     use store::{
@@ -122,8 +103,6 @@ mod firmware {
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
     /// The inter-board / link-listen UART baud, from its one owner (`link::INTER_BOARD_BAUD`).
     const LINK_BAUD: u32 = link::INTER_BOARD_BAUD;
-    /// The CC2541 module's AT-command baud (`ble::at::BAUD`).
-    const BT_BAUD: u32 = ble::at::BAUD;
 
     /// Each L2 link's reassembly buffer (the largest packet a link reassembles). The links carry
     /// single-fragment L3/config PDUs (<= `net::walk::MAX_PDU` = 64 B); 72 B holds a whole PDU with a
@@ -132,16 +111,9 @@ mod firmware {
     const PACKET: usize = 72;
     /// Per-link `StreamFramer` buffers (`frame_capacity + 4`, the `SerialTransport` rule: the
     /// SOF/len and CRC bytes around the carrier's largest frame). Sized to EACH carrier instead
-    /// of one shared 132-byte max (the slice-7 stack budget: the shared constant wasted 144 B of
-    /// live loop RAM across the UART/BLE links).
+    /// of one shared 132-byte max (the slice-7 stack budget).
     const MAILBOX_FRAMER_N: usize = swd_mailbox::FRAME_CAPACITY + 4; // 132
-    const UART_FRAMER_N: usize = UART_FRAME_CAP + 4; // 100
-    const BLE_FRAMER_N: usize = BLE_FRAME_CAP + 4; // 20
-    /// The BLE port's one-deep emission slot, sized to the largest PDU the responder can hand
-    /// `route_emits` (`net::walk::MAX_PDU`, the bound on an `Emission`'s bytes). The slot holds the
-    /// PDU rather than its wire frames, because a PDU over the port's 15 B chunk becomes several
-    /// frames and `MeteredTx` encodes them one at a time as the wire frees (`crate::ble_wire`).
-    const BLE_EMIT_CAP: usize = net::walk::MAX_PDU; // 64
+    const UART_FRAMER_N: usize = UART_FRAME_CAP + 4; // 76
     /// The DMA RX ring for the inter-board USART (circular DMA + USART IDLE). >= the max wire frame
     /// with margin for a back-to-back burst.
     const DMA_CAP: usize = 128;
@@ -150,10 +122,6 @@ mod firmware {
     /// this port ever carries is a MAX_PDU (64 B) + the 1-byte frag-hdr = 65 <= 71 usable, so 96
     /// bought nothing but 24 B of framer buffer + 24 B of send scratch on the deep drain chain.
     const UART_FRAME_CAP: usize = 72;
-    /// The BLE link's L2 frame capacity. The CC2541 bridge is a byte stream (it coalesces/re-chunks),
-    /// so this is just the framing chunk size, sized so one stream frame fits a ~20 B BLE ATT write
-    /// (SOF + len + 16 B L2 frame + CRC).
-    const BLE_FRAME_CAP: usize = 16;
     /// The poll window (`specs/l3.md`, "PROBE_PORTS is answered by an active local probe"): after a
     /// `PROBE_PORTS`, the responder waits this long for its per-port neighbour probes to answer, then
     /// emits `PORTS`. Expressed in **SysTick ticks** (250 Hz) - a wall-clock window that is the same
@@ -164,15 +132,13 @@ mod firmware {
     /// and never answered).
     ///
     /// Two bounds it must satisfy. It must be **longer** than the worst-case neighbour probe-reply
-    /// round-trip so a real neighbour is seen (the BLE bridge is the slowest medium: a `NODE_HELLO`
-    /// out and its reply back through the CC2541's data-mode bridge is tens of ms, ~100 ms worst
-    /// case); and **shorter** than the controller's `PROBE_PORTS` retransmit (3 s, `swd-bridge`'s
+    /// round-trip so a real neighbour is seen (it was sized when the CC2541's 9600-baud data-mode
+    /// bridge was a port, the slowest medium the board ever had: ~100 ms worst case); and **shorter** than the controller's `PROBE_PORTS` retransmit (3 s, `swd-bridge`'s
     /// `run_walk`) so `PORTS` fires on the FIRST probe on every board regardless of loop speed.
     ///
-    /// 125 ticks = 500 ms sits in that gap: >3x margin over the ~100 ms BLE round-trip (neighbours
+    /// 125 ticks = 500 ms sits in that gap: >3x margin over that ~100 ms round-trip (neighbours
     /// are never missed) and 6x under the 3 s retransmit (the walk always advances on the first
-    /// probe). Snappier than the original ~1 s intent; a smaller 250 ms would still be safe but
-    /// trims the BLE-neighbour margin. DEPENDS on the firmware SysTick tick being live (the slice-7
+    /// probe). DEPENDS on the firmware SysTick tick being live (the slice-7
     /// P0 fix, `register_tick_handler`): before it, `TICK_COUNT` was stuck at 0 and a tick window
     /// would never elapse.
     const POLL_WINDOW_TICKS: u32 = 125;
@@ -193,18 +159,13 @@ mod firmware {
     const fn link_bit(port: u8) -> u8 {
         1u8 << port
     }
-    /// Port indices (fixed slots): 0 = SWD mailbox, 1 = inter-board UART, 2 = BLE module.
+    /// Port indices (fixed slots): 0 = SWD mailbox, 1 = inter-board UART.
     const PORT_IDX_MAILBOX: u8 = 0;
     const PORT_IDX_UART: u8 = 1;
-    const PORT_IDX_BLE: u8 = 2;
-    /// The board's port SLOTS (mailbox + the two USART link slots). The port assignment indexes its
-    /// answers by the same slot numbering, so the two counts are one fact and are held to it here.
-    ///
-    /// How many of those slots are REGISTERED with `net` is a per-boot question, not this one: the
-    /// BLE slot exists only when its link does ([`ble_bringup::net_ports`]).
-    const N_PORTS: u8 = 3;
-    const _: () = assert!(N_PORTS as usize == board::plumbing::NET_PORTS);
-    const _: () = assert!(ble_bringup::net_ports(true) == N_PORTS);
+    /// The board's `net` ports: the mailbox and the inter-board link, on every boot. A board whose
+    /// `LINK_SET` clears the UART bit still REGISTERS port 1 (its link is simply absent and an
+    /// emission to it drops), which is what it did before the CC2541 port went.
+    const N_PORTS: u8 = 2;
 
     /// VTOR alignment invariant: the `RAM_VECTORS` static (packed by memory.x's `.ramtables`
     /// section) carries `RamVectorTable`'s own alignment, and VTOR accepts a table aligned to a
@@ -216,79 +177,46 @@ mod firmware {
         assert!(core::mem::align_of::<RamVectorTable>() >= core::mem::size_of::<RamVectorTable>());
 
     /// One entry in the safe-link USART allowlist (`specs/l3.md`, "Pin safety": gate-capable pins
-    /// denied). Pins and slots ONLY: which peripheral a pair drives, and whether this silicon can
-    /// drive it at all, are the HAL pin model's answers ([`usart_of`]), asked per boot. Baking
-    /// either here would be a second copy of `runtime_hal::pincap`'s routing table, and a wrong one
-    /// on half the fleet: the same PB6/PB7 pair is USART0 on the F1x0 and no USART at all on the
-    /// F10x.
+    /// denied). Pins and the `LINK_SET` bit ONLY: which peripheral a pair drives, and whether this
+    /// silicon can drive it at all, are the HAL pin model's answers ([`usart_of`]), asked per boot.
     struct SafeLinkUsart {
-        /// This entry's bit in the persisted `LINK_SET` mask: the identity of the WIRING. Unique
-        /// per entry, and what the reserved-set computation keys its freeing rule on.
+        /// This entry's bit in the persisted `LINK_SET` mask: the identity of the WIRING, and what
+        /// the reserved-set computation keys its freeing rule on.
         link_set_bit: u8,
-        /// The `net` port slot this entry's link occupies when live. NOT unique: the two BLE
-        /// wirings below are alternatives for one board function and share the BLE slot.
-        net_port: u8,
         /// The entry's pin pair, packed `(port << 4) | pin`: the allowlist's PIN fact, the
         /// single declaration the board validator's reserved set is computed from
-        /// (`specs/board-model.md` check 3) and the bring-up resolves its handles from.
+        /// (`specs/board-model.md` check 3).
         pins: [u8; 2],
     }
 
-    /// The spec's safe-UART allowlist (`specs/l3.md` §143): USART0 PB6/PB7, USART1 PA2/PA3, USART2
-    /// PB10/PB11. Gate-capable pins (USART0-default PA9/PA10) are denied - that is the allowlist's
-    /// whole job.
+    /// The spec's safe-UART allowlist (`specs/l3.md` §143): USART1 PA2/PA3, the inter-board link
+    /// (both boards, both families). Gate-capable pins (USART0-default PA9/PA10) are denied - that
+    /// is the allowlist's whole job.
     ///
-    /// The first and last entries are the fleet's TWO BLE WIRINGS. The onboard CC2541 hangs off
-    /// USART2's PB10/PB11 on the standard family and off USART0's PB6/PB7 on the classywalk
-    /// offroad family, and the mirror image is true of the IMU: the pins one board uses for its
-    /// module are the pins the other uses for its I2C. Both wirings are therefore allowlisted with
-    /// distinct `LINK_SET` bits and one shared `net` slot, and which one a board brings up is
-    /// decided by what was staged on it (`resolve_ports`), never by the chip. It cannot be by the
-    /// chip: the bench slave and the offroad boards are the same GD32F130 part.
-    const SAFE_LINK_USARTS: [SafeLinkUsart; 3] = [
-        // PB6/PB7 = USART0 on the F1x0 (Datasheet Rev3.7 Table 2-10, AF0): the offroad family's
-        // BLE module. The same pins are the standard family's IMU bus, and on the F10x they reach
-        // no USART at all (that would need the AFIO remap the HAL does not implement).
-        SafeLinkUsart {
-            link_set_bit: 3,
-            net_port: PORT_IDX_BLE,
-            pins: [0x16, 0x17], // PB6/PB7
-        },
-        // USART1 (PA2/PA3): the inter-board link (both boards, both families), the link-listen port.
-        SafeLinkUsart {
-            link_set_bit: PORT_IDX_UART,
-            net_port: PORT_IDX_UART,
-            pins: [0x02, 0x03], // PA2/PA3
-        },
-        // PB10/PB11 = USART2 on the F10x: the standard family's onboard CC2541. The F1x0 has no
-        // USART2 at all and puts I2C1 on these pins, which is the offroad family's IMU bus.
-        SafeLinkUsart {
-            link_set_bit: PORT_IDX_BLE,
-            net_port: PORT_IDX_BLE,
-            pins: [0x1A, 0x1B], // PB10/PB11
-        },
-    ];
+    /// It held three entries while the onboard CC2541 was driven: the module's two wirings, USART2
+    /// on PB10/PB11 (standard family, `LINK_SET` bit 2) and USART0 on PB6/PB7 (offroad family, bit
+    /// 3), are gone with it (`specs/decision-cc2541-removal.md`), and those bits mean nothing now.
+    const SAFE_LINK_USARTS: [SafeLinkUsart; 1] = [SafeLinkUsart {
+        link_set_bit: PORT_IDX_UART,
+        pins: [0x02, 0x03], // PA2/PA3
+    }];
 
     /// [`SAFE_LINK_USARTS`]'s inter-board-link entry, and the instance its pins drive.
     ///
-    /// This slot is the one that does NOT need resolving. PA2/PA3 is USART1's default mapping on
-    /// BOTH families (the pin model's `USART_PIN_MAPPINGS` carries exactly one row for it, routable
-    /// everywhere), so unlike the BLE slot there is no per-board choice to make and no per-family
-    /// answer to look up. Three things keep the named instance honest rather than a stale copy:
-    /// `Usart::new` re-derives the pair through `pincap::usart_pins` on every boot and refuses a
-    /// mismatch (`SelectorAddrMismatch`), so a drift fails loud at the seam on the first boot; the
-    /// R-CAP agreement suite asserts the pair routes on every fleet part at host-test time; and the
-    /// const assert below pins the index to the right slot.
+    /// Declared, not resolved. PA2/PA3 is USART1's default mapping on BOTH families (the pin
+    /// model's `USART_PIN_MAPPINGS` carries exactly one row for it, routable everywhere), so there
+    /// is no per-board choice to make and no per-family answer to look up. Two things keep the
+    /// named instance honest rather than a stale copy: `Usart::new` re-derives the pair through
+    /// `pincap::usart_pins` on every boot and refuses a mismatch (`SelectorAddrMismatch`), so a
+    /// drift fails loud at the seam on the first boot; and the R-CAP agreement suite asserts the
+    /// pair routes to USART1 on every fleet part at host-test time.
     ///
     /// It is also a deliberate flash decision (`specs/decision-flash-budget.md`). Routing this slot
-    /// through the per-boot resolver as well costs **816 B**, because the inter-board USART's
-    /// instance then stops being a constant and `RingBufferedRx::new`'s DMA-channel selection can
-    /// no longer fold. That is most of a 1 KiB budget spent to re-derive a fact with one fleet-wide
-    /// answer that the HAL already re-checks. The BLE and IMU slots, which genuinely differ per
-    /// board, are resolved; this one is declared and verified.
-    const LINK_ENTRY_UART: usize = 1;
+    /// through a per-boot resolver costs **816 B**, because the inter-board USART's instance then
+    /// stops being a constant and `RingBufferedRx::new`'s DMA-channel selection can no longer fold.
+    const LINK_ENTRY_UART: usize = 0;
     const LINK_USART: PeriphLabel = PeriphLabel::Usart1;
-    const _: () = assert!(SAFE_LINK_USARTS[LINK_ENTRY_UART].net_port == PORT_IDX_UART);
+    const _: () = assert!(SAFE_LINK_USARTS[LINK_ENTRY_UART].link_set_bit == PORT_IDX_UART);
 
     /// The USART instance a safe-link entry's pins drive on THIS chip, if the HAL can bring that
     /// instance up: the one place the firmware asks the pin model "what is on these pins, and can
@@ -305,13 +233,11 @@ mod firmware {
         runtime_hal::supports_rx(chip, mapping.usart).then_some(mapping.usart)
     }
 
-    /// The compiled allowlist with the HAL's per-boot answers filled in, the form both the
-    /// validator's reserved set and the port assignment consume (their one shared input, so the
-    /// pins the validator refuses to a board field and the pins a bring-up drives cannot disagree).
-    fn allowlist(chip: &runtime_hal::Chip) -> [AllowlistPort; 3] {
+    /// The compiled allowlist with the HAL's per-boot answers filled in, the form the validator's
+    /// reserved set consumes.
+    fn allowlist(chip: &runtime_hal::Chip) -> [AllowlistPort; 1] {
         SAFE_LINK_USARTS.map(|u| AllowlistPort {
             link_set_bit: u.link_set_bit,
-            net_port: u.net_port,
             pins: u.pins,
             routable: usart_of(chip, u.pins).is_some(),
         })
@@ -426,7 +352,8 @@ mod firmware {
 
     /// The inter-board USART's DMA RX ring. NOT `.bss`: it lives in the 192 B alignment gap
     /// between the SWD mailbox carve and the 256-aligned RAM vector table (`memory.x`,
-    /// `.ramtables`; shrink round 7), which cortex-m-rt's zero loop never visits, so `main` zeroes
+    /// `.ramtables`; shrink round 7; the gap's other 64 B are free since the CC2541 port went),
+    /// which cortex-m-rt's zero loop never visits, so `main` zeroes
     /// it explicitly at the one place the `&'static mut` is formed. Nothing reads a ring byte the
     /// DMA has not written (the reader stays behind the live write index), so the zeroing keeps
     /// the SWD-visible bytes identical to the `.bss` days rather than guarding a read.
@@ -445,18 +372,6 @@ mod firmware {
     /// caller's frame. Sized to [`UART_FRAMER_N`], the largest encoded frame this port can emit, so
     /// a whole frame always goes in ONE transfer and never comes back truncated.
     static mut UART_TX_DMA: [u8; UART_FRAMER_N] = [0; UART_FRAMER_N];
-
-    /// The BLE port's DMA RX ring (the [`DMA_RING`] pattern: in the vector-table gap, zeroed by
-    /// `main`). Sized and justified by [`crate::ble_carrier::RING_CAP`], which also holds why the
-    /// port has a ring at all. The two rings are exactly the 192 B gap; `memory.x` asserts it.
-    #[link_section = ".uninit.BLE_DMA_RING"]
-    static mut BLE_DMA_RING: MaybeUninit<DmaRing<{ crate::ble_carrier::RING_CAP }>> =
-        MaybeUninit::uninit();
-
-    /// The BLE port's DMA TX buffer (.bss; the [`UART_TX_DMA`] pattern): the transmitter's own copy
-    /// of the frame its channel is reading (`specs/ble-port-dma-tx.md`). Sized to [`BLE_FRAMER_N`],
-    /// the largest encoded frame this port emits, so a frame always goes in ONE transfer.
-    static mut BLE_TX_DMA: [u8; BLE_FRAMER_N] = [0; BLE_FRAMER_N];
 
     /// The 250 Hz scheduler (the upgraded ISR-safe crate). The ONE ISR/thread crossing: the
     /// SysTick ISR calls `tick(&self)` concurrently with the loop's `dispatch(&self)`; the
@@ -483,33 +398,10 @@ mod firmware {
     /// half of the OQ1 split, kept SEPARATE from [`LINK_LINE_ERRORS`] so a wire glitch is
     /// distinguishable from a slow-consumer loss.
     static LINK_LAP_OVERRUNS: AtomicU32 = AtomicU32::new(0);
-    /// BLE port recovered RX-LOSS counts (OBS), packed `lap_overruns | line_errors << 16`: the
-    /// conditions the BLE carrier absorbed on the CC2541's UART since boot, sampled from the BLE link
-    /// each loop pass and read at publish. Two u16 saturating counters in one word, the
-    /// `motor_fault` packing precedent, because they answer one question between them.
-    ///
-    /// This instrument is what turned the BLE port's inbound losses from an argument into a number,
-    /// and then into this port's DMA ring. Against the POLLED carrier the port used to ship, a 47.5 s
-    /// drive capture stepped the low half by **634 in 47.5 s** (~13/s) with the high half flat at
-    /// zero: the bytes were arriving and the firmware was missing them, because a polled port's whole
-    /// receive buffer is its one-byte data register and the 250 Hz control callback (1,399 us on an
-    /// IMU-equipped F130, 1,011 us on the F103; 3,941 us for the bounded wedged-I2C path) is longer
-    /// than a 9600-baud character time (1,041.7 us).
-    ///
-    /// The halves keep their meanings across that carrier change, which is what makes the number
-    /// comparable either side of it: the low half is still "the consumer did not come back in time
-    /// and inbound bytes are gone", now a DMA ring LAP rather than a one-byte-register overrun, and
-    /// the high half is still the wire-glitch half of the OQ1 split, kept apart so a noisy module link
-    /// cannot be read as a control loop that stopped listening. What changes is the SCALE, and that is
-    /// the point: the buffer that has to be outrun is [`crate::ble_carrier::RING_CAP`] bytes rather
-    /// than one, so the low half should now read ZERO, and any non-zero reading is a real finding
-    /// rather than the expected cost of a control tick.
-    static BLE_RX_LOSSES: AtomicU32 = AtomicU32::new(0);
     /// Mailbox port DROPPED-FRAME count (OBS): the L2 frames the SWD mailbox refused since boot,
-    /// sampled from the link each loop pass and read at publish. The third port's loss counter,
-    /// beside the inter-board port's two and the BLE port's pair, and the only one that counts an
-    /// OUTBOUND loss: the other two count inbound bytes the receiver missed, this one counts replies
-    /// the board could not place (`specs/swd-mailbox.md`, "Backpressure", requirement 4).
+    /// sampled from the link each loop pass and read at publish. The second port's loss counter,
+    /// beside the inter-board port's two, and the only one that counts an OUTBOUND loss: those
+    /// count inbound bytes the receiver missed, this one counts replies the board could not place (`specs/swd-mailbox.md`, "Backpressure", requirement 4).
     ///
     /// Two causes, separated by the OUTBOUND RING and not by `epoch` (`swd_mailbox::MailboxSerial::
     /// refused_writes` holds the rule). Nothing ever clears `epoch`, so a non-zero one means a
@@ -533,11 +425,11 @@ mod firmware {
     /// writer, `Relaxed`, the [`MAILBOX_DROPS`] pattern.
     static ODOMETER_TOTAL: AtomicU32 = AtomicU32::new(0);
 
-    /// Write calls the polled serial adapters ABANDONED because a transmit flag did not come up
-    /// inside their write budget, packed `inter-board | BLE << 16`
-    /// (`runtime_hal::serial`'s `tx_timeouts`, saturating u16 each).
+    /// Write calls the inter-board port's serial adapter ABANDONED because a transmit flag did not
+    /// come up inside its write budget (`runtime_hal::serial`'s `tx_timeouts`, saturating u16), in
+    /// the low half. The high half was the CC2541 port's and is zero.
     ///
-    /// **The expected reading is zero on both halves**, and a non-zero one is specific: the port
+    /// **The expected reading is zero**, and a non-zero one is specific: the port
     /// stopped accepting bytes and the frame was dropped rather than the main thread spinning on
     /// it. Before that bound existed the same condition was an unbounded spin, and the offroad
     /// master answered it with eleven watchdog resets in one session (2026-10-22). Published
@@ -575,14 +467,11 @@ mod firmware {
     /// (`ldr` indexed, `cmp`, `bne`, `add`, `cmp`, `bne`), so <= 9 core cycles per word, so 32 words
     /// <= 288 cycles = **4.0 us at 72 MHz**.
     ///
-    /// The budget it has to fit inside is the 250 Hz control callback's, which measures 1,011 us on
-    /// the F103 against a 1,041.7 us 9600-baud character time
-    /// (`specs/bench-evidence/2026-08-02/wide-division/RECORD.md`): ~30 us of margin before the
-    /// callback starts costing the BLE port an inbound byte. 4.0 us is 13% of that.
-    ///
-    /// An UNCHUNKED full scan of this image's 661 painted words would be ~5,950 cycles = ~83 us,
-    /// nearly three times the whole margin, on every publish. That would make this instrument a
-    /// cause of exactly the losses [`BLE_RX_LOSSES`] exists to count, which is the specific way a
+    /// It was sized against the 250 Hz control callback's margin under the CC2541 port's 9600-baud
+    /// character time (1,011 us measured on the F103 against 1,041.7 us,
+    /// `specs/bench-evidence/2026-08-02/wide-division/RECORD.md`): ~30 us, of which 4.0 us is 13%.
+    /// That port is gone, and the bound it set is kept: an UNCHUNKED full scan of the painted
+    /// region would be tens of microseconds on every publish, which is the specific way a
     /// diagnostic stops being free.
     const STACK_SCAN_CHUNK: usize = 32;
 
@@ -725,15 +614,14 @@ mod firmware {
         /// Step 8's pending cyclic payload: the 250 Hz callback builds it (addressed boards
         /// only); the loop empties it port-directed onto the inter-board UART.
         cyclic_out: Option<CyclicState>,
-        /// The guest ports' samples ([`GuestSlots`]): the board's own decimated cyclic payload
+        /// The guest port's samples ([`GuestSlots`]): the board's own decimated cyclic payload
         /// (5 Hz, `dispatch::ble_cyclic_tx`) and the PEER's forward (2.5 Hz,
         /// `dispatch::ble_peer_tx`), each a latest-wins slot separate from `cyclic_out` because
-        /// the ports run at different rates. The mailbox port takes a sample in the pass it was
-        /// built; the BLE port takes it when its staging buffer is idle, the own one first
-        /// (`specs/link-control.md`, "The peer's state on the BLE port: the forward" and "The
-        /// mailbox port carries both samples (2026-10-25)").
+        /// the ports run at different rates. The mailbox port takes a sample in the pass after it
+        /// was built (`specs/link-control.md`, "The mailbox port carries both samples
+        /// (2026-10-25)").
         guest: GuestSlots,
-        /// Samples each guest port accepted, `CTRL_OBS` words 40 and 41 ([`GuestStaged`]).
+        /// Samples the mailbox port accepted, `CTRL_OBS` word 41 ([`GuestStaged`]).
         guest_staged: GuestStaged,
         /// Sampled each loop pass from the responder (the address fact lives in `net`).
         addressed: bool,
@@ -802,7 +690,7 @@ mod firmware {
     /// binds one `&'static mut` from here for its ~40 boot reads and never drops it (`main` never
     /// returns), so what makes it sound is ordering, that its last use precedes the entry to
     /// `service_loop`, and therefore precedes the existence of any other borrow. That is the same
-    /// pattern this file already uses for `RAM_VECTORS`, `DMA_RING` and `BLE_DMA_RING`: one
+    /// pattern this file already uses for `RAM_VECTORS` and `DMA_RING`: one
     /// `&'static mut` formed once on the boot thread, before the interrupt or the loop that would
     /// contend for it.
     ///
@@ -981,30 +869,11 @@ mod firmware {
         /// session's unexplained SHUTDOWN/re-arm cycles left `enact_inits`/`enact_shutdowns`
         /// stepping with every level already clear by the time anyone looked.
         event_counts: [u8; orchestrator::N_EVENT_PRODUCERS],
-        /// The BLE port's recovered RX-LOSS counts ([`BLE_RX_LOSSES`]), packed
-        /// `lap_overruns | line_errors << 16`. Appended LAST, so every prior field keeps its offset
-        /// (the offset-preserving append the ISR-metric, roll, motor and balance blocks all used);
-        /// word 29 in the SWD map.
-        ///
-        /// The third port's counters, next to `link_line_errors` / `link_lap_overruns`, which are
-        /// the inter-board port's, and now the same two quantities read the same way: the BLE port
-        /// carries the same DMA-ring receiver the inter-board port does. The low half means what it
-        /// means there, that the consumer did not come back before the ring lapped and inbound bytes
-        /// are gone.
-        ///
-        /// **The expected reading is zero, and it was not always.** Against the polled carrier this
-        /// port used to ship, the low half stepped ~13/s under a phone drive
-        /// (`specs/bench-evidence/2026-08-02/wide-division/RECORD.md` and `specs/ble.md`), because the
-        /// buffer that had to be outrun was one byte and a control tick is longer than a character
-        /// time. Against the ring the buffer is [`crate::ble_carrier::RING_CAP`] bytes, roughly 67 ms
-        /// of wire at 9600 baud, so a non-zero low half is now a genuine finding: it means the loop
-        /// missed many consecutive passes, not that it took one ordinary control tick.
-        ///
-        /// Zero is a real answer here, not an absent one: the counter is published every pass from
-        /// boot, and its host tests pin both directions (`crate::ble_carrier`: the measured
-        /// caller-away windows cost no bytes AND leave this word at zero), so a zero read on a board
-        /// that has been streaming means the bytes survived.
-        ble_rx_losses: u32,
+        /// Word 29, ZERO. It was the CC2541 port's recovered RX-loss counts; the port went
+        /// (`specs/decision-cc2541-removal.md`) and the word keeps its offset, publishing zero,
+        /// because the bench reads this block by offset and `tools/stack-margin.sh` finds word 30
+        /// by symbol plus offset. A later change may re-purpose it.
+        retired_29: u32,
         /// The stack high-water instrument ([`STACK_MARK`]; `crate::stack_paint`), packed
         /// `free_bytes | painted_bytes << 16`. Appended LAST, so every prior field keeps its offset
         /// (the offset-preserving append the ISR-metric, roll, motor, balance and BLE blocks all
@@ -1084,8 +953,8 @@ mod firmware {
         /// stopped draining. `epoch` does not answer it, because nothing clears `epoch`: non-zero
         /// only means a bridge attached at some point this boot.
         mailbox_drops: u32,
-        /// The polled serial adapters' abandoned writes, packed `inter-board | BLE << 16`
-        /// ([`TX_TIMEOUTS`]). Appended LAST, so every prior field keeps its offset (the
+        /// The inter-board port's abandoned writes in the low half ([`TX_TIMEOUTS`]); the high half
+        /// was the CC2541 port's and is zero. Appended LAST, so every prior field keeps its offset (the
         /// offset-preserving append the ISR-metric, roll, motor, balance, BLE and stack blocks all
         /// used); word 35 in the SWD map.
         tx_timeouts: u32,
@@ -1163,18 +1032,13 @@ mod firmware {
         /// The hand-spin gate reads it: smooth and sign-correct while the wheel turns, decaying to
         /// zero within a second of it stopping, exactly 0 while it rocks between two hall codes.
         motor_rate_q: i32,
-        /// Samples the BLE port ACCEPTED (`MeteredTx::stage` took them), packed
-        /// `own u16 | forwards u16 << 16`, each half wrapping ([`GuestStaged`]). Appended LAST,
-        /// offset-preserving, at word 40 (`specs/link-control.md`, "Counting what is staged
-        /// (2026-10-25)").
-        ///
-        /// Read over SWD while a phone is attached, the high half advances by 2.5 a second if the
-        /// forwards leave the board, in which case a forward the phone never shows was lost on the
-        /// module or the phone; if it does not, the board skipped them. A sample the port refused
-        /// (busy) is not counted.
-        ble_staged: u32,
-        /// The same for the SWD mailbox port: samples the ring took whole, own in the low half and
-        /// forwards in the high half, wrapping; word 41. Advances only while a host is attached; a
+        /// Word 40, ZERO. It was the CC2541 port's staged samples (own and phone forwards); the
+        /// port went (`specs/decision-cc2541-removal.md`) and the word keeps its offset, publishing
+        /// zero. A later change may re-purpose it.
+        retired_40: u32,
+        /// Samples the SWD mailbox port's ring took whole, own in the low half and forwards in the
+        /// high half, wrapping; word 41 (`specs/link-control.md`, "Counting what is staged
+        /// (2026-10-25)"). Advances only while a host is attached; a
         /// sample a full ring refused is counted in word 34 and not here.
         mailbox_staged: u32,
         /// This wheel's position in hall edges, FORWARD POSITIVE (`specs/state-feedback.md`
@@ -1286,8 +1150,8 @@ mod firmware {
         assert!(offset_of!(CtrlObs, gating_field) == 0x68);
         assert!(offset_of!(CtrlObs, pre_env_torque) == 0x6A);
         assert!(offset_of!(CtrlObs, event_counts) == 0x6C);
-        // Word 29: the BLE port's RX losses.
-        assert!(offset_of!(CtrlObs, ble_rx_losses) == 0x74);
+        // Word 29: retired (the CC2541 port's RX losses), publishes zero.
+        assert!(offset_of!(CtrlObs, retired_29) == 0x74);
         // Word 30: the stack high-water margin.
         assert!(offset_of!(CtrlObs, stack_margin) == 0x78);
         // Word 31: the phase-current observation.
@@ -1308,8 +1172,9 @@ mod firmware {
         assert!(offset_of!(CtrlObs, reset_cause) == 0x98);
         // Word 39: the period-based wheel rate, the state-feedback law's speed measurement.
         assert!(offset_of!(CtrlObs, motor_rate_q) == 0x9C);
-        // Words 40-41: samples staged per guest port, BLE then mailbox.
-        assert!(offset_of!(CtrlObs, ble_staged) == 0xA0);
+        // Word 40: retired (the CC2541 port's staged samples), publishes zero. Word 41: the
+        // mailbox port's.
+        assert!(offset_of!(CtrlObs, retired_40) == 0xA0);
         assert!(offset_of!(CtrlObs, mailbox_staged) == 0xA4);
         // Words 42-43: the two wheel positions, own then peer, forward positive.
         assert!(offset_of!(CtrlObs, wheel_pos_own) == 0xA8);
@@ -1437,7 +1302,7 @@ mod firmware {
             addr_of_mut!((*p).gating_field).write_volatile(o.gating_field);
             addr_of_mut!((*p).pre_env_torque).write_volatile(o.pre_env_torque);
             addr_of_mut!((*p).event_counts).write_volatile(o.event_counts);
-            addr_of_mut!((*p).ble_rx_losses).write_volatile(BLE_RX_LOSSES.load(Ordering::Relaxed));
+            addr_of_mut!((*p).retired_29).write_volatile(0);
             addr_of_mut!((*p).stack_margin).write_volatile(sample_stack_margin());
             addr_of_mut!((*p).motor_current)
                 .write_volatile(motor::OBS_CURRENT.load(Ordering::Relaxed));
@@ -1455,7 +1320,7 @@ mod firmware {
             );
             addr_of_mut!((*p).reset_cause).write_volatile(RESET_CAUSE.load(Ordering::Relaxed));
             addr_of_mut!((*p).motor_rate_q).write_volatile(motor::RATE_Q.load(Ordering::Relaxed));
-            addr_of_mut!((*p).ble_staged).write_volatile(staged.ble);
+            addr_of_mut!((*p).retired_40).write_volatile(0);
             addr_of_mut!((*p).mailbox_staged).write_volatile(staged.mailbox);
             addr_of_mut!((*p).wheel_pos_own).write_volatile(o.wheel_pos_own);
             addr_of_mut!((*p).wheel_pos_peer).write_volatile(o.wheel_pos_peer);
@@ -1886,7 +1751,7 @@ mod firmware {
     /// publish the same `imu_configured = 0` as a board with no IMU fitted at all.
     ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget idiom, as `init_shell` /
-    /// `validate_layout` / `bring_up_ble`). Only the two live handles are returned; the staged gyro
+    /// `validate_layout`). Only the two live handles are returned; the staged gyro
     /// bias, the probe/init working set and `I2c::new`'s own frame are gone before the loop exists,
     /// instead of sitting in `main`'s frame, which is permanent because `main` never returns.
     #[inline(never)]
@@ -2041,8 +1906,7 @@ mod firmware {
             Err(e) => (BoardObs::failure(&e, self_hold), None),
         };
         // SAFETY: single-threaded boot, interrupts not yet enabled, the one writer this boot;
-        // via a raw pointer so no reference to the `static mut` is formed (the BLE_PROBE_OBS
-        // pattern).
+        // via a raw pointer so no reference to the `static mut` is formed.
         unsafe { *core::ptr::addr_of_mut!(BOARD_OBS) = obs };
         (plan, v.imu_staged)
     }
@@ -2228,7 +2092,7 @@ mod firmware {
     /// SWD at the address of the `BOARD_OBS` symbol
     /// (`nm <elf> | grep BOARD_OBS`). A `static mut` with a fixed un-mangled symbol, written
     /// once per boot (before any interrupt is enabled) via a raw pointer, never through a
-    /// reference: the `BLE_PROBE_OBS` pattern exactly.
+    /// reference.
     #[no_mangle]
     static mut BOARD_OBS: BoardObs = BoardObs {
         magic: 0,
@@ -2241,101 +2105,21 @@ mod firmware {
 
     // ---------------------------------------------------------------------------------------------
     // Serials: the L2 links ride runtime-hal's embedded-io adapters (specs/firmware.md, "The link
-    // serials"): SplitSerial<RingBufferedRx> for the inter-board UART, and the BLE module on a
-    // `PolledSerial` for bring-up only, adopted onto a `SplitSerial<RingBufferedRx>` of its own
-    // once interrupts exist (`specs/ble.md`, "The RX carrier"), which is the carrier the steady
-    // state runs on. There is no firmware-local serial wrapper: the AT probe and the AT handshake
-    // run on the same `PolledSerial` (`crate::ble_bringup`), which is what keeps one `drain_ack`
-    // body in the image.
+    // serials"): SplitSerial<RingBufferedRx> for the inter-board UART, the mailbox's own serial for
+    // port 0. There is no firmware-local serial wrapper.
     // ---------------------------------------------------------------------------------------------
 
-    /// The SWD diagnostic block ([`crate::ble_bringup::BleProbeObs`]). A `static mut` (not a
-    /// functional static) so it keeps the fixed, un-mangled symbol `BLE_PROBE_OBS` the evaluator
-    /// reads over SWD; written only by the one `attach` call below, once per boot, before interrupts
-    /// are enabled. Accessed via a raw pointer (never a reference to the `static mut`, per the
-    /// `static_mut_refs` lint), so it is single-writer and sound.
-    #[no_mangle]
-    static mut BLE_PROBE_OBS: BleProbeObs = BleProbeObs::NEW;
-
-    /// Phase 1: the BT-probe (active, polled, 9600) on the USART the port assignment gave the BLE
-    /// slot.
-    ///
-    /// WHICH USART that is comes from the assignment, not from here: on the standard family the
-    /// module is USART2 on PB10/PB11, on the classywalk offroad family it is USART0 on PB6/PB7, and
-    /// the caller has already applied the whole rule (`LINK_SET`, this silicon's routability, and
-    /// the refusal to take a staged IMU's pins). `entry` is simply the port that won, so a `None`
-    /// caller-side means the board has no BLE port this boot and this is not called at all.
-    ///
-    /// Configured boards bring up exactly the link-set and never probe outside it; unconfigured
-    /// ones probe the routable BLE wiring and the module is whatever answers `AT+OK`.
-    ///
-    /// `name` is the advertised BLE name the caller read from the store ([`crate::ble_name`], whose
-    /// docs hold the whole rule). It is borrowed BYTES and stays borrowed only for this call: it
-    /// goes into `AT+NAME=` and nothing built here keeps it.
-    ///
-    /// It **fails soft**, exactly as [`bring_up_imu`] does: an optional peripheral that is absent,
-    /// silent or wedged returns `None`, the board boots without it, and the outcome is observable
-    /// (`BLE_PROBE_OBS`, and the BLE port simply not existing in `PORTS`). Nothing here can hold the
-    /// boot: the whole window is bounded by `ble_bringup::BOOT_BUDGET_MS`, const-asserted against the
-    /// `ble` crate's own pacing.
-    ///
-    /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the serial, the
-    /// probe tee, and the AT bring-up's working set live here and are gone before the loop's deep
-    /// chains exist.
-    /// Returns the data-mode `Pipe` over the POLLED port plus the USART it was resolved to, NOT a
-    /// finished link: the port's steady-state carrier is a DMA ring, and a ring cannot be armed here
-    /// because this phase runs before the RAM vector table is installed and interrupts are enabled.
-    /// Phase 2 adopts it ([`crate::ble_carrier::adopt`]) once those exist. The resolved instance
-    /// travels with the pipe because it is what selects the ring's DMA channel and vectors, and
-    /// re-deriving it later would mean running the whole port resolution a second time.
-    #[inline(never)]
-    fn bring_up_ble(
-        chip: &runtime_hal::Chip,
-        delay: &mut Delay,
-        entry: &SafeLinkUsart,
-        configured: bool,
-        name: &[u8],
-    ) -> Option<(ble::Pipe<PolledSerial>, PeriphLabel)> {
-        let ble_usart = usart_of(chip, entry.pins)?;
-        let (Ok(tx), Ok(rx)) = (chip.pin(entry.pins[0]), chip.pin(entry.pins[1])) else {
-            return None;
-        };
-        let serial = PolledSerial::new(chip, &CLOCK, ble_usart, (tx, rx), BT_BAUD).ok()?;
-
-        // The bring-up itself is medium-agnostic (`crate::ble_bringup`): everything from the settle
-        // to the data-mode gate is generic over the serial, so the bounded-budget/soft-fail contract
-        // is host-tested against a module that never answers rather than asserted from the bench.
-        // SAFETY: single-threaded boot, interrupts not yet enabled, and this is the one write site
-        // of the block this boot; via a raw pointer, so no reference to the `static mut` outlives it.
-        let obs = unsafe { &mut *core::ptr::addr_of_mut!(BLE_PROBE_OBS) };
-        ble_bringup::attach(serial, delay, configured, name, obs)
-            .pipe()
-            .map(|p| (p, ble_usart))
-    }
-
-    // The three concrete L2 links (heterogeneous serials, one L2 code path each). Each link's
+    // The two concrete L2 links (heterogeneous serials, one L2 code path each). Each link's
     // frame-scratch const (`F`) is its transport's framer capacity, NOT the 255 B protocol
     // ceiling: the scratch lives on the deep drain/send stack chains (round-7a reclaim, ~360 B
     // across poll_recv + send on the 8 KiB parts) and the carrier can never emit a larger frame.
     type MailboxLink =
         Link<SerialTransport<MailboxSerial, MAILBOX_FRAMER_N>, PACKET, MAILBOX_FRAMER_N>;
-    // The inter-board and BLE ports are both on DMA BOTH ways (`runtime-hal/specs/uart-tx-dma.md`,
-    // `specs/ble-port-dma-tx.md`): a ring receiving and a one-shot transmitting, so a frame costs
-    // the main loop a copy instead of its wire time (0.43 ms at 460800, ~21 ms at the module's 9600).
-    // Which carrier a port holds is runtime state inside `SplitSerial` (`TxHalf`), so the TYPE is the
-    // same one both links always had and this whole generic stack is instantiated once for the two.
+    // The inter-board port is on DMA BOTH ways (`runtime-hal/specs/uart-tx-dma.md`): a ring
+    // receiving and a one-shot transmitting, so a frame costs the main loop a copy instead of its
+    // wire time (0.43 ms at 460800).
     type UartLink =
         Link<SerialTransport<SplitSerial<RingBufferedRx>, UART_FRAMER_N>, PACKET, UART_FRAMER_N>;
-    // The BLE link rides the data-mode gate type (`ble::Pipe`, specs/ble.md): a link can only be
-    // built on a serial KNOWN to be in transparent data mode (handshake arm: `bring_up`; fallback
-    // arm: `Pipe::assume_data_mode` from the persisted link-set knowledge). Its carrier is the DMA
-    // ring the port is adopted into after the AT phase (`crate::ble_carrier`), so the BLE and
-    // inter-board links now share one receiver shape and differ only in framer capacity.
-    type BleLink = Link<
-        SerialTransport<ble::Pipe<crate::ble_carrier::BleSerial>, BLE_FRAMER_N>,
-        PACKET,
-        BLE_FRAMER_N,
-    >;
 
     #[entry]
     fn main() -> ! {
@@ -2377,12 +2161,11 @@ mod firmware {
         // instructions per word (`str` post-indexed, `subs`, `bne`), so <= 6 core cycles per word,
         // and the core is still on the 8 MHz reset IRC here because `clock::configure_tree` has not
         // run yet. The painted region is about 900 words (see `paint_stack`), so <= 5,400 cycles =
-        // **<= 675 us**, once, on the boot path. Against `ble_bringup::BOOT_BUDGET_MS` (6,000 ms,
-        // const-asserted) that is 0.008%, and it is spent on EVERY boot including the fast one.
+        // **<= 675 us**, once, on the boot path, spent on EVERY boot.
         //
         // Painting after `configure_tree` would cost 9x less (72 MHz rather than 8 MHz) and is
         // deliberately not done: it would leave the detect and clock-tree frames unmeasured, and
-        // detect runs the bus-fault probe, to save 0.44 ms out of 6,000.
+        // detect runs the bus-fault probe, to save 0.6 ms of boot.
         let painted_words = paint_stack();
         STACK_PAINTED_WORDS.store(painted_words, Ordering::Relaxed);
         // Nothing observed yet: the whole painted region is intact until a sweep says otherwise.
@@ -2419,7 +2202,6 @@ mod firmware {
             &mut state.epoch_watch,
             &mut state.mailbox_link,
             &mut state.uart_link,
-            &mut state.ble_link,
             &mut state.responder.0,
             &mut state.wdg,
             state.discovered,
@@ -2428,17 +2210,16 @@ mod firmware {
         )
     }
 
-    /// What [`service_loop`] borrows for the life of the image: the three links, the responder,
+    /// What [`service_loop`] borrows for the life of the image: the two links, the responder,
     /// the watchdog, the mailbox epoch watch and the three boot facts the loop reads. It is a
     /// struct, not a set of locals in `main`, for one reason: a local of `main` is in `main`'s
     /// frame, and `main`'s frame is the one frame in the image that never pops. Everything that
-    /// is NOT in here (the detected `Chip`, the plan, the allowlist, the polled AT-phase serial,
-    /// the split USART halves, the IMU handles, the input pins, the motor summary) is bring-up
+    /// is NOT in here (the detected `Chip`, the plan, the allowlist, the split USART halves, the IMU handles, the input pins, the motor summary) is bring-up
     /// scaffolding, built and consumed in [`boot`] and gone before the loop's deep chains exist.
     ///
     /// Built IN PLACE: [`boot`] gets `&mut MaybeUninit<LoopState>` and each large field is written
-    /// by its own `#[inline(never)]` placer ([`place_uart_link`], [`place_ble_link`],
-    /// [`place_mailbox_link`], [`place_responder`]) that takes the slot's raw pointer. The placer
+    /// by its own `#[inline(never)]` placer ([`place_uart_link`], [`place_mailbox_link`],
+    /// [`place_responder`]) that takes the slot's raw pointer. The placer
     /// is where the construction temporaries live (a `Link` is built from a transport built from a
     /// carrier built from two DMA halves, each a value on the way), and the placer's frame pops.
     /// Built as a struct literal at the end of `boot`, those temporaries would be `boot`'s frame
@@ -2450,7 +2231,6 @@ mod firmware {
         epoch_watch: EpochWatch,
         mailbox_link: MailboxLink,
         uart_link: Option<UartLink>,
-        ble_link: Option<BleLink>,
         /// Wrapped to word alignment: `Responder` is `align(2)`, and `Responder::new`'s fill of
         /// the slot through an `align(2)` pointer linked the byte-wise `__aeabi_memset` (92 B)
         /// beside the word-wise `__aeabi_memset4` the rest of the image uses; word-aligned, it
@@ -2478,8 +2258,8 @@ mod firmware {
     /// links, the shell before the tick source, the watchdog last), with the long-lived values
     /// written into `state` where `main` used to bind them as locals.
     ///
-    /// `state` is written exactly once per field and never read here except through the two
-    /// `is_some()` facts the link-set and the port count need, both after the field's write.
+    /// `state` is written exactly once per field and never read here except through the one
+    /// `is_some()` fact the link-set needs, after the field's write.
     #[inline(never)]
     fn boot(state: &mut MaybeUninit<LoopState>) {
         let st = state.as_mut_ptr();
@@ -2588,54 +2368,16 @@ mod firmware {
         // bit; it matters on battery + the inter-board cable.
         let (plan, imu_staged) = apply_layout(&chip, store, &allowlist, link_set);
 
-        // Assign the board's pins to functions for this boot, ONCE, before anything is driven
-        // (`board::plumbing::resolve_ports`, the single owner). It decides which USART carries the
-        // BLE module from the staged `LINK_SET` and this silicon's routability, and it refuses any
-        // link port whose pins the validated layout gave to the IMU. Both bring-ups below read
-        // their answer from here, so they cannot disagree about who owns a pin.
-        let assignment = resolve_ports(
-            &allowlist,
-            link_set,
-            plan.as_ref()
-                .and_then(|p| p.imu)
-                .map(|ip| [ip.scl.packed(), ip.sda.packed()]),
-        );
-
-        // A SysTick busy-delay for the polled AT bring-up (phase 1, before any interrupt is enabled).
         // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
         // raw register views internally and never consumes the one-shot flag, so ordering vs
         // detect_chip is unconstrained). take() after detect works; fail loud if somehow taken twice.
+        // Its SYST becomes the 250 Hz tick source below.
         let core = match cortex_m::Peripherals::take() {
             Some(p) => p,
             None => halt(),
         };
-        let mut delay = Delay::new(core.SYST, CLOCK.sysclk_hz);
 
-        // === Phase 1: the BT-probe (active, polled, 9600): see `bring_up_ble` (a popped boot
-        // frame; the probe/bring-up working set never joins the boot frame). ===
-        // The assignment already applied `LINK_SET`, routability, and the IMU-pin refusal, so a
-        // `None` here means this board has no BLE port this boot and nothing is driven.
-        let ble_entry = assignment.port(PORT_IDX_BLE).map(|i| &SAFE_LINK_USARTS[i]);
-        // The advertised name is staged data, not a compiled constant (`crate::ble_name`): a
-        // flash-borrowed `&str` straight out of the mounted store, so it costs no RAM and no copy.
-        // The borrow ends with this statement (nothing built here keeps it), leaving `store`
-        // free for the mutable uses further down.
-        // Phase 1 yields the data-mode pipe over the POLLED port; the link is built in phase 2, after
-        // the vector table exists, once the port has been adopted into its DMA-ring carrier.
-        let ble_ready: Option<(ble::Pipe<PolledSerial>, PeriphLabel)> = ble_entry.and_then(|e| {
-            bring_up_ble(
-                &chip,
-                &mut delay,
-                e,
-                configured,
-                ble_name::advertised(store),
-            )
-        });
-        // Deviation-1 observability (whether the BLE Link came up) is recorded by `attach` itself,
-        // as it returns: it is the outcome of the bring-up, so it is written where the outcome is
-        // known rather than re-derived here from the caller's `Option`.
-
-        // === Phase 2: link-listen (passive, DMA, link::INTER_BOARD_BAUD) on the inter-board USART (port 1) ===
+        // === Link-listen (passive, DMA, link::INTER_BOARD_BAUD) on the inter-board USART (port 1) ===
         //
         // Always brought up (both boards, every boot): it is the proven inter-board link. Configured
         // boards still bring it up iff its port bit is set (it always is for a walked board).
@@ -2694,46 +2436,27 @@ mod firmware {
         let uart_link = unsafe { addr_of_mut!((*st).uart_link) };
         place_uart_link(uart_link, want_uart, &chip, usart1_tx, usart1_rx);
 
-        // Adopt the BLE port into its steady-state DMA-ring carrier, HERE and not in phase 1: arming
-        // a ring registers and unmasks its vectors, so it has to follow the `install` + `enable`
-        // above, and it sits beside the inter-board ring because the two are the same act on
-        // different ports (`crate::ble_carrier`, which holds the measurement that put it here).
-        //
-        let ble_link = unsafe { addr_of_mut!((*st).ble_link) };
-        place_ble_link(ble_link, ble_ready, &chip);
-
-        // === The links into `net`: port 0 = mailbox (always), port 1 = UART, port 2 = BLE ===
+        // === The links into `net`: port 0 = mailbox (always), port 1 = UART ===
         place_mailbox_link(unsafe { addr_of_mut!((*st).mailbox_link) }, mailbox);
-        // The two link facts the rest of the boot reads, taken once from the written slots.
-        // SAFETY: both fields were written by their placers above; these are shared reads of
-        // initialized memory with no other reference alive.
+        // The link fact the rest of the boot reads, taken once from the written slot.
+        // SAFETY: the field was written by its placer above; a shared read of initialized memory
+        // with no other reference alive.
         let uart_up = unsafe { (*uart_link).is_some() };
-        let ble_up = unsafe { (*ble_link).is_some() };
 
         // The discovered link-set: the bitmask of live USART links, persisted at assign (below) and
-        // read back as `LINK_SET` on every later boot. The bit recorded is the ENTRY's, not the
-        // `net` slot's, which is what makes the mask remember WHICH WIRING was found: a BLE module
-        // discovered on USART0/PB6-PB7 persists bit 3 and a module on USART2/PB10-PB11 persists
-        // bit 2, so the next boot re-selects the same one and frees the other wiring's pins.
-        let discovered = (if uart_up {
+        // read back as `LINK_SET` on every later boot.
+        let discovered = if uart_up {
             link_bit(SAFE_LINK_USARTS[LINK_ENTRY_UART].link_set_bit)
         } else {
             0
-        }) | (match (ble_up, ble_entry) {
-            (true, Some(e)) => link_bit(e.link_set_bit),
-            _ => 0,
-        });
+        };
 
-        // The ports this board actually HAS this boot. The BLE slot is registered only if its link
-        // came up (`ble_bringup::net_ports`, which holds the reasoning): a dead module leaves no
-        // port for the forwarder to flood at and none for `PORTS` to report.
         place_responder(
             // SAFETY: a `&mut MaybeUninit` to one field of `main`'s uninitialized state: the
             // field is written by the placer and read by nobody until `boot` returns.
             unsafe {
                 &mut *addr_of_mut!((*st).responder).cast::<MaybeUninit<Aligned4<Responder>>>()
             },
-            ble_bringup::net_ports(ble_up),
             mcu,
             store,
         );
@@ -2889,8 +2612,7 @@ mod firmware {
         );
 
         // 3. The tick source (integration.md step-3 order: register the task table, mark the
-        //    scheduler's tick-source latch, THEN enable SysTick). The bring-up Delay is done;
-        //    free() returns the SYST it consumed.
+        //    scheduler's tick-source latch, THEN enable SysTick).
         {
             // SAFETY: bring-up-time, thread-only registration BEFORE the tick source is enabled
             // (the scheduler crate's debug-asserted discipline; this &mut is exclusive: the
@@ -2911,7 +2633,7 @@ mod firmware {
             runtime_hal::register_tick_handler(systick_tick_cb);
             sched.mark_tick_source_enabled();
         }
-        let mut syst = delay.free();
+        let mut syst = core.SYST;
         let load = match systick_load(CLOCK.sysclk_hz) {
             Some(l) => l,
             None => halt(), // fatal config error per the recovered contract (24-bit LOAD)
@@ -2998,62 +2720,6 @@ mod firmware {
         unsafe { slot.write(uart_link) };
     }
 
-    /// Place the BLE link into the loop's state by adopting the AT-phase polled port into its
-    /// steady-state DMA-ring carrier. A POPPED boot frame (shrink round 7), for the same reason as
-    /// [`place_uart_link`].
-    ///
-    /// Adopting HERE and not in phase 1: arming a ring registers and unmasks its vectors, so it has
-    /// to follow the `install` + `enable` in `boot`, and it sits beside the inter-board ring because
-    /// the two are the same act on different ports (`crate::ble_carrier`, which holds the
-    /// measurement that put it here).
-    #[inline(never)]
-    fn place_ble_link(
-        slot: *mut Option<BleLink>,
-        ble_ready: Option<(ble::Pipe<PolledSerial>, PeriphLabel)>,
-        chip: &runtime_hal::Chip,
-    ) {
-        // SAFETY: as DMA_RING in `place_uart_link`, the one &mut formation of this static, before
-        // its DMA IRQ exists; the `write` zeroes the NOLOAD ring exactly as `.bss` did.
-        let ble_ring: &'static mut [u8; crate::ble_carrier::RING_CAP] = unsafe {
-            &mut (*addr_of_mut!(BLE_DMA_RING))
-                .write(DmaRing([0; crate::ble_carrier::RING_CAP]))
-                .0
-        };
-        // SAFETY: as the ring above: the one `&mut` ever formed from `BLE_TX_DMA`, moved into the
-        // BLE port's transmitter for the life of the image.
-        let ble_tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(BLE_TX_DMA) };
-        let ble_link: Option<BleLink> = ble_ready.map(|(pipe, instance)| {
-            // `halt()` on failure, matching the inter-board ring rather than the soft-fail the BLE
-            // PORT gets. Soft-fail answers "is a module present", which was already answered yes by
-            // the AT handshake; the only failure reachable here is the DMA channel's write-back
-            // self-checks (the ring's and the transmitter's), on the same DMA0 the inter-board ring
-            // and transmitter just armed successfully. A controller that fails it after that is
-            // broken silicon, not an absent module, and dropping the port silently would leave a
-            // board that probed a module and then has no BLE port with nothing to say why.
-            let carrier = match crate::ble_carrier::adopt(
-                chip,
-                pipe.into_inner(),
-                instance,
-                ble_ring,
-                ble_tx_buf,
-                CLOCK.sysclk_hz,
-            ) {
-                Ok(c) => c,
-                Err(_) => halt(),
-            };
-            // The data-mode gate is re-asserted, not re-negotiated: the handshake that established
-            // transparent data mode just completed on this very port, and adopting the receiver
-            // changed how bytes are collected, never the module's mode. This is the knowledge arm of
-            // `assume_data_mode`, the same one the persisted-link-set path uses.
-            Link::new(SerialTransport::new(
-                ble::Pipe::assume_data_mode(carrier),
-                BLE_FRAME_CAP,
-            ))
-        });
-        // SAFETY: as `place_uart_link`'s write: the `ble_link` field of `main`'s state, once.
-        unsafe { slot.write(ble_link) };
-    }
-
     /// Place the mailbox link (port 0, always present) into the loop's state. A POPPED boot frame
     /// (shrink round 7): the 264 B `Link` is this frame's temporary, not `boot`'s.
     #[inline(never)]
@@ -3070,9 +2736,6 @@ mod firmware {
     /// Place the L3 responder into the loop's state with its persisted address restored. A POPPED
     /// boot frame (shrink round 7): the 280 B `Responder` is built and restored here, then written.
     ///
-    /// `n_ports` is the port count for THIS boot (`ble_bringup::net_ports`, which holds why the BLE
-    /// slot is registered only when its link came up).
-    ///
     /// The slot is a `&mut MaybeUninit` rather than the raw pointer the other placers take so the
     /// compiler sees the slot's word alignment (a reference carries it, a raw pointer does not):
     /// `Responder::new`'s fill of the fresh value then lowers to the word-wise `__aeabi_memset4` the
@@ -3080,13 +2743,12 @@ mod firmware {
     #[inline(never)]
     fn place_responder<F: store::Flash>(
         slot: &mut MaybeUninit<Aligned4<Responder>>,
-        n_ports: u8,
         mcu: u8,
         store: &Store<F>,
     ) {
         let mut responder = Responder::new(
-            n_ports,
-            [PORT_SWD, PORT_UART, PORT_BLE, 0],
+            N_PORTS,
+            [PORT_SWD, PORT_UART, 0, 0],
             mcu,
             NODE_CLASS.default(),
             FW_VER,
@@ -3125,7 +2787,6 @@ mod firmware {
         epoch_watch: &mut EpochWatch,
         mailbox_link: &mut MailboxLink,
         uart_link: &mut Option<UartLink>,
-        ble_link: &mut Option<BleLink>,
         responder: &mut Responder,
         wdg: &mut FreeWatchdog,
         discovered: u8,
@@ -3140,10 +2801,6 @@ mod firmware {
                                              // here because the write belongs here: the loop is the main thread, it already samples
                                              // the arm fact, and it is where the OTHER deferred persist waits for a disarmed pass.
         let mut odo = odometer::Odometer::new(odometer_base, motor::EDGES.load(Ordering::Relaxed));
-        // The BLE port's outbound frame stream, and the one owner every write to it goes through
-        // (`crate::ble_wire`): the cyclic samples AND the responder's port-directed emissions, so
-        // fragments of one PDU go out in order with nothing between them.
-        let mut ble_tx = MeteredTx::<BLE_FRAMER_N, BLE_EMIT_CAP>::new();
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
         // ONE reusable emissions scratch for every drain site + the probe window (the slice-7
@@ -3184,7 +2841,7 @@ mod firmware {
                     None => None,
                 };
                 route_handback(handed, responder, &mut emits);
-                route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
+                route_emits(&emits, mailbox_link, uart_link);
                 true
             });
 
@@ -3222,7 +2879,7 @@ mod firmware {
                     None => None,
                 };
                 route_handback(handed, responder, &mut emits);
-                route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
+                route_emits(&emits, mailbox_link, uart_link);
                 true
             });
             // Sample the inter-board link's two recovered-loss counters into the OBS crossings (the
@@ -3234,51 +2891,11 @@ mod firmware {
                 LINK_LINE_ERRORS.store(s.line_errors() as u32, Ordering::Relaxed);
                 LINK_LAP_OVERRUNS.store(s.lap_overruns() as u32, Ordering::Relaxed);
                 // The TX half of the same read-through-the-link: the abandoned writes, low half
-                // (`TX_TIMEOUTS`). The BLE port's are the high half, sampled at its own drain.
-                TX_TIMEOUTS.fetch_and(0xFFFF_0000, Ordering::Relaxed);
-                TX_TIMEOUTS.fetch_or(s.tx_timeouts() as u32, Ordering::Relaxed);
+                // (`TX_TIMEOUTS`; the high half was the CC2541 port's and stays zero).
+                TX_TIMEOUTS.store(s.tx_timeouts() as u32, Ordering::Relaxed);
             }
 
-            // 2c. Drain the BLE link (port 2), if a module was brought up. Bounded as above.
-            bounded_drain(DRAIN_BUDGET, || {
-                let Some(n) = ble_link
-                    .as_mut()
-                    .and_then(|l| l.poll_recv(&mut rxbuf))
-                    .map(|f| copy_pdu(f, &mut pdu))
-                else {
-                    return false;
-                };
-                emits.clear();
-                // The store comes from the static, in a borrow scoped to this statement (see
-                // `STORE`): ingest is where a `CONFIG_WRITE` reaches flash, and it must not hold a
-                // borrow across `dispatch()` below. `None` is unreachable after boot (the static is
-                // written before the loop is entered); matching rather than unwrapping keeps the
-                // impossible case out of the panic machinery.
-                // SAFETY: main-thread context, the `SHELL` discipline.
-                let handed = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
-                    Some(st) => responder.ingest(PORT_IDX_BLE, &pdu[..n], st, &mut emits),
-                    None => None,
-                };
-                route_handback(handed, responder, &mut emits);
-                route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
-                true
-            });
-            // Sample the BLE port's two recovered-loss counters into the OBS crossing, the same
-            // read-through-the-link the inter-board port gets above, one layer deeper: the `Pipe`
-            // is the BLE link's carrier and it borrows the `SplitSerial` underneath. Sampled AFTER
-            // the drain, so a loss the drain just absorbed is in this pass's number rather than the
-            // next one's. Packed `lap_overruns | line_errors << 16` ([`BLE_RX_LOSSES`]).
-            if let Some(l) = ble_link.as_ref() {
-                let s = l.transport().serial().serial();
-                BLE_RX_LOSSES.store(
-                    s.lap_overruns() as u32 | ((s.line_errors() as u32) << 16),
-                    Ordering::Relaxed,
-                );
-                TX_TIMEOUTS.fetch_and(0x0000_FFFF, Ordering::Relaxed);
-                TX_TIMEOUTS.fetch_or((s.tx_timeouts() as u32) << 16, Ordering::Relaxed);
-            }
-
-            // 2d. If any of the three drains PERSISTED a config write, re-read the fields the
+            // 2c. If either drain PERSISTED a config write, re-read the fields the
             //     control block shadows (`specs/rider-ui.md` section 4). Once per pass rather than
             //     per drain, on a level the responder raises, so the store scan is paid on a config
             //     write and never in the steady loop.
@@ -3304,7 +2921,7 @@ mod firmware {
             if fire {
                 emits.clear();
                 responder.poll_probe(&mut emits);
-                route_emits(&emits, mailbox_link, uart_link, ble_link, &mut ble_tx);
+                route_emits(&emits, mailbox_link, uart_link);
             }
 
             // 4. R4: sample the arm fact into the responder each pass (integration.md; the mode
@@ -3388,7 +3005,7 @@ mod firmware {
             // 8. Step 8's emission: the pending cyclic payload leaves PORT-DIRECTED on the
             //    inter-board UART (dst 0x00, the point-to-point rule; addressed boards only,
             //    which the builder already gated). Never routed: the 250 Hz stream cannot flood
-            //    the BLE/mailbox ports (link-control.md, "Addressing and emission").
+            //    the mailbox port (link-control.md, "Addressing and emission").
             let pending = {
                 // SAFETY: main-thread context, after dispatch returned; scoped as above.
                 unsafe { (*addr_of_mut!(SHELL)).as_mut() }.and_then(|s| s.cyclic_out.take())
@@ -3410,72 +3027,31 @@ mod firmware {
                 }
             }
 
-            // 8b. The SAME payload to the BLE port, decimated to 5 Hz by `ble_cyclic_tx` and handed
-            //     to the port's DMA transmit a WHOLE frame at a time (never `Link::send`).
-            //
-            //     Why not a send: the module's UART is 9600 baud, so the sample's two frames are
-            //     41.7 ms of wire time (20 B + 20 B; `orchestrator::BLE_CYCLIC_DIVISOR` carries
-            //     the arithmetic). A blocking send would hold this loop for it, and the 16 kHz ISR
-            //     floats all three phases if the 250 Hz control task (dispatched from THIS loop at
-            //     step 6, not from an ISR) has not refreshed DEMAND within 16 ms. The port's
-            //     transmit is a one-shot DMA channel (`crate::ble_carrier`), and a frame is handed
-            //     to it only when `write_ready` says it is idle, so a handover is a copy and a
-            //     channel start and the wire time is spent in the background. One visit a pass is
-            //     enough: a 20 B frame is ~21 ms of wire, several passes even at the two ticks a
-            //     pass the loop runs with a phone attached (`specs/ble-port-dma-tx.md`).
-            //
-            //     Bounded, never queued: a new payload is picked up only when the owner is idle, and
-            //     the own-sample slot is latest-wins, so a slow or absent module drops samples
-            //     rather than accruing a backlog.
-            //
-            //     The port is shared with the responder's port-directed emissions, so both go
-            //     through the one owner (`crate::ble_wire::MeteredTx`), which hands the port exactly
-            //     one frame at a time and holds an arriving emission in a one-deep slot. An emission
-            //     over the port's 15 B chunk (a PORTS reply, a CONFIG_RESP carrying a string) is
-            //     several frames, and the slot holds it until all of them are out. `route_emits`
-            //     below is the other half of that rule.
-            //
-            //     Addressing: dst 0x00, the same point-to-point rule as the inter-board emission
-            //     (`net::pdu::NO_ADDRESS` is "the one peer on a point-to-point link"). The BLE link
-            //     carries exactly one connected central, and a received dst-0x00 PDU is delivered
-            //     locally by the peer's forwarder. Deliberately NOT routed through `originate()`:
-            //     a dst-0x00 originate matches no route and floods every port.
-            //
-            //     The port carries a second sample source: the PEER's state, forwarded under the
-            //     peer's own address at 2.5 Hz (`specs/link-control.md`, "The peer's state on the
-            //     BLE port: the forward"). It waits in its own latest-wins slot and is picked up only
-            //     on a pass where the port is idle and the board's own slot is empty, so the own
-            //     sample always goes first and the two never contend for the staging buffer: when
-            //     both are due on one tick the forward follows the own sample's two frames.
-            //
-            //     The SWD mailbox port is the second guest port and gets both samples too, the
-            //     identical PDUs, in the pass they were built and only while a host is attached
-            //     (`specs/link-control.md`, "The mailbox port carries both samples (2026-10-25)").
-            //     Its write is all-or-nothing into RAM with no wait, so it needs no owner, adds
-            //     nothing to the demand-stale bound, and a full ring drops the sample.
-            //     `crate::guest_tx::emit_samples` holds both rules and counts what each port
-            //     accepted (`CTRL_OBS` words 40 and 41).
+            // 8b. The SAME payload to the SWD mailbox port, decimated to 5 Hz by `ble_cyclic_tx`,
+            //     and the PEER's state forwarded under the peer's own address at 2.5 Hz
+            //     (`specs/link-control.md`, "The mailbox port carries both samples (2026-10-25)"):
+            //     the identical PDUs, in the pass after they were built and only while a host is
+            //     attached. The bridge on the SWD header re-publishes both on its BLE link. The
+            //     write is all-or-nothing into RAM with no wait, so it needs no owner, adds nothing
+            //     to the demand-stale bound, and a full ring drops the sample.
+            //     `crate::guest_tx::emit_mailbox_samples` holds the rule and counts what the port
+            //     accepted (`CTRL_OBS` word 41).
             {
                 // SAFETY: main-thread context, after dispatch returned; the borrow ends with this
                 // block, and nothing it calls touches the shell.
                 if let Some(s) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
-                    emit_samples(
+                    emit_mailbox_samples(
                         &mut s.guest,
                         responder.addr(),
                         mailbox_link,
-                        ble_link.as_mut().map(|l| (l, &mut ble_tx)),
                         &mut s.guest_staged,
                         &mut pdu,
                     );
                 }
             }
-            if let Some(l) = ble_link.as_mut() {
-                // Hand the waiting frame to the port if its channel is idle.
-                ble_tx.pump(l);
-            }
 
             // Sample the mailbox port's dropped-frame count into its OBS crossing, the same
-            // read-through-the-link the other two ports get above. Sampled HERE, after the last
+            // read-through-the-link the inter-board port gets above. Sampled HERE, after the last
             // emission site of the pass (the guest samples just above; the drains and the
             // probe-window fire route emissions too), so a frame this pass dropped is in this
             // pass's number. The counter itself is the serial's, saturating at u16::MAX.
@@ -3494,24 +3070,10 @@ mod firmware {
         n
     }
 
-    /// Route the Responder's emitted PDUs to the right L2 link by emit port (0 = mailbox, 1 = UART,
-    /// 2 = BLE). Best-effort (L2 is best-effort; the controller retransmits the acknowledged plane). A
-    /// port with no live link (an absent BLE module, or a not-brought-up UART) silently drops.
-    ///
-    /// The BLE port goes through `ble_tx`, the staged-TX owner, NOT straight at the link. Two
-    /// reasons, both in `crate::ble_wire`: a cyclic sample is two fragments over ~40 ms of wire, and
-    /// a raw send between them would land in the reassembler as a new set and tear the sample; and
-    /// a raw `Link::send` on that 9600-baud port waits on the channel for each frame after the
-    /// first, tens of milliseconds from the same pass that dispatches the 250 Hz control task, past
-    /// the 16 ms the 16 kHz ISR coasts before it floats all three phases. `ble_tx.send` queues
-    /// instead, and step 8b's visit hands it over.
-    fn route_emits(
-        emits: &Emits,
-        mailbox: &mut MailboxLink,
-        uart: &mut Option<UartLink>,
-        ble: &mut Option<BleLink>,
-        ble_tx: &mut MeteredTx<BLE_FRAMER_N, BLE_EMIT_CAP>,
-    ) {
+    /// Route the Responder's emitted PDUs to the right L2 link by emit port (0 = mailbox, 1 = UART).
+    /// Best-effort (L2 is best-effort; the controller retransmits the acknowledged plane). A port
+    /// with no live link (a not-brought-up UART) silently drops.
+    fn route_emits(emits: &Emits, mailbox: &mut MailboxLink, uart: &mut Option<UartLink>) {
         for e in emits {
             match e.port {
                 PORT_IDX_MAILBOX => {
@@ -3522,13 +3084,7 @@ mod firmware {
                         let _ = l.send(&e.bytes);
                     }
                 }
-                PORT_IDX_BLE => {
-                    if let Some(l) = ble.as_mut() {
-                        ble_tx.send(l, &e.bytes);
-                    }
-                }
-                // No slot 3+ on this board: `net` slots are the board's PORTS, and the allowlist's
-                // three entries share these three (both BLE wirings land on `PORT_IDX_BLE`).
+                // No slot 2+ on this board: `net` slots are the board's PORTS.
                 _ => {}
             }
         }
@@ -3538,860 +3094,6 @@ mod firmware {
     fn halt() -> ! {
         loop {
             nop();
-        }
-    }
-}
-
-/// The advertised BLE name's one owner: it is the store's `DEVICE_NAME` (field id `0x10`),
-/// verbatim.
-///
-/// The name reaches air as `AT+NAME=<name>` inside `ble::Module::bring_up`, so a per-board name is
-/// STAGED CONFIG (writable over the wire with `CONFIG_WRITE 0x10`, readable back with
-/// `CONFIG_READ 0x10`), never a compiled constant. That matters beyond taste: the fleet has two
-/// masters, and a scanner can only tell them apart if the name is per-board data.
-///
-/// **The only fallback is the field's own registered default** (`"Hoverboard"`), and it is the
-/// store's rule rather than a firmware one: the store returns the registered default when the
-/// record is absent or is the wrong type. So an unstaged board advertises `"Hoverboard"`, and a
-/// `CONFIG_READ` of `0x10` returns the exact bytes a scanner sees. There is no second, hidden name
-/// the firmware could substitute, which is the whole point of the change.
-///
-/// **The name is BYTES, not a `&str`.** The board no longer validates a `STR` record as UTF-8
-/// (`specs/decision-flash-budget.md`, shrink round 2 item 4), so a record that is not valid UTF-8
-/// now advertises verbatim instead of being ignored in favour of the default. That is the whole of
-/// the behaviour change here, and it keeps the invariant this owner exists for: whatever
-/// `CONFIG_READ 0x10` reports is what goes on air. Nothing downstream wanted text anyway -
-/// `ble::Module` writes the bytes straight after `AT+NAME=`.
-///
-/// **An explicitly-stored empty string is a legal value and is sent verbatim** (`AT+NAME=\r\n`).
-/// It is deliberately NOT read as "keep the module's current name" and deliberately does NOT
-/// re-fall-back to the default: either reading would make `CONFIG_READ 0x10` disagree with what is
-/// on air, which is the silent-hidden-name failure this owner exists to prevent. It stays loud
-/// instead: `BLE_PROBE_OBS.answered = 1` with `name_len = 0` says an empty name was staged and
-/// sent, distinct from `answered = 0, name_len = 0` (the data-mode fallback arm, no rename
-/// attempted). No length cap is applied here: the module's own name-length limit is a CC2541 fact
-/// the `ble` crate does not model yet, and a rejected `AT+NAME` leaves the previous name up.
-///
-/// Factored out of the target-only bring-up (the `probe_window` / `link_drain` pattern) so the host
-/// test run reaches it against a real `Store`; `allow(dead_code)` because its one caller is the
-/// target-only phase-1 bring-up, so the host non-test build (which CI clippys with
-/// `--all-targets -D warnings`) sees it unused.
-mod ble_name {
-    /// This boot's advertised BLE name, borrowed from the mounted store's flash (no copy, no RAM).
-    /// The borrow is the store's, so holding it blocks a concurrent `set`/`compact` at compile
-    /// time; the bring-up call site drops it within the statement.
-    ///
-    /// **Why the dynamic `get_value` and not the typed `get_text(DEVICE_NAME)`** (which is
-    /// otherwise the right door for a `StrField`, and which this was written with first):
-    /// `get_value` is the path `CONFIG_READ` already takes, so it is ALREADY in the image, while
-    /// the typed getter is a second STR read site.
-    ///
-    /// The ORIGINAL reason is GONE and the margin with it. It used to be that `get_str` made LLVM
-    /// outline `core::str::from_utf8` into a shared 368 B function instead of the ~230 B
-    /// specialised copy inlined into `Value::decode`, which measured the typed expression at
-    /// +264 B of flashed span against +40 B for this one. Shrink round 2 item 4
-    /// (`specs/decision-flash-budget.md`) removed the validation entirely, so there is no
-    /// validator left to outline. Re-measured with that change in (`cargo image` + `objcopy`,
-    /// ELF-fresh): `get_text` costs **+20 B** over this form, not +224 B.
-    ///
-    /// So the form is kept because it is still the smaller of the two, but 20 B is small enough
-    /// that this is now a preference rather than a finding: switch to `store.get_text(DEVICE_NAME)`
-    /// freely if the typed door reads better, and expect to pay 20 B. Behaviour is identical on
-    /// every input either way - both fall back to the field's registered default for an absent or
-    /// wrong-type record, and both return a non-UTF-8 record verbatim. The `ble_name` tests pin
-    /// that behaviour, not the expression.
-    #[allow(dead_code)]
-    pub fn advertised<'a, F: store::Flash>(store: &'a store::Store<'_, F>) -> &'a [u8] {
-        match store.get_value(store::DEVICE_NAME.key()) {
-            Ok(store::Value::Str(s)) => s,
-            // Unreachable by construction: `DEVICE_NAME` is a registered `STR` field, so
-            // `get_value` returns either a decoded `STR` record or that field's registered default
-            // (also a `STR`), never `UnknownKey` and never another variant. Answered with the
-            // field's OWN default rather than a literal, so even an impossible answer cannot put a
-            // name on air that `CONFIG_READ 0x10` would not also report.
-            _ => store::DEVICE_NAME.default(),
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::advertised;
-        use ble::Module;
-        use embedded_hal::delay::DelayNs;
-        use embedded_io::{ErrorType, Read, ReadReady, Write};
-        use store::{Store, DEVICE_NAME};
-
-        /// The crate's one in-RAM [`Flash`] for host tests (`crate::test_flash`).
-        use crate::test_flash::TestFlash;
-
-        /// A stub CC2541: records every TX byte and acks each completed `...\r\n` command with the
-        /// exact 7-byte `AT+OK\r\n`, which is all `Module::bring_up` waits on. Enough to read the
-        /// name off the wire; the `ble` crate owns the full protocol tests.
-        struct StubSerial {
-            tx: Vec<u8>,
-            rx: std::collections::VecDeque<u8>,
-        }
-
-        impl ErrorType for StubSerial {
-            type Error = core::convert::Infallible;
-        }
-
-        impl Read for StubSerial {
-            fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-                let mut n = 0;
-                while n < buf.len() {
-                    match self.rx.pop_front() {
-                        Some(b) => {
-                            buf[n] = b;
-                            n += 1;
-                        }
-                        None => break,
-                    }
-                }
-                Ok(n)
-            }
-        }
-
-        impl ReadReady for StubSerial {
-            fn read_ready(&mut self) -> Result<bool, Self::Error> {
-                Ok(!self.rx.is_empty())
-            }
-        }
-
-        impl Write for StubSerial {
-            fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-                self.tx.extend_from_slice(buf);
-                if self.tx.ends_with(b"\r\n") {
-                    self.rx.extend(b"AT+OK\r\n");
-                }
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> Result<(), Self::Error> {
-                Ok(())
-            }
-        }
-
-        struct NoDelay;
-        impl DelayNs for NoDelay {
-            fn delay_ns(&mut self, _ns: u32) {}
-        }
-
-        /// Run the AT bring-up with `name` and return the whole TX stream.
-        fn tx_for(name: &[u8]) -> Vec<u8> {
-            let stub = StubSerial {
-                tx: Vec::new(),
-                rx: std::collections::VecDeque::new(),
-            };
-            let b = Module::new(name)
-                .bring_up(stub, &mut NoDelay)
-                .expect("the stub acks every command, so bring-up reaches data mode");
-            b.pipe.into_inner().tx
-        }
-
-        #[test]
-        fn an_unstaged_board_advertises_the_registered_default() {
-            // Nothing written: the name is DEVICE_NAME's own registered default, which is also
-            // exactly what a CONFIG_READ of 0x10 returns. No firmware-side constant is involved.
-            let mut flash = TestFlash::erased();
-            let store = Store::mount(&mut flash).unwrap();
-            assert_eq!(advertised(&store), b"Hoverboard");
-        }
-
-        #[test]
-        fn a_staged_name_is_what_gets_advertised() {
-            let mut flash = TestFlash::erased();
-            let mut store = Store::mount(&mut flash).unwrap();
-            store.set_str(DEVICE_NAME, "hb-offroad-m").unwrap();
-            assert_eq!(advertised(&store), b"hb-offroad-m");
-        }
-
-        #[test]
-        fn the_newest_staged_name_wins() {
-            // The store is an append log: a re-stage (the bench renaming a board) must take, not
-            // return the first record written.
-            let mut flash = TestFlash::erased();
-            let mut store = Store::mount(&mut flash).unwrap();
-            store.set_str(DEVICE_NAME, "hb-bench-m").unwrap();
-            store.set_str(DEVICE_NAME, "hb-offroad-m").unwrap();
-            assert_eq!(advertised(&store), b"hb-offroad-m");
-        }
-
-        #[test]
-        fn an_explicitly_empty_name_is_carried_verbatim() {
-            // The documented decision: empty is a legal staged value, NOT a signal to fall back to
-            // the default (which would make CONFIG_READ 0x10 disagree with what is on air).
-            let mut flash = TestFlash::erased();
-            let mut store = Store::mount(&mut flash).unwrap();
-            store.set_str(DEVICE_NAME, "").unwrap();
-            assert_eq!(advertised(&store), b"");
-            // ...and it reaches the wire as an empty AT+NAME, which is what `name_len = 0` with
-            // `answered = 1` reports on the bench.
-            let tx = tx_for(advertised(&store));
-            assert!(
-                tx.windows(12).any(|w| w == b"AT+NAME=\r\nAT"),
-                "an empty staged name is sent as a bare AT+NAME= line"
-            );
-        }
-
-        #[test]
-        fn a_name_that_is_not_utf8_is_advertised_verbatim() {
-            // The shrink-round-2 behaviour change (`specs/decision-flash-budget.md`, item 4),
-            // pinned at the consumer rather than only in the store: the board no longer validates
-            // a STR record, so bytes that are not valid UTF-8 reach the air as themselves instead
-            // of being ignored in favour of the default. Staged through the dynamic face, which is
-            // the only door that can produce such a record (`set_str` takes a `&str`): a
-            // configurator writing raw bytes over `CONFIG_WRITE 0x10`, or a half-programmed page.
-            let mut flash = TestFlash::erased();
-            let mut store = Store::mount(&mut flash).unwrap();
-            let raw: &[u8] = &[b'h', 0xFF, b'b'];
-            store
-                .set_value(DEVICE_NAME.key(), store::Value::Str(raw))
-                .unwrap();
-            assert_eq!(advertised(&store), raw);
-            // ...and it reaches the AT sequence unchanged, rather than the default taking its place.
-            let tx = tx_for(advertised(&store));
-            assert!(
-                tx.windows(13).any(|w| w == b"AT+NAME=h\xFFb\r\n"),
-                "the staged bytes are written verbatim after AT+NAME="
-            );
-            assert!(
-                !tx.windows(10).any(|w| w == b"Hoverboard"),
-                "the registered default must not have been substituted"
-            );
-        }
-
-        #[test]
-        fn the_at_sequence_carries_the_staged_name() {
-            // The whole slice in one assertion: a name staged over the wire (CONFIG_WRITE 0x10 ->
-            // set_str) is the name the module is told to advertise.
-            let mut flash = TestFlash::erased();
-            let mut store = Store::mount(&mut flash).unwrap();
-            store.set_str(DEVICE_NAME, "hb-offroad-m").unwrap();
-
-            let tx = tx_for(advertised(&store));
-            let at = |needle: &[u8]| tx.windows(needle.len()).position(|w| w == needle);
-            let name = at(b"AT+NAME=hb-offroad-m\r\n").expect("the staged name is on the wire");
-            let set = at(b"AT+SET=1\r\n").expect("SET=1 present");
-            assert!(
-                name < set,
-                "the name must be sent BEFORE SET=1 commits it (specs/ble.md ordering)"
-            );
-            assert!(
-                at(b"hb-s6a").is_none(),
-                "no compiled name may survive anywhere in the sequence"
-            );
-        }
-
-        #[test]
-        fn the_default_reaches_the_wire_on_an_unstaged_board() {
-            let mut flash = TestFlash::erased();
-            let store = Store::mount(&mut flash).unwrap();
-            let tx = tx_for(advertised(&store));
-            assert!(
-                tx.windows(21).any(|w| w == b"AT+NAME=Hoverboard\r\nA"),
-                "an unstaged board advertises the registered default"
-            );
-        }
-    }
-}
-
-/// The BLE module's boot bring-up: the settle, the patient AT probe with its SWD-readable record,
-/// and the decision between a full AT handshake, the configured board's data-mode fallback, and
-/// "no module this boot". Everything here is generic over the serial, so it is the same code the
-/// image runs and the code the host tests drive against a module that never answers. Only the
-/// HAL-touching half (building the `PolledSerial` on the assigned USART, wrapping the returned pipe
-/// in the L2 `Link`) stays in the target-only firmware module, as `bring_up_ble`.
-///
-/// **The contract: an optional peripheral may not hold the boot.** The BLE module is optional in
-/// exactly the sense the IMU is (`bring_up_imu`, "Fails soft in every refusal"), and it gets the
-/// same treatment:
-///
-/// - **Bounded.** The whole window is at most [`BOOT_BUDGET_MS`], and that is a CHECKED property:
-///   the budget is const-asserted against the `ble` crate's own pacing (`ble::probe_ms` /
-///   `ble::bring_up_ms`), so lengthening a drain window or a retry count fails the build instead of
-///   quietly lengthening every board's boot. It was not checked before, and the cost was the
-///   2026-08-03 offroad session: an AT-deaf module after a dirty power-on reset, the MCU behind it
-///   still in phase 1 with no shell, no control stack, no motors and no telemetry, while the module
-///   itself kept advertising and accepting GATT on its own power -- which reads from the phone
-///   exactly like an app bug.
-/// - **Soft-failing.** Absent, silent and wedged all end the same way: [`Attached::Absent`], the
-///   board boots without BLE, and nothing further is attempted.
-/// - **Observable.** The outcome lands in the same `BLE_PROBE_OBS` block a healthy boot writes
-///   (`answered` / `attempts` / `matched_attempt` / `brought_up`), so a bench read tells a module
-///   that was never there from one that never answered from one that answered and then went deaf.
-/// - **Not retried later.** One bounded attempt per boot, deliberately. A module in transparent data
-///   mode cannot be re-probed (re-entry from data mode is not a supported path, `specs/ble.md`), so a
-///   retry would have to run the whole AT sequence again; each of its windows blocks for `STEP_MS`,
-///   which is 15x the 16 ms the 16 kHz ISR coasts before it floats all three phases, so a retry from
-///   the live loop is a torque-path hazard, not a convenience. The recovery for an AT-deaf CC2541 is
-///   a power cycle (bench-established), and that resets the MCU too, so the next boot re-probes: the
-///   retry already exists, at the only moment it can work.
-///
-/// Compiled on all targets (outside the `target_os = "none"` firmware module) so the workspace host
-/// test run reaches its tests, hence the module-wide `dead_code` allowance: on the host non-test
-/// build its callers (the target-only boot path) do not exist.
-mod ble_bringup {
-    #![allow(dead_code)]
-
-    use ble::{Module, Pipe};
-    use embedded_hal::delay::DelayNs;
-    use embedded_io::{Read, ReadReady, Write};
-
-    /// Fixed settle before the first `AT`: a freshly cold-power-cycled CC2541 is not UART-ready for the
-    /// first few hundred ms, so the first probe would be lost (or land mid-byte). Warm modules already
-    /// answer by ~250 ms, so this only delays a cold boot.
-    pub const COLD_BOOT_SETTLE_MS: u32 = 500;
-
-    /// AT-probe attempts (each one `ble::probe` attempt: `AT\r\n` + a whole `ble::STEP_MS` ≈ 248 ms
-    /// RX-drain window). 16 ≈ a ~4 s patient window AFTER the settle - a cold module's AT-ready time
-    /// varies, and a fixed ~750 ms (3 tries) caught it only ~50%. The probe early-exits the instant
-    /// `AT+OK` arrives, so a warm/fast module still costs ~one step; only a silent port spends it all.
-    ///
-    /// This patience is the DISCOVERY budget and it is kept: cutting it is how a slow module gets
-    /// misread as absent (unconfigured) or as already-in-data-mode (configured), and neither failure
-    /// is observable from the phone. What the budget fix removes is the *redundant* patience below.
-    pub const PROBE_ATTEMPTS: u32 = 16;
-
-    /// The AT handshake's own state-0 re-probe, once the probe above has already answered.
-    ///
-    /// `ble::Module::bring_up` re-probes because it is a standalone API that knows nothing about its
-    /// caller; this caller has just seen `AT+OK` within the last window, so the default 20 retries buy
-    /// nothing and cost up to ~5 s of blocking boot. They are pure cost in precisely the failure this
-    /// module exists for: a dirty-POR module that answers one `AT` and then goes deaf spends the whole
-    /// 20 before the boot may continue, and no resend has ever recovered one (it needs a power cycle).
-    /// One confirming resend keeps state 0's "advance only on `AT+OK`" contract at the cheapest price.
-    pub const HANDSHAKE_PROBE_RETRIES: u32 = 1;
-
-    /// The hard ceiling on how long a BLE module may delay this board's boot, dead or alive.
-    ///
-    /// Its value is not a wish: it is the settle plus the full discovery patience plus one handshake
-    /// pass, rounded up, and the assertion below is what keeps it that. The pre-budget worst case
-    /// (the full probe, then 20 more inside `bring_up`) was ~10.5 s and nothing in the build noticed.
-    pub const BOOT_BUDGET_MS: u32 = 6_000;
-
-    /// The bound, checked at compile time rather than believed: settle + probe + handshake.
-    const _: () = assert!(
-        COLD_BOOT_SETTLE_MS
-            + ble::probe_ms(PROBE_ATTEMPTS)
-            + ble::bring_up_ms(HANDSHAKE_PROBE_RETRIES)
-            <= BOOT_BUDGET_MS
-    );
-
-    /// The board's `net` port count for this boot: the mailbox (port 0) and the inter-board UART
-    /// (port 1) are structural, and the BLE port (port 2, the last slot) is registered **only if its
-    /// link exists**.
-    ///
-    /// A port that never came up is not a port. `specs/l3.md` already says so ("each port that comes
-    /// up becomes one of the board's local ports"), but the count handed to the `Responder` was the
-    /// compiled maximum, so a board whose module was dead still declared a BLE port: the forwarder
-    /// flooded every unrouted frame at it (dropped in `route_emits`, since there is no link to send
-    /// on) and `PORTS` reported it to the controller as a port of the board. That is a half-modelled
-    /// fact - a port with a kind and an index but no carrier - and the controller cannot tell it from
-    /// a live module with no peer connected. Registering the slot only when the link exists is the
-    /// whole fix; no other index moves, because BLE is the last slot.
-    pub const fn net_ports(ble_up: bool) -> u8 {
-        2 + ble_up as u8
-    }
-
-    /// SWD-readable AT-probe observation. Read it over SWD at the address of the `BLE_PROBE_OBS` symbol
-    /// (`nm <elf> | grep BLE_PROBE_OBS`).
-    #[repr(C)]
-    pub struct BleProbeObs {
-        /// `BleProbeObs::MAGIC` once a probe has written this block (confirms it is live, not stale RAM).
-        magic: u32,
-        /// AT attempts issued this boot (`== matched_attempt` on success, `== PROBE_ATTEMPTS` on a miss).
-        attempts: u32,
-        /// The 1-based attempt `AT+OK` arrived on (0 = never). Elapsed-to-`AT+OK` ≈ this × ~248 ms (`STEP_MS`).
-        matched_attempt: u32,
-        /// 1 = `AT+OK` seen (command mode), 0 = no AT (silent / not-ready / already in data mode).
-        answered: u32,
-        /// Deviation-1 observability: `1` if the BLE `Link` was built this boot (either arm: the AT
-        /// handshake reached transparent data mode, or the configured board took the data-mode
-        /// fallback), `0` if it was not (no module, or one that answered the initial `AT` and then
-        /// went deaf through the handshake). Written by [`attach`] as it returns; this word sits at
-        /// offset `0x10`. Lets the bench distinguish a *correctly* empty `PORTS` BLE port -
-        /// module up, no L3 peer connected over the bridge (`specs/l3.md`: `PORTS` reports neighbour
-        /// presence, not local link liveness) - from a bring-up that produced no port at all. On a
-        /// board with no module the block's `magic` stays `0`, so this word is ignored with the rest.
-        brought_up: u32,
-        /// Bytes of the store's `DEVICE_NAME` handed to `AT+NAME=` this boot; `0` = **no rename was
-        /// attempted** on this boot. Written only in the command-mode arm (immediately before
-        /// [`ble::Module::bring_up`]), so it is the bench's evidence that the staged name actually
-        /// reached the AT sequence rather than the module keeping whatever name it already had.
-        /// Read it WITH `answered`: `answered = 1, name_len = n` is an n-byte name sent this boot;
-        /// `answered = 0, name_len = 0` is the data-mode fallback arm, which by design never
-        /// re-handshakes and so never renames; `answered = 1, name_len = 0` is a deliberately
-        /// staged EMPTY name (a legal store value, sent verbatim). Offset `0x14`.
-        name_len: u32,
-        /// Bit per `ble::AtStep` (0 = NAME, 1 = CON_INTERVAL, 2 = ADV_INTERVAL, 3 = SET,
-        /// 4 = MODE=DATA): that step's `AT+OK` arrived, i.e. the module said the command TOOK.
-        /// Offset `0x18`.
-        at_acked: u32,
-        /// Bit per `ble::AtStep`, same numbering: the module answered `AT+ERR`, i.e. it REFUSED the
-        /// command. A step in NEITHER mask answered nothing, which is a third state and not the
-        /// same fact (`ble::Ack`). Offset `0x1C`.
-        ///
-        /// This is what makes a rename verifiable end to end. Read it WITH `name_len`:
-        /// `name_len = n` with bit 0 set in `at_acked` is a rename that TOOK; the same `name_len`
-        /// with bit 0 set here is a rename the module REFUSED (the board is still advertising its
-        /// old name, and the fault is not in the firmware's staging); `name_len = n` with bit 0 in
-        /// neither is a rename whose fate the module never stated. Before this existed all three
-        /// looked identical, and `name_len` alone only ever proved the bytes were SENT.
-        at_refused: u32,
-    }
-
-    impl BleProbeObs {
-        /// `"BLEP"` little-endian: the live marker.
-        const MAGIC: u32 = 0x424C_4550;
-
-        /// The zeroed block a board boots with: `magic = 0` says no probe has written it, so every
-        /// other word is stale RAM and must be ignored. The `static mut`'s initializer.
-        pub const NEW: BleProbeObs = BleProbeObs {
-            magic: 0,
-            attempts: 0,
-            matched_attempt: 0,
-            answered: 0,
-            brought_up: 0,
-            name_len: 0,
-            at_acked: 0,
-            at_refused: 0,
-        };
-
-        /// Start a fresh boot's probe record.
-        fn begin(&mut self) {
-            self.magic = Self::MAGIC;
-            self.attempts = 0;
-            self.matched_attempt = 0;
-            self.answered = 0;
-            self.brought_up = 0;
-            self.name_len = 0;
-            self.at_acked = 0;
-            self.at_refused = 0;
-        }
-    }
-
-    /// What phase 1 produced. Three outcomes, kept apart because they are three different facts
-    /// about the board (and the middle one is the only reason the wire ever sees a module the
-    /// firmware never handshaked this boot).
-    pub enum Attached<S> {
-        /// The full AT bring-up ran and the module reported itself transparent: a data-mode pipe.
-        Handshaked(Pipe<S>),
-        /// A CONFIGURED board whose known-BLE port answered no `AT` after the full patient probe: a
-        /// warm reset left the module in transparent data mode, still advertising, so the port is
-        /// registered live WITHOUT re-handshaking (`specs/l3.md`). Its BLE identity comes from the
-        /// link-set, so no AT identification is needed.
-        DataMode(Pipe<S>),
-        /// No BLE link this boot: nothing answered on an unconfigured board's candidate wiring, or a
-        /// configured board's module answered `AT` and then failed the handshake. The board boots
-        /// without BLE and no port is registered for it.
-        Absent,
-    }
-
-    impl<S> Attached<S> {
-        /// The data-mode pipe, if a link exists at all. The caller builds its L2 link on this and
-        /// treats `None` as "no BLE port this boot"; which of the two live arms produced it is a
-        /// bench-diagnosis fact (`answered` in the observation block), not a routing one.
-        pub fn pipe(self) -> Option<Pipe<S>> {
-            match self {
-                Attached::Handshaked(p) | Attached::DataMode(p) => Some(p),
-                Attached::Absent => None,
-            }
-        }
-
-        /// Whether a BLE link came up (the `net` port question, and `brought_up` in the block).
-        pub fn is_up(&self) -> bool {
-            !matches!(self, Attached::Absent)
-        }
-    }
-
-    /// The cold-boot-robust AT probe: issue `AT` up to [`PROBE_ATTEMPTS`] times (each is one
-    /// `ble::probe` attempt - `AT\r\n` + a whole `ble::STEP_MS` RX-drain window), early-exiting on the
-    /// first exact `AT+OK\r\n`. Patient enough to catch a cold-power-cycled module whose AT-ready time
-    /// varies, instead of racing a fixed short window. Records the attempt count + matching attempt
-    /// into `obs`.
-    ///
-    /// It probes the SAME serial type the AT handshake then runs on, rather than a wrapper around
-    /// it, so `ble::probe`, `ble::bring_up` and the `drain_ack` body underneath them are one
-    /// instantiation in the image instead of two.
-    fn cold_boot_probe<S, D>(serial: &mut S, delay: &mut D, obs: &mut BleProbeObs) -> bool
-    where
-        S: Read + Write + ReadReady,
-        D: DelayNs,
-    {
-        for attempt in 1..=PROBE_ATTEMPTS {
-            obs.attempts = attempt;
-            if ble::probe(serial, delay, 1).unwrap_or(false) {
-                obs.matched_attempt = attempt;
-                obs.answered = 1;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Bring the module up on an already-built serial, within [`BOOT_BUDGET_MS`], recording the
-    /// outcome in `obs`. Never fails: every refusal is an [`Attached`] variant.
-    ///
-    /// `configured` is the board's own knowledge that this port IS a BLE module (its bit is in the
-    /// persisted link-set); it is what makes the data-mode fallback safe, and on an unconfigured board
-    /// its absence is why a silent port is simply not a module.
-    ///
-    /// `name` is the advertised BLE name the caller read from the store (`crate::ble_name`, whose docs
-    /// hold the whole rule). Borrowed bytes, only for this call: it goes into `AT+NAME=` and nothing
-    /// built here keeps it.
-    pub fn attach<S, D>(
-        mut serial: S,
-        delay: &mut D,
-        configured: bool,
-        name: &[u8],
-        obs: &mut BleProbeObs,
-    ) -> Attached<S>
-    where
-        S: Read + Write + ReadReady,
-        D: DelayNs,
-    {
-        obs.begin();
-
-        // Settle: a freshly cold-power-cycled CC2541 is not UART-ready for the first few hundred ms,
-        // so the first `AT` would be lost or land mid-byte. Part of the budget, like everything else.
-        delay.delay_ms(COLD_BOOT_SETTLE_MS);
-
-        // Patient cold-boot AT probe (retry `AT` until `AT+OK` over a generous window, not a fixed
-        // ~750 ms). A CONFIGURED board runs this on EVERY boot, not just the unconfigured discovery:
-        // a cold power-cycle resets the CC2541 to command mode, so a BLE-kind port from the link-set
-        // must be re-handshaked with the full AT bring-up (`SET=1`) or the module never re-advertises
-        // and the board is invisible to the app (l3.md). `cold_boot_probe` only borrows the serial, so
-        // it stays usable for the data-mode fallback below (`bring_up` would move + drop it).
-        let answered_at = cold_boot_probe(&mut serial, delay, obs);
-
-        let attached = if answered_at {
-            // Command mode: full AT bring-up (NAME / intervals / SET=1 -> advertises / MODE=DATA).
-            // Transparent data mode after; the link rides the gate type itself. The advertised name
-            // is the staged one and only this arm sends it: record its length as the bench's evidence
-            // that it reached the AT sequence.
-            obs.name_len = name.len() as u32;
-            let brought = Module::new(name)
-                // The probe above has already proven command mode, so the handshake does not re-run
-                // a 20-deep patience budget over it (see `HANDSHAKE_PROBE_RETRIES`).
-                .probe_retries(HANDSHAKE_PROBE_RETRIES)
-                .bring_up(serial, delay);
-            // Published on BOTH arms. A refused `AT+MODE=DATA` is the one fatal case (no pipe at all,
-            // `ble::bring_up`) and it is precisely the boot whose record matters most: it is the
-            // module stating why there is no BLE link this boot, and it carries every earlier step's
-            // answer with it. Publishing only from the success arm would leave both masks 0 exactly
-            // there, indistinguishable from a serial error mid-sequence.
-            let report = match &brought {
-                Ok(b) => Some(b.report),
-                Err(ble::Error::ModeRefused { report }) => Some(*report),
-                Err(_) => None,
-            };
-            if let Some(report) = report {
-                obs.at_acked = report.acked as u32;
-                obs.at_refused = report.refused as u32;
-            }
-            match brought {
-                Ok(b) => Attached::Handshaked(b.pipe),
-                // It answered `AT`, so it was in command mode, not data mode: the fallback below
-                // would be a claim about the wire that this boot just disproved. No pipe.
-                Err(_) => Attached::Absent,
-            }
-        } else if configured {
-            // Data-mode fallback (l3.md): the link-set already identifies this port as the BLE
-            // module, but it answered no `AT` even after the FULL patient probe -- a warm reset left
-            // it in transparent data mode, still advertising. The patient probe is the prerequisite
-            // that makes this safe: an `AT` miss now genuinely means data-mode, not a not-yet-ready
-            // cold boot (which the old fixed ~750 ms window misread ~50% of the time, registering a
-            // SILENT module live).
-            Attached::DataMode(Pipe::assume_data_mode(serial))
-        } else {
-            // Unconfigured + no AT+OK: not a module. On an unconfigured board that is the normal
-            // answer for a wiring this board does not have, and it is why the probe is safe to run
-            // at all: nothing but a CC2541 replies `AT+OK`.
-            Attached::Absent
-        };
-
-        obs.brought_up = attached.is_up() as u32;
-        attached
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use embedded_io::ErrorType;
-        use net::pdu::{Opcode, Pdu, NO_ADDRESS};
-        use net::walk::{Emits, Responder, MAX_PDU, PORT_BLE, PORT_SWD, PORT_UART};
-        use std::boxed::Box;
-        use std::collections::VecDeque;
-        use std::vec;
-        use std::vec::Vec;
-        use store::Store;
-
-        /// A CC2541 stand-in with a scripted AT personality: `answers(n)` decides whether the n-th
-        /// completed `...\r\n` command (1-based, counting every command of the whole bring-up) is
-        /// answered with the exact 7-byte `AT+OK\r\n`. Everything else is silence, which is the
-        /// failure this module exists for: silence is indistinguishable from absence at the wire, so
-        /// it is the boot's job not to care.
-        struct ScriptedModule {
-            answers: Box<dyn Fn(usize) -> bool>,
-            commands: usize,
-            rx: VecDeque<u8>,
-            tx: Vec<u8>,
-            pending: Vec<u8>,
-        }
-
-        impl ScriptedModule {
-            fn new(answers: impl Fn(usize) -> bool + 'static) -> Self {
-                ScriptedModule {
-                    answers: Box::new(answers),
-                    commands: 0,
-                    rx: VecDeque::new(),
-                    tx: Vec::new(),
-                    pending: Vec::new(),
-                }
-            }
-            /// AT-deaf: the 2026-08-03 offroad module, still advertising, answering nothing.
-            fn deaf() -> Self {
-                Self::new(|_| false)
-            }
-            /// Healthy: acks every command.
-            fn healthy() -> Self {
-                Self::new(|_| true)
-            }
-        }
-
-        impl ErrorType for ScriptedModule {
-            type Error = core::convert::Infallible;
-        }
-        impl Read for ScriptedModule {
-            fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-                let mut n = 0;
-                while n < buf.len() {
-                    match self.rx.pop_front() {
-                        Some(b) => {
-                            buf[n] = b;
-                            n += 1;
-                        }
-                        None => break,
-                    }
-                }
-                Ok(n)
-            }
-        }
-        impl ReadReady for ScriptedModule {
-            fn read_ready(&mut self) -> Result<bool, Self::Error> {
-                Ok(!self.rx.is_empty())
-            }
-        }
-        impl Write for ScriptedModule {
-            fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-                self.tx.extend_from_slice(buf);
-                self.pending.extend_from_slice(buf);
-                while let Some(i) = self.pending.windows(2).position(|w| w == b"\r\n") {
-                    self.pending.drain(..i + 2);
-                    self.commands += 1;
-                    if (self.answers)(self.commands) {
-                        self.rx.extend(b"AT+OK\r\n");
-                    }
-                }
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> Result<(), Self::Error> {
-                Ok(())
-            }
-        }
-
-        /// A delay that runs no clock and simply accounts for the time asked of it: the boot budget
-        /// in milliseconds, measured rather than asserted. Every wait in the bring-up goes through a
-        /// `DelayNs`, so this totals the whole blocking window.
-        struct Budget {
-            ns: u64,
-        }
-        impl Budget {
-            fn new() -> Self {
-                Budget { ns: 0 }
-            }
-            fn ms(&self) -> u32 {
-                (self.ns / 1_000_000) as u32
-            }
-        }
-        impl DelayNs for Budget {
-            fn delay_ns(&mut self, ns: u32) {
-                self.ns += ns as u64;
-            }
-            fn delay_us(&mut self, us: u32) {
-                self.ns += us as u64 * 1_000;
-            }
-            fn delay_ms(&mut self, ms: u32) {
-                self.ns += ms as u64 * 1_000_000;
-            }
-        }
-
-        /// The crate's one in-RAM [`Flash`] for host tests (`crate::test_flash`): the tests here
-        /// mount a REAL store behind the responder over it.
-        use crate::test_flash::TestFlash;
-
-        /// Phase 1 against a scripted module: the outcome, the observation block, and the milliseconds
-        /// of boot it cost.
-        fn phase_one(
-            module: ScriptedModule,
-            configured: bool,
-        ) -> (Attached<ScriptedModule>, BleProbeObs, u32) {
-            let mut obs = BleProbeObs::NEW;
-            let mut budget = Budget::new();
-            let attached = attach(module, &mut budget, configured, b"hb-offroad-m", &mut obs);
-            (attached, obs, budget.ms())
-        }
-
-        #[test]
-        fn a_module_that_never_answers_costs_a_bounded_boot_window() {
-            let (attached, obs, ms) = phase_one(ScriptedModule::deaf(), false);
-
-            assert!(
-                matches!(attached, Attached::Absent),
-                "a silent port on an unconfigured board is not a module"
-            );
-            assert!(
-                ms <= BOOT_BUDGET_MS,
-                "a dead module delayed the boot {ms} ms, past the {BOOT_BUDGET_MS} ms budget"
-            );
-            // ...and the budget arithmetic the const assertion is built on is the REAL pacing: the
-            // measured window is exactly the settle plus the whole probe patience, so `ble::probe_ms`
-            // models what the code does rather than what it was hoped to do.
-            assert_eq!(ms, COLD_BOOT_SETTLE_MS + ble::probe_ms(PROBE_ATTEMPTS));
-
-            // The 2026-08-03 signature, now a recorded outcome instead of a boot that never ended:
-            // the full attempt budget spent, nothing ever answered, no link.
-            assert_eq!(obs.attempts, PROBE_ATTEMPTS);
-            assert_eq!(obs.answered, 0);
-            assert_eq!(obs.matched_attempt, 0);
-            assert_eq!(obs.brought_up, 0);
-            assert_eq!(
-                obs.magic,
-                BleProbeObs::MAGIC,
-                "the block is live, not stale RAM"
-            );
-        }
-
-        #[test]
-        fn a_module_that_answers_once_and_goes_deaf_costs_a_bounded_boot_window() {
-            // The dirty-POR shape, at its worst: the module wakes just in time to answer the LAST
-            // probe attempt, then goes deaf for the handshake. This is the boot that used to spend
-            // the whole discovery budget AND a second, longer one inside `Module::bring_up`.
-            let (attached, obs, ms) =
-                phase_one(ScriptedModule::new(|n| n == PROBE_ATTEMPTS as usize), true);
-
-            assert!(
-                matches!(attached, Attached::Absent),
-                "a module that answered AT was in command mode, so the data-mode fallback would be \
-                 a claim this boot just disproved"
-            );
-            assert!(
-                ms <= BOOT_BUDGET_MS,
-                "an AT-deaf module delayed the boot {ms} ms, past the {BOOT_BUDGET_MS} ms budget"
-            );
-            assert_eq!(obs.answered, 1, "it did answer once");
-            assert_eq!(obs.matched_attempt, PROBE_ATTEMPTS);
-            assert_eq!(obs.brought_up, 0, "and produced no link");
-        }
-
-        #[test]
-        fn the_boot_carries_on_without_the_module() {
-            // The property the dead module violated: everything AFTER phase 1 still happens. The
-            // board that gets no BLE link registers the ports it actually has, and its L3 responder
-            // is live on them -- so a controller on the mailbox or the inter-board UART still walks,
-            // addresses and configures the board, which is how the bench reaches a board whose
-            // module is dead.
-            let (attached, _, _) = phase_one(ScriptedModule::deaf(), false);
-            assert!(!attached.is_up());
-
-            let ports = net_ports(attached.is_up());
-            assert_eq!(
-                ports, 2,
-                "mailbox + inter-board UART, and no phantom BLE port"
-            );
-
-            let mut flash = TestFlash::erased();
-            let mut store = Store::mount(&mut flash).unwrap();
-            let mut resp = Responder::new(
-                ports,
-                [PORT_SWD, PORT_UART, PORT_BLE, 0],
-                net::walk::MCU_F1X0,
-                store::NODE_CLASS.default(),
-                0x0001,
-            );
-
-            // A controller asks the board to report itself: it answers, over the port it has.
-            let mut emits = Emits::new();
-            let mut buf = [0u8; MAX_PDU];
-            let probe = Pdu::from_op(Opcode::ProbePorts, 0x80, NO_ADDRESS, &[]);
-            let n = probe.encode(&mut buf).unwrap();
-            resp.ingest(0, &buf[..n], &mut store, &mut emits);
-            emits.clear();
-            resp.poll_probe(&mut emits);
-
-            let reply = emits
-                .iter()
-                .map(|e| Pdu::decode(&e.bytes).expect("a PORTS reply decodes"))
-                .find(|p| p.opcode == Opcode::Ports.to_u8())
-                .expect("the board reports its ports without a BLE module");
-            assert_eq!(reply.payload[0], 2, "PORTS reports two ports");
-            let kinds: Vec<u8> = reply.payload[1..].chunks(4).map(|entry| entry[1]).collect();
-            assert_eq!(kinds, vec![PORT_SWD, PORT_UART]);
-            assert!(
-                !kinds.contains(&PORT_BLE),
-                "a port that never came up is not a port: the controller must not be told the \
-                 board has a BLE link it does not have"
-            );
-        }
-
-        #[test]
-        fn a_healthy_module_still_handshakes_and_gets_its_port() {
-            let (attached, obs, ms) = phase_one(ScriptedModule::healthy(), true);
-
-            let pipe = match attached {
-                Attached::Handshaked(p) => p,
-                _ => panic!("a module that acks every command reaches transparent data mode"),
-            };
-            assert!(ms <= BOOT_BUDGET_MS);
-            assert_eq!(obs.answered, 1);
-            assert_eq!(
-                obs.matched_attempt, 1,
-                "a healthy module answers the first AT"
-            );
-            assert_eq!(obs.brought_up, 1);
-            assert_eq!(obs.name_len, "hb-offroad-m".len() as u32);
-            assert_eq!(
-                obs.at_acked, 0b1_1111,
-                "every AT step acked (NAME/CON/ADV/SET/MODE)"
-            );
-            assert_eq!(
-                net_ports(true),
-                3,
-                "the BLE port is registered when it exists"
-            );
-
-            // The staged name reached the wire, through the shortened handshake probe: cutting the
-            // redundant retries must not cut a configuration step.
-            let tx = pipe.into_inner().tx;
-            let at = |needle: &[u8]| tx.windows(needle.len()).position(|w| w == needle);
-            assert!(at(b"AT+NAME=hb-offroad-m\r\n").is_some());
-            assert!(at(b"AT+SET=1\r\n").is_some());
-            assert!(at(b"AT+MODE=DATA\r\n").is_some());
-        }
-
-        #[test]
-        fn a_configured_board_still_falls_back_to_data_mode() {
-            // The l3.md fallback is untouched by the budget: a configured board's known-BLE port that
-            // answers nothing is a module a warm reset left transparent, and it stays registered.
-            let (attached, obs, ms) = phase_one(ScriptedModule::deaf(), true);
-            assert!(matches!(attached, Attached::DataMode(_)));
-            assert!(ms <= BOOT_BUDGET_MS);
-            assert_eq!(obs.answered, 0);
-            assert_eq!(obs.brought_up, 1);
-            assert_eq!(
-                obs.name_len, 0,
-                "the fallback never re-handshakes, so never renames"
-            );
         }
     }
 }
@@ -4679,1081 +3381,28 @@ mod link_drain {
     }
 }
 
-/// The BLE port's outbound frame stream and its ONE owner (`specs/link-control.md`, "Addressing and
-/// emission"; `specs/ble-port-dma-tx.md`).
+/// The guest port's telemetry: the board's own `CYCLIC_STATE` sample (5 Hz) and the peer's forward
+/// (2.5 Hz) go into the SWD mailbox port's ring, and the port counts what it accepted
+/// (`specs/link-control.md`, "The mailbox port carries both samples (2026-10-25)" and "Counting
+/// what is staged (2026-10-25)"). The bridge on the board's SWD header re-publishes both on its own
+/// BLE link, which is how a phone sees them.
 ///
-/// The port is a shared resource with two writers: the 5 Hz cyclic telemetry, and the responder's
-/// port-directed emissions (a `CONFIG_READ` reply, a `CFG_ARMED` refusal, a walk probe or forward,
-/// a `PORTS` response). The module's UART is 9600 8N1, so a byte is 1.042 ms, and one cyclic
-/// sample is TWO frames of 20 B, 41.7 ms of WIRE time. That is unavoidable. What is not
-/// unavoidable is paying it in CPU time.
-///
-/// **The bound this exists to hold is 16 ms, and it is not the watchdog.** The 250 Hz control task
-/// (IMU sample, balance law, torque word) is dispatched from the MAIN LOOP, the same pass that
-/// hands these frames over, and the 16 kHz commutation ISR floats all three phases if `DEMAND` has
-/// not been refreshed within `DEMAND_STALE_PERIODS` = 256 periods = 16 ms (`crate::motor`). So a
-/// main-loop pass that blocks longer than 16 ms cuts motor torque mid-balance. The 500 ms IWDG is
-/// three decimal orders away from being the operative limit. Emissions are NOT gated on armed
-/// state (`Responder::ingest` has no armed gate; the R4 gate refuses only the flash persist, and a
-/// refusal is itself a reply), so a phone can trigger this path at will against a balancing board.
-///
-/// So NOTHING here blocks on the wire. The port's transmit is a one-shot DMA channel
-/// (`crate::ble_carrier`, `runtime_hal::DmaTx`): a WHOLE wire frame is copied into the channel's
-/// buffer and leaves in the background, and the channel is busy until it has. Both writers hand
-/// whole PDUs to [`MeteredTx`], which encodes them a frame at a time and hands each frame to the
-/// port only when `write_ready` says the channel is idle, so a handover is a copy and a channel
-/// start and never a wait. A frame still takes its wire time; the CPU does not.
-///
-/// It used to put the frames out a BYTE at a time from the main loop, as far as the elapsed time
-/// had paid for and the polled transmit register would take. Then the loop's pass rate set the
-/// port's byte rate: at the one to two ticks a pass the loop runs with a phone attached, the port
-/// moved about 256 B/s against the 285 B/s the two samples needed, and the peer's forward, which
-/// only goes out when the port is idle, was superseded in its slot (`specs/ble-port-dma-tx.md`).
-/// A frame per handover takes the pass rate out of it: at two ticks a pass a 20 B frame is three
-/// passes of wire.
-///
-/// **Ordering is a correctness requirement, at two scales.** A frame that has begun cannot be
-/// abandoned partway, and nothing may be written inside it: the receiver's length-driven framer
-/// would consume the other bytes as the body it is still waiting for. The DMA channel takes a
-/// frame whole and refuses another until it is done, so that half is the carrier's. Above the
-/// frame: a PDU larger than the port's 15 B chunk becomes SEVERAL frames, which must go out in
-/// index order with nothing in between, because a `FRAG_IDX` 0 arriving mid-reassembly discards
-/// the set in progress (`link::reasm`, atomic-or-discard). So `MeteredTx` holds ONE encoded frame
-/// waiting for the port, and the rest of its PDU in a one-deep slot behind it, encoding the next
-/// fragment only once the frame ahead has been handed over. Anything arriving meanwhile waits in
-/// that slot ([`send`](MeteredTx::send)) or is dropped ([`stage`](MeteredTx::stage)).
-///
-/// **Emissions are not size-bounded to one frame**, and must not be: a `PORTS` reply is 16 B at this
-/// board's three ports, and a `CONFIG_RESP` carrying the device name is 17 to 19 B. Both are over
-/// the 15 B chunk, both are real traffic (the BLE walk's `PROBE_PORTS` is answered by the first; the
-/// per-board name is read and written over BLE with the second), and a size-based drop would be
-/// DETERMINISTIC, which is the one loss the acknowledged plane's retransmit cannot recover: every
-/// retry drops identically. So the slot holds the PDU rather than an encoded frame, and
-/// `promote` encodes its fragments one at a time as the port takes them.
-///
-/// **The two writers get opposite overflow policies, because their PDUs are worth different
-/// things.** A telemetry sample is one observation of a 5 Hz stream and the next is 200 ms behind
-/// it, so a sample arriving while the port is busy is DROPPED and the newer one staged later:
-/// queueing it would only put a stale reading on the wire. An emission is a distinct reply that
-/// nothing else supersedes (losing a `CONFIG_READ` response costs the controller a retransmit), so
-/// it is QUEUED, one deep, and telemetry yields to it. Two deep is where the queue stops: the
-/// second emission is dropped and the FIRST kept, because the wire, not the buffer, is the
-/// bottleneck (a ~20 ms frame against a few-millisecond pass), so any depth only defers the same
-/// drop while adding reply latency, and dropping the older frame would reorder replies against
-/// their requests for nothing. What a sample's own fragments do NOT do is hold the slot against a
-/// reply: see [`MeteredTx::send`] for why they yield.
-///
-/// BLE traffic CAN overflow that slot on its own: replies are systematically longer than the
-/// requests that ask for them (a `CONFIG_READ` request is 10 wire bytes, its `i32` reply 16 and its
-/// string reply two or three frames), so back-to-back reads from the phone outrun the port with no
-/// second source involved. What makes the policy hold is not that overflow cannot happen, it is what
-/// happens when it does: every op that reaches this port on the acknowledged plane (`specs/l3.md`:
-/// `PROBE_PORTS`, `ASSIGN`, `CONFIG_READ`/`CONFIG_WRITE`) is idempotent and retransmitted by the
-/// controller on timeout, so an overflow drop costs a retry rather than a reply. That is what
-/// separates it from the deterministic size-based drop above, which no retry could ever clear.
-///
-/// Compiled on all targets (outside the `target_os = "none"` firmware module) so the workspace host
-/// test run reaches its tests over a real `Link`/`SerialTransport`; `allow(dead_code)` because its
-/// callers are the target-only loop, so the host non-test build (CI clippys with `--all-targets
-/// -D warnings`) sees it unused.
-mod ble_wire {
-    use embedded_io::{Read, ReadReady, Write, WriteReady};
-    use link::{Link, SerialTransport};
-    use linkctl::CyclicState;
-    use orchestrator::dispatch::PeerCyclic;
-
-    /// The frame waiting for the port, and the PDU whose remaining fragments are queued behind it.
-    /// `N` is the link's stream-frame size (`BLE_FRAMER_N`), so `buf` holds the largest frame the
-    /// port can emit; `Q` is the largest PDU the port can be handed (`BLE_EMIT_CAP`).
-    ///
-    /// The state lives in the service loop's frame (which is permanent) and is borrowed by the
-    /// routing. The queue costs `Q + 2` words, 72 B at `Q` = 64: the price of holding a PDU that has
-    /// still to be cut into frames rather than a single frame that is already cut. What it buys is
-    /// the delivery of every emission, up to the port's own `net::walk::MAX_PDU` bound, without a
-    /// blocking `Link::send`.
-    pub struct MeteredTx<const N: usize, const Q: usize> {
-        buf: [u8; N],
-        /// Length of the encoded frame in `buf` still owed to the port; 0 when none is. A frame here
-        /// has consumed its place in the set (and, for the last fragment, the PID), so it goes out
-        /// before anything else does.
-        len: usize,
-        /// The PDU still owed to the wire, as the caller handed it over: unencoded, because a PDU
-        /// over the link's 15 B chunk becomes several wire frames and only ONE of them fits `buf`.
-        /// Empty (`pending_len == 0`) once the last fragment has moved into `buf`.
-        pending: [u8; Q],
-        pending_len: usize,
-        /// The index of the next fragment of `pending` to encode. The set shares one PID and the
-        /// receiver tears a set whose fragments arrive out of order, so this only ever advances.
-        pending_frag: usize,
-        /// Whether the PDU in the slot is a telemetry SAMPLE ([`stage`](MeteredTx::stage)) rather
-        /// than an emission ([`send`](MeteredTx::send)).
-        ///
-        /// It decides who yields when an emission arrives while a PDU still owes fragments, which
-        /// is the common case because the cyclic payload is two fragments on this port: a sample
-        /// yields, per the module's overflow rule, and an emission is never dropped for one.
-        pending_is_sample: bool,
-    }
-
-    impl<const N: usize, const Q: usize> Default for MeteredTx<N, Q> {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    #[allow(dead_code)]
-    impl<const N: usize, const Q: usize> MeteredTx<N, Q> {
-        pub const fn new() -> Self {
-            MeteredTx {
-                buf: [0u8; N],
-                len: 0,
-                pending: [0u8; Q],
-                pending_len: 0,
-                pending_frag: 0,
-                pending_is_sample: false,
-            }
-        }
-
-        /// Nothing is waiting for the port: the next PDU staged here is the next thing handed to
-        /// it. The port itself may still be sending the last frame handed over; that frame is the
-        /// channel's now, and the next handover waits for it ([`pump`](MeteredTx::pump)).
-        pub fn idle(&self) -> bool {
-            !self.framed() && self.pending_len == 0
-        }
-
-        /// A frame is encoded and waiting for the port. It owns the next handover: nothing else
-        /// may go to the port before it, and it may not be dropped.
-        fn framed(&self) -> bool {
-            self.len != 0
-        }
-
-        /// Take `packet` into the one-deep slot, recording whether it is a telemetry sample.
-        /// Refuses a PDU longer than the slot, and an empty one (nothing here emits either: an
-        /// `Emission`'s bytes are a `net::walk::PduBuf`, bounded by `Q`, and a PDU always carries
-        /// its 3-byte L3 header).
-        fn queue(&mut self, packet: &[u8], is_sample: bool) -> bool {
-            if packet.is_empty() || packet.len() > Q {
-                return false;
-            }
-            self.pending[..packet.len()].copy_from_slice(packet);
-            self.pending_len = packet.len();
-            self.pending_frag = 0;
-            self.pending_is_sample = is_sample;
-            true
-        }
-
-        /// Encode the next fragment of the queued PDU into `buf` once the frame ahead of it has
-        /// been handed to the port. Called at the head of every entry point, so the next fragment
-        /// never waits longer than the frame ahead of it and the slot frees the moment the LAST
-        /// fragment is encoded.
-        ///
-        /// This is where a multi-fragment emission is sequenced: one wire frame at a time, in index
-        /// order, with nothing else able to take the port in between (`stage` and `send` both
-        /// refuse while `pending_len != 0`). A refusal from the link (a PDU needing more than
-        /// `MAX_FRAGMENTS`, which nothing at `Q` = 64 against a 15 B chunk can reach) drops the
-        /// whole PDU rather than leaving a half-sent set owed to the wire.
-        fn promote<S, const P: usize>(&mut self, link: &mut Link<SerialTransport<S, N>, P, N>)
-        where
-            S: Read + Write + ReadReady,
-        {
-            if self.framed() || self.pending_len == 0 {
-                return;
-            }
-            match link.stage_fragment(
-                &self.pending[..self.pending_len],
-                self.pending_frag,
-                &mut self.buf,
-            ) {
-                Some(s) => {
-                    self.len = s.len;
-                    if s.more {
-                        self.pending_frag += 1;
-                    } else {
-                        self.pending_len = 0;
-                        self.pending_frag = 0;
-                    }
-                }
-                None => {
-                    self.pending_len = 0;
-                    self.pending_frag = 0;
-                }
-            }
-        }
-
-        /// Stage a telemetry `packet`, to be handed to the port by [`pump`](MeteredTx::pump).
-        /// Nothing reaches the port here, and nothing blocks.
-        ///
-        /// A sample arriving while the owner is busy (a frame waiting for the port, or a PDU still
-        /// owed fragments) is DROPPED and reported by the `false` return, never queued: the caller's
-        /// source is a latest-wins slot 200 ms from its successor, so queueing this one would only
-        /// put a stale reading on a wire that an emission has better use for. A slow or absent
-        /// module therefore costs samples rather than accruing a backlog.
-        pub fn stage<S, const P: usize>(
-            &mut self,
-            link: &mut Link<SerialTransport<S, N>, P, N>,
-            packet: &[u8],
-        ) -> bool
-        where
-            S: Read + Write + ReadReady,
-        {
-            self.promote(link);
-            if !self.idle() || !self.queue(packet, true) {
-                return false;
-            }
-            self.promote(link);
-            self.framed()
-        }
-
-        /// Queue `packet` as one whole L2 PACKET on this port, behind whatever is already waiting.
-        /// Nothing reaches the port here and nothing blocks: the bytes are encoded through the same
-        /// `Link::stage_fragment` seam the telemetry uses (so the framing and the PID stay the
-        /// link's), and [`pump`](MeteredTx::pump) hands them over on the following visits, one wire
-        /// frame at a time.
-        ///
-        /// **Any PDU the port can be handed goes out whole**, including the ones that do not fit a
-        /// single 16 B frame: a `PORTS` reply is 16 B at this board's three ports and a
-        /// `CONFIG_RESP` carrying the device name is 17 to 19 B, both over the 15 B chunk. Those
-        /// fragment, and the fragments keep the port to themselves until the set is complete
-        /// (`Link::stage_fragment`: a `FRAG_IDX` 0 arriving mid-reassembly discards the set in
-        /// progress, so an interleaved frame would destroy the emission, not merely delay it).
-        ///
-        /// Three cases. The slot is empty: this PDU takes it, behind the frame waiting for the port
-        /// if there is one. The slot holds a TELEMETRY SAMPLE's remaining fragments: the sample
-        /// yields and this PDU takes the slot, per the module's overflow rule. The slot holds
-        /// another EMISSION: this PDU is DROPPED and the one already queued is kept. A drop is
-        /// invisible here by design, exactly as `Link::send`'s was: L2 is best-effort and the
-        /// acknowledged plane above retransmits.
-        ///
-        /// **Why a sample yields its remaining fragments and not just its slot.** On this port the
-        /// cyclic payload is two frames, so a sample can hold the slot across a frame of wire time.
-        /// Refusing an emission for that window would invert the priority this module is built on:
-        /// a sample is 200 ms from its successor and worth nothing stale, while a reply costs the
-        /// controller a retransmit. The half-delivered sample costs the receiver nothing either:
-        /// this PDU's `FRAG_IDX` 0 arrives under a NEW PID, and the reassembler discards a set
-        /// whose PID changes mid-way (`link::reasm`, atomic-or-discard), so the torn sample is
-        /// dropped there rather than mixed into anything. The frame already ENCODED is never
-        /// dropped: it has taken its place in the set and goes out first.
-        pub fn send<S, const P: usize>(
-            &mut self,
-            link: &mut Link<SerialTransport<S, N>, P, N>,
-            packet: &[u8],
-        ) where
-            S: Read + Write + ReadReady,
-        {
-            self.promote(link);
-            if (self.pending_len != 0 && !self.pending_is_sample) || !self.queue(packet, false) {
-                return;
-            }
-            self.promote(link);
-        }
-
-        /// One visit to the port: if a frame is waiting and the port's transmit channel is idle,
-        /// hand the WHOLE frame over. A busy channel is left alone, so a visit costs a status read
-        /// when there is nothing to do and a copy plus a channel start when there is, and never a
-        /// wait. The next fragment of the set is encoded by whichever entry point runs next, each
-        /// of which promotes first.
-        ///
-        /// A frame the port did not take whole (a write error, or a carrier shorter than the frame,
-        /// which is a sizing bug: the DMA buffer is `N` bytes) abandons the rest of its set
-        /// (best-effort, as everywhere on L2: a torn set is discarded by the receiver whole, so
-        /// holding the remaining fragments would only occupy the port).
-        pub fn pump<S, const P: usize>(&mut self, link: &mut Link<SerialTransport<S, N>, P, N>)
-        where
-            S: Read + Write + ReadReady + WriteReady,
-        {
-            self.promote(link);
-            if !self.framed() {
-                return;
-            }
-            let serial = link.transport_mut().serial_mut();
-            if !matches!(serial.write_ready(), Ok(true)) {
-                return;
-            }
-            let whole = matches!(serial.write(&self.buf[..self.len]), Ok(n) if n == self.len);
-            self.len = 0;
-            if !whole {
-                self.pending_len = 0;
-                self.pending_frag = 0;
-            }
-        }
-
-        /// Stage one `CYCLIC_STATE` sample (the board's own, or the peer's forward) under `src`,
-        /// dst 0x00 (the point-to-point rule, `specs/link-control.md`, "Addressing and emission"),
-        /// through the one sample encoder both guest ports share ([`crate::guest_tx::sample_pdu`]).
-        /// `pdu` is the caller's PDU scratch. Dropped, as [`stage`](MeteredTx::stage) drops, when
-        /// the owner is busy; the return is `stage`'s, `true` only for a sample the port took, which
-        /// is what the staged counter counts (`specs/link-control.md`, "Counting what is staged").
-        pub fn stage_sample<S, const P: usize>(
-            &mut self,
-            link: &mut Link<SerialTransport<S, N>, P, N>,
-            src: u8,
-            state: &CyclicState,
-            pdu: &mut [u8],
-        ) -> bool
-        where
-            S: Read + Write + ReadReady,
-        {
-            match crate::guest_tx::sample_pdu(src, state, pdu) {
-                Some(len) => self.stage(link, &pdu[..len]),
-                None => false,
-            }
-        }
-    }
-
-    /// One sample as a guest port takes it: the address it goes out under, the state, and whether
-    /// it is the PEER's forward (the high half of the staged counter) rather than the board's own.
-    pub struct Sample {
-        pub src: u8,
-        pub state: CyclicState,
-        pub forward: bool,
-    }
-
-    /// The sample the BLE port takes next, from the two latest-wins slots the control pass fills:
-    /// the board's own (5 Hz, sent under `own_src`) first, and the peer's forward (2.5 Hz, under
-    /// the peer's address) only when the own slot is empty (`specs/link-control.md`, "The peer's
-    /// state on the BLE port: the forward"). The caller asks only while the owner is idle, so the
-    /// two never contend for the staging buffer.
-    #[allow(dead_code)]
-    pub fn next_sample(
-        own: &mut Option<CyclicState>,
-        own_src: u8,
-        peer: &mut Option<PeerCyclic>,
-    ) -> Option<Sample> {
-        own.take()
-            .map(|state| Sample {
-                src: own_src,
-                state,
-                forward: false,
-            })
-            .or_else(|| {
-                peer.take().map(|p| Sample {
-                    src: p.src,
-                    state: p.state,
-                    forward: true,
-                })
-            })
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::MeteredTx;
-        use embedded_io::{ErrorType, Read, ReadReady, Write, WriteReady};
-        use link::{Link, SerialTransport};
-        use std::collections::VecDeque;
-
-        /// The firmware's BLE link shape: 16 B L2 frame capacity, 20 B stream frames, 72 B packets.
-        const FRAME_CAP: usize = 16;
-        const FRAMER_N: usize = FRAME_CAP + 4;
-        const PACKET: usize = 72;
-
-        /// One 8N1 character at 9600 baud (`ble::at::BAUD`): 10 bit times, 1.0417 ms.
-        const BYTE_US: u64 = 10 * 1_000_000 / 9600;
-        /// The bound the whole module exists to hold. The 16 kHz commutation ISR floats all three
-        /// phases once `DEMAND` is `DEMAND_STALE_PERIODS` = 256 periods stale (`crate::motor`), and
-        /// the 250 Hz control task that refreshes it is dispatched from the same main-loop pass that
-        /// hands these frames over. NOT the 500 ms IWDG, which is three decimal orders slacker.
-        const DEMAND_STALE_US: u64 = 256 * 1_000_000 / 16_000;
-        /// A main-loop pass's own work, well inside one frame's wire time so the channel is found
-        /// busy on most visits and the readiness rule actually bites.
-        const PASS_US: u64 = 100;
-
-        /// The BLE port's transmit as the firmware ships it: a one-shot DMA channel at 9600 8N1
-        /// (`runtime_hal::DmaTx` under `runtime_hal::SplitSerial`), modelled where it matters. A
-        /// write on an idle channel takes the whole frame, up to the channel's `FRAMER_N`-byte
-        /// buffer, in one transfer; the channel is then busy for the frame's wire time, and its
-        /// bytes reach the far end when that time is up. Time is a virtual microsecond clock the
-        /// test advances a pass at a time.
-        ///
-        /// The write side mirrors `SplitSerial`'s DMA arm: a write while the channel is busy WAITS
-        /// for it (the adapter retries inside its bounded budget, because `Ok(0)` on a non-empty
-        /// buffer is forbidden), and `blocked_us` totals what the port made its caller wait for.
-        /// That total is the number under test: the owner only writes when `write_ready` says the
-        /// channel is idle, so it must stay zero. `write_ready` is the adapter's `!in_flight`.
-        ///
-        /// Delivered bytes land in `buf`, which is also the read side, so the receiving framer sees
-        /// exactly the bytes that went on the wire; `transfers` records each transfer's bytes and
-        /// start time, which is what the whole-frame and ordering cases read.
-        #[derive(Default)]
-        struct DmaWire {
-            buf: VecDeque<u8>,
-            in_flight: Vec<u8>,
-            now_us: u64,
-            free_at_us: u64,
-            blocked_us: u64,
-            transfers: Vec<(u64, Vec<u8>)>,
-        }
-
-        impl DmaWire {
-            /// The channel's transfer is done once its wire time has passed: deliver its bytes.
-            fn settle(&mut self) {
-                if self.now_us >= self.free_at_us && !self.in_flight.is_empty() {
-                    self.buf.extend(self.in_flight.drain(..));
-                }
-            }
-            fn channel_idle(&mut self) -> bool {
-                self.settle();
-                self.now_us >= self.free_at_us
-            }
-        }
-
-        impl ErrorType for DmaWire {
-            type Error = core::convert::Infallible;
-        }
-        impl Write for DmaWire {
-            fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
-                if data.is_empty() {
-                    return Ok(0);
-                }
-                if !self.channel_idle() {
-                    self.blocked_us += self.free_at_us - self.now_us;
-                    self.now_us = self.free_at_us;
-                    self.settle();
-                }
-                let n = data.len().min(FRAMER_N);
-                self.in_flight.extend_from_slice(&data[..n]);
-                self.transfers.push((self.now_us, data[..n].to_vec()));
-                self.free_at_us = self.now_us + n as u64 * BYTE_US;
-                Ok(n)
-            }
-            fn flush(&mut self) -> Result<(), Self::Error> {
-                if !self.channel_idle() {
-                    self.blocked_us += self.free_at_us - self.now_us;
-                    self.now_us = self.free_at_us;
-                    self.settle();
-                }
-                Ok(())
-            }
-        }
-        impl Read for DmaWire {
-            fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
-                self.settle();
-                let n = out.len().min(self.buf.len());
-                for b in out.iter_mut().take(n) {
-                    *b = self.buf.pop_front().unwrap();
-                }
-                Ok(n)
-            }
-        }
-        impl ReadReady for DmaWire {
-            fn read_ready(&mut self) -> Result<bool, Self::Error> {
-                self.settle();
-                Ok(!self.buf.is_empty())
-            }
-        }
-        impl WriteReady for DmaWire {
-            fn write_ready(&mut self) -> Result<bool, Self::Error> {
-                Ok(self.channel_idle())
-            }
-        }
-
-        /// The one-deep emission slot, `net::walk::MAX_PDU` as the firmware sizes it
-        /// (`BLE_EMIT_CAP`): the largest PDU an `Emission` can carry.
-        const EMIT_CAP: usize = 64;
-
-        type TestLink = Link<SerialTransport<DmaWire, FRAMER_N>, PACKET, FRAMER_N>;
-        type Tx = MeteredTx<FRAMER_N, EMIT_CAP>;
-
-        fn link() -> TestLink {
-            Link::new(SerialTransport::new(DmaWire::default(), FRAME_CAP))
-        }
-
-        /// A 22 B PDU, which frames to TWO fragments of 20 and 12 wire bytes: a multi-fragment
-        /// sample, the shape the cyclic emission stages on this port (the shipping 30 B PDU is two
-        /// 20 B frames; what the cases here rest on is that it is two).
-        const CYCLIC_PDU: [u8; 22] = [
-            0x10, 0x01, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ];
-        /// A second, distinguishable PDU standing for any BLE-bound emission (a `CONFIG_READ` reply,
-        /// a `CFG_ARMED` refusal, a walk probe or forward): what the responder hands `route_emits`
-        /// for the BLE port.
-        const REPLY_PDU: [u8; 8] = [0x21, 0x01, 0xA0, 0xDE, 0xAD, 0xBE, 0xEF, 0x01];
-        /// A third, so a queue-overflow case can say WHICH emission survived.
-        const SECOND_REPLY_PDU: [u8; 6] = [0x21, 0x02, 0xB0, 0xC0, 0xFF, 0xEE];
-        /// A `PORTS` reply at this board's three ports, the exact size the walk emits: a 3 B L3
-        /// header, the port count, and 4 B of descriptor per port, 16 B in all. ONE byte past the
-        /// 15 B chunk this link's 16 B frame capacity leaves, so it is the first emission that has
-        /// to fragment, and the one the BLE walk cannot complete without.
-        const PORTS_PDU: [u8; 16] = [
-            0x30, 0x01, 0x00, 3, 0x00, 0x01, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x02, 0x03, 0x00,
-            0x00,
-        ];
-        /// A `CONFIG_RESP` carrying a string value, the store's `DEVICE_NAME`: 3 B L3 header + field
-        /// id + index + type tag + length + the 12 bytes of "hb-offroad-m" = 19 B. Comfortably above
-        /// the fragmentation boundary rather than sitting on it.
-        const NAME_RESP_PDU: [u8; 19] = [
-            0x41, 0x01, 0x00, 0x10, 0x00, 0x05, 0x0C, b'h', b'b', b'-', b'o', b'f', b'f', b'r',
-            b'o', b'a', b'd', b'-', b'm',
-        ];
-        /// The largest emission this port can be handed: `net::walk::MAX_PDU`, the bound on an
-        /// `Emission`'s bytes. Five fragments on a 15 B chunk.
-        const MAX_EMISSION: [u8; 64] = {
-            let mut p = [0u8; 64];
-            let mut i = 0;
-            while i < 64 {
-                p[i] = i as u8;
-                i += 1;
-            }
-            p
-        };
-
-        /// Blocking charged to the port so far, in microseconds.
-        fn blocked_us(l: &TestLink) -> u64 {
-            l.transport().serial().blocked_us
-        }
-        /// Each transfer the port was handed, in order.
-        fn transfers(l: &TestLink) -> Vec<Vec<u8>> {
-            l.transport()
-                .serial()
-                .transfers
-                .iter()
-                .map(|(_, t)| t.clone())
-                .collect()
-        }
-
-        /// One main-loop pass: visit the port, then let the clock advance by the pass's own work.
-        /// Returns the blocking this pass cost, which is what the 16 ms bound is about.
-        fn pass(tx: &mut Tx, l: &mut TestLink) -> u64 {
-            let before = blocked_us(l);
-            tx.pump(l);
-            let cost = blocked_us(l) - before;
-            l.transport_mut().serial_mut().now_us += PASS_US;
-            cost
-        }
-
-        /// Run passes until nothing is waiting for the port, returning the worst single pass's
-        /// blocking. Bounded so a stuck state cannot spin.
-        fn drain(tx: &mut Tx, l: &mut TestLink) -> u64 {
-            let mut worst = 0;
-            let mut n = 0;
-            while !tx.idle() && n < 4000 {
-                worst = worst.max(pass(tx, l));
-                n += 1;
-            }
-            worst
-        }
-
-        /// Everything the receiver reassembles once the last transfer has had its wire time.
-        fn received(l: &mut TestLink) -> Vec<Vec<u8>> {
-            let s = l.transport_mut().serial_mut();
-            s.now_us = s.now_us.max(s.free_at_us);
-            let mut out = [0u8; PACKET];
-            let mut v = Vec::new();
-            while let Some(p) = l.poll_recv(&mut out) {
-                v.push(p.to_vec());
-            }
-            v
-        }
-
-        /// Hand `pdu` to the emission path on a quiet port, drain it, and return what the receiver
-        /// reassembled together with the worst single pass's blocking.
-        fn emit_and_drain(pdu: &[u8]) -> (u64, Vec<Vec<u8>>) {
-            let mut l = link();
-            let mut tx = Tx::new();
-            tx.send(&mut l, pdu);
-            let worst = drain(&mut tx, &mut l);
-            (worst, received(&mut l))
-        }
-
-        /// **The P1 regression.** A `PORTS` reply is 16 B at this board's three ports, one byte over
-        /// the single-fragment chunk. The owner must fragment it and deliver it whole: the BLE
-        /// walk's `PROBE_PORTS` is answered by exactly this PDU, and a size-based drop is
-        /// deterministic, so the controller's 3 s retransmit re-drops it forever.
-        #[test]
-        fn a_ports_sized_emission_reaches_the_receiver_intact() {
-            let (worst, got) = emit_and_drain(&PORTS_PDU);
-            assert_eq!(got, vec![PORTS_PDU.to_vec()], "the PORTS reply");
-            assert_eq!(worst, 0, "a main-loop pass waited on the BLE wire");
-        }
-
-        /// The same, comfortably above the boundary rather than on it: a `CONFIG_RESP` carrying the
-        /// device name. Reading or writing the board's name over BLE is this PDU.
-        #[test]
-        fn a_string_config_resp_reaches_the_receiver_intact() {
-            let (worst, got) = emit_and_drain(&NAME_RESP_PDU);
-            assert_eq!(got, vec![NAME_RESP_PDU.to_vec()], "the string CONFIG_RESP");
-            assert_eq!(worst, 0, "a main-loop pass waited on the BLE wire");
-        }
-
-        /// The ceiling: the largest PDU an emission can carry (`net::walk::MAX_PDU`), five fragments
-        /// deep, still arrives whole and still costs no pass any wait.
-        #[test]
-        fn the_largest_emission_the_port_carries_reaches_the_receiver_intact() {
-            let (worst, got) = emit_and_drain(&MAX_EMISSION);
-            assert_eq!(got, vec![MAX_EMISSION.to_vec()], "the largest emission");
-            assert_eq!(worst, 0, "a main-loop pass waited on the BLE wire");
-        }
-
-        /// **The carrier's half of the ordering rule.** Every transfer the port is handed is ONE
-        /// whole encoded frame, so nothing can land inside a frame: the frames of a sample with an
-        /// emission arriving mid-sample, as the port saw them, are each a complete frame (SOF, the
-        /// length its byte announces, CRC) and there are exactly as many transfers as frames.
-        #[test]
-        fn every_transfer_is_one_whole_frame() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            assert!(tx.stage(&mut l, &CYCLIC_PDU));
-            pass(&mut tx, &mut l);
-            tx.send(&mut l, &NAME_RESP_PDU);
-            drain(&mut tx, &mut l);
-
-            // The frames the same link encodes for the two PDUs, from an untouched link so the
-            // PIDs line up with the run above (they are that link's first two packets).
-            let mut expect = Vec::new();
-            let mut model = link();
-            for pdu in [&CYCLIC_PDU[..], &NAME_RESP_PDU[..]] {
-                let mut i = 0;
-                loop {
-                    let mut f = [0u8; FRAMER_N];
-                    let s = model.stage_fragment(pdu, i, &mut f).expect("stages");
-                    expect.push(f[..s.len].to_vec());
-                    if !s.more {
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            assert_eq!(
-                transfers(&l),
-                expect,
-                "each transfer is one whole frame, in set order"
-            );
-            assert_eq!(
-                received(&mut l),
-                vec![CYCLIC_PDU.to_vec(), NAME_RESP_PDU.to_vec()]
-            );
-        }
-
-        /// The timing bound for the case most likely to regress it: a MULTI-FRAGMENT emission
-        /// arriving while a sample is going out. No single pass may block past the demand-stale
-        /// coast, and here no pass waits at all: the owner only hands a frame to an idle channel.
-        ///
-        /// Both arrive. Once the sample's first fragment is handed over, the `promote` that opens
-        /// `send` encodes its second, so that frame owns the next handover and the emission queues
-        /// behind it.
-        #[test]
-        fn a_multi_fragment_emission_mid_sample_never_blocks_a_pass() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            assert!(tx.stage(&mut l, &CYCLIC_PDU));
-            let mut worst = pass(&mut tx, &mut l).max(pass(&mut tx, &mut l));
-
-            let before = blocked_us(&l);
-            tx.send(&mut l, &NAME_RESP_PDU);
-            let emission_pass = blocked_us(&l) - before;
-            worst = worst.max(emission_pass);
-            worst = worst.max(drain(&mut tx, &mut l));
-
-            assert!(
-                worst < DEMAND_STALE_US,
-                "worst pass blocked {worst} us, past the {DEMAND_STALE_US} us demand-stale coast \
-                 (the emission's own pass cost {emission_pass} us)"
-            );
-            assert_eq!(worst, 0, "a main-loop pass waited on the BLE wire");
-            assert_eq!(
-                received(&mut l),
-                vec![CYCLIC_PDU.to_vec(), NAME_RESP_PDU.to_vec()]
-            );
-        }
-
-        /// Fragments of one PDU keep the port to themselves. A telemetry sample offered on EVERY
-        /// pass while a multi-fragment emission is going out is refused every time: a frame handed
-        /// over between two fragments would land in the reassembler as a new set (`FRAG_IDX` 0
-        /// discards the set in progress), destroying the emission. The sample staged after it
-        /// arrives after it.
-        #[test]
-        fn a_sample_never_lands_between_two_fragments_of_an_emission() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            tx.send(&mut l, &PORTS_PDU);
-
-            let mut n = 0;
-            while !tx.idle() && n < 4000 {
-                assert!(
-                    !tx.stage(&mut l, &CYCLIC_PDU),
-                    "a sample took the port between two fragments of an emission"
-                );
-                pass(&mut tx, &mut l);
-                n += 1;
-            }
-            assert!(n > 0 && n < 4000, "the emission never drained ({n} passes)");
-
-            assert!(tx.stage(&mut l, &CYCLIC_PDU), "the port never freed up");
-            drain(&mut tx, &mut l);
-            assert_eq!(
-                received(&mut l),
-                vec![PORTS_PDU.to_vec(), CYCLIC_PDU.to_vec()],
-                "the emission was torn, or the sample after it never went out"
-            );
-        }
-
-        /// **The headline invariant.** A telemetry frame is going out, a phone-triggered emission
-        /// arrives (the worst case: `CONFIG_READ` replies and `CFG_ARMED` refusals are not gated on
-        /// armed state, so this happens while balancing), and both go out. No single main-loop pass
-        /// may block past the demand-stale coast, because a pass that does floats all three motor
-        /// phases.
-        #[test]
-        fn no_main_loop_pass_blocks_past_the_demand_stale_coast() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            assert!(tx.stage(&mut l, &CYCLIC_PDU));
-
-            let mut worst = pass(&mut tx, &mut l);
-            let before = blocked_us(&l);
-            tx.send(&mut l, &REPLY_PDU);
-            let emission_pass = blocked_us(&l) - before;
-            worst = worst.max(emission_pass);
-            worst = worst.max(drain(&mut tx, &mut l));
-
-            assert!(
-                worst < DEMAND_STALE_US,
-                "worst pass blocked {worst} us, past the {DEMAND_STALE_US} us demand-stale coast \
-                 (the emission's own pass cost {emission_pass} us)"
-            );
-            // Not merely under the line: the port is only ever written when the channel is
-            // already idle, so a pass waits for nothing at all.
-            assert_eq!(worst, 0, "a main-loop pass waited on the BLE wire");
-        }
-
-        /// The same requirement for the far commoner case: an emission on a quiet port. Queueing
-        /// writes nothing; the next visit hands it over.
-        #[test]
-        fn an_emission_on_a_quiet_port_costs_the_pass_nothing() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            tx.send(&mut l, &REPLY_PDU);
-            assert_eq!(
-                blocked_us(&l),
-                0,
-                "the emission blocked the pass instead of queueing"
-            );
-            assert!(
-                transfers(&l).is_empty(),
-                "queueing hands nothing to the port"
-            );
-
-            let worst = drain(&mut tx, &mut l);
-            assert_eq!(worst, 0);
-            assert_eq!(received(&mut l), vec![REPLY_PDU.to_vec()]);
-        }
-
-        /// The receiver's view of the priority rule: an emission arriving while a SAMPLE still owes
-        /// fragments takes the slot from it. The sample's encoded first fragment is not dropped (it
-        /// has its place), so it goes out, and the receiver discards it on the PID change rather
-        /// than reassembling a short packet; the emission arrives whole and nothing trails it.
-        ///
-        /// The window is real: a sample staged while the channel is still sending the frame before
-        /// it holds its first fragment encoded and its second unencoded until the channel frees.
-        #[test]
-        fn an_emission_takes_the_slot_from_a_waiting_sample_and_the_torn_sample_is_discarded() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            tx.send(&mut l, &REPLY_PDU);
-            pass(&mut tx, &mut l); // the reply is on the wire; the channel is busy
-            assert!(tx.idle());
-            assert!(
-                tx.stage(&mut l, &CYCLIC_PDU),
-                "the sample is staged behind it"
-            );
-            tx.send(&mut l, &SECOND_REPLY_PDU);
-            assert_eq!(drain(&mut tx, &mut l), 0);
-
-            assert_eq!(
-                received(&mut l),
-                vec![REPLY_PDU.to_vec(), SECOND_REPLY_PDU.to_vec()],
-                "the second reply did not survive, or the torn sample reached the receiver"
-            );
-            assert_eq!(
-                transfers(&l).len(),
-                3,
-                "reply, the sample's first frame, reply"
-            );
-        }
-
-        /// A sample on a QUIET port still goes out whole, both fragments, with nothing else
-        /// touching the port: the yielding above is a collision rule, not the common path.
-        #[test]
-        fn a_sample_on_a_quiet_port_goes_out_whole() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            assert!(tx.stage(&mut l, &CYCLIC_PDU));
-            let worst = drain(&mut tx, &mut l);
-            assert_eq!(worst, 0, "a main-loop pass waited on the BLE wire");
-            let sizes: Vec<usize> = transfers(&l).iter().map(|t| t.len()).collect();
-            assert_eq!(sizes, vec![20, 12], "two transfers, one per frame");
-            assert_eq!(received(&mut l), vec![CYCLIC_PDU.to_vec()]);
-        }
-
-        /// Telemetry's overflow policy: a sample arriving while the owner is busy is dropped, never
-        /// queued, so no backlog of stale readings accrues.
-        #[test]
-        fn a_sample_arriving_mid_drain_is_dropped_not_queued() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            assert!(tx.stage(&mut l, &CYCLIC_PDU));
-            pass(&mut tx, &mut l);
-            assert!(!tx.stage(&mut l, &CYCLIC_PDU), "no backlog accrues");
-        }
-
-        /// Telemetry also yields to a queued emission: the one slot is the reply's, not a sample's.
-        #[test]
-        fn a_sample_is_dropped_while_an_emission_is_queued() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            assert!(tx.stage(&mut l, &CYCLIC_PDU));
-            pass(&mut tx, &mut l);
-            tx.send(&mut l, &REPLY_PDU);
-            assert!(
-                !tx.stage(&mut l, &CYCLIC_PDU),
-                "a sample took the slot the queued emission is waiting in"
-            );
-        }
-
-        /// Emissions' overflow policy, the opposite one: the queue is one deep, and a second
-        /// emission arriving behind a queued one is DROPPED while the first is kept, so replies keep
-        /// the order their requests arrived in. Only an emission can hold the slot against another:
-        /// a sample yields it to a reply (`MeteredTx::send`).
-        #[test]
-        fn a_second_queued_emission_is_dropped_and_the_first_kept() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            assert!(tx.stage(&mut l, &CYCLIC_PDU));
-            pass(&mut tx, &mut l);
-            tx.send(&mut l, &REPLY_PDU);
-            tx.send(&mut l, &SECOND_REPLY_PDU);
-            assert_eq!(blocked_us(&l), 0, "the overflow blocked the pass");
-
-            drain(&mut tx, &mut l);
-            assert_eq!(
-                received(&mut l),
-                vec![CYCLIC_PDU.to_vec(), REPLY_PDU.to_vec()],
-                "the older emission was dropped in favour of the newer, or the overflow got out"
-            );
-        }
-
-        /// The slot frees as soon as the frame ahead has been handed over, so a burst of emissions
-        /// drains one per frame rather than stalling behind a single queued one.
-        #[test]
-        fn the_slot_frees_once_the_frame_ahead_is_handed_over() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            tx.send(&mut l, &REPLY_PDU); // goes out on the first visit
-            tx.send(&mut l, &SECOND_REPLY_PDU); // queued behind it
-            let worst = drain(&mut tx, &mut l);
-            assert_eq!(worst, 0);
-            assert_eq!(
-                received(&mut l),
-                vec![REPLY_PDU.to_vec(), SECOND_REPLY_PDU.to_vec()],
-                "the queued emission never followed the one ahead of it"
-            );
-            assert!(tx.idle(), "the port did not return to quiet");
-        }
-
-        /// The wire time itself is untouched, and must be: the channel is busy for a frame's
-        /// character times, and the owner does not hand it the next frame until then. What changed
-        /// is who waits for it: nobody.
-        #[test]
-        fn a_frame_still_takes_its_wire_time() {
-            let mut l = link();
-            let mut tx = Tx::new();
-            assert!(tx.stage(&mut l, &CYCLIC_PDU));
-            drain(&mut tx, &mut l);
-            let t = &l.transport().serial().transfers;
-            assert_eq!(t.len(), 2);
-            let gap = t[1].0 - t[0].0;
-            assert!(
-                gap >= t[0].1.len() as u64 * BYTE_US,
-                "the second frame was handed over {gap} us after the first, inside its wire time"
-            );
-            assert_eq!(blocked_us(&l), 0, "and none of it was paid by the CPU");
-        }
-
-        // --- The send step against a main loop slower than its tick -----------------------------
-        //
-        // `specs/bench-evidence/2026-10-25/esp-tool-e2e/RECORD.md`: with the phone attached the
-        // offroad master took one to two SysTick ticks per main-loop pass, and when the port moved
-        // bytes a visit at a time the peer's forward was superseded in its slot. These run the
-        // loop's one BLE visit (8b, after dispatch) over virtual time against `DmaWire`.
-
-        /// One SysTick tick, `scheduler::TICK_HZ`.
-        const TICK_US: u64 = 1_000_000 / scheduler::TICK_HZ as u64;
-        /// The control run inside a pass, ahead of the visit: the IMU-equipped F130's measured
-        /// callback (`specs/bench-evidence/2026-08-02/wide-division/RECORD.md`).
-        const CONTROL_US: u64 = 1_399;
-        /// The two slots' cadences in ticks: the own sample at 5 Hz
-        /// (`orchestrator::BLE_CYCLIC_DIVISOR`) and the forward at 2.5 Hz
-        /// (`orchestrator::dispatch::BLE_PEER_CYCLIC_TICKS`).
-        const OWN_TICKS: u32 = orchestrator::BLE_CYCLIC_DIVISOR;
-        const PEER_TICKS: u32 = orchestrator::dispatch::BLE_PEER_CYCLIC_TICKS;
-        const OWN_SRC: u8 = 0x01;
-        const PEER_SRC: u8 = 0x02;
-        /// Simulated wall time per run.
-        const RUN_US: u64 = 60_000_000;
-
-        /// What reached the receiver: samples made and delivered per source, and the longest gap
-        /// between two delivered forwards.
-        struct Delivered {
-            own_made: u32,
-            own_sent: u32,
-            peer_made: u32,
-            peer_sent: u32,
-            peer_worst_gap_us: u64,
-        }
-
-        fn sample() -> linkctl::CyclicState {
-            linkctl::CyclicState::decode(&[0u8; linkctl::CyclicState::ENCODED_LEN]).unwrap()
-        }
-
-        /// Run the send step for [`RUN_US`] with every pass `pass_us` long, the samples the
-        /// shipping payload (`sample()` encodes to the real `CYCLIC_STATE` PDU, two 20 B frames).
-        fn run_slow_loop(pass_us: u64) -> Delivered {
-            let mut l = link();
-            let mut tx = Tx::new();
-            let mut own: Option<linkctl::CyclicState> = None;
-            let mut peer: Option<orchestrator::PeerCyclic> = None;
-            let mut pdu = [0u8; net::walk::MAX_PDU];
-            let mut out = [0u8; PACKET];
-            let mut d = Delivered {
-                own_made: 0,
-                own_sent: 0,
-                peer_made: 0,
-                peer_sent: 0,
-                peer_worst_gap_us: 0,
-            };
-            let mut last_control_tick = 0u32;
-            let mut last_peer_us = 0u64;
-            let tick = |l: &TestLink| (l.transport().serial().now_us / TICK_US) as u32;
-            while l.transport().serial().now_us < RUN_US {
-                // The drains and the rest of the pass ahead of dispatch.
-                l.transport_mut().serial_mut().now_us += pass_us - CONTROL_US;
-                // 6. The control run fills the slots, latest-wins, at their tick cadences.
-                let now = tick(&l);
-                for k in last_control_tick + 1..=now {
-                    if k % OWN_TICKS == 0 {
-                        own = Some(sample());
-                        d.own_made += 1;
-                    }
-                    if k % PEER_TICKS == PEER_TICKS / 4 {
-                        peer = Some(orchestrator::PeerCyclic {
-                            src: PEER_SRC,
-                            state: sample(),
-                        });
-                        d.peer_made += 1;
-                    }
-                }
-                last_control_tick = now;
-                l.transport_mut().serial_mut().now_us += CONTROL_US;
-                // 8b, after dispatch: stage when idle, then the pass's one visit.
-                if tx.idle() {
-                    if let Some(s) = super::next_sample(&mut own, OWN_SRC, &mut peer) {
-                        tx.stage_sample(&mut l, s.src, &s.state, &mut pdu);
-                    }
-                }
-                tx.pump(&mut l);
-                // The receiver.
-                while let Some(p) = l.poll_recv(&mut out) {
-                    let now_us = l.transport().serial().now_us;
-                    match net::Pdu::decode(p).map(|p| p.src) {
-                        Ok(OWN_SRC) => d.own_sent += 1,
-                        Ok(PEER_SRC) => {
-                            d.peer_sent += 1;
-                            d.peer_worst_gap_us = d.peer_worst_gap_us.max(now_us - last_peer_us);
-                            last_peer_us = now_us;
-                        }
-                        other => panic!("an unexpected PDU reached the receiver: {other:?}"),
-                    }
-                }
-            }
-            assert_eq!(blocked_us(&l), 0, "a pass waited on the BLE wire");
-            d
-        }
-
-        /// Both streams at their cadences: nearly every own sample, at least nine forwards in ten,
-        /// and never more than two forward periods (800 ms) without one, so the app's peer chip
-        /// does not go stale.
-        fn at_cadence(d: &Delivered) -> bool {
-            let peer_period_us = PEER_TICKS as u64 * TICK_US;
-            d.own_sent * 100 >= d.own_made * 95
-                && d.peer_sent * 10 >= d.peer_made * 9
-                && d.peer_worst_gap_us <= 2 * peer_period_us
-        }
-
-        /// The pass lengths the offroad master measured with the phone attached: 1.0, 1.23 and
-        /// 1.78 ticks per pass (`specs/bench-evidence/2026-10-24/l3-node-class/RECORD.md`), and
-        /// the 2.01 of the 2026-10-25 session (`specs/bench-evidence/2026-10-25/esp-tool-e2e/
-        /// RECORD.md`).
-        const MEASURED_PASS_US: [u64; 4] = [4_000, 4_920, 7_120, 8_040];
-
-        /// **The forward regression.** At every measured pass length, both the board's own sample
-        /// and the peer's forward reach the phone at their cadences. With the port moving bytes a
-        /// visit at a time the forward kept 81 per cent at 1.78 ticks and lost its cadence at 2.01;
-        /// with a frame per handover the pass rate no longer sets the port's rate.
-        #[test]
-        fn both_samples_keep_their_cadence_at_every_measured_pass_length() {
-            for pass_us in MEASURED_PASS_US {
-                let d = run_slow_loop(pass_us);
-                assert!(
-                    at_cadence(&d),
-                    "{pass_us} us passes: own {}/{}, forward {}/{}, worst forward gap {} us",
-                    d.own_sent,
-                    d.own_made,
-                    d.peer_sent,
-                    d.peer_made,
-                    d.peer_worst_gap_us
-                );
-            }
-        }
-
-        /// `specs/ble-port-dma-tx.md`, "Tests": at the 2.01 ticks per pass the offroad master
-        /// measured with the phone attached, both samples keep their cadence. It failed while the
-        /// port moved about two bytes a pass, under the 285 B/s the two samples need: the own
-        /// sample always went first, and the forward waited in its slot past its 100-tick cadence
-        /// and was superseded there.
-        #[test]
-        fn both_samples_keep_their_cadence_at_two_ticks_a_pass() {
-            let d = run_slow_loop(8_040);
-            assert!(
-                at_cadence(&d),
-                "own {}/{}, forward {}/{}, worst forward gap {} us",
-                d.own_sent,
-                d.own_made,
-                d.peer_sent,
-                d.peer_made,
-                d.peer_worst_gap_us
-            );
-        }
-    }
-}
-
-/// The two guest ports' telemetry: the board's own `CYCLIC_STATE` sample (5 Hz) and the peer's
-/// forward (2.5 Hz) go to EVERY guest port with a consumer, the BLE port through its one TX owner
-/// and the SWD mailbox port straight into its ring (`specs/link-control.md`, "The mailbox port
-/// carries both samples (2026-10-25)"), and each port counts what it accepted ("Counting what is
-/// staged (2026-10-25)").
-///
-/// Outside the `target_os = "none"` firmware module, the `ble_wire` precedent, so the host test run
-/// drives the real step against a real mailbox ring and a real BLE staging owner. `allow(dead_code)`
-/// because the only non-test caller is the target-only service loop.
+/// Outside the `target_os = "none"` firmware module so the host test run drives the real step
+/// against a real mailbox ring. `allow(dead_code)` because the only non-test caller is the
+/// target-only service loop.
 #[allow(dead_code)]
 mod guest_tx {
-    use crate::ble_wire::{next_sample, MeteredTx};
-    use embedded_io::{Read, ReadReady, Write, WriteReady};
     use link::{Link, SerialTransport};
     use linkctl::CyclicState;
     use orchestrator::dispatch::PeerCyclic;
     use swd_mailbox::MailboxSerial;
 
-    /// The guest ports' two latest-wins sample slots, and which of them the control pass refilled
-    /// since the loop last emitted.
-    ///
-    /// The slots are the BLE port's: a sample waits in one until the port's owner is idle, which
-    /// on the 9600-baud module can be several passes. The mailbox port takes a sample only in the
-    /// pass it was built and never from a slot it has already seen, which is what the two `fresh`
-    /// flags record: without them a sample still waiting for the BLE port would go into the ring
-    /// once per pass. They cost no RAM the slots did not already pad.
+    /// The two samples the control pass built since the loop last emitted, latest-wins: a catch-up
+    /// burst that builds one twice before the loop runs leaves the later one. The loop empties both
+    /// every pass, so a sample goes into the ring at most once, in the pass after it was built.
     pub struct GuestSlots {
         own: Option<CyclicState>,
         peer: Option<PeerCyclic>,
-        own_fresh: bool,
-        peer_fresh: bool,
     }
 
     impl GuestSlots {
@@ -5761,34 +3410,26 @@ mod guest_tx {
             GuestSlots {
                 own: None,
                 peer: None,
-                own_fresh: false,
-                peer_fresh: false,
             }
         }
 
         /// The control pass's hand-off: whatever the two cadences built this run
-        /// (`orchestrator::ble_cyclic_tx`, `orchestrator::ble_peer_tx`) overwrites its slot,
-        /// latest-wins, and marks it fresh. A catch-up burst that fills a slot twice before the
-        /// loop runs leaves the later sample and one fresh mark.
+        /// (`orchestrator::ble_cyclic_tx`, `orchestrator::ble_peer_tx`) overwrites its slot.
         pub fn fill(&mut self, own: Option<CyclicState>, peer: Option<PeerCyclic>) {
-            if let Some(c) = own {
-                self.own = Some(c);
-                self.own_fresh = true;
+            if own.is_some() {
+                self.own = own;
             }
-            if let Some(p) = peer {
-                self.peer = Some(p);
-                self.peer_fresh = true;
+            if peer.is_some() {
+                self.peer = peer;
             }
         }
     }
 
-    /// Samples staged per guest port, `CTRL_OBS` words 40 (BLE) and 41 (mailbox): each
-    /// `own u16 | forwards u16 << 16`, counted when the port ACCEPTED the sample (the `stage` that
-    /// took it, the `send` that placed it), wrapping within its half
-    /// (`specs/link-control.md`, "Counting what is staged (2026-10-25)").
+    /// Samples the mailbox port staged, `CTRL_OBS` word 41: `own u16 | forwards u16 << 16`, counted
+    /// when the ring took the sample, wrapping within its half (`specs/link-control.md`, "Counting
+    /// what is staged (2026-10-25)"). Word 40 beside it was the CC2541 port's and publishes zero.
     #[derive(Clone, Copy, Default)]
     pub struct GuestStaged {
-        pub ble: u32,
         pub mailbox: u32,
     }
 
@@ -5800,10 +3441,9 @@ mod guest_tx {
         (word & !(0xFFFF << shift)) | (half << shift)
     }
 
-    /// The `CYCLIC_STATE` PDU both guest ports carry, `[0x10][src][dst 0x00][27 B]`, encoded into
+    /// The `CYCLIC_STATE` PDU the mailbox port carries, `[0x10][src][dst 0x00][27 B]`, encoded into
     /// `pdu`; the encoded length, or `None` if `pdu` is too small. dst 0x00 by the point-to-point
-    /// rule: each guest port carries exactly one peer (`specs/link-control.md`, "Addressing and
-    /// emission"). The one encoder, so the two ports' bytes are the same bytes.
+    /// rule: the port carries exactly one peer (`specs/link-control.md`, "Addressing and emission").
     pub fn sample_pdu(src: u8, state: &CyclicState, pdu: &mut [u8]) -> Option<usize> {
         let mut payload = [0u8; CyclicState::ENCODED_LEN];
         let n = state.encode(&mut payload);
@@ -5833,123 +3473,49 @@ mod guest_tx {
         }
     }
 
-    /// Step 8b's samples for one pass, on both guest ports.
-    ///
-    /// **The mailbox port** takes each sample built since the last pass, in this pass, and only
-    /// while a host is attached (`MailboxSerial::outbound_has_consumer`): a board with nothing on
-    /// SWD neither writes the ring nor inflates word 34. No TX owner: a write is one copy into RAM
-    /// with no wait, so this adds nothing to the 16 ms demand-stale bound. It
-    /// goes FIRST, because it reads the slots without emptying them and the BLE port then takes
-    /// what it takes.
-    ///
-    /// **The BLE port** is unchanged: when its owner is idle it takes the next sample from the
-    /// slots (the own one first) and stages it for the owner's visit, which is the caller's next
-    /// step.
-    pub fn emit_samples<
-        S,
-        const BP: usize,
-        const BN: usize,
-        const Q: usize,
-        const MP: usize,
-        const MN: usize,
-    >(
+    /// Step 8b's samples for one pass: each sample built since the last pass goes into the mailbox
+    /// ring, the own one first, and only while a host is attached
+    /// (`MailboxSerial::outbound_has_consumer`): a board with nothing on SWD neither writes the ring
+    /// nor inflates word 34. Both slots are emptied either way. No TX owner: a write is one copy
+    /// into RAM with no wait, so this adds nothing to the 16 ms demand-stale bound.
+    pub fn emit_mailbox_samples<const MP: usize, const MN: usize>(
         slots: &mut GuestSlots,
         own_src: u8,
         mailbox: &mut Link<SerialTransport<MailboxSerial, MN>, MP, MN>,
-        ble: Option<(
-            &mut Link<SerialTransport<S, BN>, BP, BN>,
-            &mut MeteredTx<BN, Q>,
-        )>,
         staged: &mut GuestStaged,
         pdu: &mut [u8],
-    ) where
-        S: Read + Write + ReadReady + WriteReady,
-    {
-        let own_fresh = core::mem::take(&mut slots.own_fresh);
-        let peer_fresh = core::mem::take(&mut slots.peer_fresh);
-        if mailbox.transport().serial().outbound_has_consumer() {
-            if let (true, Some(c)) = (own_fresh, slots.own.as_ref()) {
-                if mailbox_sample(mailbox, own_src, c, pdu) {
-                    staged.mailbox = bump(staged.mailbox, false);
-                }
-            }
-            if let (true, Some(p)) = (peer_fresh, slots.peer.as_ref()) {
-                if mailbox_sample(mailbox, p.src, &p.state, pdu) {
-                    staged.mailbox = bump(staged.mailbox, true);
-                }
+    ) {
+        let own = slots.own.take();
+        let peer = slots.peer.take();
+        if !mailbox.transport().serial().outbound_has_consumer() {
+            return;
+        }
+        if let Some(c) = own {
+            if mailbox_sample(mailbox, own_src, &c, pdu) {
+                staged.mailbox = bump(staged.mailbox, false);
             }
         }
-        if let Some((l, tx)) = ble {
-            if tx.idle() {
-                if let Some(s) = next_sample(&mut slots.own, own_src, &mut slots.peer) {
-                    if tx.stage_sample(l, s.src, &s.state, pdu) {
-                        staged.ble = bump(staged.ble, s.forward);
-                    }
-                }
+        if let Some(p) = peer {
+            if mailbox_sample(mailbox, p.src, &p.state, pdu) {
+                staged.mailbox = bump(staged.mailbox, true);
             }
         }
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{bump, emit_samples, GuestSlots, GuestStaged};
-        use crate::ble_wire::MeteredTx;
-        use embedded_io::{ErrorType, Read, ReadReady, Write, WriteReady};
+        use super::{bump, emit_mailbox_samples, GuestSlots, GuestStaged};
         use link::{Link, SerialTransport};
         use linkctl::CyclicState;
         use orchestrator::dispatch::PeerCyclic;
-        use std::collections::VecDeque;
         use swd_mailbox::{layout, Bridge, Mailbox, MailboxSerial, FRAME_CAPACITY, REGION_LEN};
 
-        /// The firmware's two guest links: the BLE port's 16 B frame (20 B stream frames) and the
-        /// mailbox port's 128 B frame (132 B), both with the 72 B packet buffer.
-        const BLE_FRAME_CAP: usize = 16;
-        const BLE_N: usize = BLE_FRAME_CAP + 4;
+        /// The firmware's mailbox link: the 128 B frame (132 B) with the 72 B packet buffer.
         const MB_N: usize = FRAME_CAPACITY + 4;
         const PACKET: usize = 72;
-        const EMIT_CAP: usize = 64;
         const OWN_SRC: u8 = 0x01;
         const PEER_SRC: u8 = 0x02;
 
-        /// A BLE wire that takes every frame at once: what is under test here is which samples
-        /// reach the port, not the port's timing, which `ble_wire`'s tests own.
-        #[derive(Default)]
-        struct Wire {
-            buf: VecDeque<u8>,
-        }
-        impl ErrorType for Wire {
-            type Error = core::convert::Infallible;
-        }
-        impl Write for Wire {
-            fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
-                self.buf.extend(data);
-                Ok(data.len())
-            }
-            fn flush(&mut self) -> Result<(), Self::Error> {
-                Ok(())
-            }
-        }
-        impl Read for Wire {
-            fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
-                let n = out.len().min(self.buf.len());
-                for b in out.iter_mut().take(n) {
-                    *b = self.buf.pop_front().unwrap();
-                }
-                Ok(n)
-            }
-        }
-        impl ReadReady for Wire {
-            fn read_ready(&mut self) -> Result<bool, Self::Error> {
-                Ok(!self.buf.is_empty())
-            }
-        }
-        impl WriteReady for Wire {
-            fn write_ready(&mut self) -> Result<bool, Self::Error> {
-                Ok(true)
-            }
-        }
-
-        type BleLink = Link<SerialTransport<Wire, BLE_N>, PACKET, BLE_N>;
         type MbLink = Link<SerialTransport<MailboxSerial, MB_N>, PACKET, MB_N>;
 
         /// The mailbox region in host RAM, `u32`-backed for the header's alignment, with the
@@ -5958,8 +3524,6 @@ mod guest_tx {
             ram: Box<[u32]>,
             board: MbLink,
             host: MbLink,
-            ble: BleLink,
-            tx: MeteredTx<BLE_N, EMIT_CAP>,
             slots: GuestSlots,
             staged: GuestStaged,
         }
@@ -5984,43 +3548,27 @@ mod guest_tx {
                         MailboxSerial::bridge(mb),
                         FRAME_CAPACITY,
                     )),
-                    ble: Link::new(SerialTransport::new(Wire::default(), BLE_FRAME_CAP)),
-                    tx: MeteredTx::new(),
                     slots: GuestSlots::new(),
                     staged: GuestStaged::default(),
                 }
             }
 
-            /// One step 8b: the samples, then the BLE owner's visits run to completion, as the
-            /// loop's would over the following passes.
+            /// One step 8b.
             fn pass(&mut self) {
                 let mut pdu = [0u8; net::walk::MAX_PDU];
-                emit_samples(
+                emit_mailbox_samples(
                     &mut self.slots,
                     OWN_SRC,
                     &mut self.board,
-                    Some((&mut self.ble, &mut self.tx)),
                     &mut self.staged,
                     &mut pdu,
                 );
-                while !self.tx.idle() {
-                    self.tx.pump(&mut self.ble);
-                }
             }
 
             fn mailbox_pdus(&mut self) -> Vec<Vec<u8>> {
                 let mut out = [0u8; PACKET];
                 let mut v = Vec::new();
                 while let Some(p) = self.host.poll_recv(&mut out) {
-                    v.push(p.to_vec());
-                }
-                v
-            }
-
-            fn ble_pdus(&mut self) -> Vec<Vec<u8>> {
-                let mut out = [0u8; PACKET];
-                let mut v = Vec::new();
-                while let Some(p) = self.ble.poll_recv(&mut out) {
                     v.push(p.to_vec());
                 }
                 v
@@ -6055,23 +3603,15 @@ mod guest_tx {
             net::Pdu::decode(pdu).unwrap().src
         }
 
-        /// Ports: with a host attached, each due own sample and each forward reaches BOTH the BLE
-        /// staging owner and the mailbox link, and the bytes are identical on the two.
+        /// Ports: with a host attached, a due own sample and a forward both reach the mailbox link
+        /// in the pass after they were built, own first, each under its own source address.
         #[test]
-        fn each_sample_reaches_both_guest_ports_with_identical_bytes() {
+        fn both_samples_reach_the_mailbox_port_own_first() {
             let mut r = Rig::new(true);
             r.slots.fill(Some(state(7)), Some(forward(9)));
-            // The own sample goes out on both ports in this pass; the BLE port takes the forward
-            // on the next idle pass, the mailbox port already has it.
-            r.pass();
             r.pass();
             let mb = r.mailbox_pdus();
-            let ble = r.ble_pdus();
             assert_eq!(mb.len(), 2, "the mailbox port carried own + forward");
-            assert_eq!(
-                mb, ble,
-                "the two ports carry the same PDUs, in the same order"
-            );
             assert_eq!(src(&mb[0]), OWN_SRC);
             assert_eq!(src(&mb[1]), PEER_SRC);
             assert_eq!(mb[0][0], linkctl::OP_CYCLIC_STATE);
@@ -6081,25 +3621,28 @@ mod guest_tx {
                 "dst 0x00 on the mailbox port"
             );
             assert_eq!(mb[0].len(), 3 + CyclicState::ENCODED_LEN);
+            assert_eq!(mb[0][3], 7);
+            assert_eq!(mb[1][3], 9);
         }
 
-        /// A sample still waiting in its slot for a busy BLE port is NOT put in the ring again on
-        /// the passes it waits: the mailbox port takes each sample once, in the pass it was built.
+        /// A sample goes into the ring once: the passes after the one that emitted it put nothing
+        /// in, and a catch-up burst that built two before the loop ran sends the later one.
         #[test]
-        fn a_sample_waiting_for_the_ble_port_goes_into_the_ring_once() {
+        fn each_sample_goes_into_the_ring_once_latest_wins() {
             let mut r = Rig::new(true);
             r.slots.fill(Some(state(1)), Some(forward(2)));
+            r.slots.fill(Some(state(3)), None);
             for _ in 0..5 {
                 r.pass();
             }
-            assert_eq!(r.mailbox_pdus().len(), 2);
-            assert_eq!(r.ble_pdus().len(), 2);
+            let tags: Vec<u8> = r.mailbox_pdus().iter().map(|p| p[3]).collect();
+            assert_eq!(tags, vec![3, 2]);
             assert_eq!(r.staged.mailbox, 1 | 1 << 16);
-            assert_eq!(r.staged.ble, 1 | 1 << 16);
         }
 
-        /// Ports: with no host attached the mailbox link is not written at all, and its refused
-        /// count stays zero, so word 34 is not inflated by telemetry on a board nothing reached.
+        /// Ports: with no host attached the mailbox link is not written at all, its refused count
+        /// stays zero (so word 34 is not inflated by telemetry on a board nothing reached), and
+        /// the samples are not held for a host that attaches later.
         #[test]
         fn with_no_consumer_the_mailbox_is_not_written_and_nothing_is_refused() {
             let mut r = Rig::new(false);
@@ -6110,7 +3653,7 @@ mod guest_tx {
             assert_eq!(r.ring_used(), 0, "the outbound ring stayed empty");
             assert_eq!(r.refused(), 0);
             assert_eq!(r.staged.mailbox, 0);
-            assert_eq!(r.ble_pdus().len(), 10, "the BLE port is unaffected");
+            assert!(r.slots.own.is_none() && r.slots.peer.is_none());
         }
 
         /// Ports and Counters: a full ring drops the sample, counts exactly one refused write, and
@@ -6134,7 +3677,6 @@ mod guest_tx {
                 "a refused sample is not counted as staged"
             );
             assert_eq!(r.ring_used(), used, "nothing of it entered the ring");
-            assert_eq!(r.staged.ble, 8, "the BLE port took it");
             let tags: Vec<u8> = r.mailbox_pdus().iter().map(|p| p[3]).collect();
             assert_eq!(
                 tags,
@@ -6143,80 +3685,17 @@ mod guest_tx {
             );
         }
 
-        /// Counters: each staged sample advances its port's word by one, own in the low half and
-        /// forwards in the high half; a sample the BLE port refused (busy) is not counted.
+        /// Counters: each staged sample advances the word by one, own in the low half and forwards
+        /// in the high half.
         #[test]
-        fn the_staged_words_count_own_and_forwards_in_their_own_halves() {
+        fn the_staged_word_counts_own_and_forwards_in_their_own_halves() {
             let mut r = Rig::new(true);
             r.slots.fill(Some(state(1)), None);
             r.pass();
-            assert_eq!(r.staged.ble, 1);
             assert_eq!(r.staged.mailbox, 1);
             r.slots.fill(None, Some(forward(2)));
             r.pass();
-            assert_eq!(r.staged.ble, 1 | 1 << 16);
             assert_eq!(r.staged.mailbox, 1 | 1 << 16);
-
-            // A BLE port still draining refuses the stage: no count there, and the sample waits.
-            r.slots.fill(Some(state(3)), None);
-            let mut pdu = [0u8; net::walk::MAX_PDU];
-            assert!(r.tx.stage(&mut r.ble, &[0x21, 0x01, 0xA0, 0xDE]));
-            emit_samples(
-                &mut r.slots,
-                OWN_SRC,
-                &mut r.board,
-                Some((&mut r.ble, &mut r.tx)),
-                &mut r.staged,
-                &mut pdu,
-            );
-            assert_eq!(r.staged.ble, 1 | 1 << 16, "the busy port took nothing");
-            assert_eq!(
-                r.staged.mailbox,
-                2 | 1 << 16,
-                "the mailbox port took it at once"
-            );
-        }
-
-        /// Counting what is staged (`specs/link-control.md`, 2026-10-25): an emission queued at
-        /// any phase of the own sample's going out, the forward due on any tick, costs no forward.
-        /// The BLE path takes from a slot only after `MeteredTx::idle`, and `idle` means no frame
-        /// is waiting and nothing is queued, so the `promote` that opens `stage` has nothing to
-        /// move and `stage` cannot refuse.
-        #[test]
-        fn an_emission_queued_at_any_phase_costs_no_forward() {
-            let emits: [&[u8]; 3] = [&[0x21, 0x01, 0xA0, 0xDE], &[0x22; 16], &[0x23; 30]];
-            for e in emits {
-                for phase in 0..125u32 {
-                    for peer_phase in [0u32, 25, 50, 75] {
-                        let mut r = Rig::new(false);
-                        let mut pdu = [0u8; net::walk::MAX_PDU];
-                        for t in 1..=450u32 {
-                            if t % 125 == phase {
-                                r.tx.send(&mut r.ble, e);
-                            }
-                            r.tx.pump(&mut r.ble);
-                            let own = (t <= 400 && t % 50 == 0).then(|| state(1));
-                            let peer = (t <= 400 && t % 100 == peer_phase).then(|| forward(2));
-                            r.slots.fill(own, peer);
-                            emit_samples(
-                                &mut r.slots,
-                                OWN_SRC,
-                                &mut r.board,
-                                Some((&mut r.ble, &mut r.tx)),
-                                &mut r.staged,
-                                &mut pdu,
-                            );
-                            r.tx.pump(&mut r.ble);
-                        }
-                        assert_eq!(
-                            r.staged.ble,
-                            8 | 4 << 16,
-                            "emission {} B at phase {phase}, forward at {peer_phase}",
-                            e.len()
-                        );
-                    }
-                }
-            }
         }
 
         /// The halves wrap independently: a full own half rolls to zero without touching the
@@ -6308,9 +3787,8 @@ mod stack_paint {
     ///
     /// A full scan of the intact paint costs one read per free word, and on this image that is
     /// ~1,100 words. Paid every 250 Hz publish it would add ~56 us to a control callback that
-    /// already measures 1,011 us on the F103 against a 1,041.7 us BLE character time, i.e. the
-    /// instrument would start costing the BLE port the very inbound bytes another instrument exists
-    /// to count. So the sweep is chunked: the per-pass cost is bounded by `chunk` regardless of how
+    /// measured 1,011 us on the F103, which is the specific way a diagnostic stops being free. So
+    /// the sweep is chunked: the per-pass cost is bounded by `chunk` regardless of how
     /// much stack is free, and a whole sweep completes over `ceil(mark / chunk)` passes.
     ///
     /// **Scanning rarely costs no accuracy**, which is what makes chunking free rather than a
@@ -6552,8 +4030,7 @@ mod stack_paint {
 
         /// The per-pass cost is bounded by the chunk, whatever the region: the sweep never reads
         /// more than `chunk` words in one pass. That bound is the reason this can ship inside a
-        /// 250 Hz callback that is already tight against the BLE port's character time, so it is
-        /// asserted rather than argued.
+        /// 250 Hz callback, so it is asserted rather than argued.
         #[test]
         fn one_pass_reads_at_most_a_chunk() {
             let mut region = vec![0u32; 1024];

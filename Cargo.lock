@@ -46,28 +46,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46afbd2983a5d5a7bd740ccb198caf5b82f45c40c09c0eed36052d91cb92e719"
 
 [[package]]
-name = "ble"
-version = "0.1.0"
-dependencies = [
- "embedded-hal 1.0.0",
- "embedded-io",
-]
-
-[[package]]
-name = "ble-loopback-test"
-version = "0.1.0"
-dependencies = [
- "ble",
- "cortex-m",
- "cortex-m-rt",
- "embedded-hal 1.0.0",
- "embedded-io",
- "panic-halt",
- "runtime-hal",
- "vectors",
-]
-
-[[package]]
 name = "board"
 version = "0.1.0"
 dependencies = [
@@ -235,7 +213,6 @@ version = "0.1.0"
 dependencies = [
  "attitude",
  "base",
- "ble",
  "board",
  "commutation",
  "control",

@@ -33,8 +33,8 @@ resolved at runtime, not baked into the build.
 - **The board layout cannot be detected:** which pins drive the phases, where the halls, IMU, buttons, and
   LEDs sit, which IMU model is fitted, and whether it is a single mainboard driving both wheels or a split
   board with one controller per wheel. Every hoverboard firmware needs this; here it is **configuration stored on the board**, written
-  and changed in the field over the board's link, which runs over **Bluetooth, UART, or SWD**, from a
-  configurator.
+  and changed in the field over the board's link, which runs over **UART or SWD** (a phone reaches it
+  over the Bluetooth of the hoverboard bridge on the board's SWD header), from a configurator.
 
 The two axes are orthogonal: the same chip turns up in different layouts, and a split board can be
 either MCU. The combinations multiply, and one configurable image covers them all instead of a build per
@@ -49,7 +49,8 @@ and this project's link stack is designed for exactly that tree. What it cannot 
 this image.
 
 Six-step commutation drives a wheel on both an F103 and an F130 from a single image, under an arming gate
-and a current limit, and a phone drives both wheels of a split pair over the board's own Bluetooth. The
+and a current limit, and a phone drives both wheels of a split pair through the hoverboard bridge on the
+master's SWD header. The
 runtime-config path is wired end to end: settings written from the phone take effect at the next arm. The
 current focus is the balance loop and the machine it is going into (see [Status](#status)).
 
@@ -66,9 +67,9 @@ Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned &nbs
 | HAL ([runtime-hal]) | ✅ | chip detection (GD32F103 / F130), GPIO / USART / timer / ADC / I2C / SPI, on-chip flash erase/program; commutation spins a wheel on real boards |
 | Config storage (`crates/store`) | ✅ | log-structured key/value config store in flash; host-tested and running on a board |
 | Universal firmware binary (`crates/firmware`) | ✅ | one image: detect the GD32 at boot, read and validate the board layout, mount the store, run the 250 Hz control pipeline and the 16 kHz motor ISR; valid fleet-wide |
-| Onboard Bluetooth (`crates/ble` + harness) | ✅ | AT bring-up to a transparent BLE byte-pipe, a loopback test firmware, and an Android throughput harness; proven on real phones |
+| Onboard Bluetooth (the CC2541 module) | ❌ | the AT bring-up and the board's BLE port were proven on real phones and then removed (2026-10-27): the phone's way in is the hoverboard bridge's Bluetooth, and the module is no longer driven |
 | DMA UART ([runtime-hal]) | ✅ | interrupt- and DMA-driven buffered USART receive behind embedded-io adapters; proven on both chip families |
-| Config over Bluetooth | ✅ | a phone (the in-repo Android app) writes a setting into a board's on-board storage over the board's built-in Bluetooth and reads it back: the runtime-config path end to end (a browser configurator is planned) |
+| Config over Bluetooth | ✅ | a phone (the in-repo Android app) writes a setting into a board's on-board storage over the hoverboard bridge's Bluetooth and the board's SWD mailbox, and reads it back: the runtime-config path end to end (a browser configurator is planned) |
 | IMU + attitude | ✅ | a configurable I2C IMU driver (multiple models, per-board axis map and gyro bias) and the fused pitch/roll filter; both bench boards read their IMU and publish attitude every control tick |
 | Link stack (`crates/link` + `crates/net`) | ✅ | frame format, addressing, discovery, multi-hop forwarding, and the config register protocol wired to the store; framing proven over the inter-board UART and Bluetooth, discovery + config proven over Bluetooth (forwarding is host-tested) |
 | Config over SWD (`crates/swd-mailbox` + `crates/swd-bridge`) | ✅ | a RAM-mailbox link transport: a host sets and reads board config through a debug probe, no UART or radio needed |
@@ -104,8 +105,8 @@ it. With the 2 KiB config store above that, the app slot is 47,104 B:
 
 The image is 10,800 B too large for that slot, and nothing in reach closes a gap that size. Two
 dedicated shrink rounds have found about 3.6 KiB between them; the measured candidates left are worth
-a few hundred bytes each; and the largest single lever is removing Bluetooth entirely, worth about
-2.1 KiB, which is the control link. Even cutting the reservation to the 6 KiB once thought
+a few hundred bytes each; and the largest single lever, removing the onboard Bluetooth module's
+support, was spent on 2026-10-27 (5,416 B of flashed span). Even cutting the reservation to the 6 KiB once thought
 achievable leaves the image over the slot, with nothing left to grow into.
 
 So firmware is written over SWD, which is what [Flashing](#flashing) describes, and the configurator
@@ -168,9 +169,8 @@ or an ST-Link V2 clone. See [docs/flashing.md](docs/flashing.md).
 See [docs/](docs/) for hardware-facing references:
 
 - [Onboard BLE module](docs/onboard-ble-module.md): the observable interface of the built-in
-  CC2541-class Bluetooth module (AT bring-up, quirks, GATT layout, central integration notes).
-- [BLE throughput harness](crates/ble/test-harness/README.md): how to build and run the Android +
-  board-side loopback harness that measures the raw BLE byte-pipe throughput.
+  CC2541-class Bluetooth module (AT bring-up, quirks, GATT layout, central integration notes). The
+  firmware no longer drives it; the page stays as the hardware record.
 
 ## Licence
 
