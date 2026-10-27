@@ -15,7 +15,7 @@ name: CI
 #   - build the default embedded target (thumbv7m-none-eabi),
 #   - run the host tests on the runner's Linux host target,
 #   - run the tools' own test suites (python + bash, no cargo): the climit session driver, the
-#     robo-preset extraction, the imu-tilt word map, the armed-bridge verdict, the flash guard
+#     FOC trace sampler, the robo-preset extraction, the imu-tilt word map, the armed-bridge verdict, the flash guard
 #     harness, the board-target runner, and the CTRL_OBS word count against the firmware struct,
 #   - run the workspace-excluded swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite),
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
@@ -550,6 +550,13 @@ jobs:
       # word added in the firmware without the tool following shows up here.
       - name: climit-session
         run: python3 tools/tests/test_climit_session.py
+
+      # The FOC bench sampler over the bridge (specs/foc-torque.md section 7): its decode of
+      # CTRL_OBS words 47 to 49 out of `hoverboard-cli read`, the word map against the firmware's
+      # offset pins, and the host-side Clarke and Park of --frame against the commutation crate's
+      # check values.
+      - name: foc-trace
+        run: python3 tools/tests/test_foc_trace.py
 
       # The RoboDurden preset extraction: the generated presets file against the upstream source it
       # was derived from, including that a re-run is byte-identical.
