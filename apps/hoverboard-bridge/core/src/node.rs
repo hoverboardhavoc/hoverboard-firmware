@@ -28,10 +28,12 @@
 use heapless::Vec;
 use linkctl::OP_CYCLIC_STATE;
 use net::pdu::{Pdu, NO_ADDRESS};
+pub use net::walk::BRIDGE_NAME_MAX;
 use net::walk::{
-    Emits, Responder, CLASS_BRIDGE, MAX_PORTS, MCU_ESP32C3, PORT_BLE, PORT_SWD, PORT_UART,
+    bridge_name_usable, Emits, Responder, CLASS_BRIDGE, MAX_PORTS, MCU_ESP32C3, PORT_BLE, PORT_SWD,
+    PORT_UART,
 };
-use store::{Flash, Store};
+use store::{Flash, Store, Type, DEVICE_NAME};
 
 use crate::mailbox::{MailboxPort, MAX_PACKET};
 use crate::router::{Port, Router, PORTS};
@@ -53,6 +55,52 @@ pub const PROBE_WINDOW_US: u64 = 500_000;
 
 /// The most replies one command produces (a final chunk: its acknowledgement and the status).
 const REPLIES: usize = 4;
+
+/// The name until one is written: `hb-bridge-` and the last four hex digits of the MAC.
+pub fn default_name(mac: [u8; 6]) -> [u8; 14] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = *b"hb-bridge-0000";
+    for (i, b) in [mac[4], mac[5]].iter().enumerate() {
+        buf[10 + 2 * i] = HEX[(b >> 4) as usize];
+        buf[11 + 2 * i] = HEX[(b & 0xF) as usize];
+    }
+    buf
+}
+
+/// The name BLE advertises and mDNS answers for, from `device.name` in the store, copied into
+/// `buf`; returns its length. A bridge whose store holds none writes its default name there, so a
+/// `CONFIG_READ` of the key answers what BLE advertises. A `CONFIG_WRITE` of a name that fails
+/// [`bridge_name_usable`] is refused, but a store written before that refusal existed may still
+/// hold one: it stays in the store and the default is used.
+pub fn advertised_name<F: Flash>(
+    store: &mut Store<'_, F>,
+    mac: [u8; 6],
+    buf: &mut [u8; BRIDGE_NAME_MAX],
+) -> usize {
+    // `None`: nothing written; `Some(0)`: a written name that cannot be advertised.
+    let mut written: Option<usize> = None;
+    store.for_each_in(&[DEVICE_NAME.key()], |_, tag, v| {
+        written = (tag == Type::Str.tag()).then(|| {
+            if bridge_name_usable(v) {
+                buf[..v.len()].copy_from_slice(v);
+                v.len()
+            } else {
+                0
+            }
+        });
+    });
+    match written {
+        Some(n) if n > 0 => n,
+        found => {
+            let d = default_name(mac);
+            buf[..d.len()].copy_from_slice(&d);
+            if found.is_none() {
+                let _ = store.set_str(DEVICE_NAME, core::str::from_utf8(&d).unwrap_or_default());
+            }
+            d.len()
+        }
+    }
+}
 
 /// Where a frame arrived, and where a reply to it goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

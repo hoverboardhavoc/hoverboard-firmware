@@ -42,7 +42,7 @@ use trouble_host::prelude::ExternalController;
 use esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN;
 use hoverboard_bridge_core::gdb::Gdb;
 use hoverboard_bridge_core::mailbox::MailboxPort;
-use hoverboard_bridge_core::node::Node;
+use hoverboard_bridge_core::node::{advertised_name, Node, BRIDGE_NAME_MAX};
 use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
 #[cfg(feature = "boot-log")]
 use hoverboard_bridge_core::svc::Platform;
@@ -63,10 +63,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static IMAGE: ConstStaticCell<ImageBuffer> = ConstStaticCell::new(ImageBuffer::new());
 /// The name BLE advertises and mDNS answers for (`<name>.local`): the store's `device.name`, read
 /// at boot.
-static NAME: StaticCell<[u8; NAME_MAX]> = StaticCell::new();
-/// The longest name used: what fits the advertising packet beside its flags (31 B less 3 for the
-/// flags and 2 for the name's own header).
-const NAME_MAX: usize = 26;
+static NAME: StaticCell<[u8; BRIDGE_NAME_MAX]> = StaticCell::new();
 /// The store's region, mirrored in RAM (`keys`).
 static KEYS_MIRROR: ConstStaticCell<[u8; keys::REGION]> = ConstStaticCell::new([0; keys::REGION]);
 /// The store's flash.
@@ -104,57 +101,10 @@ fn build(swd_khz: u32) -> Build {
     }
 }
 
-/// The name until one is written: `hb-bridge-` and the last four hex digits of the MAC.
-fn default_name(mac: [u8; 6]) -> [u8; 14] {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut buf = *b"hb-bridge-0000";
-    for (i, b) in [mac[4], mac[5]].iter().enumerate() {
-        buf[10 + 2 * i] = HEX[(b >> 4) as usize];
-        buf[11 + 2 * i] = HEX[(b & 0xF) as usize];
-    }
-    buf
-}
-
-/// A written name the bridge can advertise and answer mDNS for: [`NAME_MAX`] bytes at most, of
-/// letters, digits and `-`.
-fn usable(name: &[u8]) -> bool {
-    !name.is_empty()
-        && name.len() <= NAME_MAX
-        && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-')
-}
-
-/// The name, from `device.name` in the store. A bridge whose store holds none writes its default
-/// name there, so a `CONFIG_READ` of the key answers what BLE advertises. A written name that
-/// cannot be advertised (too long, or characters a host name cannot carry) stays in the store and
-/// the default is used.
+/// The name, from `device.name` in the store ([`advertised_name`]).
 fn name(store: &mut store::Store<'_, KeysFlash>, mac: [u8; 6]) -> &'static str {
-    let buf = NAME.init([0; NAME_MAX]);
-    let mut written: Option<usize> = None;
-    store.for_each_in(&[store::DEVICE_NAME.key()], |_, tag, v| {
-        written = (tag == store::Type::Str.tag()).then(|| {
-            let n = v.len().min(NAME_MAX);
-            buf[..n].copy_from_slice(&v[..n]);
-            if usable(v) {
-                n
-            } else {
-                0
-            }
-        });
-    });
-    let n = match written {
-        Some(n) if n > 0 => n,
-        found => {
-            let d = default_name(mac);
-            buf[..d.len()].copy_from_slice(&d);
-            if found.is_none() {
-                let _ = store.set_str(
-                    store::DEVICE_NAME,
-                    core::str::from_utf8(&d).unwrap_or_default(),
-                );
-            }
-            d.len()
-        }
-    };
+    let buf = NAME.init([0; BRIDGE_NAME_MAX]);
+    let n = advertised_name(store, mac, buf);
     core::str::from_utf8(&buf[..n]).unwrap_or("hb-bridge")
 }
 

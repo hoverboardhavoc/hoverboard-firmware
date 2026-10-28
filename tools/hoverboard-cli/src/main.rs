@@ -762,12 +762,13 @@ fn run(args: &[String]) -> Result<(), String> {
             store::Type::Str,
             text.as_bytes(),
         )?;
-        println!(
-            "device.name of {}: {}",
-            label(&f),
-            nodes::status_name(r.status)
-        );
-        return config_outcome(r.status);
+        let shown = nodes::name_status(f.class, r.status);
+        println!("device.name of {}: {shown}", label(&f));
+        return if r.status == net::walk::CFG_OK {
+            Ok(())
+        } else {
+            Err(format!("refused: {shown}"))
+        };
     }
 
     if cmd == "config" {

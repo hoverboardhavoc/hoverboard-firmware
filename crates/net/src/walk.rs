@@ -28,7 +28,9 @@
 //!   the relay half of `ASSIGN` stays ungated (no flash on the relay).
 
 use heapless::Vec;
-use store::{DynError, Flash, Key, Store, StoreError, Type, Value, NODE_ADDRESS, NODE_CLASS};
+use store::{
+    DynError, Flash, Key, Store, StoreError, Type, Value, DEVICE_NAME, NODE_ADDRESS, NODE_CLASS,
+};
 
 use crate::forward::Forwarder;
 use crate::pdu::{self, Opcode, Pdu, GUEST_FIRST, GUEST_LAST};
@@ -114,9 +116,23 @@ pub const MCU_ESP32C3: u8 = 3;
 /// `Responder` that answers with it.
 pub const CLASS_BRIDGE: u8 = 0x02;
 
+/// The longest `device.name` a bridge takes: what fits its BLE advertising packet beside the flags
+/// (31 B less 3 for the flags and 2 for the name's own header).
+pub const BRIDGE_NAME_MAX: usize = 26;
+
+/// A `device.name` a bridge can advertise over BLE and answer mDNS for: 1 to [`BRIDGE_NAME_MAX`]
+/// bytes of ASCII letters, digits and `-`. A bridge's `CONFIG_WRITE` of any other name is refused
+/// with [`CFG_BAD`], and a bridge whose store already holds one advertises its default name.
+pub fn bridge_name_usable(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.len() <= BRIDGE_NAME_MAX
+        && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+}
+
 /// `CONFIG_RESP` status: success.
 pub const CFG_OK: u8 = 0;
-/// `CONFIG_RESP` status: a malformed request (unknown type tag, bad value bytes, truncated PDU).
+/// `CONFIG_RESP` status: a malformed request (unknown type tag, bad value bytes, truncated PDU), or
+/// a value the node cannot use (a bridge's `device.name` that fails [`bridge_name_usable`]).
 pub const CFG_BAD: u8 = 1;
 /// `CONFIG_RESP` status: no field declares this `field_id`.
 pub const CFG_UNKNOWN_KEY: u8 = 2;
@@ -618,10 +634,10 @@ impl Responder {
     }
 
     /// Decode + validate a value of `type_tag` and persist it to `key`, returning the `CONFIG_RESP`
-    /// status (`OK` / `ARMED` / `UNKNOWN_KEY` / `TYPE_MISMATCH` / `BAD`). The single choke point
-    /// between `CONFIG_WRITE`/`_MULTI` and `store.set_value`, which is what makes the R4 gate
-    /// airtight: the armed check runs first, before any decode, so an armed board persists
-    /// nothing regardless of the request's shape.
+    /// status (`OK` / `ARMED` / `UNKNOWN_KEY` / `TYPE_MISMATCH` / `BAD`; `BAD` also for a bridge's
+    /// unusable `device.name`). The single choke point between `CONFIG_WRITE`/`_MULTI` and
+    /// `store.set_value`, which is what makes the R4 gate airtight: the armed check runs first,
+    /// before any decode, so an armed board persists nothing regardless of the request's shape.
     fn apply_write<F: Flash>(
         &mut self,
         store: &mut Store<F>,
@@ -638,6 +654,13 @@ impl Responder {
         let Some(value) = Value::decode(kind, bytes) else {
             return CFG_BAD;
         };
+        if self.class == CLASS_BRIDGE && key == DEVICE_NAME.key() {
+            if let Value::Str(name) = value {
+                if !bridge_name_usable(name) {
+                    return CFG_BAD;
+                }
+            }
+        }
         match store.set_value(key, value) {
             Ok(()) => {
                 self.config_persisted = true;

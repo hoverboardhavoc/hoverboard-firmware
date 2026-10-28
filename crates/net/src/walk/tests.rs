@@ -645,6 +645,60 @@ fn a_fresh_bridge_in_front_of_an_addressed_pair_ends_at_0x03_and_the_boards_keep
     assert_eq!(m.live_addr(bridge), 0x03);
 }
 
+#[test]
+fn a_bridge_refuses_a_name_it_cannot_advertise_and_keeps_the_old_one() {
+    // A bridge advertises `device.name` over BLE and answers mDNS for it, so a name that fails
+    // `bridge_name_usable` is refused with CFG_BAD and the store keeps its value. A board takes it.
+    let mut m = Mesh::new();
+    let bridge = m.add_node(3, [PORT_BLE, PORT_SWD, PORT_UART, 0], CLASS_BRIDGE);
+    let board = m.add_board_kinds(3, [PORT_SWD, PORT_UART, PORT_BLE, 0]);
+    m.attach_controller(bridge, 2);
+    m.wire(bridge, 1, board, 0);
+    m.run_walk();
+    let b = m.live_addr(bridge);
+    let read_name = |m: &mut Mesh, addr: u8| {
+        let r = m.config_read(addr, DEVICE_NAME.key());
+        assert_eq!(resp_status(&r), CFG_OK);
+        match resp_value(&r) {
+            Some(Value::Str(s)) => s.to_vec(),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+
+    let w = m.config_write(b, DEVICE_NAME.key(), Value::Str(b"rover-esp"));
+    assert_eq!(resp_status(&w), CFG_OK);
+    let longest = [b'a'; BRIDGE_NAME_MAX];
+    let w = m.config_write(b, DEVICE_NAME.key(), Value::Str(&longest));
+    assert_eq!(resp_status(&w), CFG_OK);
+    let w = m.config_write(b, DEVICE_NAME.key(), Value::Str(b"rover-esp"));
+    assert_eq!(resp_status(&w), CFG_OK);
+
+    let too_long = [b'a'; BRIDGE_NAME_MAX + 1];
+    let unusable: [&[u8]; 4] = [b"Offroad master", &too_long, b"", "r\u{f8}ver".as_bytes()];
+    for name in unusable {
+        let w = m.config_write(b, DEVICE_NAME.key(), Value::Str(name));
+        assert_eq!(resp_status(&w), CFG_BAD, "{name:?}");
+        assert_eq!(read_name(&mut m, b), b"rover-esp", "{name:?}");
+    }
+
+    // The same refusal through CONFIG_WRITE_MULTI.
+    let name = b"Offroad master";
+    let mut payload = std::vec![1, DEVICE_NAME.key().field_id, DEVICE_NAME.key().index];
+    payload.extend_from_slice(&[Type::Str.tag(), name.len() as u8]);
+    payload.extend_from_slice(name);
+    let ack = m
+        .controller_send(Opcode::ConfigWriteMulti.to_u8(), b, &payload)
+        .expect("a CONFIG_RESP ack");
+    assert_eq!(resp_status(&ack), CFG_BAD);
+    assert_eq!(read_name(&mut m, b), b"rover-esp");
+
+    // A board does not advertise its name and takes any string.
+    let addr = m.live_addr(board);
+    let w = m.config_write(addr, DEVICE_NAME.key(), Value::Str(b"Offroad master"));
+    assert_eq!(resp_status(&w), CFG_OK);
+    assert_eq!(read_name(&mut m, addr), b"Offroad master");
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Responder-level: idempotent re-ASSIGN (a dropped ASSIGN_ACK recovers).
 // ---------------------------------------------------------------------------------------------------
