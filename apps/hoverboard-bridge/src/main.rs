@@ -228,7 +228,7 @@ async fn main(spawner: Spawner) {
 
     // The radio: BLE first, then Wi-Fi, which share it through esp-radio's coexistence.
     boot!("radio: BLE controller");
-    let connector = match BleConnector::new(p.BT, Default::default()) {
+    let connector = match BleConnector::new(p.BT, ble_config()) {
         Ok(c) => Some(c),
         Err(_e) => {
             boot!("radio: BLE controller failed: {:?}", _e);
@@ -269,6 +269,19 @@ async fn main(spawner: Spawner) {
         }
         None => core::future::pending().await,
     }
+}
+
+/// The BLE controller's configuration: the default but for the transmit power.
+///
+/// The controller takes its default power from this config, and it is the config's value that
+/// survives the HCI Reset `trouble-host` sends when it starts, so a power set any other way before
+/// the host runs is undone. esp-radio hands the controller the `TxPower` variant's position, not
+/// its level (`txpwr_dft: config.default_tx_power as u8`, `os_adapter_esp32c3_s3.rs`), and on the C3
+/// a position is read as an `esp_power_level_t` index three steps lower: the default `P9` arrived
+/// as `ESP_PWR_LVL_N0`, 0 dBm, and `P20`, the last variant, arrives as `ESP_PWR_LVL_P12`, +12 dBm.
+/// Measured 2026-10-28 with a scanner a few centimetres from a bridge: -59 dBm at the default.
+fn ble_config() -> esp_radio::ble::Config {
+    esp_radio::ble::Config::default().with_default_tx_power(esp_radio::ble::TxPower::P20)
 }
 
 /// Move up to a channel's room of `router`'s bytes for `port` into `send`, `N` at a time.
