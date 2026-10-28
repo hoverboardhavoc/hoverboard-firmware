@@ -97,7 +97,7 @@ fn cli(args: &[&str]) -> (bool, String, String) {
 fn nodes_name_config_and_esp_commands_by_node() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || serve(listener, 9));
+    let server = std::thread::spawn(move || serve(listener, 10));
 
     // The walk: the fresh bridge ends at 0x03 and the boards keep theirs.
     let (ok, out, err) = cli(&[&tcp, "nodes"]);
@@ -107,6 +107,16 @@ fn nodes_name_config_and_esp_commands_by_node() {
     assert!(rows[1].starts_with("0x01     motor controller"), "{out}");
     assert!(rows[2].starts_with("0x02     motor controller"), "{out}");
     assert!(rows[3].starts_with("0x03     bridge"), "{out}");
+
+    // A name the bridge cannot advertise is refused with the rule, and the old one stays.
+    let (ok, out, err) = cli(&[&tcp, "name", "0x03", "Offroad master"]);
+    assert!(!ok);
+    let rule = "name must be 1 to 26 letters, digits or '-'";
+    assert_eq!(
+        out.trim(),
+        format!("device.name of 0x03 (Hoverboard): {rule}")
+    );
+    assert!(err.contains(&format!("refused: {rule}")), "{err}");
 
     // A name, then the node by that name.
     let (ok, out, err) = cli(&[&tcp, "name", "0x03", "rover-esp"]);

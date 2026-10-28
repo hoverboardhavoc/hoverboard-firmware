@@ -2774,3 +2774,42 @@ fn a_commanded_connect_tries_for_500_ms_and_the_background_retry_makes_one_short
         Ok(Msg::Result { .. })
     )));
 }
+
+#[test]
+fn the_boot_name_falls_back_for_a_stored_name_it_cannot_advertise() {
+    use crate::node::{advertised_name, BRIDGE_NAME_MAX};
+    let mac = [0, 0, 0, 0, 0xAB, 0x12];
+    let boot = |flash: &mut RamFlash| {
+        let mut s = store::Store::mount(flash).unwrap();
+        let mut buf = [0; BRIDGE_NAME_MAX];
+        let n = advertised_name(&mut s, mac, &mut buf);
+        (buf[..n].to_vec(), s.get_text(store::DEVICE_NAME).to_vec())
+    };
+
+    // Nothing written: the default, and the store now holds it.
+    let mut flash = RamFlash::erased(4096);
+    assert_eq!(
+        boot(&mut flash),
+        (b"hb-bridge-ab12".to_vec(), b"hb-bridge-ab12".to_vec())
+    );
+
+    // A usable name is advertised.
+    store::Store::mount(&mut flash)
+        .unwrap()
+        .set_str(store::DEVICE_NAME, "rover-esp")
+        .unwrap();
+    assert_eq!(
+        boot(&mut flash),
+        (b"rover-esp".to_vec(), b"rover-esp".to_vec())
+    );
+
+    // A store written before the refusal existed: the default is advertised, the store keeps it.
+    store::Store::mount(&mut flash)
+        .unwrap()
+        .set_str(store::DEVICE_NAME, "Offroad master")
+        .unwrap();
+    assert_eq!(
+        boot(&mut flash),
+        (b"hb-bridge-ab12".to_vec(), b"Offroad master".to_vec())
+    );
+}
