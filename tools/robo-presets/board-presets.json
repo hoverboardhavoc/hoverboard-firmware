@@ -3,7 +3,7 @@
     {
       "consequence": "a layout whose colour labels contradict the convention is REFUSED with InvalidGateSet rather than silently reordered, because reordering would permute the phases against the halls",
       "decision": "gate colour order",
-      "oracle": "the bench pair's own working configuration: defines_2-2-20.h and defines_2-1-20.h read BLDC_YH PA8 / BLDC_BH PA9 / BLDC_GH PA10, and our map for those boards is gate_hi_a PA8 / gate_hi_b PA9 / gate_hi_c PA10. Confirmed twice more by his fixed TIMER_BLDC_CHANNEL_Y/B/G = TIMER_CH_0/1/2 and by layout 2.2.1 spelling the channel-to-pin pairing out",
+      "oracle": "the bench pair's own working configuration: defines_2-2-20.h and defines_2-1-20.h read BLDC_YH PA8 / BLDC_BH PA9 / BLDC_GH PA10, and our map for those boards is gate.hi_a PA8 / gate.hi_b PA9 / gate.hi_c PA10. Confirmed twice more by his fixed TIMER_BLDC_CHANNEL_Y/B/G = TIMER_CH_0/1/2 and by layout 2.2.1 spelling the channel-to-pin pairing out",
       "settled": "A = BLDC_Y (yellow), B = BLDC_B (blue), C = BLDC_G (green)"
     },
     {
@@ -16,11 +16,11 @@
       "consequence": "the group is all-or-none, so the model goes absent with the pins; PB8/PB9 is not a hardware-I2C pair our capability table answers at all; and the model is a fact about the part soldered on, which no layout file carries",
       "decision": "the IMU bus",
       "oracle": "he states the bus as a pair flag (I2C_PB6PB7, I2C_PB8PB9) and his own comment on 2.1.20 says the IMU needs soldering to the tiny module on PB6/PB7, which is also where USART0 can live, so the flag is a solderable option and not a fitted bus",
-      "settled": "imu.scl_pin, imu.sda_pin and imu.model are left ABSENT"
+      "settled": "imu.scl, imu.sda and imu.model are left ABSENT"
     },
     {
       "consequence": "a preset with no dead time is refused on DeadTimeBelowFloor before any check that could say something about his file, so every gated preset would report nothing. This is HIS single global figure, not per-board data: the bench boards' own silicon-proven value is 25",
-      "decision": "motor.dead_time (not named by the spec)",
+      "decision": "gate.dead_time (not named by the spec)",
       "oracle": "his DEAD_TIME 60 is programmed at TIMER_CKDIV_DIV1 (13.9 ns a tick, 833 ns) in setup.c; our bring-up runs the generator at /2 (27.8 ns a tick)",
       "settled": "DTG = round(his DEAD_TIME * 1/2) = 30 ticks"
     }
@@ -69,25 +69,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -165,63 +165,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB11"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PF1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PC14"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -235,7 +235,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -243,26 +243,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-1",
       "layout": 1,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -278,7 +267,7 @@
       "name": "RoboDurden 2.1.1",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-1.h",
@@ -390,25 +379,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -479,63 +468,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PA0"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB11"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -549,7 +538,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -557,26 +546,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-2",
       "layout": 2,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -592,7 +570,7 @@
       "name": "RoboDurden 2.1.2",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-2.h",
       "target": 1,
@@ -716,25 +694,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -779,63 +757,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB8"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA12"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB3"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA10"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA8"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB1"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB0"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PA7"
         },
         {
@@ -849,7 +827,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -857,7 +835,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         },
@@ -880,24 +858,12 @@
       ],
       "id": "robo-2-1-3",
       "layout": 3,
-      "link_set": 8,
-      "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        }
-      ],
+      "link_set": 0,
+      "link_set_basis": [],
       "name": "RoboDurden 2.1.3",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-3.h",
       "target": 1,
@@ -975,13 +941,13 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -1047,63 +1013,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PA0"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA2"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -1117,21 +1083,21 @@
           "from": "PHASE_A",
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "value": "PA7"
         },
         {
           "from": "PHASE_B",
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "value": "PB0"
         },
         {
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -1139,7 +1105,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
         },
@@ -1162,24 +1128,12 @@
       ],
       "id": "robo-2-1-4",
       "layout": 4,
-      "link_set": 8,
-      "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        }
-      ],
+      "link_set": 0,
+      "link_set_basis": [],
       "name": "RoboDurden 2.1.4",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-4.h",
       "target": 1,
@@ -1205,7 +1159,7 @@
         },
         {
           "from": "MOTOR_AMP_CONV_DC_AMP",
-          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from motor.current_cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
+          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from current.cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
           "value": "0.0201465201465"
         },
         {
@@ -1235,17 +1189,23 @@
         }
       ],
       "validate": {
-        "accepted_on": [
-          "F130C8"
-        ],
+        "accepted_on": [],
+        "field": "SELF_HOLD",
+        "motor": null,
+        "obs_result": 5,
         "parts": [
           {
+            "field": "SELF_HOLD",
+            "motor": null,
+            "obs_result": 5,
             "part": "F130C8",
-            "self_hold": "PA3",
-            "verdict": "accepted"
+            "reason": "ReservedPin(PA3)",
+            "self_hold": null,
+            "verdict": "refused"
           }
         ],
-        "verdict": "accepted"
+        "reason": "ReservedPin(PA3)",
+        "verdict": "refused"
       }
     },
     {
@@ -1271,25 +1231,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -1360,63 +1320,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB0"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PB5"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB4"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB4"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -1430,7 +1390,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -1438,26 +1398,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-5",
       "layout": 5,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -1473,7 +1422,7 @@
       "name": "RoboDurden 2.1.5",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-5.h",
       "target": 1,
@@ -1560,25 +1509,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -1644,63 +1593,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PC14"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB11"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -1714,7 +1663,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -1722,7 +1671,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         },
@@ -1762,7 +1711,7 @@
       "name": "RoboDurden 2.1.6",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-6.h",
       "target": 1,
@@ -1843,25 +1792,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -1927,63 +1876,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB11"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PC14"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA1"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -1997,7 +1946,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -2005,7 +1954,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         },
@@ -2028,19 +1977,8 @@
       ],
       "id": "robo-2-1-7-0",
       "layout": 7,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -2056,7 +1994,7 @@
       "name": "RoboDurden 2.1.7.0",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-7.h",
@@ -2152,25 +2090,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -2229,63 +2167,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB11"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PC14"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA1"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -2299,7 +2237,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -2307,7 +2245,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         },
@@ -2330,19 +2268,8 @@
       ],
       "id": "robo-2-1-7-1",
       "layout": 7,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -2358,7 +2285,7 @@
       "name": "RoboDurden 2.1.7.1",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-7.h",
@@ -2444,25 +2371,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -2528,63 +2455,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PA1"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA0"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB10"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -2598,7 +2525,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -2606,7 +2533,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         },
@@ -2629,19 +2556,8 @@
       ],
       "id": "robo-2-1-8",
       "layout": 8,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -2657,7 +2573,7 @@
       "name": "RoboDurden 2.1.8",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER, LED_GREEN, LED_ORANGE, LED_RED."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-8.h",
@@ -2684,7 +2600,7 @@
         },
         {
           "from": "MOTOR_AMP_CONV_DC_AMP",
-          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from motor.current_cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
+          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from current.cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
           "value": "0.0201465201465"
         },
         {
@@ -2742,25 +2658,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -2856,63 +2772,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB11"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA0"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA10"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA8"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB15"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB13"
         },
         {
@@ -2926,7 +2842,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -2934,7 +2850,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
@@ -2958,7 +2874,7 @@
       "name": "RoboDurden 2.1.9",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "pad.a is UNKNOWN (his file marks this pin TODO_PIN: he does not know it). It is staged ABSENT, never guessed at, so the verdict below is the verdict on this layout with that function absent.",
         "pad.b is UNKNOWN (his file marks this pin TODO_PIN: he does not know it). It is staged ABSENT, never guessed at, so the verdict below is the verdict on this layout with that function absent.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
@@ -3042,13 +2958,13 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -3126,63 +3042,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB11"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PC14"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PF1"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -3196,21 +3112,21 @@
           "from": "PHASE_A",
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "value": "PB0"
         },
         {
           "from": "PHASE_B",
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "value": "PB1"
         },
         {
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -3218,26 +3134,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
         }
       ],
       "id": "robo-2-1-10",
       "layout": 10,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -3253,7 +3158,7 @@
       "name": "RoboDurden 2.1.10",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-10.h",
       "target": 1,
@@ -3334,13 +3239,13 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -3406,63 +3311,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB11"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PC14"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PF1"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -3476,21 +3381,21 @@
           "from": "PHASE_A",
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "value": "PB0"
         },
         {
           "from": "PHASE_B",
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "value": "PB1"
         },
         {
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -3498,7 +3403,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
         },
@@ -3521,19 +3426,8 @@
       ],
       "id": "robo-2-1-11",
       "layout": 11,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -3549,7 +3443,7 @@
       "name": "RoboDurden 2.1.11",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-11.h",
       "target": 1,
@@ -3644,25 +3538,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -3740,63 +3634,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB11"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PC14"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA1"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -3810,7 +3704,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -3818,26 +3712,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-12",
       "layout": 12,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -3853,7 +3736,7 @@
       "name": "RoboDurden 2.1.12",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-12.h",
@@ -3945,25 +3828,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -4041,63 +3924,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PC14"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB11"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -4111,7 +3994,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -4119,26 +4002,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-13",
       "layout": 13,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -4154,7 +4026,7 @@
       "name": "RoboDurden 2.1.13",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-13.h",
@@ -4266,25 +4138,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -4362,63 +4234,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PA0"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB11"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -4432,7 +4304,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -4440,26 +4312,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-14",
       "layout": 14,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -4475,7 +4336,7 @@
       "name": "RoboDurden 2.1.14",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-14.h",
@@ -4580,25 +4441,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -4655,63 +4516,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PF1"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA0"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PC15"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -4725,7 +4586,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -4733,7 +4594,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
@@ -4757,7 +4618,7 @@
       "name": "RoboDurden 2.1.15",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-15.h",
@@ -4824,25 +4685,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -4920,63 +4781,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PC14"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PF1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB11"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -4990,7 +4851,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -4998,26 +4859,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-16",
       "layout": 16,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -5033,7 +4883,7 @@
       "name": "RoboDurden 2.1.16",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-16.h",
@@ -5130,25 +4980,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -5226,63 +5076,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PA0"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PB11"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA1"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -5296,7 +5146,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -5304,26 +5154,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-18",
       "layout": 18,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -5339,7 +5178,7 @@
       "name": "RoboDurden 2.1.18",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-18.h",
       "target": 1,
@@ -5360,7 +5199,7 @@
         },
         {
           "from": "MOTOR_AMP_CONV_DC_AMP",
-          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from motor.current_cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
+          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from current.cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
           "value": "0.0201465201465"
         },
         {
@@ -5413,13 +5252,13 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -5499,63 +5338,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PC13"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PC14"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -5569,21 +5408,21 @@
           "from": "PHASE_A",
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "value": "PB0"
         },
         {
           "from": "PHASE_B",
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "value": "PA0"
         },
         {
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -5591,7 +5430,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
         },
@@ -5614,19 +5453,8 @@
       ],
       "id": "robo-2-1-20",
       "layout": 20,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -5642,7 +5470,7 @@
       "name": "RoboDurden 2.1.20",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "His layout DOES state an IMU bus, as a solderable pair flag. It is still carried as absent: the flag is a claim about an option, and PB6/PB7 is also where USART0 can live."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-20.h",
@@ -5729,25 +5557,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -5818,63 +5646,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PC14"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PB11"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA1"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA9"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA10"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA8"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB14"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB15"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB13"
         },
         {
@@ -5888,7 +5716,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -5896,26 +5724,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-22",
       "layout": 22,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -5931,7 +5748,7 @@
       "name": "RoboDurden 2.1.22",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-22.h",
       "target": 1,
@@ -6039,13 +5856,13 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -6057,13 +5874,13 @@
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -6134,70 +5951,70 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PA1"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PC14"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB11"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PB15"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PA10"
         },
         {
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -6205,26 +6022,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-1-28",
       "layout": 28,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -6240,7 +6046,7 @@
       "name": "RoboDurden 2.1.28",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-28.h",
       "target": 1,
@@ -6312,25 +6118,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -6396,63 +6202,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PA1"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA0"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA2"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -6466,7 +6272,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -6474,7 +6280,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         },
@@ -6497,35 +6303,12 @@
       ],
       "id": "robo-2-2-1",
       "layout": 1,
-      "link_set": 12,
-      "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
-        {
-          "bit": 2,
-          "from": [
-            "USART2_TX",
-            "USART2_RX"
-          ],
-          "pins": [
-            "PB10",
-            "PB11"
-          ]
-        }
-      ],
+      "link_set": 0,
+      "link_set_basis": [],
       "name": "RoboDurden 2.2.1",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-1.h",
       "target": 2,
@@ -6546,7 +6329,7 @@
         },
         {
           "from": "MOTOR_AMP_CONV_DC_AMP",
-          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from motor.current_cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
+          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from current.cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
           "value": "0.0201465201465"
         },
         {
@@ -6691,26 +6474,32 @@
         }
       ],
       "validate": {
-        "accepted_on": [
-          "F103C8"
-        ],
+        "accepted_on": [],
+        "field": "BUTTON",
+        "motor": null,
+        "obs_result": 5,
         "parts": [
           {
+            "field": "BUTTON",
+            "motor": null,
+            "obs_result": 5,
             "part": "F103C8",
+            "reason": "ReservedPin(PA3)",
             "self_hold": "PA4",
-            "verdict": "accepted"
+            "verdict": "refused"
           },
           {
-            "field": "BUZZER",
+            "field": "BUTTON",
             "motor": null,
-            "obs_result": 7,
+            "obs_result": 5,
             "part": "F103RC",
-            "reason": "GateCapableMisused(PB1)",
+            "reason": "ReservedPin(PA3)",
             "self_hold": "PA4",
             "verdict": "refused"
           }
         ],
-        "verdict": "accepted"
+        "reason": "ReservedPin(PA3)",
+        "verdict": "refused"
       }
     },
     {
@@ -6748,25 +6537,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -6811,63 +6600,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PA0"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA2"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PA1"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -6881,7 +6670,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -6889,7 +6678,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         },
@@ -6912,35 +6701,12 @@
       ],
       "id": "robo-2-2-3",
       "layout": 3,
-      "link_set": 12,
-      "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
-        {
-          "bit": 2,
-          "from": [
-            "USART2_TX",
-            "USART2_RX"
-          ],
-          "pins": [
-            "PB10",
-            "PB11"
-          ]
-        }
-      ],
+      "link_set": 0,
+      "link_set_basis": [],
       "name": "RoboDurden 2.2.3",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "His layout DOES state an IMU bus, as a solderable pair flag. It is still carried as absent: the flag is a claim about an option, and PB6/PB7 is also where USART0 can live.",
         "His layout says this board may carry an STM32F103 rather than a GD32F103."
       ],
@@ -6962,7 +6728,7 @@
         },
         {
           "from": "MOTOR_AMP_CONV_DC_AMP",
-          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from motor.current_cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
+          "reason": "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from current.cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible between chains, so it stays open",
           "value": "0.0201465201465"
         },
         {
@@ -7005,26 +6771,32 @@
         }
       ],
       "validate": {
-        "accepted_on": [
-          "F103C8"
-        ],
+        "accepted_on": [],
+        "field": "BUTTON",
+        "motor": null,
+        "obs_result": 5,
         "parts": [
           {
+            "field": "BUTTON",
+            "motor": null,
+            "obs_result": 5,
             "part": "F103C8",
+            "reason": "ReservedPin(PA3)",
             "self_hold": "PA4",
-            "verdict": "accepted"
+            "verdict": "refused"
           },
           {
-            "field": "BUZZER",
+            "field": "BUTTON",
             "motor": null,
-            "obs_result": 7,
+            "obs_result": 5,
             "part": "F103RC",
-            "reason": "GateCapableMisused(PB1)",
+            "reason": "ReservedPin(PA3)",
             "self_hold": "PA4",
             "verdict": "refused"
           }
         ],
-        "verdict": "accepted"
+        "reason": "ReservedPin(PA3)",
+        "verdict": "refused"
       }
     },
     {
@@ -7044,25 +6816,25 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "reason": "his layout defines no PHASE_A"
         },
         {
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "reason": "his layout defines no PHASE_B"
         },
         {
@@ -7140,63 +6912,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PC13"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PC14"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -7210,7 +6982,7 @@
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -7218,26 +6990,15 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 0
         }
       ],
       "id": "robo-2-2-6",
       "layout": 6,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -7253,7 +7014,7 @@
       "name": "RoboDurden 2.2.6",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-6.h",
       "target": 2,
@@ -7348,13 +7109,13 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -7418,63 +7179,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PB5"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PB6"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PB7"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PC8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PC7"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PC6"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB1"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB0"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PA7"
         },
         {
@@ -7488,21 +7249,21 @@
           "from": "PHASE_A",
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "value": "PA0"
         },
         {
           "from": "PHASE_B",
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "value": "PC3"
         },
         {
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -7510,14 +7271,14 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
         }
       ],
       "id": "robo-2-2-7-left",
       "layout": 7,
-      "link_set": 6,
+      "link_set": 2,
       "link_set_basis": [
         {
           "bit": 1,
@@ -7529,23 +7290,12 @@
             "PA2",
             "PA3"
           ]
-        },
-        {
-          "bit": 2,
-          "from": [
-            "USART2_TX",
-            "USART2_RX"
-          ],
-          "pins": [
-            "PB10",
-            "PB11"
-          ]
         }
       ],
       "name": "RoboDurden 2.2.7-left",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "This is a DUAL-MOTOR board, and his file expresses its two motors as ALTERNATIVES under one MOTOR_LEFT switch rather than as a second named gate set, so each of the two presets carries one motor as motor 0 and neither populates our motor-1 field set. Merging them would be our invention rather than his record: the two halves also differ in facts we do not model (his DC-bus shunt and break input per side), and nothing on the bench exercises a two-motor preset."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-7.h",
@@ -7657,13 +7407,13 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -7727,63 +7477,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PC10"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PC11"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PC12"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA10"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA8"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB15"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB13"
         },
         {
@@ -7797,21 +7547,21 @@
           "from": "PHASE_A",
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "value": "PC4"
         },
         {
           "from": "PHASE_B",
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "value": "PC5"
         },
         {
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -7819,14 +7569,14 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
         }
       ],
       "id": "robo-2-2-7-right",
       "layout": 7,
-      "link_set": 6,
+      "link_set": 2,
       "link_set_basis": [
         {
           "bit": 1,
@@ -7838,23 +7588,12 @@
             "PA2",
             "PA3"
           ]
-        },
-        {
-          "bit": 2,
-          "from": [
-            "USART2_TX",
-            "USART2_RX"
-          ],
-          "pins": [
-            "PB10",
-            "PB11"
-          ]
         }
       ],
       "name": "RoboDurden 2.2.7-right",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "This is a DUAL-MOTOR board, and his file expresses its two motors as ALTERNATIVES under one MOTOR_LEFT switch rather than as a second named gate set, so each of the two presets carries one motor as motor 0 and neither populates our motor-1 field set. Merging them would be our invention rather than his record: the two halves also differ in facts we do not model (his DC-bus shunt and break input per side), and nothing on the bench exercises a two-motor preset."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-7.h",
@@ -7942,13 +7681,13 @@
         {
           "id": "0x48",
           "index": 0,
-          "key": "imu.scl_pin",
+          "key": "imu.scl",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
           "id": "0x49",
           "index": 0,
-          "key": "imu.sda_pin",
+          "key": "imu.sda",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -8028,63 +7767,63 @@
           "from": "HALL_A",
           "id": "0x4A",
           "index": 0,
-          "key": "motor.hall_a",
+          "key": "hall.a",
           "value": "PC13"
         },
         {
           "from": "HALL_B",
           "id": "0x4B",
           "index": 0,
-          "key": "motor.hall_b",
+          "key": "hall.b",
           "value": "PA1"
         },
         {
           "from": "HALL_C",
           "id": "0x4C",
           "index": 0,
-          "key": "motor.hall_c",
+          "key": "hall.c",
           "value": "PC14"
         },
         {
           "from": "BLDC_YH",
           "id": "0x4D",
           "index": 0,
-          "key": "motor.gate_hi_a",
+          "key": "gate.hi_a",
           "value": "PA8"
         },
         {
           "from": "BLDC_BH",
           "id": "0x4E",
           "index": 0,
-          "key": "motor.gate_hi_b",
+          "key": "gate.hi_b",
           "value": "PA9"
         },
         {
           "from": "BLDC_GH",
           "id": "0x4F",
           "index": 0,
-          "key": "motor.gate_hi_c",
+          "key": "gate.hi_c",
           "value": "PA10"
         },
         {
           "from": "BLDC_YL",
           "id": "0x50",
           "index": 0,
-          "key": "motor.gate_lo_a",
+          "key": "gate.lo_a",
           "value": "PB13"
         },
         {
           "from": "BLDC_BL",
           "id": "0x51",
           "index": 0,
-          "key": "motor.gate_lo_b",
+          "key": "gate.lo_b",
           "value": "PB14"
         },
         {
           "from": "BLDC_GL",
           "id": "0x52",
           "index": 0,
-          "key": "motor.gate_lo_c",
+          "key": "gate.lo_c",
           "value": "PB15"
         },
         {
@@ -8098,21 +7837,21 @@
           "from": "PHASE_A",
           "id": "0x54",
           "index": 0,
-          "key": "motor.phase_a",
+          "key": "current.phase_a",
           "value": "PB0"
         },
         {
           "from": "PHASE_B",
           "id": "0x55",
           "index": 0,
-          "key": "motor.phase_b",
+          "key": "current.phase_b",
           "value": "PA0"
         },
         {
           "from": "DEAD_TIME",
           "id": "0x64",
           "index": 0,
-          "key": "motor.dead_time",
+          "key": "gate.dead_time",
           "note": "his DEAD_TIME 60 ticks at his /1 gate-timer divider, re-expressed for our /2 divider. HIS SINGLE GLOBAL FIGURE, not per-board data: the bench boards' own silicon-proven value is DTG 25.",
           "value": 30
         },
@@ -8120,7 +7859,7 @@
           "from": "PHASE_A + PHASE_B",
           "id": "0x66",
           "index": 0,
-          "key": "motor.current_sense",
+          "key": "current.sense",
           "note": "derived: the declaration and the pins that realize it may not disagree, so it is 1 exactly where his layout gives both phase-sense pins",
           "value": 1
         },
@@ -8143,19 +7882,8 @@
       ],
       "id": "robo-2-2-20",
       "layout": 20,
-      "link_set": 10,
+      "link_set": 2,
       "link_set_basis": [
-        {
-          "bit": 3,
-          "from": [
-            "USART0_TX",
-            "USART0_RX"
-          ],
-          "pins": [
-            "PB6",
-            "PB7"
-          ]
-        },
         {
           "bit": 1,
           "from": [
@@ -8171,7 +7899,7 @@
       "name": "RoboDurden 2.2.20",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl_pin, imu.sda_pin and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-20.h",
       "target": 2,
@@ -8271,7 +7999,7 @@
     }
   ],
   "summary": {
-    "accepted": 19,
+    "accepted": 16,
     "by_target": {
       "target_1": 21,
       "target_2": 6
@@ -8308,6 +8036,13 @@
       },
       {
         "chip": "GD32F130",
+        "field": "SELF_HOLD",
+        "id": "robo-2-1-4",
+        "motor": null,
+        "reason": "ReservedPin(PA3)"
+      },
+      {
+        "chip": "GD32F130",
         "field": "GATE_LO_B",
         "id": "robo-2-1-5",
         "motor": 0,
@@ -8319,6 +8054,20 @@
         "id": "robo-2-1-9",
         "motor": null,
         "reason": "ReservedPin(PA14)"
+      },
+      {
+        "chip": "GD32F103",
+        "field": "BUTTON",
+        "id": "robo-2-2-1",
+        "motor": null,
+        "reason": "ReservedPin(PA3)"
+      },
+      {
+        "chip": "GD32F103",
+        "field": "BUTTON",
+        "id": "robo-2-2-3",
+        "motor": null,
+        "reason": "ReservedPin(PA3)"
       },
       {
         "chip": "GD32F103",
@@ -8335,7 +8084,7 @@
         "reason": "DuplicatePin(PA1)"
       }
     ],
-    "refused": 8,
+    "refused": 11,
     "validated": true
   },
   "targets_in_scope": [

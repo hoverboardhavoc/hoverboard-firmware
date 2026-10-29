@@ -186,8 +186,8 @@ SYMBOLIC_TOKENS = [
 #:      working pin map came from, and both read `BLDC_YH PA8`, `BLDC_BH PA9`, `BLDC_GH PA10` with
 #:      `BLDC_YL PB13`, `BLDC_BL PB14`, `BLDC_GL PB15`. Our map for those boards
 #:      (`specs/board-model.md` section 4, mirrored in `protocol-kotlin/.../LayoutPresets.kt`) is
-#:      `gate_hi_a PA8`, `gate_hi_b PA9`, `gate_hi_c PA10`, `gate_lo_a PB13`, `gate_lo_b PB14`,
-#:      `gate_lo_c PB15`. So A = yellow, B = blue, C = green.
+#:      `gate.hi_a PA8`, `gate.hi_b PA9`, `gate.hi_c PA10`, `gate.lo_a PB13`, `gate.lo_b PB14`,
+#:      `gate.lo_c PB15`. So A = yellow, B = blue, C = green.
 #:   2. HIS OWN CHANNEL CONVENTION. `HoverBoardGigaDevice/Inc/defines.h` fixes
 #:      `TIMER_BLDC_CHANNEL_Y TIMER_CH_0`, `..._B TIMER_CH_1`, `..._G TIMER_CH_2` for every Gen2
 #:      board, and TIMER0's channels 0/1/2 are PA8/PA9/PA10, which our gate set takes in that order.
@@ -253,7 +253,7 @@ def vbatt_cal_slope(volts_per_count):
 #: He expresses the IMU bus as a pair FLAG (`I2C_PB6PB7`, `I2C_PB8PB9`) rather than as pins, and
 #: `defines_2-1-20.h`'s own comment says the IMU needs soldering to the tiny module on PB6/PB7,
 #: which is also where `USART0` can live. The flag is therefore a claim about a SOLDERABLE OPTION
-#: and not a fitted bus, so the presets leave `imu.scl_pin`, `imu.sda_pin` and `imu.model` ABSENT
+#: and not a fitted bus, so the presets leave `imu.scl`, `imu.sda` and `imu.model` ABSENT
 #: rather than asserting them, and say so in the preset.
 #:
 #: Two more reasons it would be wrong to assert them. Our IMU group is all-or-none (both pins plus a
@@ -272,7 +272,7 @@ IMU_ABSENT_REASON = (
 # DECISION 4: the dead time, which the spec did not name
 # --------------------------------------------------------------------------------------------------
 
-#: `motor.dead_time` is required at or above `DEAD_TIME_MIN_DTG` (18) wherever a gate group is
+#: `gate.dead_time` is required at or above `DEAD_TIME_MIN_DTG` (18) wherever a gate group is
 #: configured (`crates/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`), so a preset that omitted it would be
 #: refused on the dead time before any check that could say something about HIS file: the group
 #: completeness check runs before the capability stage, and the first failure wins. Every preset with
@@ -310,8 +310,8 @@ def dead_time_dtg(his_ticks):
 #:   "pin"     the marker's token is a pin, packed into the field byte
 #:   "derived" the generator computes it; the entry names what from
 #:
-#: The three fields the validator carries WITHOUT judging (`motor.direction`,
-#: `motor.align_offset`, `motor.current_cal`) are deliberately absent from this table, and so are
+#: The three fields the validator carries WITHOUT judging (`direction`,
+#: `align_offset`, `current.cal`) are deliberately absent from this table, and so are
 #: machine-policy fields. A preset is board facts only (`specs/rider-ui.md` 3.7), and those three are
 #: not facts a pin map can state: the drive direction is a hall-and-phase wiring fact, the align
 #: offset is bench-swept, and the calibration belongs to the shunt chain fitted. The existing
@@ -326,23 +326,23 @@ FIELDS = [
     {"id": 0x45, "key": "led.red", "kind": "pin", "frm": "LED_RED"},
     {"id": 0x46, "key": "pad.a", "kind": "pin", "frm": "PHOTO_L"},
     {"id": 0x47, "key": "pad.b", "kind": "pin", "frm": "PHOTO_R"},
-    {"id": 0x48, "key": "imu.scl_pin", "kind": "decision3"},
-    {"id": 0x49, "key": "imu.sda_pin", "kind": "decision3"},
-    {"id": 0x4A, "key": "motor.hall_a", "kind": "pin", "frm": "HALL_A", "motor": 0},
-    {"id": 0x4B, "key": "motor.hall_b", "kind": "pin", "frm": "HALL_B", "motor": 0},
-    {"id": 0x4C, "key": "motor.hall_c", "kind": "pin", "frm": "HALL_C", "motor": 0},
-    {"id": 0x4D, "key": "motor.gate_hi_a", "kind": "pin", "frm": "BLDC_YH", "motor": 0},
-    {"id": 0x4E, "key": "motor.gate_hi_b", "kind": "pin", "frm": "BLDC_BH", "motor": 0},
-    {"id": 0x4F, "key": "motor.gate_hi_c", "kind": "pin", "frm": "BLDC_GH", "motor": 0},
-    {"id": 0x50, "key": "motor.gate_lo_a", "kind": "pin", "frm": "BLDC_YL", "motor": 0},
-    {"id": 0x51, "key": "motor.gate_lo_b", "kind": "pin", "frm": "BLDC_BL", "motor": 0},
-    {"id": 0x52, "key": "motor.gate_lo_c", "kind": "pin", "frm": "BLDC_GL", "motor": 0},
+    {"id": 0x48, "key": "imu.scl", "kind": "decision3"},
+    {"id": 0x49, "key": "imu.sda", "kind": "decision3"},
+    {"id": 0x4A, "key": "hall.a", "kind": "pin", "frm": "HALL_A", "motor": 0},
+    {"id": 0x4B, "key": "hall.b", "kind": "pin", "frm": "HALL_B", "motor": 0},
+    {"id": 0x4C, "key": "hall.c", "kind": "pin", "frm": "HALL_C", "motor": 0},
+    {"id": 0x4D, "key": "gate.hi_a", "kind": "pin", "frm": "BLDC_YH", "motor": 0},
+    {"id": 0x4E, "key": "gate.hi_b", "kind": "pin", "frm": "BLDC_BH", "motor": 0},
+    {"id": 0x4F, "key": "gate.hi_c", "kind": "pin", "frm": "BLDC_GH", "motor": 0},
+    {"id": 0x50, "key": "gate.lo_a", "kind": "pin", "frm": "BLDC_YL", "motor": 0},
+    {"id": 0x51, "key": "gate.lo_b", "kind": "pin", "frm": "BLDC_BL", "motor": 0},
+    {"id": 0x52, "key": "gate.lo_c", "kind": "pin", "frm": "BLDC_GL", "motor": 0},
     {"id": 0x53, "key": "board.button", "kind": "pin", "frm": "BUTTON"},
-    {"id": 0x54, "key": "motor.phase_a", "kind": "pin", "frm": "PHASE_A", "motor": 0},
-    {"id": 0x55, "key": "motor.phase_b", "kind": "pin", "frm": "PHASE_B", "motor": 0},
+    {"id": 0x54, "key": "current.phase_a", "kind": "pin", "frm": "PHASE_A", "motor": 0},
+    {"id": 0x55, "key": "current.phase_b", "kind": "pin", "frm": "PHASE_B", "motor": 0},
     {"id": 0x60, "key": "imu.model", "kind": "decision3"},
-    {"id": 0x64, "key": "motor.dead_time", "kind": "dead_time", "frm": "DEAD_TIME", "motor": 0},
-    {"id": 0x66, "key": "motor.current_sense", "kind": "current_sense", "motor": 0},
+    {"id": 0x64, "key": "gate.dead_time", "kind": "dead_time", "frm": "DEAD_TIME", "motor": 0},
+    {"id": 0x66, "key": "current.sense", "kind": "current_sense", "motor": 0},
     {"id": 0x69, "key": "board.vbatt_cal", "kind": "vbatt_cal", "frm": "ADC_BATTERY_VOLT"},
 ]
 
@@ -367,7 +367,7 @@ UNMAPPED_KEYS = {
     "PHASE_C": "no field: our phase-current group is the injected group's two ranks, A and B only",
     "MOTOR_AMP_CONV_DC_AMP": (
         "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from "
-        "motor.current_cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible "
+        "current.cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible "
         "between chains, so it stays open"
     ),
     "UPPER_LED": "no field: a second LED bank",
@@ -885,7 +885,7 @@ def layout_notes(values, target):
         "board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave "
         "takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for "
-        "imu.scl_pin, imu.sda_pin and imu.model.",
+        "imu.scl, imu.sda and imu.model.",
     ]
     if any(values.get(k) is not None for k in ("I2C_PB6PB7", "I2C_PB8PB9", "I2C0_SCL")):
         notes.append(
@@ -1324,7 +1324,7 @@ def decision_record():
             "oracle": (
                 "the bench pair's own working configuration: defines_2-2-20.h and defines_2-1-20.h "
                 "read BLDC_YH PA8 / BLDC_BH PA9 / BLDC_GH PA10, and our map for those boards is "
-                "gate_hi_a PA8 / gate_hi_b PA9 / gate_hi_c PA10. Confirmed twice more by his fixed "
+                "gate.hi_a PA8 / gate.hi_b PA9 / gate.hi_c PA10. Confirmed twice more by his fixed "
                 "TIMER_BLDC_CHANNEL_Y/B/G = TIMER_CH_0/1/2 and by layout 2.2.1 spelling the "
                 "channel-to-pin pairing out"
             ),
@@ -1350,7 +1350,7 @@ def decision_record():
         },
         {
             "decision": "the IMU bus",
-            "settled": "imu.scl_pin, imu.sda_pin and imu.model are left ABSENT",
+            "settled": "imu.scl, imu.sda and imu.model are left ABSENT",
             "oracle": (
                 "he states the bus as a pair flag (I2C_PB6PB7, I2C_PB8PB9) and his own comment on "
                 "2.1.20 says the IMU needs soldering to the tiny module on PB6/PB7, which is also "
@@ -1363,7 +1363,7 @@ def decision_record():
             ),
         },
         {
-            "decision": "motor.dead_time (not named by the spec)",
+            "decision": "gate.dead_time (not named by the spec)",
             "settled": "DTG = round(his DEAD_TIME * 1/2) = 30 ticks",
             "oracle": (
                 "his DEAD_TIME 60 is programmed at TIMER_CKDIV_DIV1 (13.9 ns a tick, 833 ns) in "
