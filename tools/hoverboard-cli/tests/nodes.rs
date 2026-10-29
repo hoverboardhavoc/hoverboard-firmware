@@ -141,14 +141,14 @@ fn nodes_name_config_and_esp_commands_by_node() {
     let rule = "name must be 1 to 26 letters, digits or '-'";
     assert_eq!(
         out.trim(),
-        format!("device.name of 0x03 (Hoverboard): {rule}")
+        format!("device.name of 0x03 (hb-bridge-ab12): {rule}")
     );
     assert!(err.contains(&format!("refused: {rule}")), "{err}");
 
     // A name, then the node by that name.
     let (ok, out, err) = cli(&[&tcp, "name", "0x03", "rover-esp"]);
     assert!(ok, "{err}");
-    assert_eq!(out.trim(), "device.name of 0x03 (Hoverboard): ok");
+    assert_eq!(out.trim(), "device.name of 0x03 (hb-bridge-ab12): ok");
     let (ok, out, err) = cli(&[&tcp, "config", "rover-esp", "0x10"]);
     assert!(ok, "{err}");
     assert_eq!(out.trim(), "rover-esp: device.name = \"rover-esp\"");
@@ -279,7 +279,7 @@ fn a_boards_store_as_a_file_through_the_binary() {
     let (code, _, err) = run(&["config", "rover-lft", "control.mode", "balance"]);
     assert_eq!(code, Some(1));
     assert!(
-        err.contains("no node named rover-lft (nodes: rover-left, Hoverboard, Hoverboard)"),
+        err.contains("no node named rover-lft (nodes: rover-left, Hoverboard, hb-bridge-ab12)"),
         "{err}"
     );
 

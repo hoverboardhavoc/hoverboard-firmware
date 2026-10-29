@@ -17,7 +17,9 @@ use crate::loader::{self, Poll};
 use crate::mailbox::MailboxPort;
 use crate::node::Node;
 use crate::router::{Port, Router, NOTIFY_MAX};
-use crate::sim::{board, Family, Firmware, Gd32, Inject, Machine, RamFlash, SimPins, SimPlatform};
+use crate::sim::{
+    board, Family, Firmware, Gd32, Inject, Machine, RamFlash, SimPins, SimPlatform, SIM_NAME,
+};
 use crate::svc::{Build, ImageBuffer, Service};
 use crate::swd::{Counters, Swd, SwdError, XferError};
 use crate::target::{self, TargetError};
@@ -722,7 +724,7 @@ fn stream(packets: &[Vec<u8>]) -> Vec<u8> {
 /// The bridge's node over a fresh store: unassigned, as a new bridge boots.
 fn esp_node() -> Node<'static, RamFlash> {
     let flash = std::boxed::Box::leak(std::boxed::Box::new(RamFlash::erased(4096)));
-    Node::new(store::Store::mount(flash).unwrap(), true, 0x0001)
+    Node::new(store::Store::mount(flash).unwrap(), true, 0x0001, &SIM_NAME)
 }
 
 fn service() -> Service<'static, SimPlatform> {
@@ -1656,7 +1658,12 @@ fn a_console_controller_walks_the_esp_and_both_boards_and_the_esp_ends_at_0x03()
     }
     // The address is in the bridge's own store, and a reboot comes back with it.
     assert_eq!(esp_addr(&mut flash), Some(0x03));
-    let node = Node::new(store::Store::mount(&mut flash).unwrap(), true, 0x0001);
+    let node = Node::new(
+        store::Store::mount(&mut flash).unwrap(),
+        true,
+        0x0001,
+        &SIM_NAME,
+    );
     assert_eq!(node.addr(), 0x03);
 }
 
@@ -1817,7 +1824,12 @@ fn the_esp_keeps_its_name_and_address_in_its_store_and_reports_a_store_that_did_
     let mut empty = RamFlash::erased(4096);
     let (mut port, mut fw) = booted(Family::F1x0, Inject::default());
     attach(&mut port, &mut fw);
-    let mut node = Node::new(store::Store::mount(&mut empty).unwrap(), false, 0x0001);
+    let mut node = Node::new(
+        store::Store::mount(&mut empty).unwrap(),
+        false,
+        0x0001,
+        &SIM_NAME,
+    );
     let mut svc = service();
     let mut router = Router::new();
     router.on_bytes(Port::Usb, &stream(&[encode(&Msg::InfoReq, 0x80)]));
@@ -2778,7 +2790,6 @@ fn a_commanded_connect_tries_for_500_ms_and_the_background_retry_makes_one_short
 #[test]
 fn the_esp_answers_a_default_read_un_stores_its_name_and_compacts() {
     // `specs/cli-config.md` sections 6.1 to 6.3, on the bridge's own `Responder` and store.
-    use crate::node::{advertised_name, BRIDGE_NAME_MAX};
     let mut flash = RamFlash::erased(4096);
     {
         let mut m = Rig::new(&mut flash);
@@ -2810,52 +2821,63 @@ fn the_esp_answers_a_default_read_un_stores_its_name_and_compacts() {
             [0, 0, net::walk::CFG_OK, 0]
         );
     }
-    let mut s = store::Store::mount(&mut flash).unwrap();
-    let mut names = 0;
-    s.for_each_in(&[store::DEVICE_NAME.key()], |_, _, _| names += 1);
-    assert_eq!(names, 0, "no record of the name is left");
-    // The next boot advertises the default name again and writes it into the store.
-    let mut buf = [0; BRIDGE_NAME_MAX];
-    let n = advertised_name(&mut s, [0, 0, 0, 0, 0xAB, 0x12], &mut buf);
-    assert_eq!(&buf[..n], b"hb-bridge-ab12");
-    assert_eq!(s.get_text(store::DEVICE_NAME), b"hb-bridge-ab12");
+    assert_eq!(name_records(&mut flash), 0, "no record of the name is left");
+    // A reboot leaves it un-stored: the read answers the MAC-based default with CFG_DEFAULT, and
+    // the store still holds no name (`specs/hoverboard-bridge.md`, "Its store").
+    {
+        let mut m = Rig::new(&mut flash);
+        m.walk(0);
+        let r = m.config_read(0x03, store::DEVICE_NAME.key());
+        assert_eq!(r[2..4], [net::walk::CFG_DEFAULT, store::Type::Str.tag()]);
+        assert_eq!(&r[4..], b"hb-bridge-ab12");
+    }
+    assert_eq!(
+        name_records(&mut flash),
+        0,
+        "the default is answered, not stored"
+    );
+}
+
+/// How many `device.name` records the bridge's store holds.
+fn name_records(flash: &mut RamFlash) -> usize {
+    let s = store::Store::mount(flash).unwrap();
+    let mut n = 0;
+    s.for_each_in(&[store::DEVICE_NAME.key()], |_, _, _| n += 1);
+    n
 }
 
 #[test]
 fn the_boot_name_falls_back_for_a_stored_name_it_cannot_advertise() {
     use crate::node::{advertised_name, BRIDGE_NAME_MAX};
-    let mac = [0, 0, 0, 0, 0xAB, 0x12];
     let boot = |flash: &mut RamFlash| {
-        let mut s = store::Store::mount(flash).unwrap();
+        let s = store::Store::mount(flash).unwrap();
         let mut buf = [0; BRIDGE_NAME_MAX];
-        let n = advertised_name(&mut s, mac, &mut buf);
-        (buf[..n].to_vec(), s.get_text(store::DEVICE_NAME).to_vec())
+        let n = advertised_name(&s, &SIM_NAME, &mut buf);
+        buf[..n].to_vec()
     };
 
-    // Nothing written: the default, and the store now holds it.
+    // Nothing written: the default is advertised, and the store is left without a name.
     let mut flash = RamFlash::erased(4096);
-    assert_eq!(
-        boot(&mut flash),
-        (b"hb-bridge-ab12".to_vec(), b"hb-bridge-ab12".to_vec())
-    );
+    assert_eq!(boot(&mut flash), b"hb-bridge-ab12");
+    assert_eq!(name_records(&mut flash), 0);
 
     // A usable name is advertised.
     store::Store::mount(&mut flash)
         .unwrap()
         .set_str(store::DEVICE_NAME, "rover-esp")
         .unwrap();
-    assert_eq!(
-        boot(&mut flash),
-        (b"rover-esp".to_vec(), b"rover-esp".to_vec())
-    );
+    assert_eq!(boot(&mut flash), b"rover-esp");
 
     // A store written before the refusal existed: the default is advertised, the store keeps it.
     store::Store::mount(&mut flash)
         .unwrap()
         .set_str(store::DEVICE_NAME, "Offroad master")
         .unwrap();
+    assert_eq!(boot(&mut flash), b"hb-bridge-ab12");
     assert_eq!(
-        boot(&mut flash),
-        (b"hb-bridge-ab12".to_vec(), b"Offroad master".to_vec())
+        store::Store::mount(&mut flash)
+            .unwrap()
+            .get_text(store::DEVICE_NAME),
+        b"Offroad master"
     );
 }

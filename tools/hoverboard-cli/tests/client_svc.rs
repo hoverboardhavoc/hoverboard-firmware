@@ -49,7 +49,12 @@ impl Esp {
         let flash: &'static mut RamFlash = Box::leak(Box::new(RamFlash::erased(4096)));
         Esp {
             router,
-            node: Node::new(store::Store::mount(flash).unwrap(), true, 0x0001),
+            node: Node::new(
+                store::Store::mount(flash).unwrap(),
+                true,
+                0x0001,
+                &hoverboard_bridge_core::sim::SIM_NAME,
+            ),
             port: MailboxPort::new(board(family, Inject::default(), 5)),
             svc: Service::new(
                 Build {

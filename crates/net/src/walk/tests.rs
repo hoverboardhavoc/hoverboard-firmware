@@ -1579,6 +1579,33 @@ fn config_compact_is_refused_while_armed_and_erases_nothing() {
 }
 
 #[test]
+fn a_nodes_own_default_name_answers_an_unstored_device_name() {
+    // The bridge's default name is the node's, not the registry's (`specs/cli-config.md` 6.2).
+    let mut m = walked_pair();
+    m.boards[0].resp.set_default_name(b"hb-bridge-ab12");
+    let key = DEVICE_NAME.key();
+    let r = m.config_read(0x01, key);
+    assert_eq!(
+        (resp_status(&r), resp_value(&r)),
+        (CFG_DEFAULT, Some(Value::Str(b"hb-bridge-ab12")))
+    );
+    assert_eq!(
+        resp_status(&m.config_write(0x01, key, Value::Str(b"rover-esp"))),
+        CFG_OK
+    );
+    let r = m.config_read(0x01, key);
+    assert_eq!(
+        (resp_status(&r), resp_value(&r)),
+        (CFG_OK, Some(Value::Str(b"rover-esp")))
+    );
+    // An un-store echoes the node's default, and the board without one keeps the registry's.
+    let w = unstore(&mut m, 0x01, key);
+    assert_eq!(resp_value(&w), Some(Value::Str(b"hb-bridge-ab12")));
+    let r = m.config_read(0x02, key);
+    assert_eq!(resp_value(&r), Some(Value::Str(b"Hoverboard")));
+}
+
+#[test]
 fn node_class_answers_ok_and_refuses_an_unstore_read_only() {
     let mut m = walked_pair();
     let before = m.boards[0].flash.bytes.clone();

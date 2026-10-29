@@ -56,50 +56,43 @@ pub const PROBE_WINDOW_US: u64 = 500_000;
 /// The most replies one command produces (a final chunk: its acknowledgement and the status).
 const REPLIES: usize = 4;
 
-/// The name until one is written: `hb-bridge-` and the last four hex digits of the MAC.
-pub fn default_name(mac: [u8; 6]) -> [u8; 14] {
+/// The name until one is written: `hb-bridge-` and the last four hex digits of the MAC. It is the
+/// node's own and is never written to the store (`specs/hoverboard-bridge.md`, "Its store"): the
+/// responder answers it for a read of an unstored `device.name` ([`Responder::set_default_name`]).
+pub const fn default_name(mac: [u8; 6]) -> [u8; 14] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut buf = *b"hb-bridge-0000";
-    for (i, b) in [mac[4], mac[5]].iter().enumerate() {
+    let mut i = 0;
+    while i < 2 {
+        let b = mac[4 + i];
         buf[10 + 2 * i] = HEX[(b >> 4) as usize];
         buf[11 + 2 * i] = HEX[(b & 0xF) as usize];
+        i += 1;
     }
     buf
 }
 
-/// The name BLE advertises and mDNS answers for, from `device.name` in the store, copied into
-/// `buf`; returns its length. A bridge whose store holds none writes its default name there, so a
-/// `CONFIG_READ` of the key answers what BLE advertises. A `CONFIG_WRITE` of a name that fails
-/// [`bridge_name_usable`] is refused, but a store written before that refusal existed may still
-/// hold one: it stays in the store and the default is used.
+/// The name BLE advertises and mDNS answers for, copied into `buf`; returns its length: the
+/// `device.name` the store holds, or `default` when it holds none. A `CONFIG_WRITE` of a name that
+/// fails [`bridge_name_usable`] is refused, but a store written before that refusal existed may
+/// still hold one: it stays in the store and the default is used. Nothing is written: the default
+/// is answered by the node, not stored, so an un-stored name stays un-stored across a reboot.
 pub fn advertised_name<F: Flash>(
-    store: &mut Store<'_, F>,
-    mac: [u8; 6],
+    store: &Store<'_, F>,
+    default: &[u8],
     buf: &mut [u8; BRIDGE_NAME_MAX],
 ) -> usize {
-    // `None`: nothing written; `Some(0)`: a written name that cannot be advertised.
-    let mut written: Option<usize> = None;
+    let mut usable: Option<usize> = None;
     store.for_each_in(&[DEVICE_NAME.key()], |_, tag, v| {
-        written = (tag == Type::Str.tag()).then(|| {
-            if bridge_name_usable(v) {
-                buf[..v.len()].copy_from_slice(v);
-                v.len()
-            } else {
-                0
-            }
+        usable = (tag == Type::Str.tag() && bridge_name_usable(v)).then(|| {
+            buf[..v.len()].copy_from_slice(v);
+            v.len()
         });
     });
-    match written {
-        Some(n) if n > 0 => n,
-        found => {
-            let d = default_name(mac);
-            buf[..d.len()].copy_from_slice(&d);
-            if found.is_none() {
-                let _ = store.set_str(DEVICE_NAME, core::str::from_utf8(&d).unwrap_or_default());
-            }
-            d.len()
-        }
-    }
+    usable.unwrap_or_else(|| {
+        buf[..default.len()].copy_from_slice(default);
+        default.len()
+    })
 }
 
 /// Where a frame arrived, and where a reply to it goes.
@@ -137,9 +130,16 @@ impl<'f, F: Flash> Node<'f, F> {
     /// The node over its `store`, with the address the store holds. `store_mounted` says whether
     /// the store is the bridge's own (`false`: it did not mount and the firmware gave the node an
     /// empty one, so the bridge runs unassigned and `ESP_INFO` says so). `fw_ver` is what
-    /// `NODE_HELLO` reports.
-    pub fn new(store: Store<'f, F>, store_mounted: bool, fw_ver: u16) -> Self {
+    /// `NODE_HELLO` reports; `default_name` is what a read of an unstored `device.name` answers
+    /// ([`default_name`]).
+    pub fn new(
+        store: Store<'f, F>,
+        store_mounted: bool,
+        fw_ver: u16,
+        default_name: &'static [u8],
+    ) -> Self {
         let mut resp = Responder::new(N_PORTS, PORT_KINDS, MCU_ESP32C3, CLASS_BRIDGE, fw_ver);
+        resp.set_default_name(default_name);
         resp.restore_addr(&store);
         Node {
             resp,

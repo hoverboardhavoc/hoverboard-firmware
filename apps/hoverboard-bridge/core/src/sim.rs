@@ -1474,6 +1474,9 @@ pub fn running_board() -> (crate::mailbox::MailboxPort<SimPins<Gd32>>, Firmware)
     (port, fw)
 }
 
+/// The simulated bridge's MAC-based default name.
+pub static SIM_NAME: [u8; 14] = crate::node::default_name([0, 0, 0, 0, 0xAB, 0x12]);
+
 /// A bridge in front of a master and its slave: the bridge's service loop on the simulated F1x0's
 /// mailbox, the master's firmware on the other end, and the slave on the master's UART. The bridge's
 /// controller links are the caller's, through [`Machine::router`].
@@ -1508,7 +1511,7 @@ impl<'f> Machine<'f> {
         };
         Machine {
             router: crate::router::Router::new(),
-            node: crate::node::Node::new(store, true, 0x0001),
+            node: crate::node::Node::new(store, true, 0x0001, &SIM_NAME),
             port,
             svc,
             fw,
