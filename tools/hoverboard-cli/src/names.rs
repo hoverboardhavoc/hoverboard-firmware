@@ -374,7 +374,20 @@ pub fn encode(
     }
     let row = row_of(key);
     let path = path_of(key);
-    let bad = |what: &str| Problem::stop(format!("{path}: {what}, not {v}"));
+    // A secret's value is never printed (`specs/bridge-onboarding.md` section 2.2): a refusal names
+    // what was given by its JSON type alone.
+    let given = if row.is_some_and(|r| r.secret()) {
+        match v {
+            Json::Bool(_) => "a boolean".to_string(),
+            Json::Number(_) => "a number".to_string(),
+            Json::String(_) => "a string".to_string(),
+            Json::Array(_) => "a list".to_string(),
+            Json::Object(_) | Json::Null => "an object".to_string(),
+        }
+    } else {
+        v.to_string()
+    };
+    let bad = |what: &str| Problem::stop(format!("{path}: {what}, not {given}"));
     let mut warn = Vec::new();
     let checked = |warn: &mut Vec<Problem>, ok: bool, what: String| {
         if !ok {

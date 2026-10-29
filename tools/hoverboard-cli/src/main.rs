@@ -38,6 +38,8 @@
 //! `control.mode`) or by its raw `<id>.<index>`, and a value takes the file's forms (`PC13`,
 //! `balance`, `null` to un-store). Every line about a board starts with its `device.name`. `diff`
 //! exits 0 with no changes, 1 with changes, 2 on an error. `fields --json` prints the name table.
+//! A secret (`wifi.pass`) is never printed: it shows as `(set)`, `dump` leaves it out and says so,
+//! and a file that gives one always writes it (`specs/bridge-onboarding.md` section 2.2).
 //!
 //! An ESP command goes to the bridge the link reaches (`0x00`, the one peer) unless `--node` names
 //! another, which is reached through the boards by its address. Over a board's own BLE module the
@@ -1011,6 +1013,9 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
                 b.name,
                 names::path_of(k)
             );
+        }
+        for l in config::left_out(&b.name, &reads) {
+            eprintln!("{l}");
         }
         let stored = reads
             .values()
