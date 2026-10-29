@@ -44,6 +44,11 @@ CLONE = os.path.join(_ROOT, "reference", "robo-gd32")
 #: The committed presets, which are also the asset the app ships.
 PRESETS = os.path.join(_ROOT, rp.DEFAULT_OUT)
 
+#: The store's name table as `hoverboard-cli fields --json` prints it (`specs/cli-config.md`
+#: section 3), committed beside the tool; a hoverboard-cli test holds the file equal to the binary's
+#: output, so this suite checks against it with no Rust toolchain.
+FIELDS_JSON = os.path.join(_ROOT, "tools", "hoverboard-cli", "fields.json")
+
 
 def have_clone(sha):
     """Is the pinned clone here, pristine and at `sha`?"""
@@ -110,15 +115,15 @@ class GateColourOrder(unittest.TestCase):
     #: layouts must equal it. A mapping that swapped two colours would swap two phases, which on a
     #: first arm is a jerk or a trip rather than a spin.
     BENCH = {
-        "motor.hall_a": "PC13",
-        "motor.hall_b": "PA1",
-        "motor.hall_c": "PC14",
-        "motor.gate_hi_a": "PA8",
-        "motor.gate_hi_b": "PA9",
-        "motor.gate_hi_c": "PA10",
-        "motor.gate_lo_a": "PB13",
-        "motor.gate_lo_b": "PB14",
-        "motor.gate_lo_c": "PB15",
+        "hall.a": "PC13",
+        "hall.b": "PA1",
+        "hall.c": "PC14",
+        "gate.hi_a": "PA8",
+        "gate.hi_b": "PA9",
+        "gate.hi_c": "PA10",
+        "gate.lo_a": "PB13",
+        "gate.lo_b": "PB14",
+        "gate.lo_c": "PB15",
     }
 
     #: The benign fleet pins those two boards also share, which the same two files state
@@ -140,16 +145,18 @@ class GateColourOrder(unittest.TestCase):
         self.assertEqual(rp.GATE_COLOUR_FOR_PHASE, {"a": "Y", "b": "B", "c": "G"})
 
     def test_the_mapped_gate_fields_read_his_colours_in_that_order(self):
-        gates = {f["key"]: f["frm"] for f in rp.FIELDS if f["key"].startswith("motor.gate_")}
+        gates = {
+            f["key"]: f["frm"] for f in rp.FIELDS if f["key"].startswith("gate.") and f["kind"] == "pin"
+        }
         self.assertEqual(
             gates,
             {
-                "motor.gate_hi_a": "BLDC_YH",
-                "motor.gate_hi_b": "BLDC_BH",
-                "motor.gate_hi_c": "BLDC_GH",
-                "motor.gate_lo_a": "BLDC_YL",
-                "motor.gate_lo_b": "BLDC_BL",
-                "motor.gate_lo_c": "BLDC_GL",
+                "gate.hi_a": "BLDC_YH",
+                "gate.hi_b": "BLDC_BH",
+                "gate.hi_c": "BLDC_GH",
+                "gate.lo_a": "BLDC_YL",
+                "gate.lo_b": "BLDC_BL",
+                "gate.lo_c": "BLDC_GL",
             },
         )
 
@@ -173,7 +180,7 @@ class GateColourOrder(unittest.TestCase):
     def test_the_bench_presets_carry_his_phase_sense_pins_as_his_file_states_them(self):
         # Recorded as a test rather than only in the report: his 2.1.20 gives PHASE_A PB0 and
         # PHASE_B PA0, which is the F103 MASTER's pair. Our own spec says the F130 slave senses on
-        # PB0/PB1 (`specs/board-model.md` section 1, motor.phase_a), so the generated 2.1.20 preset
+        # PB0/PB1 (`specs/board-model.md` section 1, current.phase_a), so the generated 2.1.20 preset
         # disagrees with the bench slave on phase B. The generator carries HIS value; the
         # disagreement is a finding about his file, and this test pins which value is in the file so
         # a future change to either side is visible.
@@ -183,9 +190,9 @@ class GateColourOrder(unittest.TestCase):
         by_id = {p["id"]: p for p in doc["presets"]}
         for preset_id in ("robo-2-1-20", "robo-2-2-20"):
             got = {f["key"]: f["value"] for f in by_id[preset_id]["fields"]}
-            self.assertEqual(got["motor.phase_a"], "PB0")
-            self.assertEqual(got["motor.phase_b"], "PA0")
-            self.assertEqual(got["motor.current_sense"], 1)
+            self.assertEqual(got["current.phase_a"], "PB0")
+            self.assertEqual(got["current.phase_b"], "PA0")
+            self.assertEqual(got["current.sense"], 1)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -261,7 +268,7 @@ class BatteryCalibration(unittest.TestCase):
 class ImuBus(unittest.TestCase):
     def test_the_imu_fields_are_never_asserted(self):
         imu = [f for f in rp.FIELDS if f["key"].startswith("imu.")]
-        self.assertEqual({f["key"] for f in imu}, {"imu.scl_pin", "imu.sda_pin", "imu.model"})
+        self.assertEqual({f["key"] for f in imu}, {"imu.scl", "imu.sda", "imu.model"})
         for f in imu:
             self.assertEqual(f["kind"], "decision3", f["key"])
             self.assertNotIn("frm", f)
@@ -272,7 +279,7 @@ class ImuBus(unittest.TestCase):
         doc = json.load(open(PRESETS))
         for p in doc["presets"]:
             absent = {a["key"]: a["reason"] for a in p["absent"]}
-            for key in ("imu.scl_pin", "imu.sda_pin", "imu.model"):
+            for key in ("imu.scl", "imu.sda", "imu.model"):
                 self.assertIn(key, absent, p["id"])
                 self.assertIn("solderable", absent[key])
             self.assertFalse([f for f in p["fields"] if f["key"].startswith("imu.")], p["id"])
@@ -319,14 +326,14 @@ class DeadTime(unittest.TestCase):
         for p in doc["presets"]:
             by_key = {f["key"]: f for f in p["fields"]}
             gated = all(
-                "motor.gate_%s_%s" % (side, phase) in by_key
+                "gate.%s_%s" % (side, phase) in by_key
                 for side in ("hi", "lo")
                 for phase in ("a", "b", "c")
             )
             if not gated:
                 continue
-            self.assertIn("motor.dead_time", by_key, p["id"])
-            dt = by_key["motor.dead_time"]
+            self.assertIn("gate.dead_time", by_key, p["id"])
+            dt = by_key["gate.dead_time"]
             self.assertEqual(dt["value"], 30, p["id"])
             self.assertEqual(dt["from"], "DEAD_TIME", p["id"])
             self.assertIn("not per-board data", dt["note"], p["id"])
@@ -374,6 +381,25 @@ class LinkSet(unittest.TestCase):
 
 
 class KeyList(unittest.TestCase):
+    def test_every_field_is_named_as_the_name_table_names_its_id(self):
+        with open(FIELDS_JSON) as fh:
+            table = {r["id"]: r for r in json.load(fh)}
+        for f in rp.FIELDS:
+            row = table[f["id"]]
+            self.assertEqual(f["key"], row["path"], "0x%02X" % f["id"])
+            self.assertEqual("motor" in f, row["index"] == "motor", f["key"])
+
+    def test_every_key_the_committed_presets_carry_is_a_name_table_path(self):
+        if not os.path.exists(PRESETS):
+            self.skipTest("the committed presets are not here")
+        with open(FIELDS_JSON) as fh:
+            paths = {r["path"] for r in json.load(fh)}
+        with open(PRESETS) as fh:
+            doc = json.load(fh)
+        for p in doc["presets"]:
+            for f in p["fields"] + p["absent"]:
+                self.assertIn(f["key"], paths, p["id"])
+
     def test_the_mapped_fields_are_in_registry_id_order(self):
         ids = [f["id"] for f in rp.FIELDS]
         self.assertEqual(ids, sorted(ids))
@@ -397,7 +423,7 @@ class KeyList(unittest.TestCase):
                 self.assertIsNone(rp.UNMAPPED_KEYS[name], name)
 
     def test_the_carried_but_unjudged_motor_facts_are_not_preset_data(self):
-        # motor.direction (0x62), motor.align_offset (0x63) and motor.current_cal (0x67) are not
+        # direction (0x62), align_offset (0x63) and current.cal (0x67) are not
         # facts a pin map can state, so a preset must not carry them
         # (protocol-kotlin/.../LayoutPresets.kt, LayoutPreset.applyTo).
         self.assertFalse({f["id"] for f in rp.FIELDS} & {0x62, 0x63, 0x67})
@@ -497,12 +523,12 @@ class Document(unittest.TestCase):
     def test_a_pin_rides_as_his_token_and_never_as_our_packed_byte(self):
         # The schema's second insistence: one pin encoder keeps one owner, and a human reading the
         # file sees PC13 rather than 0x2D.
+        pins = {f["key"] for f in rp.FIELDS if f["kind"] == "pin"}
         for p in self.doc["presets"]:
             for f in p["fields"]:
                 self.assertNotIn("packed", f, "%s %s" % (p["id"], f["key"]))
-                if f["key"].endswith("_pin") or "hall" in f["key"] or "gate" in f["key"]:
-                    if f["value"] is not None:
-                        self.assertIsNotNone(rp.pack_pin(f["value"]), f["value"])
+                if f["key"] in pins and f["value"] is not None:
+                    self.assertIsNotNone(rp.pack_pin(f["value"]), f["value"])
 
     def test_absent_is_distinguished_from_a_field_that_never_appeared(self):
         # The schema's third insistence. Every field our key list asks about appears in exactly one
