@@ -375,9 +375,10 @@ impl Plan {
     }
 }
 
-/// Plan the files against what the board answered (`specs/cli-config.md` section 4.3). With
-/// `replace`, every key the board stores that no file names is un-stored too, except the board-owned
-/// ones. `Err` for a file's key the board does not know, or a value for an id the table does not
+/// Plan the files against what the board answered (`specs/cli-config.md` section 4.3). Only
+/// `replace` un-stores: a `null` for a key the board stores, and every key the board stores that no
+/// file names, except the board-owned ones. `apply` leaves both alone (section 2.1), so applying
+/// one board's dump to another never removes the second board's values. `Err` for a file's key the board does not know, or a value for an id the table does not
 /// name that the board's type cannot take.
 pub fn plan(
     files: &Files,
@@ -415,7 +416,7 @@ pub fn plan(
         };
         let holds = |b: &[u8]| r.tag == storage.tag() && r.bytes == b;
         let act = match &bytes {
-            None if r.status == CFG_OK => Some(Act::Unstore),
+            None if r.status == CFG_OK && replace => Some(Act::Unstore),
             None => None,
             Some(b) if holds(b) && r.status == CFG_OK => None,
             Some(b) if holds(b) => Some(Act::Pin),
@@ -552,36 +553,81 @@ pub fn change_line(name: &str, key: Key, before: &ConfigResp, after: &ConfigResp
     )
 }
 
-/// Carry out `plan` on `b`: one `CONFIG_WRITE` per step, then a read of every written key. `Err`
-/// at the first refusal, naming the key, the status and the keys written before it.
+/// A plan refused partway (`specs/cli-config.md` section 5): why, and what the keys written
+/// before the refusal now read on the board.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Refused {
+    /// The refused key and the status, or the link's error.
+    pub msg: String,
+    /// Each key written before it, as read back.
+    pub written: BTreeMap<Key, ConfigResp>,
+}
+
+/// Carry out `plan` on `b`: one `CONFIG_WRITE` per step, then a read of every written key. At the
+/// first refusal it stops, and still reads back the keys written before it, so the report says what
+/// the board now holds.
 pub fn execute<W: Wire>(
     b: &mut Board<'_, W>,
     plan: &Plan,
-) -> Result<BTreeMap<Key, ConfigResp>, String> {
+) -> Result<BTreeMap<Key, ConfigResp>, Refused> {
     let mut written = Vec::new();
+    let mut failed = None;
     for s in &plan.steps {
-        let status = b.write(s.key, s.storage, s.bytes.as_deref())?;
-        if status != CFG_OK {
-            let before = if written.is_empty() {
-                "nothing was written".to_string()
-            } else {
-                let w: Vec<String> = written.iter().map(|k| path_of(*k)).collect();
-                format!("written before it: {}", w.join(", "))
-            };
-            return Err(format!(
-                "{}: {}: refused: {}; {before}",
-                b.name,
-                path_of(s.key),
-                status_name(status)
-            ));
+        match b.write(s.key, s.storage, s.bytes.as_deref()) {
+            Ok(CFG_OK) => written.push(s.key),
+            Ok(status) => {
+                failed = Some(format!(
+                    "{}: {}: refused: {}",
+                    b.name,
+                    path_of(s.key),
+                    status_name(status)
+                ));
+                break;
+            }
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
         }
-        written.push(s.key);
     }
     let mut after = BTreeMap::new();
     for k in written {
-        after.insert(k, b.read(k)?);
+        match b.read(k) {
+            Ok(r) => {
+                after.insert(k, r);
+            }
+            Err(e) => {
+                failed.get_or_insert(e);
+                break;
+            }
+        }
     }
-    Ok(after)
+    match failed {
+        None => Ok(after),
+        Some(msg) => Err(Refused {
+            msg,
+            written: after,
+        }),
+    }
+}
+
+/// The lines for the keys a refused plan wrote before the refusal, from their read-back.
+pub fn written_lines(name: &str, plan: &Plan, before: &Reads, r: &Refused) -> Vec<String> {
+    let lines = plan.steps.iter().filter_map(|s| {
+        Some(change_line(
+            name,
+            s.key,
+            &before[&s.key],
+            r.written.get(&s.key)?,
+        ))
+    });
+    let mut out: Vec<String> = lines.collect();
+    if out.is_empty() {
+        out.push(format!("{name}: nothing was written"));
+    } else {
+        out.insert(0, format!("{name}: written before the refusal:"));
+    }
+    out
 }
 
 /// `config <node> <path>`: the line for the key's value, ` (default)` when nothing is stored.
@@ -764,7 +810,7 @@ mod tests {
         let mut b = board(lp);
         let (reads, unknown) = read_board(&mut b, &plan_keys(f))?;
         let plan = plan(f, &reads, &unknown, replace).map_err(|p| format!("{p:?}"))?;
-        let after = execute(&mut b, &plan)?;
+        let after = execute(&mut b, &plan).map_err(|r| r.msg)?;
         let lines = report(&b.name, &plan, &reads, &after);
         Ok((plan, lines))
     }
@@ -919,29 +965,69 @@ mod tests {
             "m.json",
             json!({ "control": { "mode": "balance", "frame": "rigid", "side": "right" } }),
         )]);
+        // Run the plan; on a refusal, the message and the lines for what was written before it.
+        let refused = |lp: &mut Loop| {
+            let mut b = board(lp);
+            let (reads, unknown) = read_board(&mut b, &plan_keys(&f)).unwrap();
+            let plan = plan(&f, &reads, &unknown, false).unwrap();
+            let r = execute(&mut b, &plan).unwrap_err();
+            let lines = written_lines(&b.name, &plan, &reads, &r);
+            (r.msg, lines)
+        };
         // Armed from the first write: the board is unchanged, whatever --force says.
         let mut lp = Loop::new();
         lp.board.resp.set_armed(true);
-        let e = run(&mut lp, &f, false).unwrap_err();
         assert_eq!(
-            e,
-            "rover-left: control.mode: refused: armed; nothing was written"
+            refused(&mut lp),
+            (
+                "rover-left: control.mode: refused: armed".to_string(),
+                vec!["rover-left: nothing was written".to_string()]
+            )
         );
         assert_eq!(records(&mut lp)[&k(0x22, 0)].status, CFG_DEFAULT);
 
-        // Arms after the first write.
+        // Arms after the first write: that key is read back and reported as the board holds it.
         let mut lp = Loop::new();
         lp.arm_after = Some(1);
-        let e = run(&mut lp, &f, false).unwrap_err();
         assert_eq!(
-            e,
-            "rover-left: control.frame: refused: armed; written before it: control.mode"
+            refused(&mut lp),
+            (
+                "rover-left: control.frame: refused: armed".to_string(),
+                vec![
+                    "rover-left: written before the refusal:".to_string(),
+                    "rover-left: control.mode: throttle (default) -> balance".to_string(),
+                ]
+            )
         );
         let r = records(&mut lp);
         assert_eq!(
             (r[&k(0x22, 0)].status, r[&k(0x25, 0)].status),
             (CFG_OK, CFG_DEFAULT)
         );
+    }
+
+    /// `apply` never un-stores: a `null` (a position a dump of another board did not store) leaves
+    /// the key alone; `replace` un-stores it (`specs/cli-config.md` section 2.1).
+    #[test]
+    fn a_null_unstores_under_replace_and_is_left_alone_under_apply() {
+        let f = files(&[(
+            "dump.json",
+            json!({ "control": { "sf_gains": [3491, null] } }),
+        )]);
+        let stored = |v: i16| ConfigResp {
+            status: CFG_OK,
+            tag: Type::I16.tag(),
+            bytes: v.to_le_bytes().to_vec(),
+        };
+        let reads: Reads = [(k(0x79, 0), stored(3491)), (k(0x79, 1), stored(4002))]
+            .into_iter()
+            .collect();
+        let apply = plan(&f, &reads, &[], false).unwrap();
+        assert!(apply.steps.is_empty(), "{:?}", apply.steps);
+        assert_eq!(apply.unchanged, 2);
+        let replace = plan(&f, &reads, &[], true).unwrap();
+        let steps: Vec<(Key, Act)> = replace.steps.iter().map(|s| (s.key, s.act)).collect();
+        assert_eq!(steps, [(k(0x79, 1), Act::Unstore)]);
     }
 
     #[test]
