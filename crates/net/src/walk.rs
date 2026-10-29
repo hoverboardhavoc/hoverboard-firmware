@@ -359,6 +359,11 @@ pub struct Responder {
     /// class"): the node's own fact, never stored, so the read-only registry row only refuses
     /// writes.
     class: u8,
+    /// The node's own default `device.name`, answered for a `CONFIG_READ` of an unstored
+    /// `device.name` in place of the registry's (`specs/cli-config.md` section 6.2): the bridge's
+    /// MAC-based name, which it never writes to its store. `None` on a board, which answers the
+    /// registry default.
+    default_name: Option<&'static [u8]>,
     /// The next grant's offset inside this node's guest slice ([`guest_slice`]). The slice itself
     /// is derived from the live address at each grant, so an `ASSIGN` or a boot-time restore moves
     /// the allocator to the new slice with no further state.
@@ -390,6 +395,7 @@ impl Responder {
             fw_ver,
             mcu,
             class,
+            default_name: None,
             guest_slot: 0,
             probe: None,
             armed: false,
@@ -404,6 +410,33 @@ impl Responder {
     /// no in-RAM adopt). Reads are unaffected.
     pub fn set_armed(&mut self, armed: bool) {
         self.armed = armed;
+    }
+
+    /// Answer `name` for a read of an unstored `device.name`, with `CFG_DEFAULT`: a node whose
+    /// default name is its own rather than the registry's (the bridge, `specs/hoverboard-bridge.md`,
+    /// "Its store").
+    pub fn set_default_name(&mut self, name: &'static [u8]) {
+        self.default_name = Some(name);
+    }
+
+    /// The value a `CONFIG_READ` of `key` answers, and whether a record holds it: `node.class` from
+    /// the node, an unstored `device.name` from the node's own default when it has one, everything
+    /// else from the store.
+    fn read_value<'s, F: Flash>(
+        &self,
+        store: &'s Store<F>,
+        key: Key,
+    ) -> Result<(Value<'s>, Stored), DynError> {
+        if key == NODE_CLASS.key() {
+            return Ok((Value::U8(self.class), Stored::Yes));
+        }
+        let read = store.get_value(key)?;
+        match (read.1, self.default_name) {
+            (Stored::No, Some(name)) if key == DEVICE_NAME.key() => {
+                Ok((Value::Str(name), Stored::No))
+            }
+            _ => Ok(read),
+        }
     }
 
     /// Whether a `CONFIG_WRITE` / `_MULTI` entry has persisted since this was last called, and
@@ -562,14 +595,7 @@ impl Responder {
         let mut resp: PduBuf = Vec::new();
         let _ = resp.push(key.field_id);
         let _ = resp.push(key.index);
-        // `node.class` is the node's, not the store's: answered from the responder, as a value the
-        // node holds.
-        let value = if key == NODE_CLASS.key() {
-            Ok((Value::U8(self.class), Stored::Yes))
-        } else {
-            store.get_value(key)
-        };
-        match value {
+        match self.read_value(store, key) {
             Ok((v, stored)) => {
                 let _ = resp.push(if stored == Stored::Yes {
                     CFG_OK
@@ -603,7 +629,7 @@ impl Responder {
         let _ = resp.push(key.index);
         let _ = resp.push(status);
         if status == CFG_OK {
-            if let Ok((v, _)) = store.get_value(key) {
+            if let Ok((v, _)) = self.read_value(store, key) {
                 push_value(&mut resp, &v);
             }
         } else {

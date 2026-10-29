@@ -42,7 +42,7 @@ use trouble_host::prelude::ExternalController;
 use esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN;
 use hoverboard_bridge_core::gdb::Gdb;
 use hoverboard_bridge_core::mailbox::MailboxPort;
-use hoverboard_bridge_core::node::{advertised_name, Node, BRIDGE_NAME_MAX};
+use hoverboard_bridge_core::node::{advertised_name, default_name, Node, BRIDGE_NAME_MAX};
 use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
 #[cfg(feature = "boot-log")]
 use hoverboard_bridge_core::svc::Platform;
@@ -64,6 +64,8 @@ static IMAGE: ConstStaticCell<ImageBuffer> = ConstStaticCell::new(ImageBuffer::n
 /// The name BLE advertises and mDNS answers for (`<name>.local`): the store's `device.name`, read
 /// at boot.
 static NAME: StaticCell<[u8; BRIDGE_NAME_MAX]> = StaticCell::new();
+/// The MAC-based default name, which the node answers for an unstored `device.name`.
+static DEFAULT_NAME: StaticCell<[u8; 14]> = StaticCell::new();
 /// The store's region, mirrored in RAM (`keys`).
 static KEYS_MIRROR: ConstStaticCell<[u8; keys::REGION]> = ConstStaticCell::new([0; keys::REGION]);
 /// The store's flash.
@@ -101,10 +103,10 @@ fn build(swd_khz: u32) -> Build {
     }
 }
 
-/// The name, from `device.name` in the store ([`advertised_name`]).
-fn name(store: &mut store::Store<'_, KeysFlash>, mac: [u8; 6]) -> &'static str {
+/// The name, from `device.name` in the store or the default ([`advertised_name`]).
+fn name(store: &store::Store<'_, KeysFlash>, default: &[u8]) -> &'static str {
     let buf = NAME.init([0; BRIDGE_NAME_MAX]);
-    let n = advertised_name(store, mac, buf);
+    let n = advertised_name(store, default, buf);
     core::str::from_utf8(&buf[..n]).unwrap_or("hb-bridge")
 }
 
@@ -141,11 +143,12 @@ async fn main(spawner: Spawner) {
         keys.ram_only();
     }
     let mounted = keys.persists();
-    let Ok(mut store) = store::Store::mount(keys) else {
+    let Ok(store) = store::Store::mount(keys) else {
         // An erased region always mounts; nothing to run on otherwise.
         panic!("the store did not mount on an erased region")
     };
-    let name = name(&mut store, mac);
+    let default = DEFAULT_NAME.init(default_name(mac));
+    let name = name(&store, default);
     boot!(
         "store {}, name {}",
         if mounted { "mounted" } else { "NOT mounted" },
@@ -163,7 +166,7 @@ async fn main(spawner: Spawner) {
     let platform = EspPlatform::new(FlashStorage::new(p.FLASH), table);
     let build = build(khz);
     let fw_ver = u16::from_be_bytes([build.version[0], build.version[1]]);
-    let node = NODE.init(Node::new(store, mounted, fw_ver));
+    let node = NODE.init(Node::new(store, mounted, fw_ver, default));
     let svc = SERVICE.init(Service::new(
         build,
         IMAGE.take(),
