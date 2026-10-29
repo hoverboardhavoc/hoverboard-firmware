@@ -246,6 +246,29 @@ fn a_boards_store_as_a_file_through_the_binary() {
     let missing = scratch("missing.json");
     let (code, _, err) = cli_code(&["--tcp=127.0.0.1:9", "diff", "x", &missing]);
     assert_eq!(code, Some(2), "{err}");
+    // diff's 1 means changes alone: a usage error is 2 like any other, wherever it stands.
+    for args in [
+        &["--tcp=127.0.0.1:9", "diff", "x", "f.json", "--bogus"][..],
+        &["--bogus", "--tcp=127.0.0.1:9", "diff", "x", "f.json"],
+        &["--tcp=127.0.0.1:9", "diff", "--yes", "x", "f.json"],
+        &["--tcp=127.0.0.1:9", "diff"],
+        &[
+            "--tcp=127.0.0.1:9",
+            "--tcp=127.0.0.1:9",
+            "diff",
+            "x",
+            "f.json",
+        ],
+    ] {
+        let (code, _, err) = cli_code(args);
+        assert_eq!(code, Some(2), "{args:?}: {err}");
+        assert!(err.starts_with("error: "), "{err}");
+    }
+    let (code, _, err) = cli_code(&["--bogus", "--tcp=127.0.0.1:9", "apply", "x", "f.json"]);
+    assert_eq!(
+        (code, err.trim()),
+        (Some(1), "error: unknown option --bogus")
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
