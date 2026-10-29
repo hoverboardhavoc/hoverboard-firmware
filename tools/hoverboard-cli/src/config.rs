@@ -494,14 +494,22 @@ pub fn shown(key: Key, r: &ConfigResp) -> String {
 }
 
 /// What the board will answer for `key` after `step`, as `CONFIG_RESP` carries it: the value, or
-/// for an un-store the registry's default.
+/// for an un-store the registry's default. A default a node may answer itself
+/// ([`store::NODE_DEFAULTS`]) is not known before the write, so it carries no value and shows as
+/// `(default)` alone (`specs/cli-config.md` section 4.3).
 fn predicted(step: &Step) -> ConfigResp {
+    let unknown = ConfigResp {
+        status: CFG_DEFAULT,
+        tag: ERASED_TAG,
+        bytes: Vec::new(),
+    };
     match &step.bytes {
         Some(b) => ConfigResp {
             status: CFG_OK,
             tag: step.storage.tag(),
             bytes: b.clone(),
         },
+        None if row_of(step.key).is_some_and(|r| r.node_default()) => unknown,
         None => match store::lookup_key(step.key) {
             Some(def) => {
                 let mut buf = [0u8; 64];
@@ -512,11 +520,7 @@ fn predicted(step: &Step) -> ConfigResp {
                     bytes: buf[..n].to_vec(),
                 }
             }
-            None => ConfigResp {
-                status: CFG_DEFAULT,
-                tag: ERASED_TAG,
-                bytes: Vec::new(),
-            },
+            None => unknown,
         },
     }
 }
@@ -1071,6 +1075,60 @@ mod tests {
         let steps: Vec<(Key, Act)> = replace.steps.iter().map(|s| (s.key, s.act)).collect();
         assert_eq!(steps, [(k(0x79, 1), Act::Unstore)]);
         assert!(replace.kept.is_empty());
+    }
+
+    /// An un-store of a key whose default is the node's (a bridge's `device.name`) shows
+    /// `(default)` with no value before the write, and the read-back's value after it; a key whose
+    /// default is the table's shows that default (`specs/cli-config.md` section 4.3).
+    #[test]
+    fn an_unstored_node_default_shows_no_value_until_read_back() {
+        let f = files(&[("empty.json", json!({}))]);
+        let name = ConfigResp {
+            status: CFG_OK,
+            tag: Type::Str.tag(),
+            bytes: b"rover-esp".to_vec(),
+        };
+        let mode = ConfigResp {
+            status: CFG_OK,
+            tag: Type::U8.tag(),
+            bytes: vec![1],
+        };
+        let reads: Reads = [(k(0x10, 0), name), (k(0x22, 0), mode)]
+            .into_iter()
+            .collect();
+        let plan = plan(&f, &reads, &[], true).unwrap();
+        assert_eq!(
+            report("esp", &plan, &reads, &BTreeMap::new()),
+            [
+                "esp: 0 changed, 0 pinned, 0 unchanged, 2 un-stored",
+                "esp: device.name: \"rover-esp\" -> (default)",
+                "esp: control.mode: balance -> throttle (default)",
+            ]
+        );
+        let after: BTreeMap<Key, ConfigResp> = [
+            (
+                k(0x10, 0),
+                ConfigResp {
+                    status: CFG_DEFAULT,
+                    tag: Type::Str.tag(),
+                    bytes: b"hb-bridge-ab12".to_vec(),
+                },
+            ),
+            (
+                k(0x22, 0),
+                ConfigResp {
+                    status: CFG_DEFAULT,
+                    tag: Type::U8.tag(),
+                    bytes: vec![0],
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            report("esp", &plan, &reads, &after)[1],
+            "esp: device.name: \"rover-esp\" -> \"hb-bridge-ab12\" (default)"
+        );
     }
 
     #[test]
