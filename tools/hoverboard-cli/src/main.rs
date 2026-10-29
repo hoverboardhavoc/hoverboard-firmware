@@ -327,6 +327,7 @@ fn print_info(i: &espsvc::EspInfo) {
         Some(espsvc::WifiState::Up) => println!("wifi        up, {a}.{b}.{c}.{d}"),
         Some(espsvc::WifiState::Joined) => println!("wifi        joined, no address yet"),
         Some(espsvc::WifiState::Down) => println!("wifi        not joined"),
+        Some(espsvc::WifiState::NotConfigured) => println!("wifi        not configured"),
         None => println!("wifi        {}", i.wifi),
     }
     println!("slot        {}", slot_name(i));

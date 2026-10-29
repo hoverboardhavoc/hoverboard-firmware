@@ -322,6 +322,9 @@ pub enum WifiState {
     Joined = 1,
     /// Associated and addressed: the console and the mDNS name are served.
     Up = 2,
+    /// No network in the store (`wifi.ssid` empty or unstored): the station is not started
+    /// (`specs/bridge-onboarding.md` section 2.1).
+    NotConfigured = 3,
 }
 
 impl WifiState {
@@ -331,6 +334,7 @@ impl WifiState {
             0 => WifiState::Down,
             1 => WifiState::Joined,
             2 => WifiState::Up,
+            3 => WifiState::NotConfigured,
             _ => return None,
         })
     }
