@@ -815,6 +815,34 @@ impl Via<'_> {
     }
 }
 
+/// Every command word; any other is a usage error before a link is opened.
+const COMMANDS: &[&str] = &[
+    "scan",
+    "nodes",
+    "name",
+    "config",
+    "dump",
+    "diff",
+    "apply",
+    "replace",
+    "compact",
+    "fields",
+    "info",
+    "id",
+    "flash",
+    "update-esp",
+    "clear-protection",
+    "disarm",
+    "halt",
+    "resume",
+    "reset",
+    "reset-halt",
+    "read",
+    "write",
+    "watch",
+    "drive",
+];
+
 /// Run the command line. `diff` exits 2 on every error, usage errors included, so its 1 means
 /// only "there are changes" (`specs/cli-config.md` section 4.2).
 fn run(args: &[String]) -> Result<u8, String> {
@@ -882,13 +910,34 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
             }
         }
     }
-    *cmd_out = rest.first().map(|c| c.to_string());
+    // The command word is the first argument that is neither a flag nor `--secs`'s value, wherever
+    // the flags stand; it moves to the front, so the positional arguments follow it.
+    let mut word = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--secs" => i += 2,
+            a if a.starts_with("--") => i += 1,
+            _ => {
+                word = Some(i);
+                break;
+            }
+        }
+    }
+    if let Some(i) = word {
+        let w = rest.remove(i);
+        rest.insert(0, w);
+    }
+    *cmd_out = word.map(|_| rest[0].to_string());
     if let Some(e) = early {
         return Err(e);
     }
     let via = via.unwrap_or(Via::Ble(None));
     let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
-    let cmd = *rest.first().ok_or(usage)?;
+    let cmd = match word {
+        Some(_) if COMMANDS.contains(&rest[0]) => rest[0],
+        _ => return Err(usage.into()),
+    };
     let e = |e: ClientError| e.to_string();
 
     // The configuration commands' flags, wherever they stand; what remains is positional.
@@ -1247,7 +1296,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
                 .collect();
             println!("stages: {}", stages.join(", "));
         }
-        _ => return Err(usage.into()),
+        _ => unreachable!("{cmd} is in COMMANDS and handled above"),
     }
     Ok(0)
 }
