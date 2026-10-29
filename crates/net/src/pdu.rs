@@ -76,6 +76,10 @@ pub enum Opcode {
     ConfigResp = 0x32,
     /// Write a whole board definition in a few PDUs.
     ConfigWriteMulti = 0x33,
+    /// Compact the node's store now, so superseded values and un-stored keys are erased from flash
+    /// (`specs/cli-config.md` section 6.3). `0x36`, not the `0x34` that section and `specs/l3.md`
+    /// give it: `0x34` and `0x35` are [`crate::walk::OP_TUNE_WRITE`] / `OP_TUNE_READ`.
+    ConfigCompact = 0x36,
 }
 
 impl Opcode {
@@ -98,6 +102,7 @@ impl Opcode {
             0x31 => Some(Opcode::ConfigWrite),
             0x32 => Some(Opcode::ConfigResp),
             0x33 => Some(Opcode::ConfigWriteMulti),
+            0x36 => Some(Opcode::ConfigCompact),
             _ => None,
         }
     }
@@ -211,6 +216,7 @@ mod tests {
             Opcode::ConfigWrite,
             Opcode::ConfigResp,
             Opcode::ConfigWriteMulti,
+            Opcode::ConfigCompact,
         ] {
             let pdu = Pdu::from_op(op, 0x01, 0x80, &payload);
             let mut buf = [0u8; 16];
