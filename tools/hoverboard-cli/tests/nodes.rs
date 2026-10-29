@@ -124,12 +124,19 @@ fn nodes_name_config_and_esp_commands_by_node() {
     assert_eq!(out.trim(), "device.name of 0x03 (Hoverboard): ok");
     let (ok, out, err) = cli(&[&tcp, "config", "rover-esp", "0x10"]);
     assert!(ok, "{err}");
-    assert_eq!(out.trim(), "0x10.0 at 0x03 (rover-esp): ok \"rover-esp\"");
+    assert_eq!(out.trim(), "rover-esp: device.name = \"rover-esp\"");
 
-    // A typed write the board refuses, printed by name, and the command fails.
-    let (ok, out, _) = cli(&[&tcp, "config", "0x01", "0x03", "2"]);
+    // A key the board's image does not know: forced past the name table, refused by the board.
+    let (ok, _, err) = cli(&[&tcp, "config", "0x01", "0x99", "5", "--force"]);
     assert!(!ok);
-    assert!(out.contains(": read-only"), "{out}");
+    assert!(
+        err.contains("warning: 0x99 is not in the name table"),
+        "{err}"
+    );
+    assert!(
+        err.contains("0x99.0: the board does not know this key"),
+        "{err}"
+    );
 
     // An ESP command to the bridge on the link, and by name through the walk.
     let (ok, out, err) = cli(&[&tcp, "info"]);
@@ -160,6 +167,180 @@ fn nodes_name_config_and_esp_commands_by_node() {
     for d in after.drives {
         assert!(d >= 20, "{d} drive frames");
     }
+}
+
+/// A scratch file for one test, under cargo's per-test temporary directory.
+fn scratch(name: &str) -> String {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli-config");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name).to_string_lossy().into_owned()
+}
+
+/// The exit code of a run of the binary.
+fn cli_code(args: &[&str]) -> (Option<i32>, String, String) {
+    let o = Command::new(env!("CARGO_BIN_EXE_hoverboard-cli"))
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        o.status.code(),
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+        String::from_utf8_lossy(&o.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn a_boards_store_as_a_file_through_the_binary() {
+    // The refusals that need no board come first: they open no link.
+    let (ok, _, err) = cli(&[
+        "--tcp=127.0.0.1:9",
+        "config",
+        "rover-left",
+        "control.mod",
+        "balance",
+    ]);
+    assert!(!ok);
+    assert_eq!(
+        err.trim(),
+        "error: unknown field control.mod (did you mean control.mode?)"
+    );
+    let (ok, _, err) = cli(&[
+        "--tcp=127.0.0.1:9",
+        "config",
+        "x",
+        "control.mode.1",
+        "balance",
+    ]);
+    assert!(!ok);
+    assert_eq!(
+        err.trim(),
+        "error: control.mode has one index (--force writes index 1 anyway)"
+    );
+    let missing = scratch("missing.json");
+    let (code, _, err) = cli_code(&["--tcp=127.0.0.1:9", "diff", "x", &missing]);
+    assert_eq!(code, Some(2), "{err}");
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 14));
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+
+    // One field at a time, by name or by number.
+    let (code, out, err) = run(&["config", "0x01", "device.name", "rover-left"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out.trim(),
+        // The line starts with the name the board had when the command found it.
+        "Hoverboard: device.name: \"Hoverboard\" (default) -> \"rover-left\""
+    );
+    let (code, out, err) = run(&["config", "rover-left", "control.mode", "balance"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out.trim(),
+        "rover-left: control.mode: throttle (default) -> balance"
+    );
+    let (code, out, err) = run(&["config", "0x01", "0x4A.1", "PB5"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "rover-left: motors[1].hall.a: none (default) -> PB5\npin fields take effect at the next boot\n"
+    );
+    let (code, _, err) = run(&["config", "rover-lft", "control.mode", "balance"]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("no node named rover-lft (nodes: rover-left, Hoverboard, Hoverboard)"),
+        "{err}"
+    );
+
+    // Dump, then a diff against the dump reports nothing.
+    let file = scratch("rover-left.json");
+    let (code, _, err) = run(&["dump", "rover-left", &file]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        err.contains("rover-left: 3 stored keys written to"),
+        "{err}"
+    );
+    let dumped: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        dumped,
+        serde_json::json!({
+            "device": { "name": "rover-left" },
+            "control": { "mode": "balance" },
+            "motors": [{}, { "hall": { "a": "PB5" } }],
+        })
+    );
+    let (code, out, err) = run(&["diff", "rover-left", &file]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "rover-left: 0 changed, 0 pinned, 3 unchanged");
+
+    // A stray key: kept by a merge, un-stored by a replace.
+    let (code, _, err) = run(&["config", "rover-left", "control.frame", "rigid"]);
+    assert_eq!(code, Some(0), "{err}");
+    let (code, out, err) = run(&["diff", "--replace", "rover-left", &file]);
+    assert_eq!(code, Some(1), "{err}");
+    assert_eq!(
+        out,
+        "rover-left: 0 changed, 0 pinned, 3 unchanged, 1 un-stored\n\
+         rover-left: control.frame: rigid -> pivoting (default)\n"
+    );
+    // Without a terminal, replace refuses rather than asking; with --yes it un-stores.
+    let (code, _, err) = run(&["replace", "rover-left", &file]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("rover-left: replace would un-store 1 keys; give --yes"),
+        "{err}"
+    );
+    let (code, out, err) = run(&["replace", "rover-left", &file, "--yes"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "rover-left: 0 changed, 0 pinned, 3 unchanged, 1 un-stored\n\
+         rover-left: control.frame: rigid -> pivoting (default)\n"
+    );
+    let (code, out, err) = run(&["compact", "rover-left"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "rover-left: compact: ok");
+    let (code, out, err) = run(&["diff", "--replace", "rover-left", &file]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "rover-left: 0 changed, 0 pinned, 3 unchanged");
+    let (code, out, err) = run(&["config", "rover-left", "control.frame"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "rover-left: control.frame = pivoting (default)");
+
+    // apply merges: a file naming one changed key writes it and keeps the rest.
+    let machine = scratch("machine.json");
+    std::fs::write(&machine, r#"{ "control": { "mode": "throttle" } }"#).unwrap();
+    let (code, out, err) = run(&["apply", "rover-left", &machine]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "rover-left: 1 changed, 0 pinned, 0 unchanged, 2 kept\n\
+         rover-left: control.mode: balance -> throttle\n\
+         rover-left: kept: device.name = \"rover-left\" (stored, not in the file)\n\
+         rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn fields_json_is_the_committed_name_table() {
+    // `tools/robo-presets.py`'s test checks its names against this file, so the file must be what
+    // the binary prints: regenerate it with `hoverboard-cli fields --json > fields.json`.
+    let (ok, out, err) = cli(&["fields", "--json"]);
+    assert!(ok, "{err}");
+    // A checkout that turned the file's line ends into CRLF still holds the same table.
+    let committed = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/fields.json"))
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
+    assert!(
+        out == committed,
+        "tools/hoverboard-cli/fields.json is not `hoverboard-cli fields --json`'s output"
+    );
 }
 
 /// A board's own end of a link, its BLE module's place: one `net` responder on port 0, no bridge.

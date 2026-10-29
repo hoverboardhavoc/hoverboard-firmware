@@ -5,7 +5,13 @@
 //! hoverboard-cli scan [--secs N]
 //! hoverboard-cli [LINK] nodes
 //! hoverboard-cli [LINK] name <node> <text>
-//! hoverboard-cli [LINK] config <node> <field>[.<index>] [<value>]
+//! hoverboard-cli [LINK] config <node> <path> [<value>] [--force]
+//! hoverboard-cli [LINK] dump <node> [<file>]
+//! hoverboard-cli [LINK] diff [--replace] <node> <file>... [--force]
+//! hoverboard-cli [LINK] apply <node> <file>... [--force]
+//! hoverboard-cli [LINK] replace <node> <file>... [--yes] [--force]
+//! hoverboard-cli [LINK] compact <node>
+//! hoverboard-cli fields --json
 //! hoverboard-cli [LINK] [--node NODE] info | id | clear-protection
 //! hoverboard-cli [LINK] [--node NODE] disarm | halt | resume | reset | reset-halt
 //! hoverboard-cli [LINK] [--node NODE] read <addr> <len> | write <addr> <hex>
@@ -22,8 +28,14 @@
 //! ```
 //!
 //! A node is an address (`0x03`) or a `device.name`. `nodes` walks the machine with `net`'s
-//! controller and lists every node's address, class and name; `name` and `config` walk, then write
-//! or read the node's key, typed as the store's registry says, and print the status by name.
+//! controller and lists every node's address, class and name; `name` walks, then writes the node's
+//! `device.name` and prints the status by name.
+//!
+//! `config`, `dump`, `diff`, `apply`, `replace` and `compact` treat a board's store as a file
+//! (`specs/cli-config.md`): a field goes by its name in the store's name table (`motors.1.hall.a`,
+//! `control.mode`) or by its raw `<id>.<index>`, and a value takes the file's forms (`PC13`,
+//! `balance`, `null` to un-store). Every line about a board starts with its `device.name`. `diff`
+//! exits 0 with no changes, 1 with changes, 2 on an error. `fields --json` prints the name table.
 //!
 //! An ESP command goes to the bridge the link reaches (`0x00`, the one peer) unless `--node` names
 //! another, which is reached through the boards by its address. Over a board's own BLE module the
@@ -40,7 +52,8 @@
 //! slot. It needs no `ESP_INFO` it can decode: one from a bridge built for another layout is
 //! skipped with a note.
 
-use std::io::{BufRead, Write as _};
+use std::collections::BTreeMap;
+use std::io::{BufRead, IsTerminal, Write as _};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -57,8 +70,10 @@ use net::pdu::NO_ADDRESS;
 use tokio::runtime::Runtime;
 
 use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
+use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
+use hoverboard_cli::names;
 use hoverboard_cli::nodes::{self, class_name, Found, CLASS_MOTOR};
 use hoverboard_cli::transport::{Serial, Tcp};
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
@@ -516,6 +531,94 @@ fn walk_to(wire: &mut impl Wire, spec: &str) -> Result<(u8, Found), String> {
     Ok((src, f))
 }
 
+/// The name lines about a node start with: its `device.name`, or its address when it has none.
+fn node_name(f: &Found) -> String {
+    f.name.clone().unwrap_or_else(|| format!("{:#04x}", f.addr))
+}
+
+/// The files of `diff`, `apply` and `replace`, read and checked before any link is opened; the
+/// problems `--force` lets through are printed as warnings.
+fn load_files(paths: &[&str], force: bool) -> Result<config::Files, String> {
+    if paths.is_empty() {
+        return Err("give at least one file".into());
+    }
+    let texts = paths
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .map(|t| (p.to_string(), t))
+                .map_err(|e| format!("{p}: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let files = config::read_files(&texts);
+    for w in config::warnings(&files.problems, force) {
+        eprintln!("{w}");
+    }
+    config::stop_on(&files.problems, force)?;
+    Ok(files)
+}
+
+/// `diff`, `apply` and `replace` (`specs/cli-config.md` section 4): check the files, read the board,
+/// plan, and unless `dry`, write. Returns whether anything is (or would be) written.
+fn file_command(
+    via: &Via,
+    spec: &str,
+    paths: &[&str],
+    replace: bool,
+    dry: bool,
+    flags: &Flags,
+) -> Result<bool, String> {
+    let files = load_files(paths, flags.force)?;
+    let mut wire = Framed::new(via.open()?);
+    let (src, f) = walk_to(&mut wire, spec)?;
+    let mut b = Board {
+        wire: &mut wire,
+        src,
+        dst: f.addr,
+        name: node_name(&f),
+    };
+    let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
+    let plan = config::plan(&files, &reads, &unknown, replace).map_err(|p| {
+        let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
+        msgs.join("\nerror: ")
+    })?;
+    let none = BTreeMap::new();
+    if dry {
+        for l in config::report(&b.name, &plan, &reads, &none) {
+            println!("{l}");
+        }
+        return Ok(plan.changes());
+    }
+    let n = plan.unstores();
+    if replace && n > 0 && !flags.yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(format!(
+                "{}: replace would un-store {n} keys; give --yes to do it without a terminal",
+                b.name
+            ));
+        }
+        for l in config::report(&b.name, &plan, &reads, &none) {
+            println!("{l}");
+        }
+        if !confirm(&format!("Un-store {n} keys on {}?", b.name)) {
+            return Err("nothing written".into());
+        }
+    }
+    let after = config::execute(&mut b, &plan)?;
+    for l in config::report(&b.name, &plan, &reads, &after) {
+        println!("{l}");
+    }
+    Ok(plan.changes())
+}
+
+/// The flags of the configuration commands.
+struct Flags {
+    /// `--force`: the checks it may let through become warnings.
+    force: bool,
+    /// `--yes`: `replace` un-stores without asking.
+    yes: bool,
+}
+
 /// The motor controllers the walk found, for `watch` and `drive` with no nodes given.
 fn motor_controllers(wire: &mut impl Wire) -> Result<(u8, Vec<u8>), String> {
     let (src, found) = walk(wire)?;
@@ -662,7 +765,7 @@ impl Via<'_> {
     }
 }
 
-fn run(args: &[String]) -> Result<(), String> {
+fn run(args: &[String]) -> Result<u8, String> {
     let mut via = None;
     let mut node: Option<&str> = None;
     let mut rest: Vec<&str> = Vec::new();
@@ -677,8 +780,8 @@ fn run(args: &[String]) -> Result<(), String> {
             "--device" => |d| Via::Ble(Some(d)),
             "--serial" => |d| Via::Serial(d),
             "--tcp" => |d| Via::Tcp(d),
-            "--secs" | "--no-confirm" => {
-                rest.push(a); // scan's and update-esp's own options
+            "--secs" | "--no-confirm" | "--force" | "--yes" | "--replace" | "--json" => {
+                rest.push(a); // the commands' own options
                 continue;
             }
             "--node" => {
@@ -706,9 +809,118 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <field>[.<index>] [<value>]|info|id|flash <elf>|update-esp <bin> [--no-confirm]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
     let cmd = *rest.first().ok_or(usage)?;
     let e = |e: ClientError| e.to_string();
+
+    // The configuration commands' flags, wherever they stand; what remains is positional.
+    let flags = Flags {
+        force: rest.contains(&"--force"),
+        yes: rest.contains(&"--yes"),
+    };
+    let replace_flag = rest.contains(&"--replace");
+    let json_flag = rest.contains(&"--json");
+    if [
+        "config", "dump", "diff", "apply", "replace", "compact", "fields",
+    ]
+    .contains(&cmd)
+    {
+        rest.retain(|a| !["--force", "--yes", "--replace", "--json"].contains(a));
+        let allowed = match cmd {
+            "config" | "apply" => !flags.yes && !replace_flag && !json_flag,
+            "diff" => !flags.yes && !json_flag,
+            "replace" => !replace_flag && !json_flag,
+            "fields" => json_flag && !flags.force && !flags.yes && !replace_flag,
+            _ => !flags.force && !flags.yes && !replace_flag && !json_flag,
+        };
+        if !allowed {
+            return Err(usage.into());
+        }
+    }
+
+    if cmd == "fields" {
+        if rest.len() != 1 {
+            return Err("fields takes --json".into());
+        }
+        let text = serde_json::to_string_pretty(&names::table_json()).map_err(|e| e.to_string())?;
+        println!("{text}");
+        return Ok(0);
+    }
+
+    if cmd == "diff" {
+        let [_, spec, ref paths @ ..] = rest[..] else {
+            eprintln!("error: diff needs [--replace] <node> <file>...");
+            return Ok(2);
+        };
+        return Ok(
+            match file_command(&via, spec, paths, replace_flag, true, &flags) {
+                Ok(changes) => u8::from(changes),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    2
+                }
+            },
+        );
+    }
+
+    if cmd == "apply" || cmd == "replace" {
+        let [_, spec, ref paths @ ..] = rest[..] else {
+            return Err(format!("{cmd} needs <node> <file>..."));
+        };
+        file_command(&via, spec, paths, cmd == "replace", false, &flags)?;
+        return Ok(0);
+    }
+
+    if cmd == "dump" {
+        let (spec, out) = match rest[..] {
+            [_, spec] => (spec, None),
+            [_, spec, out] => (spec, Some(out)),
+            _ => return Err("dump needs <node> [<file>]".into()),
+        };
+        let mut wire = Framed::new(via.open()?);
+        let (src, f) = walk_to(&mut wire, spec)?;
+        let mut b = Board {
+            wire: &mut wire,
+            src,
+            dst: f.addr,
+            name: node_name(&f),
+        };
+        let (reads, unknown) = config::read_board(&mut b, &config::dump_keys())?;
+        for k in unknown {
+            eprintln!(
+                "warning: {}: the board does not know {}",
+                b.name,
+                names::path_of(k)
+            );
+        }
+        let stored = reads
+            .values()
+            .filter(|r| r.status == net::walk::CFG_OK)
+            .count();
+        let text = serde_json::to_string_pretty(&config::to_file(&reads))
+            .map_err(|e| e.to_string())?
+            + "\n";
+        match out {
+            Some(p) => {
+                std::fs::write(p, text).map_err(|e| format!("{p}: {e}"))?;
+                eprintln!("{}: {stored} stored keys written to {p}", b.name);
+            }
+            None => print!("{text}"),
+        }
+        return Ok(0);
+    }
+
+    if cmd == "compact" {
+        let [_, spec] = rest[..] else {
+            return Err("compact needs <node>".into());
+        };
+        let mut wire = Framed::new(via.open()?);
+        let (src, f) = walk_to(&mut wire, spec)?;
+        let status = nodes::compact(&mut wire, src, f.addr)?;
+        println!("{}: compact: {}", node_name(&f), nodes::status_name(status));
+        config_outcome(status)?;
+        return Ok(0);
+    }
 
     if cmd == "scan" {
         if !matches!(via, Via::Ble(_)) {
@@ -726,7 +938,7 @@ fn run(args: &[String]) -> Result<(), String> {
         for (name, addr, _) in rt.block_on(scan(secs))? {
             println!("{addr}  {name}");
         }
-        return Ok(());
+        return Ok(0);
     }
 
     if cmd == "nodes" {
@@ -744,7 +956,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 f.name.as_deref().unwrap_or("-")
             );
         }
-        return Ok(());
+        return Ok(0);
     }
 
     if cmd == "name" {
@@ -765,35 +977,47 @@ fn run(args: &[String]) -> Result<(), String> {
         let shown = nodes::name_status(f.class, r.status);
         println!("device.name of {}: {shown}", label(&f));
         return if r.status == net::walk::CFG_OK {
-            Ok(())
+            Ok(0)
         } else {
             Err(format!("refused: {shown}"))
         };
     }
 
     if cmd == "config" {
-        let (spec, field, value) = match rest[..] {
-            [_, spec, field] => (spec, field, None),
-            [_, spec, field, value] => (spec, field, Some(value)),
-            _ => return Err("config needs <node> <field>[.<index>] [<value>]".into()),
+        let (spec, path, value) = match rest[..] {
+            [_, spec, path] => (spec, path, None),
+            [_, spec, path, value] => (spec, path, Some(value)),
+            _ => return Err("config needs <node> <path> [<value>]".into()),
         };
-        let key = nodes::parse_key(field)?;
-        let typed = value.map(|v| nodes::parse_value(key, v)).transpose()?;
+        let (key, _) = names::parse_path(path).map_err(|p| p.msg)?;
+        if value.is_some() {
+            let checks = names::write_checks(key);
+            for w in config::warnings(&checks, flags.force) {
+                eprintln!("{w}");
+            }
+            config::stop_on(&checks, flags.force)?;
+        }
         let mut wire = Framed::new(via.open()?);
         let (src, f) = walk_to(&mut wire, spec)?;
-        let r = match typed {
-            None => nodes::read(&mut wire, src, f.addr, key)?,
-            Some((kind, bytes)) => nodes::write(&mut wire, src, f.addr, key, kind, &bytes)?,
+        let mut b = Board {
+            wire: &mut wire,
+            src,
+            dst: f.addr,
+            name: node_name(&f),
         };
-        let shown = r.value().map(|v| nodes::show(&v)).unwrap_or_default();
-        println!(
-            "{:#04x}.{} at {}: {} {shown}",
-            key.field_id,
-            key.index,
-            label(&f),
-            nodes::status_name(r.status)
-        );
-        return config_outcome(r.status);
+        match value {
+            None => println!("{}", config::config_read(&mut b, key)?),
+            Some(text) => {
+                let w = config::config_write(&mut b, key, text, flags.force)?;
+                for l in w.warnings {
+                    eprintln!("{l}");
+                }
+                for l in w.lines {
+                    println!("{l}");
+                }
+            }
+        }
+        return Ok(0);
     }
 
     if cmd == "watch" {
@@ -814,7 +1038,7 @@ fn run(args: &[String]) -> Result<(), String> {
             &AtomicBool::new(false),
         );
         print_summary(&tally, elapsed);
-        return Ok(());
+        return Ok(0);
     }
 
     if cmd == "drive" {
@@ -849,7 +1073,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         println!("neutral sent, power 0 sent");
         print_summary(&tally, elapsed);
-        return Ok(());
+        return Ok(0);
     }
 
     if cmd == "update-esp" {
@@ -860,7 +1084,7 @@ fn run(args: &[String]) -> Result<(), String> {
             ["--no-confirm"] => true,
             _ => return Err(need.into()),
         };
-        return update_esp(&via, node, path, no_confirm);
+        return update_esp(&via, node, path, no_confirm).map(|()| 0);
     }
 
     // Read the ELF before the link, so a refused image costs no connection.
@@ -955,15 +1179,15 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         _ => return Err(usage.into()),
     }
-    Ok(())
+    Ok(0)
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(msg) => {
-            eprintln!("hoverboard-cli: {msg}");
+            eprintln!("error: {msg}");
             ExitCode::FAILURE
         }
     }

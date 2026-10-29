@@ -15,8 +15,9 @@ description = "Terminal tool for the hoverboard bridge: scan, info, id, flash, u
 [dependencies]
 link = { path = "../../crates/link" }
 net = { path = "../../crates/net" }
-# The registry's field types, for `config`'s typed writes.
-store = { path = "../../crates/store" }
+# The registry's field types and the name table (`specs/cli-config.md` section 3), for `config` and
+# the file commands.
+store = { path = "../../crates/store", features = ["names"] }
 linkctl = { path = "../../crates/linkctl" }
 espsvc = { path = "../../crates/espsvc" }
 embedded-io = "0.6"
@@ -31,6 +32,9 @@ uuid = "1"
 serialport = { version = "4", default-features = false }
 # `drive` sends its stop frames on Ctrl-C.
 ctrlc = "3"
+# A board's store as a JSON file (`dump`, `apply`, `replace`, `diff`, `fields --json`), in the order
+# a file gives its keys and the name table gives its fields.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 # The bridge side, with the simulated board, for the client-against-service test.
