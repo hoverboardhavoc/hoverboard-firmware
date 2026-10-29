@@ -815,8 +815,25 @@ impl Via<'_> {
     }
 }
 
+/// Run the command line. `diff` exits 2 on every error, usage errors included, so its 1 means
+/// only "there are changes" (`specs/cli-config.md` section 4.2).
 fn run(args: &[String]) -> Result<u8, String> {
+    let mut cmd = None;
+    match dispatch(args, &mut cmd) {
+        Err(e) if cmd.as_deref() == Some("diff") => {
+            eprintln!("error: {e}");
+            Ok(2)
+        }
+        r => r,
+    }
+}
+
+/// The command line's work; `cmd` is set to the command as soon as it is known, before any error
+/// in the options is returned.
+fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String> {
     let mut via = None;
+    // The first error in the options, returned once the command is known.
+    let mut early: Option<String> = None;
     let mut node: Option<&str> = None;
     let mut rest: Vec<&str> = Vec::new();
     let mut it = args.iter();
@@ -835,28 +852,39 @@ fn run(args: &[String]) -> Result<u8, String> {
                 continue;
             }
             "--node" => {
-                let v = match inline {
-                    Some(v) => v,
-                    None => it.next().ok_or("--node needs a value")?,
-                };
-                if node.replace(v).is_some() {
-                    return Err("give --node once".into());
+                match inline.or_else(|| it.next().map(String::as_str)) {
+                    Some(v) if node.replace(v).is_some() => {
+                        early.get_or_insert("give --node once".into());
+                    }
+                    Some(_) => {}
+                    None => {
+                        early.get_or_insert("--node needs a value".into());
+                    }
                 }
                 continue;
             }
-            o if o.starts_with("--") => return Err(format!("unknown option {o}")),
+            o if o.starts_with("--") => {
+                early.get_or_insert(format!("unknown option {o}"));
+                continue;
+            }
             _ => {
                 rest.push(a);
                 continue;
             }
         };
-        let v = match inline {
-            Some(v) => v,
-            None => it.next().ok_or_else(|| format!("{opt} needs a value"))?,
-        };
-        if via.replace(make(v)).is_some() {
-            return Err("give one of --device, --serial, --tcp".into());
+        match inline.or_else(|| it.next().map(String::as_str)) {
+            Some(v) if via.replace(make(v)).is_some() => {
+                early.get_or_insert("give one of --device, --serial, --tcp".into());
+            }
+            Some(_) => {}
+            None => {
+                early.get_or_insert(format!("{opt} needs a value"));
+            }
         }
+    }
+    *cmd_out = rest.first().map(|c| c.to_string());
+    if let Some(e) = early {
+        return Err(e);
     }
     let via = via.unwrap_or(Via::Ble(None));
     let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
@@ -899,18 +927,9 @@ fn run(args: &[String]) -> Result<u8, String> {
 
     if cmd == "diff" {
         let [_, spec, ref paths @ ..] = rest[..] else {
-            eprintln!("error: diff needs [--replace] <node> <file>...");
-            return Ok(2);
+            return Err("diff needs [--replace] <node> <file>...".into());
         };
-        return Ok(
-            match file_command(&via, spec, paths, replace_flag, true, &flags) {
-                Ok(changes) => u8::from(changes),
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    2
-                }
-            },
-        );
+        return file_command(&via, spec, paths, replace_flag, true, &flags).map(u8::from);
     }
 
     if cmd == "apply" || cmd == "replace" {
