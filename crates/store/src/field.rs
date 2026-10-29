@@ -841,6 +841,12 @@ pub const MOTORS: u8 = 2;
 /// of a dump and never un-stores them.
 pub const BOARD_OWNED: &[u8] = &[NODE_ADDRESS.id(), LINK_SET.id(), MOTOR_ODOMETER.id()];
 
+/// The ids whose default a node may answer itself instead of the registry's (`specs/cli-config.md`
+/// sections 4.3 and 6.2): [`DEVICE_NAME`], which a bridge answers unstored with its MAC-based name
+/// (`net`'s `Responder::set_default_name`). A configuration tool cannot know that value before the
+/// key is un-stored, so it does not predict one.
+pub const NODE_DEFAULTS: &[u8] = &[DEVICE_NAME.id()];
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -1427,6 +1433,11 @@ pub mod names {
             BOARD_OWNED.contains(&self.id)
         }
 
+        /// Whether a node may answer this field's default itself ([`NODE_DEFAULTS`]).
+        pub fn node_default(&self) -> bool {
+            NODE_DEFAULTS.contains(&self.id)
+        }
+
         /// Whether the registry marks this field read-only (`node.class`).
         pub fn read_only(&self) -> bool {
             lookup(self.id).is_some_and(|d| d.read_only)
@@ -1620,6 +1631,12 @@ pub mod names {
                 .map(|r| r.path)
                 .collect();
             assert_eq!(ro, ["node.class"]);
+            let node: Vec<&str> = NAMES
+                .iter()
+                .filter(|r| r.node_default())
+                .map(|r| r.path)
+                .collect();
+            assert_eq!(node, ["device.name"]);
         }
     }
 }
