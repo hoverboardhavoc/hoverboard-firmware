@@ -2776,6 +2776,52 @@ fn a_commanded_connect_tries_for_500_ms_and_the_background_retry_makes_one_short
 }
 
 #[test]
+fn the_esp_answers_a_default_read_un_stores_its_name_and_compacts() {
+    // `specs/cli-config.md` sections 6.1 to 6.3, on the bridge's own `Responder` and store.
+    use crate::node::{advertised_name, BRIDGE_NAME_MAX};
+    let mut flash = RamFlash::erased(4096);
+    {
+        let mut m = Rig::new(&mut flash);
+        m.walk(0);
+        // `link_set` is not stored on the bridge: a successful read of the default.
+        let r = m.config_read(0x03, store::LINK_SET.key());
+        assert_eq!(r[2..], [net::walk::CFG_DEFAULT, store::Type::U8.tag(), 0]);
+
+        let mut w = vec![store::DEVICE_NAME.id(), 0, store::Type::Str.tag()];
+        w.extend_from_slice(b"rover-esp");
+        let r = m.ask(0, Opcode::ConfigWrite.to_u8(), 0x03, &w);
+        assert_eq!(Pdu::decode(&r[0]).unwrap().payload[2], net::walk::CFG_OK);
+        assert_eq!(
+            m.config_read(0x03, store::DEVICE_NAME.key())[2],
+            net::walk::CFG_OK
+        );
+
+        // Un-store it: the tombstone tag and no value.
+        let unstore = [store::DEVICE_NAME.id(), 0, store::ERASED_TAG];
+        let r = m.ask(0, Opcode::ConfigWrite.to_u8(), 0x03, &unstore);
+        assert_eq!(Pdu::decode(&r[0]).unwrap().payload[2], net::walk::CFG_OK);
+        let r = m.config_read(0x03, store::DEVICE_NAME.key());
+        assert_eq!(r[2], net::walk::CFG_DEFAULT);
+
+        // Compact: the superseded and un-stored records leave the bridge's store.
+        let r = m.ask(0, Opcode::ConfigCompact.to_u8(), 0x03, &[]);
+        assert_eq!(
+            Pdu::decode(&r[0]).unwrap().payload,
+            [0, 0, net::walk::CFG_OK, 0]
+        );
+    }
+    let mut s = store::Store::mount(&mut flash).unwrap();
+    let mut names = 0;
+    s.for_each_in(&[store::DEVICE_NAME.key()], |_, _, _| names += 1);
+    assert_eq!(names, 0, "no record of the name is left");
+    // The next boot advertises the default name again and writes it into the store.
+    let mut buf = [0; BRIDGE_NAME_MAX];
+    let n = advertised_name(&mut s, [0, 0, 0, 0, 0xAB, 0x12], &mut buf);
+    assert_eq!(&buf[..n], b"hb-bridge-ab12");
+    assert_eq!(s.get_text(store::DEVICE_NAME), b"hb-bridge-ab12");
+}
+
+#[test]
 fn the_boot_name_falls_back_for_a_stored_name_it_cannot_advertise() {
     use crate::node::{advertised_name, BRIDGE_NAME_MAX};
     let mac = [0, 0, 0, 0, 0xAB, 0x12];

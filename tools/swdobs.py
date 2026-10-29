@@ -296,7 +296,9 @@ def _read_motor_field(run, endpoint, field, name, clamp, motor, dst, config_bin)
     key = f"0x{field:02x}:{motor}"
     r = run(" ".join(shlex.quote(a) for a in [cfg, endpoint, "--dst", dst, key]))
     status, value = parse_config_read(r.stdout, field)
-    if status != "CFG_OK" or value is None:
+    # CFG_DEFAULT is a successful read of a key the board does not store: the value is its default
+    # (specs/cli-config.md section 6.1).
+    if status not in ("CFG_OK", "CFG_DEFAULT") or value is None:
         raise RuntimeError(
             f"reading {key} ({name}) failed (status {status}): {r.stdout.strip()[-200:]}"
         )

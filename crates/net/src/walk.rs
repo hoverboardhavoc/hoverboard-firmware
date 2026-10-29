@@ -29,7 +29,8 @@
 
 use heapless::Vec;
 use store::{
-    DynError, Flash, Key, Store, StoreError, Type, Value, DEVICE_NAME, NODE_ADDRESS, NODE_CLASS,
+    DynError, Flash, Key, Store, StoreError, Stored, Type, Value, DEVICE_NAME, ERASED_TAG,
+    NODE_ADDRESS, NODE_CLASS,
 };
 
 use crate::forward::Forwarder;
@@ -180,6 +181,11 @@ pub const CFG_NO_SPACE: u8 = 7;
 /// (`specs/bench-evidence/2026-10-23/store-compact-commit/`).
 pub const CFG_COMMIT_FAILED: u8 = 8;
 
+/// `CONFIG_RESP` status: a successful `CONFIG_READ` of a key with no record (`specs/cli-config.md`
+/// section 6.1). The value that follows is the field's default and nothing is stored; a key with a
+/// record answers [`CFG_OK`]. A client treats both as a successful read.
+pub const CFG_DEFAULT: u8 = 9;
+
 /// Map a store [`DynError`] to a `CONFIG_RESP` status byte.
 fn cfg_status(e: DynError) -> u8 {
     match e {
@@ -187,6 +193,14 @@ fn cfg_status(e: DynError) -> u8 {
         DynError::TypeMismatch => CFG_TYPE_MISMATCH,
         DynError::ReadOnly => CFG_READ_ONLY,
         DynError::Store(_) => CFG_STORE_ERR,
+    }
+}
+
+/// Map a failed `store.compact()` to a `CONFIG_RESP` status byte.
+fn compact_status(e: StoreError) -> u8 {
+    match e {
+        StoreError::CommitFailed => CFG_COMMIT_FAILED,
+        _ => CFG_STORE_ERR,
     }
 }
 
@@ -525,6 +539,7 @@ impl Responder {
             Some(Opcode::ConfigRead) => self.on_config_read(pdu, store, out),
             Some(Opcode::ConfigWrite) => self.on_config_write(pdu, store, out),
             Some(Opcode::ConfigWriteMulti) => self.on_config_write_multi(pdu, store, out),
+            Some(Opcode::ConfigCompact) => self.on_config_compact(pdu, store, out),
             // Delivered but not handled here: an opcode L3 does not interpret (the reserved
             // control/telemetry blocks) or a stray controller-bound walk opcode (PORTS /
             // ASSIGN_ACK / CONFIG_RESP). Handed back to the caller by copy; the firmware decides
@@ -547,15 +562,20 @@ impl Responder {
         let mut resp: PduBuf = Vec::new();
         let _ = resp.push(key.field_id);
         let _ = resp.push(key.index);
-        // `node.class` is the node's, not the store's: answered from the responder.
+        // `node.class` is the node's, not the store's: answered from the responder, as a value the
+        // node holds.
         let value = if key == NODE_CLASS.key() {
-            Ok((Value::U8(self.class), store::Stored::Yes))
+            Ok((Value::U8(self.class), Stored::Yes))
         } else {
             store.get_value(key)
         };
         match value {
-            Ok((v, _)) => {
-                let _ = resp.push(CFG_OK);
+            Ok((v, stored)) => {
+                let _ = resp.push(if stored == Stored::Yes {
+                    CFG_OK
+                } else {
+                    CFG_DEFAULT
+                });
                 push_value(&mut resp, &v);
             }
             Err(e) => {
@@ -633,11 +653,30 @@ impl Responder {
         self.reply_config(pdu.src, &resp, out);
     }
 
+    /// `CONFIG_COMPACT []` -> `store.compact()`, acked `CONFIG_RESP [0, 0, status, 0]` like the
+    /// multi-write (`specs/cli-config.md` section 6.3), so superseded values and un-stored keys are
+    /// erased from flash on request. It erases a page, so R4 refuses it while armed and touches no
+    /// flash; disarmed it is the compaction a full-page write already runs, under the same watchdog
+    /// budget (`specs/storage-layer.md`, "Compaction and the watchdog window").
+    fn on_config_compact<F: Flash>(&mut self, pdu: &Pdu, store: &mut Store<F>, out: &mut Emits) {
+        let status = if self.armed {
+            CFG_ARMED
+        } else {
+            match store.compact() {
+                Ok(()) => CFG_OK,
+                Err(e) => compact_status(e),
+            }
+        };
+        self.reply_config(pdu.src, &[0, 0, status, 0], out);
+    }
+
     /// Decode + validate a value of `type_tag` and persist it to `key`, returning the `CONFIG_RESP`
     /// status (`OK` / `ARMED` / `UNKNOWN_KEY` / `TYPE_MISMATCH` / `BAD`; `BAD` also for a bridge's
-    /// unusable `device.name`). The single choke point between `CONFIG_WRITE`/`_MULTI` and
-    /// `store.set_value`, which is what makes the R4 gate airtight: the armed check runs first,
-    /// before any decode, so an armed board persists nothing regardless of the request's shape.
+    /// unusable `device.name`). The tombstone tag with no value bytes un-stores the key instead
+    /// (`store.erase_value`, `specs/cli-config.md` section 6.2). The single choke point between
+    /// `CONFIG_WRITE`/`_MULTI` and the store's writes, which is what makes the R4 gate airtight: the
+    /// armed check runs first, before any decode, so an armed board persists nothing regardless of
+    /// the request's shape, un-stores included.
     fn apply_write<F: Flash>(
         &mut self,
         store: &mut Store<F>,
@@ -648,20 +687,30 @@ impl Responder {
         if self.armed {
             return CFG_ARMED;
         }
-        let Some(kind) = Type::from_tag(type_tag) else {
-            return CFG_BAD;
-        };
-        let Some(value) = Value::decode(kind, bytes) else {
-            return CFG_BAD;
-        };
-        if self.class == CLASS_BRIDGE && key == DEVICE_NAME.key() {
-            if let Value::Str(name) = value {
-                if !bridge_name_usable(name) {
-                    return CFG_BAD;
+        // `None` un-stores.
+        let value = if type_tag == ERASED_TAG && bytes.is_empty() {
+            None
+        } else {
+            let Some(kind) = Type::from_tag(type_tag) else {
+                return CFG_BAD;
+            };
+            let Some(value) = Value::decode(kind, bytes) else {
+                return CFG_BAD;
+            };
+            if self.class == CLASS_BRIDGE && key == DEVICE_NAME.key() {
+                if let Value::Str(name) = value {
+                    if !bridge_name_usable(name) {
+                        return CFG_BAD;
+                    }
                 }
             }
-        }
-        match store.set_value(key, value) {
+            Some(value)
+        };
+        let persist = |store: &mut Store<F>| match value {
+            Some(v) => store.set_value(key, v),
+            None => store.erase_value(key),
+        };
+        match persist(store) {
             Ok(()) => {
                 self.config_persisted = true;
                 CFG_OK
@@ -682,7 +731,7 @@ impl Responder {
             // compaction can never run under live torque. A second `Full` after compacting is a
             // genuine out-of-space and reports.
             Err(DynError::Store(StoreError::Full)) => match store.compact() {
-                Ok(()) => match store.set_value(key, value) {
+                Ok(()) => match persist(store) {
                     Ok(()) => {
                         self.config_persisted = true;
                         CFG_OK
@@ -692,8 +741,7 @@ impl Responder {
                     Err(DynError::Store(StoreError::Full)) => CFG_NO_SPACE,
                     Err(e) => cfg_status(e),
                 },
-                Err(StoreError::CommitFailed) => CFG_COMMIT_FAILED,
-                Err(_) => CFG_STORE_ERR,
+                Err(e) => compact_status(e),
             },
             Err(e) => cfg_status(e),
         }

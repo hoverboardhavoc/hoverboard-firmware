@@ -76,6 +76,17 @@ class Parsers(unittest.TestCase):
         self.assertEqual(cs.parse_config_read("  CONFIG_READ 0x20:0 -> CFG_ARMED\n", 0x20), ("CFG_ARMED", None))
         self.assertEqual(cs.parse_config_read(self.READ_OUT, 0x21), (None, None))
 
+    def test_a_default_answer_is_a_successful_read(self):
+        # A board that stores no 0x67 answers CFG_DEFAULT with the default (specs/cli-config.md
+        # section 6.1); the stand-up reads it as the board's scale, not as a failure.
+        out = "  CONFIG_READ 0x67:0 -> CFG_DEFAULT value U16(455)\n"
+        run = lambda cmd: type("R", (), {"returncode": 0, "stdout": out})()
+        self.assertEqual(cs.read_current_cal(run, "h:1", config_bin="cfg"), (455, 455))
+        refused = "  CONFIG_READ 0x67:0 -> CFG_ARMED\n"
+        run = lambda cmd: type("R", (), {"returncode": 0, "stdout": refused})()
+        with self.assertRaises(RuntimeError):
+            cs.read_current_cal(run, "h:1", config_bin="cfg")
+
     def test_config_write(self):
         self.assertTrue(cs.config_write_ok(self.WRITE_OUT, 0x20))
         self.assertFalse(cs.config_write_ok(self.WRITE_OUT.replace("(write -> read matches)", "MISMATCH"), 0x20))

@@ -17,7 +17,8 @@ use std::vec::Vec as StdVec;
 
 use crate::pdu::{is_unicast, BROADCAST, NO_ADDRESS};
 use store::{
-    Flash, Key, Store, Type, Value, DEVICE_NAME, MOTOR_CURRENT_LIMIT, MOTOR_METHOD, NODE_ADDRESS,
+    Flash, Key, Store, StoreError, Type, Value, DEVICE_NAME, MOTOR_CURRENT_LIMIT, MOTOR_METHOD,
+    NODE_ADDRESS,
 };
 
 const PS: usize = 1024;
@@ -836,11 +837,18 @@ fn config_write_then_read_round_trips_on_the_addressed_board() {
 }
 
 #[test]
-fn config_read_of_an_unwritten_field_returns_its_default() {
+fn config_read_of_an_unwritten_field_answers_cfg_default_with_its_default() {
     let mut m = walked_pair();
     let r = m.config_read(0x01, DEVICE_NAME.key());
-    assert_eq!(resp_status(&r), CFG_OK);
+    assert_eq!(resp_status(&r), CFG_DEFAULT);
+    assert_eq!(CFG_DEFAULT, 9);
     assert_eq!(resp_value(&r), Some(Value::Str(b"Hoverboard")));
+    // Once written, the same read answers CFG_OK.
+    let w = m.config_write(0x01, DEVICE_NAME.key(), Value::Str(b"rover-left"));
+    assert_eq!(resp_status(&w), CFG_OK);
+    let r = m.config_read(0x01, DEVICE_NAME.key());
+    assert_eq!(resp_status(&r), CFG_OK);
+    assert_eq!(resp_value(&r), Some(Value::Str(b"rover-left")));
 }
 
 #[test]
@@ -1003,7 +1011,7 @@ fn reboot_recovery_relearns_routes_from_cyclic_traffic() {
     // Routes are now known: a CONFIG addressed across the tree works without re-running the walk.
     let r = m.config_read(a2, MOTOR_METHOD.key());
     // (sent from the controller, which is still wired; the gateway now routes by its re-learned table)
-    assert_eq!(resp_status(&r), CFG_OK);
+    assert_eq!(resp_status(&r), CFG_DEFAULT);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1336,6 +1344,253 @@ fn an_armed_board_still_refuses_the_write_before_any_compaction_can_run() {
         resp_status(&w),
         CFG_ARMED,
         "armed refusal, not a store attempt"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Un-storing a key and compacting on request (`specs/cli-config.md` sections 6.2 and 6.3).
+// ---------------------------------------------------------------------------------------------------
+
+/// `CONFIG_WRITE [field_id, index, 0x00]`: the tombstone tag with no value bytes.
+fn unstore(m: &mut Mesh, dst: u8, key: Key) -> StdVec<u8> {
+    m.controller_send(
+        Opcode::ConfigWrite.to_u8(),
+        dst,
+        &[key.field_id, key.index, store::ERASED_TAG],
+    )
+    .expect("a CONFIG_RESP")
+}
+
+/// `CONFIG_COMPACT []` -> the `[0, 0, status, 0]` ack's status.
+fn compact(m: &mut Mesh, dst: u8) -> u8 {
+    let r = m
+        .controller_send(Opcode::ConfigCompact.to_u8(), dst, &[])
+        .expect("a CONFIG_RESP");
+    let p = Pdu::decode(&r).unwrap().payload.to_vec();
+    assert_eq!(p.len(), 4);
+    assert_eq!((p[0], p[1], p[3]), (0, 0, 0));
+    p[2]
+}
+
+/// The keys of every record on `flash`'s active page, in log order (committed or not).
+fn records(flash: &TestFlash) -> StdVec<Key> {
+    let ps = flash.page_size;
+    let b = &flash.bytes;
+    // The active side is the one with the newer seq; this test only needs the one with a magic and
+    // a committed seq, and after a compaction the old side is erased.
+    let base = (0..2)
+        .map(|p| p * ps)
+        .filter(|&o| {
+            b[o..o + 4] == store::record::MAGIC.to_le_bytes() && b[o + 4..o + 6] != [0xFF; 2]
+        })
+        .max_by_key(|&o| u16::from_le_bytes([b[o + 4], b[o + 5]]))
+        .expect("a valid side");
+    let mut keys = StdVec::new();
+    let mut off = base + store::record::PAGE_HEADER_LEN;
+    while let store::record::HeaderScan::Good(h) = store::record::parse_header(b, off) {
+        keys.push(Key {
+            field_id: h.field_id,
+            index: h.index,
+        });
+        off += store::record::record_size(h.len as usize);
+    }
+    keys
+}
+
+#[test]
+fn an_unstoring_config_write_returns_the_key_to_its_default() {
+    let mut m = walked_pair();
+    let key = MOTOR_CURRENT_LIMIT.key();
+    assert_eq!(
+        resp_status(&m.config_write(0x01, key, Value::U32(15_000))),
+        CFG_OK
+    );
+    assert!(m.boards[0].resp.take_config_persisted());
+
+    let w = unstore(&mut m, 0x01, key);
+    assert_eq!(resp_status(&w), CFG_OK);
+    // The echo is the value the key reads now, the default.
+    assert_eq!(resp_value(&w), Some(Value::U32(10_000)));
+    assert!(
+        m.boards[0].resp.take_config_persisted(),
+        "a stored value moved"
+    );
+    let r = m.config_read(0x01, key);
+    assert_eq!(resp_status(&r), CFG_DEFAULT);
+    assert_eq!(resp_value(&r), Some(Value::U32(10_000)));
+
+    // A key with nothing stored: answered OK, nothing written.
+    let before = m.boards[0].flash.bytes.clone();
+    assert_eq!(resp_status(&unstore(&mut m, 0x01, key)), CFG_OK);
+    assert!(m.boards[0].flash.bytes == before);
+
+    // The tombstone tag with value bytes is malformed; an unregistered id is unknown.
+    let bad = m
+        .controller_send(
+            Opcode::ConfigWrite.to_u8(),
+            0x01,
+            &[key.field_id, key.index, store::ERASED_TAG, 0x01],
+        )
+        .unwrap();
+    assert_eq!(resp_status(&bad), CFG_BAD);
+    let unknown = Key {
+        field_id: 0x99,
+        index: 0,
+    };
+    assert_eq!(
+        resp_status(&unstore(&mut m, 0x01, unknown)),
+        CFG_UNKNOWN_KEY
+    );
+}
+
+#[test]
+fn a_write_multi_entry_with_the_tombstone_tag_unstores_its_key() {
+    let mut m = walked_pair();
+    let (a, b) = (MOTOR_CURRENT_LIMIT.key(), MOTOR_METHOD.key());
+    assert_eq!(
+        resp_status(&m.config_write(0x01, a, Value::U32(15_000))),
+        CFG_OK
+    );
+    // Un-store `a` and write `b` in one PDU.
+    let multi = [
+        2,
+        a.field_id,
+        a.index,
+        store::ERASED_TAG,
+        0,
+        b.field_id,
+        b.index,
+        Type::U8.tag(),
+        1,
+        2,
+    ];
+    let r = m
+        .controller_send(Opcode::ConfigWriteMulti.to_u8(), 0x01, &multi)
+        .unwrap();
+    assert_eq!(resp_status(&r), CFG_OK);
+    assert_eq!(resp_status(&m.config_read(0x01, a)), CFG_DEFAULT);
+    let r = m.config_read(0x01, b);
+    assert_eq!(
+        (resp_status(&r), resp_value(&r)),
+        (CFG_OK, Some(Value::U8(2)))
+    );
+}
+
+#[test]
+fn an_armed_board_refuses_an_unstore_and_writes_nothing() {
+    let mut m = walked_pair();
+    let key = MOTOR_CURRENT_LIMIT.key();
+    assert_eq!(
+        resp_status(&m.config_write(0x01, key, Value::U32(15_000))),
+        CFG_OK
+    );
+    let _ = m.boards[0].resp.take_config_persisted();
+    m.boards[0].resp.set_armed(true);
+    let before = m.boards[0].flash.bytes.clone();
+
+    assert_eq!(resp_status(&unstore(&mut m, 0x01, key)), CFG_ARMED);
+    let multi = [1, key.field_id, key.index, store::ERASED_TAG, 0];
+    let r = m
+        .controller_send(Opcode::ConfigWriteMulti.to_u8(), 0x01, &multi)
+        .unwrap();
+    assert_eq!(resp_status(&r), CFG_ARMED);
+
+    assert!(m.boards[0].flash.bytes == before, "no flash touched");
+    assert!(!m.boards[0].resp.take_config_persisted());
+    let r = m.config_read(0x01, key);
+    assert_eq!(
+        (resp_status(&r), resp_value(&r)),
+        (CFG_OK, Some(Value::U32(15_000)))
+    );
+}
+
+#[test]
+fn an_unstore_on_a_full_page_compacts_and_retries() {
+    let mut m = walked_pair();
+    let key = MOTOR_METHOD.key();
+    assert_eq!(
+        resp_status(&m.config_write(0x01, key, Value::U8(2))),
+        CFG_OK
+    );
+    // Fill the active page with another key, through the store, stopping at the first Full.
+    {
+        let mut s = Store::mount(&mut m.boards[0].flash).unwrap();
+        while s.set(MOTOR_CURRENT_LIMIT, 1).is_ok() {}
+        // An empty name is a 10-byte record, a tombstone's size: once one no longer fits, neither
+        // does the tombstone.
+        while s.set_str(DEVICE_NAME, "").is_ok() {}
+        assert_eq!(s.set_str(DEVICE_NAME, ""), Err(StoreError::Full));
+    }
+    assert_eq!(resp_status(&unstore(&mut m, 0x01, key)), CFG_OK);
+    assert_eq!(resp_status(&m.config_read(0x01, key)), CFG_DEFAULT);
+}
+
+#[test]
+fn config_compact_leaves_only_the_latest_record_of_each_stored_key() {
+    let mut m = walked_pair();
+    let (a, b, c) = (
+        MOTOR_CURRENT_LIMIT.key(),
+        MOTOR_METHOD.key(),
+        DEVICE_NAME.key(),
+    );
+    for v in [11_000, 12_000, 13_000] {
+        assert_eq!(resp_status(&m.config_write(0x01, a, Value::U32(v))), CFG_OK);
+    }
+    assert_eq!(resp_status(&m.config_write(0x01, b, Value::U8(1))), CFG_OK);
+    assert_eq!(
+        resp_status(&m.config_write(0x01, c, Value::Str(b"x"))),
+        CFG_OK
+    );
+    assert_eq!(resp_status(&unstore(&mut m, 0x01, c)), CFG_OK);
+    assert!(records(&m.boards[0].flash).len() > 4);
+
+    assert_eq!(compact(&mut m, 0x01), CFG_OK);
+    let mut kept = records(&m.boards[0].flash);
+    kept.sort();
+    let mut want = std::vec![NODE_ADDRESS.key(), a, b];
+    want.sort();
+    assert_eq!(
+        kept, want,
+        "the latest of each stored key; the un-stored one is gone"
+    );
+    let r = m.config_read(0x01, a);
+    assert_eq!(
+        (resp_status(&r), resp_value(&r)),
+        (CFG_OK, Some(Value::U32(13_000)))
+    );
+    assert_eq!(resp_status(&m.config_read(0x01, c)), CFG_DEFAULT);
+    assert_eq!(m.persisted_addr(0), 0x01);
+}
+
+#[test]
+fn config_compact_is_refused_while_armed_and_erases_nothing() {
+    let mut m = walked_pair();
+    for v in [11_000, 12_000] {
+        let w = m.config_write(0x01, MOTOR_CURRENT_LIMIT.key(), Value::U32(v));
+        assert_eq!(resp_status(&w), CFG_OK);
+    }
+    m.boards[0].resp.set_armed(true);
+    let before = m.boards[0].flash.bytes.clone();
+    assert_eq!(compact(&mut m, 0x01), CFG_ARMED);
+    assert!(m.boards[0].flash.bytes == before, "no erase, no program");
+    m.boards[0].resp.set_armed(false);
+    assert_eq!(compact(&mut m, 0x01), CFG_OK);
+    assert!(m.boards[0].flash.bytes != before);
+}
+
+#[test]
+fn node_class_answers_ok_and_refuses_an_unstore_read_only() {
+    let mut m = walked_pair();
+    let before = m.boards[0].flash.bytes.clone();
+    assert_eq!(
+        resp_status(&unstore(&mut m, 0x01, store::NODE_CLASS.key())),
+        CFG_READ_ONLY
+    );
+    assert!(m.boards[0].flash.bytes == before);
+    let r = m.config_read(0x01, store::NODE_CLASS.key());
+    assert_eq!(
+        (resp_status(&r), resp_value(&r)),
+        (CFG_OK, Some(Value::U8(MOTOR)))
     );
 }
 

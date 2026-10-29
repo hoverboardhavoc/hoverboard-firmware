@@ -47,7 +47,9 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use net::walk::{CFG_ARMED, CFG_BAD, CFG_OK, CFG_STORE_ERR, CFG_TYPE_MISMATCH, CFG_UNKNOWN_KEY};
+use net::walk::{
+    CFG_ARMED, CFG_BAD, CFG_DEFAULT, CFG_OK, CFG_STORE_ERR, CFG_TYPE_MISMATCH, CFG_UNKNOWN_KEY,
+};
 use store::{Key, Type, Value};
 use swd_bridge::config::{
     parse_field_arg, parse_field_value, parse_key_arg, parse_type_name, parse_value_as,
@@ -79,6 +81,7 @@ fn status_name(s: u8) -> String {
         CFG_TYPE_MISMATCH => "CFG_TYPE_MISMATCH".into(),
         CFG_STORE_ERR => "CFG_STORE_ERR".into(),
         CFG_ARMED => "CFG_ARMED".into(),
+        CFG_DEFAULT => "CFG_DEFAULT".into(),
         other => format!("status {other}"),
     }
 }
@@ -294,7 +297,8 @@ fn run() -> Result<(), String> {
                     key.index,
                     describe(&r)
                 );
-                if r.status != CFG_OK {
+                // A key with no record answers CFG_DEFAULT with its default: a successful read.
+                if r.status != CFG_OK && r.status != CFG_DEFAULT {
                     failures += 1;
                 }
             }
