@@ -28,8 +28,12 @@ object = { version = "0.36", default-features = false, features = ["read_core", 
 regex = "1"
 sha2 = "0.10"
 uuid = "1"
-# The USB console (--serial). No libudev: only opening a named device is used.
+# The USB console (--serial), and the port list install-esp chooses from. No libudev: the list
+# comes from sysfs on Linux.
 serialport = { version = "4", default-features = false }
+# install-esp (specs/bridge-onboarding.md section 3.3): the flasher and the serial connection, with
+# Espressif's flasher stub, and none of espflash's own command line.
+espflash = { version = "~4.6", default-features = false, features = ["serialport"] }
 # `drive` sends its stop frames on Ctrl-C.
 ctrlc = "3"
 # A board's store as a JSON file (`dump`, `apply`, `replace`, `diff`, `fields --json`), in the order

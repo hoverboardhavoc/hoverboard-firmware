@@ -8,6 +8,7 @@ pub mod client;
 pub mod config;
 pub mod elf;
 pub mod guest;
+pub mod install;
 pub mod names;
 pub mod nodes;
 pub mod transport;
