@@ -40,6 +40,26 @@
     "read_only": false
   },
   {
+    "id": 17,
+    "path": "wifi.ssid",
+    "type": "str",
+    "index": "single",
+    "count": 1,
+    "kind": "str",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 18,
+    "path": "wifi.pass",
+    "type": "str",
+    "index": "single",
+    "count": 1,
+    "kind": "str",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
     "id": 32,
     "path": "current.limit",
     "type": "u32",

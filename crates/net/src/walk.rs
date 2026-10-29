@@ -30,7 +30,7 @@
 use heapless::Vec;
 use store::{
     DynError, Flash, Key, Store, StoreError, Stored, Type, Value, DEVICE_NAME, ERASED_TAG,
-    NODE_ADDRESS, NODE_CLASS,
+    NODE_ADDRESS, NODE_CLASS, SECRET, WIFI_PASS, WIFI_SSID,
 };
 
 use crate::forward::Forwarder;
@@ -130,10 +130,40 @@ pub fn bridge_name_usable(name: &[u8]) -> bool {
         && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-')
 }
 
+/// The longest `wifi.ssid` a bridge takes: what an 802.11 SSID holds.
+pub const WIFI_SSID_MAX: usize = 32;
+/// The shortest non-empty `wifi.pass` a bridge takes: a WPA2 passphrase's minimum.
+pub const WIFI_PASS_MIN: usize = 8;
+/// The longest `wifi.pass` a bridge takes: a WPA2 passphrase's maximum (a 64-digit hex PSK is not
+/// accepted). One `CONFIG_WRITE` carries at most 58 value bytes ([`MAX_PDU`] less the PDU header,
+/// the key and the type tag), so 59 to 63 bytes cannot be written over a link; the bound matters to
+/// a store written by an image that had no check.
+pub const WIFI_PASS_MAX: usize = 63;
+
+/// Whether a bridge can use `value` for `key` (`specs/bridge-onboarding.md` section 2.1): a
+/// `device.name` that passes [`bridge_name_usable`], a `wifi.ssid` of at most [`WIFI_SSID_MAX`]
+/// bytes, a `wifi.pass` that is empty or [`WIFI_PASS_MIN`] to [`WIFI_PASS_MAX`] bytes. Any other key
+/// or value is the store's to judge. A bridge's `CONFIG_WRITE` of a value this refuses answers
+/// [`CFG_BAD`]; a board stores any of them.
+pub fn bridge_value_usable(key: Key, value: &Value) -> bool {
+    let Value::Str(v) = value else {
+        return true;
+    };
+    if key == DEVICE_NAME.key() {
+        bridge_name_usable(v)
+    } else if key.field_id == WIFI_SSID.id() {
+        v.len() <= WIFI_SSID_MAX
+    } else if key.field_id == WIFI_PASS.id() {
+        v.is_empty() || (WIFI_PASS_MIN..=WIFI_PASS_MAX).contains(&v.len())
+    } else {
+        true
+    }
+}
+
 /// `CONFIG_RESP` status: success.
 pub const CFG_OK: u8 = 0;
 /// `CONFIG_RESP` status: a malformed request (unknown type tag, bad value bytes, truncated PDU), or
-/// a value the node cannot use (a bridge's `device.name` that fails [`bridge_name_usable`]).
+/// a value the node cannot use (a bridge's value that fails [`bridge_value_usable`]).
 pub const CFG_BAD: u8 = 1;
 /// `CONFIG_RESP` status: no field declares this `field_id`.
 pub const CFG_UNKNOWN_KEY: u8 = 2;
@@ -185,6 +215,11 @@ pub const CFG_COMMIT_FAILED: u8 = 8;
 /// section 6.1). The value that follows is the field's default and nothing is stored; a key with a
 /// record answers [`CFG_OK`]. A client treats both as a successful read.
 pub const CFG_DEFAULT: u8 = 9;
+
+/// `CONFIG_RESP` status: a `CONFIG_READ` of a stored secret (`store::SECRET`,
+/// `specs/bridge-onboarding.md` section 2.2). The key holds a value and no value follows: no node
+/// reads a secret back over a link. An unstored secret answers [`CFG_DEFAULT`] with its default.
+pub const CFG_SECRET: u8 = 10;
 
 /// Map a store [`DynError`] to a `CONFIG_RESP` status byte.
 fn cfg_status(e: DynError) -> u8 {
@@ -419,24 +454,25 @@ impl Responder {
         self.default_name = Some(name);
     }
 
-    /// The value a `CONFIG_READ` of `key` answers, and whether a record holds it: `node.class` from
-    /// the node, an unstored `device.name` from the node's own default when it has one, everything
-    /// else from the store.
+    /// What a `CONFIG_READ` of `key` answers: the value and the status, [`CFG_OK`] when a record
+    /// holds the value, [`CFG_DEFAULT`] when none does, and [`CFG_SECRET`] for a stored secret, whose
+    /// value no reply carries. `node.class` comes from the node, an unstored `device.name` from the
+    /// node's own default when it has one, everything else from the store.
     fn read_value<'s, F: Flash>(
         &self,
         store: &'s Store<F>,
         key: Key,
-    ) -> Result<(Value<'s>, Stored), DynError> {
+    ) -> Result<(Value<'s>, u8), DynError> {
         if key == NODE_CLASS.key() {
-            return Ok((Value::U8(self.class), Stored::Yes));
+            return Ok((Value::U8(self.class), CFG_OK));
         }
-        let read = store.get_value(key)?;
-        match (read.1, self.default_name) {
-            (Stored::No, Some(name)) if key == DEVICE_NAME.key() => {
-                Ok((Value::Str(name), Stored::No))
-            }
-            _ => Ok(read),
-        }
+        let (value, stored) = store.get_value(key)?;
+        Ok(match (stored, self.default_name) {
+            (Stored::Yes, _) if SECRET.contains(&key.field_id) => (value, CFG_SECRET),
+            (Stored::Yes, _) => (value, CFG_OK),
+            (Stored::No, Some(name)) if key == DEVICE_NAME.key() => (Value::Str(name), CFG_DEFAULT),
+            (Stored::No, _) => (value, CFG_DEFAULT),
+        })
     }
 
     /// Whether a `CONFIG_WRITE` / `_MULTI` entry has persisted since this was last called, and
@@ -596,13 +632,13 @@ impl Responder {
         let _ = resp.push(key.field_id);
         let _ = resp.push(key.index);
         match self.read_value(store, key) {
-            Ok((v, stored)) => {
-                let _ = resp.push(if stored == Stored::Yes {
-                    CFG_OK
+            Ok((v, status)) => {
+                let _ = resp.push(status);
+                if status == CFG_SECRET {
+                    let _ = resp.push(0); // no type tag, no value
                 } else {
-                    CFG_DEFAULT
-                });
-                push_value(&mut resp, &v);
+                    push_value(&mut resp, &v);
+                }
             }
             Err(e) => {
                 let _ = resp.push(cfg_status(e));
@@ -613,7 +649,8 @@ impl Responder {
     }
 
     /// `CONFIG_WRITE [field_id, index, type_tag, value...]` -> persist (`store.set_value`) and
-    /// `CONFIG_RESP [field_id, index, status, type_tag, value...]` echoing the stored value.
+    /// `CONFIG_RESP [field_id, index, status, type_tag, value...]` echoing the value a read answers
+    /// now, none for a stored secret.
     fn on_config_write<F: Flash>(&mut self, pdu: &Pdu, store: &mut Store<F>, out: &mut Emits) {
         if pdu.payload.len() < 3 {
             return;
@@ -628,12 +665,11 @@ impl Responder {
         let _ = resp.push(key.field_id);
         let _ = resp.push(key.index);
         let _ = resp.push(status);
-        if status == CFG_OK {
-            if let Ok((v, _)) = self.read_value(store, key) {
-                push_value(&mut resp, &v);
+        match self.read_value(store, key) {
+            Ok((v, read)) if status == CFG_OK && read != CFG_SECRET => push_value(&mut resp, &v),
+            _ => {
+                let _ = resp.push(0);
             }
-        } else {
-            let _ = resp.push(0);
         }
         self.reply_config(pdu.src, &resp, out);
     }
@@ -697,8 +733,8 @@ impl Responder {
     }
 
     /// Decode + validate a value of `type_tag` and persist it to `key`, returning the `CONFIG_RESP`
-    /// status (`OK` / `ARMED` / `UNKNOWN_KEY` / `TYPE_MISMATCH` / `BAD`; `BAD` also for a bridge's
-    /// unusable `device.name`). The tombstone tag with no value bytes un-stores the key instead
+    /// status (`OK` / `ARMED` / `UNKNOWN_KEY` / `TYPE_MISMATCH` / `BAD`; `BAD` also for a value a
+    /// bridge cannot use, [`bridge_value_usable`]). The tombstone tag with no value bytes un-stores the key instead
     /// (`store.erase_value`, `specs/cli-config.md` section 6.2). The single choke point between
     /// `CONFIG_WRITE`/`_MULTI` and the store's writes, which is what makes the R4 gate airtight: the
     /// armed check runs first, before any decode, so an armed board persists nothing regardless of
@@ -723,12 +759,8 @@ impl Responder {
             let Some(value) = Value::decode(kind, bytes) else {
                 return CFG_BAD;
             };
-            if self.class == CLASS_BRIDGE && key == DEVICE_NAME.key() {
-                if let Value::Str(name) = value {
-                    if !bridge_name_usable(name) {
-                        return CFG_BAD;
-                    }
-                }
+            if self.class == CLASS_BRIDGE && !bridge_value_usable(key, &value) {
+                return CFG_BAD;
             }
             Some(value)
         };
