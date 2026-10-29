@@ -27,6 +27,12 @@ pub struct Key {
 /// No real field may use it.
 pub const BLANK_FIELD_ID: u8 = 0xFF;
 
+/// The record `type` byte of a TOMBSTONE (`specs/storage-layer.md`, "Record format"): a committed,
+/// zero-length record saying "this key holds no value". A read whose newest record for the key is a
+/// tombstone returns the field's default, and compaction drops the key. It is not a [`Type`] (no
+/// [`Type::tag`] is `0x00`), so only the scan, compaction and the `CONFIG_WRITE` decoder see it.
+pub const ERASED_TAG: u8 = 0x00;
+
 /// The storage-layout type. It sizes/validates a record and (eventually) rides in the link's
 /// `CONFIG_RESP` so a consumer with no registry can interpret a value generically.
 ///

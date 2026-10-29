@@ -422,7 +422,7 @@ impl Responder {
     /// Restore the persisted `node_address` from flash into the live address (a reboot: the board
     /// re-reads its address and resumes; `specs/l3.md`, "Recovery after a reboot").
     pub fn restore_addr<F: Flash>(&mut self, store: &Store<F>) {
-        if let Ok(Value::U8(a)) = store.get_value(NODE_ADDRESS.key()) {
+        if let Ok((Value::U8(a), _)) = store.get_value(NODE_ADDRESS.key()) {
             self.fwd.set_addr(a);
         }
     }
@@ -549,12 +549,12 @@ impl Responder {
         let _ = resp.push(key.index);
         // `node.class` is the node's, not the store's: answered from the responder.
         let value = if key == NODE_CLASS.key() {
-            Ok(Value::U8(self.class))
+            Ok((Value::U8(self.class), store::Stored::Yes))
         } else {
             store.get_value(key)
         };
         match value {
-            Ok(v) => {
+            Ok((v, _)) => {
                 let _ = resp.push(CFG_OK);
                 push_value(&mut resp, &v);
             }
@@ -583,7 +583,7 @@ impl Responder {
         let _ = resp.push(key.index);
         let _ = resp.push(status);
         if status == CFG_OK {
-            if let Ok(v) = store.get_value(key) {
+            if let Ok((v, _)) = store.get_value(key) {
                 push_value(&mut resp, &v);
             }
         } else {

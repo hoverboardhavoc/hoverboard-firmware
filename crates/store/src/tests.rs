@@ -18,7 +18,7 @@ use crate::key::{Key, Type};
 use crate::record::{self, HeaderScan, MAGIC};
 #[cfg(feature = "test-fields")]
 use crate::run;
-use crate::store::{Store, StoreError, COMPACT_CHUNK};
+use crate::store::{Store, StoreError, Stored, COMPACT_CHUNK};
 
 const PS: usize = 1024;
 const PAGE_HEADER_LEN: usize = 8;
@@ -724,7 +724,7 @@ fn non_utf8_str_record_reads_back_as_its_bytes() {
     // The dynamic face agrees with the typed one, rather than one of them keeping the old rule.
     assert_eq!(
         s.get_value(DEVICE_NAME.key()).unwrap(),
-        crate::value::Value::Str(&[0xFF, 0xFE])
+        (crate::value::Value::Str(&[0xFF, 0xFE]), Stored::Yes)
     );
     // A wrong-TYPE record is still ignored: the default comes back. Only the charset check went.
     let mut b2 = RegionBuilder::new(PS);
@@ -859,7 +859,7 @@ mod dynamic {
         let mut s = Store::mount(&mut f).unwrap();
         let key = MOTOR_CURRENT_LIMIT.key();
         s.set_value(key, Value::U32(15_000)).unwrap();
-        assert_eq!(s.get_value(key).unwrap(), Value::U32(15_000));
+        assert_eq!(s.get_value(key).unwrap(), (Value::U32(15_000), Stored::Yes));
     }
 
     #[test]
@@ -869,11 +869,11 @@ mod dynamic {
         // Never written: the registry default comes back (10_000 for MOTOR_CURRENT_LIMIT).
         assert_eq!(
             s.get_value(MOTOR_CURRENT_LIMIT.key()).unwrap(),
-            Value::U32(10_000)
+            (Value::U32(10_000), Stored::No)
         );
         assert_eq!(
             s.get_value(DEVICE_NAME.key()).unwrap(),
-            Value::Str(b"Hoverboard")
+            (Value::Str(b"Hoverboard"), Stored::No)
         );
     }
 
@@ -883,7 +883,10 @@ mod dynamic {
         let mut s = Store::mount(&mut f).unwrap();
         let key = DEVICE_NAME.key();
         s.set_value(key, Value::Str(b"board-7")).unwrap();
-        assert_eq!(s.get_value(key).unwrap(), Value::Str(b"board-7"));
+        assert_eq!(
+            s.get_value(key).unwrap(),
+            (Value::Str(b"board-7"), Stored::Yes)
+        );
     }
 
     #[test]
@@ -897,7 +900,7 @@ mod dynamic {
             Err(DynError::TypeMismatch)
         );
         // The field is untouched: still the default.
-        assert_eq!(s.get_value(key).unwrap(), Value::U32(10_000));
+        assert_eq!(s.get_value(key).unwrap(), (Value::U32(10_000), Stored::No));
     }
 
     #[test]
@@ -908,11 +911,12 @@ mod dynamic {
         {
             let mut s = Store::mount(&mut f).unwrap();
             let key = crate::field::NODE_CLASS.key();
-            assert_eq!(s.get_value(key).unwrap(), Value::U8(0x01));
+            assert_eq!(s.get_value(key).unwrap(), (Value::U8(0x01), Stored::No));
             // Refused whatever the value, including a wrong-typed one: read-only is checked first.
             assert_eq!(s.set_value(key, Value::U8(0x02)), Err(DynError::ReadOnly));
             assert_eq!(s.set_value(key, Value::U16(2)), Err(DynError::ReadOnly));
-            assert_eq!(s.get_value(key).unwrap(), Value::U8(0x01));
+            assert_eq!(s.erase_value(key), Err(DynError::ReadOnly));
+            assert_eq!(s.get_value(key).unwrap(), (Value::U8(0x01), Stored::No));
         }
         // Nothing was appended: the region is byte for byte a freshly mounted one.
         assert_eq!(f.as_bytes(), fresh.as_bytes());
@@ -928,6 +932,7 @@ mod dynamic {
         };
         assert_eq!(s.get_value(bogus), Err(DynError::UnknownKey));
         assert_eq!(s.set_value(bogus, Value::U8(1)), Err(DynError::UnknownKey));
+        assert_eq!(s.erase_value(bogus), Err(DynError::UnknownKey));
     }
 
     #[test]
@@ -941,7 +946,7 @@ mod dynamic {
             s.set_value(key, Value::U8(3)).unwrap();
         }
         let s = Store::mount(&mut f).unwrap();
-        assert_eq!(s.get_value(key).unwrap(), Value::U8(3));
+        assert_eq!(s.get_value(key).unwrap(), (Value::U8(3), Stored::Yes));
     }
 
     /// The state-feedback fields' ids and defaults are the control crate's
@@ -1341,9 +1346,10 @@ mod dynamic {
                 field_id: d.field_id,
                 index: d.index,
             };
-            let got = s.get_value(key).unwrap();
+            let (got, stored) = s.get_value(key).unwrap();
             assert_eq!(got.kind(), d.kind);
             assert_eq!(got, d.default);
+            assert_eq!(stored, Stored::No);
         }
     }
 
@@ -1639,4 +1645,140 @@ fn count_programs(image: &[u8], page_size: usize) -> usize {
         .map(|(_, total)| total.div_ceil(COMPACT_CHUNK))
         .sum::<usize>()
         + 2
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The tombstone (`specs/storage-layer.md`, "Record format"; `specs/cli-config.md` section 6.2):
+// `erase_value` un-stores a key, so it reads its default and reports `Stored::No` again.
+// ---------------------------------------------------------------------------------------------------
+mod tombstone {
+    use super::*;
+    use crate::key::ERASED_TAG;
+    use crate::store::DynError;
+    use crate::value::Value;
+
+    /// A region holding `MOTOR_CURRENT_LIMIT = 15_000` and `MOTOR_METHOD = 2`.
+    fn holding() -> MockFlash {
+        let mut f = MockFlash::erased(PS);
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.set(MOTOR_CURRENT_LIMIT, 15_000).unwrap();
+            s.set(MOTOR_METHOD, 2).unwrap();
+        }
+        f
+    }
+
+    #[test]
+    fn a_read_after_it_returns_the_default_and_reports_not_stored() {
+        let mut f = holding();
+        let mut s = Store::mount(&mut f).unwrap();
+        let key = MOTOR_CURRENT_LIMIT.key();
+        assert_eq!(s.get_value(key).unwrap(), (Value::U32(15_000), Stored::Yes));
+        s.erase_value(key).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), (Value::U32(10_000), Stored::No));
+        // The typed face and the single pass agree: the default, not the value before it.
+        assert_eq!(s.get(MOTOR_CURRENT_LIMIT), 10_000);
+        let mut last = None;
+        s.for_each_in(&[key], |_, tag, b| {
+            last = Some(crate::scalar_or_default(MOTOR_CURRENT_LIMIT, tag, b))
+        });
+        assert_eq!(last, Some(10_000));
+        // The other key is untouched, and a write after the tombstone stores again.
+        assert_eq!(s.get(MOTOR_METHOD), 2);
+        s.set(MOTOR_CURRENT_LIMIT, 12_000).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), (Value::U32(12_000), Stored::Yes));
+    }
+
+    #[test]
+    fn it_is_a_zero_length_record_of_the_erased_tag() {
+        let mut f = holding();
+        Store::mount(&mut f)
+            .unwrap()
+            .erase_value(MOTOR_METHOD.key())
+            .unwrap();
+        // The last record on the page: header, no value, val_crc.
+        let mut cursor = PAGE_HEADER_LEN;
+        let mut last = None;
+        while let HeaderScan::Good(h) = record::parse_header(f.as_bytes(), cursor) {
+            last = Some((cursor, h));
+            cursor += record::record_size(h.len as usize);
+        }
+        let (off, h) = last.unwrap();
+        assert_eq!((h.field_id, h.index), (MOTOR_METHOD.id(), 0));
+        assert_eq!((h.type_tag, h.len), (ERASED_TAG, 0));
+        assert!(record::is_committed(f.as_bytes(), off, &h));
+        assert_eq!(record::record_size(0), 10);
+        assert_eq!(
+            Type::from_tag(ERASED_TAG),
+            None,
+            "no storage type uses the tag"
+        );
+    }
+
+    #[test]
+    fn it_survives_a_remount() {
+        let mut f = holding();
+        Store::mount(&mut f)
+            .unwrap()
+            .erase_value(MOTOR_CURRENT_LIMIT.key())
+            .unwrap();
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(
+            s.get_value(MOTOR_CURRENT_LIMIT.key()).unwrap(),
+            (Value::U32(10_000), Stored::No)
+        );
+        assert_eq!(s.get(MOTOR_METHOD), 2);
+    }
+
+    #[test]
+    fn compaction_drops_the_key() {
+        let mut f = holding();
+        let key = MOTOR_CURRENT_LIMIT.key();
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.erase_value(key).unwrap();
+            s.compact().unwrap();
+        }
+        assert!(!raw_region_contains_key(&f, key), "no record of the key");
+        assert!(raw_region_contains_key(&f, MOTOR_METHOD.key()));
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), (Value::U32(10_000), Stored::No));
+        assert_eq!(s.get(MOTOR_METHOD), 2);
+    }
+
+    #[test]
+    fn a_power_cut_while_it_is_written_leaves_the_value_before_it() {
+        // A tombstone is two programs on a page with a header: its 8-byte header, then the val_crc
+        // commit halfword. Cut before the commit.
+        let faulty_at = 1;
+        let mut f = FailingMockFlash::new(holding(), faulty_at);
+        let key = MOTOR_CURRENT_LIMIT.key();
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            assert!(matches!(s.erase_value(key), Err(DynError::Store(_))));
+        }
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), (Value::U32(15_000), Stored::Yes));
+    }
+
+    #[test]
+    fn one_for_a_key_with_no_record_writes_nothing() {
+        let mut f = holding();
+        let before = f.as_bytes().to_vec();
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.erase_value(DEVICE_NAME.key()).unwrap();
+        }
+        assert_eq!(f.as_bytes(), &before[..], "never written");
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.erase_value(MOTOR_METHOD.key()).unwrap();
+        }
+        let once = f.as_bytes().to_vec();
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.erase_value(MOTOR_METHOD.key()).unwrap();
+        }
+        assert_eq!(f.as_bytes(), &once[..], "already a tombstone");
+    }
 }

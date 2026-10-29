@@ -330,7 +330,7 @@ pub struct BoardFields {
     /// IMU group's ENABLE: with it 0 the layout is valid whatever the two pin fields hold, and
     /// those pins claim nothing (`specs/board-model.md`, check 2).
     pub imu_model: u8,
-    pub motors: [MotorFields; 2],
+    pub motors: [MotorFields; store::MOTORS as usize],
 }
 
 impl BoardFields {
@@ -441,7 +441,7 @@ pub struct BoardPlan {
     pub pad_b: Option<Pin>,
     pub button: Option<Pin>,
     pub imu: Option<ImuPlan>,
-    pub motors: [MotorPlan; 2],
+    pub motors: [MotorPlan; store::MOTORS as usize],
 }
 
 /// What applying a staged layout yields ([`validate`]): the power-latch pin, and the verdict on
@@ -653,10 +653,10 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
             lo: [Pin; 3],
             dead_time: u8,
         }
-        let mut gate_groups: [Option<GateGroup>; 2] = [None, None];
+        let mut gate_groups: [Option<GateGroup>; store::MOTORS as usize] = [None, None];
         /// A coherent-but-underived phase-current pair (check-2 output, check-4 input).
         type PhaseGroup = [Pin; 2];
-        let mut phase_groups: [Option<PhaseGroup>; 2] = [None, None];
+        let mut phase_groups: [Option<PhaseGroup>; store::MOTORS as usize] = [None, None];
         for (m, mf) in fields.motors.iter().enumerate() {
             let mref = |f: BoardField| FieldRef {
                 field: f,

@@ -829,6 +829,18 @@ pub const CONTROL_POS_CLAMP: Field<i16> = Field::new(0x7C, 45);
 /// changes with it, so it is in no boot seam, no arm-time row and no tune lane.
 pub const MACHINE_DRIVE_MODE: Field<u8> = Field::new(0x78, 0);
 
+/// The number of motor indices (`specs/cli-config.md` section 3, "Motor count"): a per-motor field's
+/// `Key.index` is the motor, `0..MOTORS`. The board crate's per-motor arrays are sized by it, so the
+/// count has one owner. Which fields are per motor is the `NAMES` table's index kind; how many
+/// motors a board has FITTED is its own layout.
+pub const MOTORS: u8 = 2;
+
+/// The ids the board or the walk writes, not the operator (`specs/cli-config.md` section 3,
+/// "Board-owned fields"): [`NODE_ADDRESS`] (assigned by the walk), [`LINK_SET`] (the ports that
+/// came up) and [`MOTOR_ODOMETER`] (written after each ride). A configuration tool leaves them out
+/// of a dump and never un-stores them.
+pub const BOARD_OWNED: &[u8] = &[NODE_ADDRESS.id(), LINK_SET.id(), MOTOR_ODOMETER.id()];
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -1278,6 +1290,338 @@ pub fn lookup_key(key: Key) -> Option<FieldDef> {
         }
     }
     base
+}
+
+// ---------------------------------------------------------------------------
+// The name table (`specs/cli-config.md` section 3): every field's human-readable name, index kind
+// and display kind, for the host tools. HOST-ONLY: behind the `names` feature (and the store's own
+// tests), so no name reaches the firmware image. Each row takes the handle itself, so a row cannot
+// name an id or a storage type its handle does not have, and the completeness test below holds it
+// to `REGISTRY` both ways.
+// ---------------------------------------------------------------------------
+
+/// The name table and its vocabulary (`specs/cli-config.md` section 3).
+#[cfg(any(test, feature = "names"))]
+pub mod names {
+    use super::*;
+
+    /// How many values a field has and what its index means (`specs/cli-config.md` section 2.1).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Index {
+        /// One value, index 0.
+        Single,
+        /// A fixed family of `n` values, indices `0..n`.
+        Array(u8),
+        /// One value per motor, the index being the motor (`0..`[`MOTORS`]).
+        Motor,
+    }
+
+    impl Index {
+        /// How many indices the table names.
+        pub const fn count(self) -> u8 {
+            match self {
+                Index::Single => 1,
+                Index::Array(n) => n,
+                Index::Motor => MOTORS,
+            }
+        }
+    }
+
+    /// How a value is written in a file (`specs/cli-config.md` section 2.2). The storage type is
+    /// the handle's; this is what the tools make of it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Kind {
+        /// A packed `(port << 4) | pin` byte, `"PC13"`, or `"none"` for `0xFF`.
+        Pin,
+        /// An integer, range-checked against the storage type.
+        Int,
+        /// `0` and `1` as `false` and `true`.
+        Bool,
+        /// A label per value.
+        Enum(&'static [(u8, &'static str)]),
+        /// The names of the set bits, by bit number.
+        Bits(&'static [(u8, &'static str)]),
+        /// A string.
+        Str,
+        /// Bytes, as hex.
+        Blob,
+    }
+
+    /// One row of [`NAMES`]: a field's id and storage type (from its handle), its path, index kind
+    /// and display kind.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct FieldName {
+        /// The field's id.
+        pub id: u8,
+        /// The field's storage type.
+        pub storage: Type,
+        /// The dotted name (`hall.a`, `board.vbatt_cal`).
+        pub path: &'static str,
+        /// How many values, and what the index means.
+        pub index: Index,
+        /// How a value is written.
+        pub kind: Kind,
+        /// An inclusive range the table states beyond the storage type (`motor.align_offset`'s
+        /// `0..5`), which a tool refuses without `--force`.
+        pub range: Option<(i64, i64)>,
+    }
+
+    impl FieldName {
+        const fn new(id: u8, storage: Type, path: &'static str, index: Index, kind: Kind) -> Self {
+            FieldName {
+                id,
+                storage,
+                path,
+                index,
+                kind,
+                range: None,
+            }
+        }
+
+        /// A field with one value.
+        pub const fn single<T: Scalar>(f: Field<T>, path: &'static str, kind: Kind) -> Self {
+            Self::new(f.id(), T::KIND, path, Index::Single, kind)
+        }
+
+        /// A field with one value per motor.
+        pub const fn motor<T: Scalar>(f: Field<T>, path: &'static str, kind: Kind) -> Self {
+            Self::new(f.id(), T::KIND, path, Index::Motor, kind)
+        }
+
+        /// A fixed family whose count is the handle's own.
+        pub const fn array<T: Scalar, const N: usize>(
+            f: IndexedField<T, N>,
+            path: &'static str,
+            kind: Kind,
+        ) -> Self {
+            Self::new(f.id(), T::KIND, path, Index::Array(N as u8), kind)
+        }
+
+        /// A fixed family declared as a plain [`Field`], whose count lives only here and in its
+        /// consumers (`specs/cli-config.md`, Open questions, "Fixed families on plain `Field`
+        /// handles").
+        pub const fn family<T: Scalar>(f: Field<T>, n: u8, path: &'static str, kind: Kind) -> Self {
+            Self::new(f.id(), T::KIND, path, Index::Array(n), kind)
+        }
+
+        /// A `STR` field.
+        pub const fn text(f: StrField, path: &'static str) -> Self {
+            Self::new(f.id(), Type::Str, path, Index::Single, Kind::Str)
+        }
+
+        /// A `BLOB` field.
+        pub const fn blob(f: BlobField, path: &'static str) -> Self {
+            Self::new(f.id(), Type::Blob, path, Index::Single, Kind::Blob)
+        }
+
+        /// This row with the inclusive range `lo..=hi`.
+        pub const fn range(self, lo: i64, hi: i64) -> Self {
+            FieldName {
+                range: Some((lo, hi)),
+                ..self
+            }
+        }
+
+        /// Whether the board or the walk writes this field ([`BOARD_OWNED`]).
+        pub fn board_owned(&self) -> bool {
+            BOARD_OWNED.contains(&self.id)
+        }
+
+        /// Whether the registry marks this field read-only (`node.class`).
+        pub fn read_only(&self) -> bool {
+            lookup(self.id).is_some_and(|d| d.read_only)
+        }
+    }
+
+    const METHOD: Kind = Kind::Enum(&[(0, "six_step"), (1, "sine"), (2, "foc")]);
+    const MODE: Kind = Kind::Enum(&[(0, "throttle"), (1, "balance")]);
+    const FRAME: Kind = Kind::Enum(&[(0, "pivoting"), (1, "rigid")]);
+    const SIDE: Kind = Kind::Enum(&[(0, "left"), (1, "right")]);
+    const DIRECTION: Kind = Kind::Enum(&[(0, "forward"), (1, "reverse")]);
+    const AXIS: Kind = Kind::Enum(&[(1, "x"), (2, "y"), (3, "z")]);
+    const DRIVE_MODE: Kind = Kind::Enum(&[
+        (0, "single"),
+        (1, "bound"),
+        (2, "differential"),
+        (3, "rigid"),
+    ]);
+    const POLARITY: Kind = Kind::Bits(&[(0, "button"), (1, "pad_a"), (2, "pad_b")]);
+
+    /// Every registered field's name (`specs/cli-config.md` section 3.1).
+    pub static NAMES: &[FieldName] = &[
+        FieldName::single(NODE_ADDRESS, "node.address", Kind::Int),
+        FieldName::single(LINK_SET, "link.set", Kind::Int),
+        FieldName::single(NODE_CLASS, "node.class", Kind::Int),
+        FieldName::text(DEVICE_NAME, "device.name"),
+        FieldName::motor(MOTOR_CURRENT_LIMIT, "current.limit", Kind::Int),
+        FieldName::motor(MOTOR_METHOD, "method", METHOD),
+        FieldName::single(CONTROL_MODE, "control.mode", MODE),
+        FieldName::single(CONTROL_RIDER_REQUIRED, "control.rider_required", Kind::Bool),
+        FieldName::single(CONTROL_BATTERY_FLOOR, "control.battery_floor", Kind::Int),
+        FieldName::single(CONTROL_FRAME, "control.frame", FRAME),
+        FieldName::single(CONTROL_SIDE, "control.side", SIDE),
+        FieldName::blob(SOME_BLOB, "scaffold.blob"),
+        FieldName::single(BOARD_SELF_HOLD, "board.self_hold", Kind::Pin),
+        FieldName::single(BOARD_VBATT, "board.vbatt", Kind::Pin),
+        FieldName::single(BOARD_BUZZER, "board.buzzer", Kind::Pin),
+        FieldName::single(LED_GREEN, "led.green", Kind::Pin),
+        FieldName::single(LED_ORANGE, "led.orange", Kind::Pin),
+        FieldName::single(LED_RED, "led.red", Kind::Pin),
+        FieldName::single(PAD_A, "pad.a", Kind::Pin),
+        FieldName::single(PAD_B, "pad.b", Kind::Pin),
+        FieldName::single(IMU_SCL_PIN, "imu.scl", Kind::Pin),
+        FieldName::single(IMU_SDA_PIN, "imu.sda", Kind::Pin),
+        FieldName::motor(MOTOR_HALL_A, "hall.a", Kind::Pin),
+        FieldName::motor(MOTOR_HALL_B, "hall.b", Kind::Pin),
+        FieldName::motor(MOTOR_HALL_C, "hall.c", Kind::Pin),
+        FieldName::motor(MOTOR_GATE_HI_A, "gate.hi_a", Kind::Pin),
+        FieldName::motor(MOTOR_GATE_HI_B, "gate.hi_b", Kind::Pin),
+        FieldName::motor(MOTOR_GATE_HI_C, "gate.hi_c", Kind::Pin),
+        FieldName::motor(MOTOR_GATE_LO_A, "gate.lo_a", Kind::Pin),
+        FieldName::motor(MOTOR_GATE_LO_B, "gate.lo_b", Kind::Pin),
+        FieldName::motor(MOTOR_GATE_LO_C, "gate.lo_c", Kind::Pin),
+        FieldName::single(BOARD_BUTTON, "board.button", Kind::Pin),
+        FieldName::motor(MOTOR_PHASE_A, "current.phase_a", Kind::Pin),
+        FieldName::motor(MOTOR_PHASE_B, "current.phase_b", Kind::Pin),
+        FieldName::single(IMU_MODEL, "imu.model", Kind::Int),
+        FieldName::family(IMU_GYRO_BIAS, 3, "imu.gyro_bias", Kind::Int),
+        FieldName::motor(MOTOR_DIRECTION, "direction", DIRECTION),
+        FieldName::motor(MOTOR_ALIGN_OFFSET, "align_offset", Kind::Int).range(0, 5),
+        FieldName::motor(MOTOR_DEAD_TIME, "gate.dead_time", Kind::Int),
+        FieldName::family(IMU_AXIS_SIGN, 6, "imu.axis_sign", Kind::Int),
+        FieldName::motor(MOTOR_CURRENT_SENSE, "current.sense", Kind::Bool),
+        FieldName::motor(MOTOR_CURRENT_CAL, "current.cal", Kind::Int),
+        FieldName::family(IMU_AXIS_ROLE, 2, "imu.axis_role", AXIS),
+        FieldName::array(BOARD_VBATT_CAL, "board.vbatt_cal", Kind::Int),
+        FieldName::single(BOARD_PACK_CELLS, "board.pack_cells", Kind::Int),
+        FieldName::motor(MOTOR_NOISE_FLOOR, "current.noise_floor", Kind::Int),
+        FieldName::single(BOARD_INPUT_POLARITY, "board.input_polarity", POLARITY),
+        FieldName::motor(MOTOR_ODOMETER, "odometer", Kind::Int),
+        FieldName::motor(MOTOR_POLE_PAIRS, "pole_pairs", Kind::Int),
+        FieldName::motor(WHEEL_DIAMETER_MM, "wheel_diameter_mm", Kind::Int),
+        FieldName::family(ATTITUDE_LEVEL_TRIM, 2, "attitude.level_trim", Kind::Int),
+        FieldName::array(CONTROL_DRIVE_TURN, "control.drive_turn", Kind::Int),
+        FieldName::single(MACHINE_DRIVE_MODE, "machine.drive_mode", DRIVE_MODE),
+        FieldName::array(CONTROL_SF_GAINS, "control.sf_gains", Kind::Int),
+        FieldName::array(CONTROL_GAIN_MAX, "control.gain_max", Kind::Int),
+        FieldName::array(CONTROL_REFERENCE, "control.reference", Kind::Int),
+        FieldName::single(CONTROL_POS_CLAMP, "control.pos_clamp", Kind::Int),
+        #[cfg(feature = "test-fields")]
+        FieldName::blob(T_BLOB, "test.blob"),
+        #[cfg(feature = "test-fields")]
+        FieldName::single(T_KEY, "test.key", Kind::Int),
+    ];
+
+    /// The row for `id`, if the table names it.
+    pub fn by_id(id: u8) -> Option<&'static FieldName> {
+        NAMES.iter().find(|r| r.id == id)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::string::{String, ToString};
+        use std::vec::Vec;
+
+        /// Every path a row produces, in the file's two namespaces: a motor row under
+        /// `motors[i]`, every other row at the top level.
+        fn paths() -> Vec<(bool, &'static str)> {
+            NAMES
+                .iter()
+                .map(|r| (r.index == Index::Motor, r.path))
+                .collect()
+        }
+
+        #[test]
+        fn every_registry_id_has_exactly_one_row_and_every_row_is_registered() {
+            for id in FIELD_IDS {
+                let n = NAMES.iter().filter(|r| r.id == *id).count();
+                assert_eq!(n, 1, "{id:#04x} has {n} rows in NAMES");
+            }
+            for r in NAMES {
+                assert!(
+                    REGISTRY.iter().any(|e| e.field_id == r.id),
+                    "{} names {:#04x}, which REGISTRY does not declare",
+                    r.path,
+                    r.id
+                );
+            }
+        }
+
+        #[test]
+        fn no_two_rows_produce_the_same_path_or_nest_inside_another() {
+            let all = paths();
+            for (i, (motor_a, a)) in all.iter().enumerate() {
+                // `motors` is the per-motor array's own key.
+                assert!(*motor_a || a.split('.').next() != Some("motors"), "{a}");
+                for (motor_b, b) in &all[i + 1..] {
+                    if motor_a != motor_b {
+                        continue;
+                    }
+                    assert_ne!(a, b, "two rows produce {a}");
+                    let (pa, pb): (String, String) = (a.to_string() + ".", b.to_string() + ".");
+                    assert!(
+                        !pa.starts_with(&pb) && !pb.starts_with(&pa),
+                        "{a} and {b} cannot both be a value and an object"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn every_row_agrees_with_its_registry_type_and_kind() {
+            for r in NAMES {
+                let def = lookup(r.id).unwrap();
+                assert_eq!(r.storage, def.kind, "{}", r.path);
+                let ok = match r.kind {
+                    Kind::Pin | Kind::Bool | Kind::Enum(_) | Kind::Bits(_) => r.storage == Type::U8,
+                    Kind::Int => r.storage.fixed_len().is_some() && r.storage != Type::Bool,
+                    Kind::Str => r.storage == Type::Str,
+                    Kind::Blob => r.storage == Type::Blob,
+                };
+                assert!(ok, "{} is {:?} over {:?}", r.path, r.kind, r.storage);
+                if let Kind::Enum(labels) | Kind::Bits(labels) = r.kind {
+                    for (i, (v, l)) in labels.iter().enumerate() {
+                        for (w, m) in &labels[i + 1..] {
+                            assert!(v != w && l != m, "{}: {l} and {m}", r.path);
+                        }
+                    }
+                }
+                if let Kind::Bits(bits) = r.kind {
+                    assert!(bits.iter().all(|(b, _)| *b < 8), "{}", r.path);
+                }
+            }
+        }
+
+        #[test]
+        fn an_indexed_handles_count_is_its_rows_count() {
+            for (handle_len, id) in [
+                (BOARD_VBATT_CAL.len(), BOARD_VBATT_CAL.id()),
+                (CONTROL_DRIVE_TURN.len(), CONTROL_DRIVE_TURN.id()),
+                (CONTROL_SF_GAINS.len(), CONTROL_SF_GAINS.id()),
+                (CONTROL_GAIN_MAX.len(), CONTROL_GAIN_MAX.id()),
+                (CONTROL_REFERENCE.len(), CONTROL_REFERENCE.id()),
+            ] {
+                assert_eq!(by_id(id).unwrap().index, Index::Array(handle_len as u8));
+            }
+        }
+
+        #[test]
+        fn the_board_owned_and_read_only_marks() {
+            let owned: Vec<&str> = NAMES
+                .iter()
+                .filter(|r| r.board_owned())
+                .map(|r| r.path)
+                .collect();
+            assert_eq!(owned, ["node.address", "link.set", "odometer"]);
+            let ro: Vec<&str> = NAMES
+                .iter()
+                .filter(|r| r.read_only())
+                .map(|r| r.path)
+                .collect();
+            assert_eq!(ro, ["node.class"]);
+        }
+    }
 }
 
 #[cfg(test)]
