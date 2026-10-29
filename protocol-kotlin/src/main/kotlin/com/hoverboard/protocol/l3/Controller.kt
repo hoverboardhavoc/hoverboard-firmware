@@ -114,6 +114,13 @@ object Walk {
     const val CFG_COMMIT_FAILED = 8
 
     /**
+     * `CONFIG_RESP` status: a successful `CONFIG_READ` of a key the board does not store
+     * (`specs/cli-config.md` section 6.1). The value that follows is the field's default; a key with
+     * a record answers [CFG_OK]. Not a refusal: a client reads the value either way.
+     */
+    const val CFG_DEFAULT = 9
+
+    /**
      * `TUNE_WRITE`: set one live-tunable value in the board's RAM, replying `CONFIG_RESP`
      * (`specs/rider-ui.md` section 4). The payload is `CONFIG_WRITE`'s
      * `[field_id, index, type_tag, value...]`.

@@ -19,6 +19,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -91,18 +92,29 @@ class ConfigClientTest {
     }
 
     /**
-     * Every `CFG_*` status in [Walk] other than `CFG_OK`, read by reflection (as
-     * `RustSourceDriftTest` reads the same object), so a status pinned into [Walk] from the Rust
-     * fails here until [CfgRefusal] names it.
+     * Every `CFG_*` status in [Walk] other than the two successful reads (`CFG_OK`, `CFG_DEFAULT`),
+     * read by reflection (as `RustSourceDriftTest` reads the same object), so a status pinned into
+     * [Walk] from the Rust fails here until [CfgRefusal] names it.
      */
     @Test
     fun theRefusalSetIsEveryNonOkStatusTheWireDefines() {
         val wire = Walk::class.java.declaredFields
             .filter { Modifier.isStatic(it.modifiers) && it.type == Int::class.javaPrimitiveType }
-            .filter { it.name.startsWith("CFG_") && it.name != "CFG_OK" }
+            .filter { it.name.startsWith("CFG_") && it.name !in setOf("CFG_OK", "CFG_DEFAULT") }
             .associate { it.name.removePrefix("CFG_") to it.getInt(null) }
         assertTrue(wire.isNotEmpty(), "no CFG_ statuses found on Walk by reflection")
         assertEquals(wire, CfgRefusal.entries.associate { it.name to it.code })
+    }
+
+    /** A key the board does not store answers `CFG_DEFAULT` with the default: a successful read. */
+    @Test
+    fun aDefaultAnswerIsARead() = runTest {
+        val f = FakeConfigBoards(this)
+        f.store[slave to limit] = Value.U32(10_000)
+        f.status = Walk.CFG_DEFAULT
+
+        assertEquals(ReadValue(Value.U32(10_000)), f.client.read(limit, slave))
+        assertNull(CfgRefusal.fromCode(Walk.CFG_DEFAULT))
     }
 
     @Test
@@ -316,7 +328,7 @@ internal class FakeConfigBoards(scope: TestScope) {
         val key = Key(p[0].toInt() and 0xFF, p[1].toInt() and 0xFF)
         val head = byteArrayOf(p[0], p[1], status.toByte())
         val body: ByteArray = when {
-            status != Walk.CFG_OK -> byteArrayOf(0)
+            status != Walk.CFG_OK && status != Walk.CFG_DEFAULT -> byteArrayOf(0)
             req.opcode == Walk.OP_TUNE_WRITE -> {
                 val v = Value.decode(Type.I16, p.copyOfRange(3, p.size)) as Value.I16
                 if (!Gains.inRange(key.index, v.v)) {

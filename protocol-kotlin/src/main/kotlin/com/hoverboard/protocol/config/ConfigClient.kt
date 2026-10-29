@@ -12,9 +12,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 
 /**
- * A `CONFIG_RESP` refusal status: every status the firmware defines other than `CFG_OK`
- * (`crates/net/src/walk.rs`, the refusal codes, which [Walk] carries and `RustSourceDriftTest`
- * pins).
+ * A `CONFIG_RESP` refusal status: every status the firmware defines other than `CFG_OK` and
+ * `CFG_DEFAULT`, the two answers to a successful read (`crates/net/src/walk.rs`, the refusal codes,
+ * which [Walk] carries and `RustSourceDriftTest` pins).
  */
 enum class CfgRefusal(val code: Int) {
     /** A malformed request (unknown type tag, bad value bytes, truncated PDU). */
@@ -53,7 +53,10 @@ sealed interface ConfigReadResult
 /** How a [ConfigClient.write] ended. */
 sealed interface ConfigWriteResult
 
-/** The board's stored value for the key, as `CONFIG_RESP` reported it. */
+/**
+ * The key's value, as `CONFIG_RESP` reported it: the stored value (`CFG_OK`), or the field's
+ * default when the board stores none (`CFG_DEFAULT`).
+ */
 data class ReadValue(val value: Value) : ConfigReadResult
 
 /**
@@ -255,7 +258,7 @@ class ConfigClient(private val exchange: ConfigExchange) {
             is ConfigExchange.Outcome.Answered -> {
                 val resp = o.resp
                 when (resp.status) {
-                    Walk.CFG_OK -> resp.decodeValue()?.let { ReadValue(it) } ?: Malformed(resp)
+                    Walk.CFG_OK, Walk.CFG_DEFAULT -> resp.decodeValue()?.let { ReadValue(it) } ?: Malformed(resp)
                     else -> CfgRefusal.fromCode(resp.status)?.let { Refused(it) } ?: Malformed(resp)
                 }
             }

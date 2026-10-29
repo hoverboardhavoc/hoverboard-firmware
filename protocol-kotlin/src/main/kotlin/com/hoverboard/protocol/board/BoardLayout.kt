@@ -353,7 +353,7 @@ data class BoardFields(
     }
 
     companion object {
-        /** How many motors the field set carries (`board::BoardFields::motors`). */
+        /** How many motors the field set carries (`crates/store/src/field.rs`, `MOTORS`, which sizes `board::BoardFields::motors`). */
         const val MOTORS = 2
     }
 }
