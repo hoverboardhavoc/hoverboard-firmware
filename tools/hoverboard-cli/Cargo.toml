@@ -12,6 +12,13 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Terminal tool for the hoverboard bridge: scan, info, id, flash, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
 
+[features]
+default = ["ble"]
+# BLE through btleplug (CoreBluetooth, BlueZ over D-Bus, WinRT). The bench Pi's build turns it off,
+# which drops btleplug and its D-Bus dependency; that CLI refuses --device and scan
+# (specs/bridge-onboarding.md section 4.2).
+ble = ["dep:btleplug", "dep:tokio", "dep:futures"]
+
 [dependencies]
 link = { path = "../../crates/link" }
 net = { path = "../../crates/net" }
@@ -21,9 +28,10 @@ store = { path = "../../crates/store", features = ["names"] }
 linkctl = { path = "../../crates/linkctl" }
 espsvc = { path = "../../crates/espsvc" }
 embedded-io = "0.6"
-btleplug = "0.11"
-tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
-futures = "0.3"
+# The BLE link and `scan` (the `ble` feature).
+btleplug = { version = "0.11", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
+futures = { version = "0.3", optional = true }
 object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
 regex = "1"
 sha2 = "0.10"

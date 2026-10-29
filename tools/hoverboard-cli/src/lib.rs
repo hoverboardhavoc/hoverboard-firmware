@@ -2,7 +2,7 @@
 //! tool"). The library holds what the tests exercise without a radio: the ELF checks, the framing,
 //! the command client, the serial and TCP links, the walk and the configuration requests, a board's
 //! store as a file and the name table's rules, and the L3 guest that `watch` and `drive` use.
-//! `main.rs` adds the BLE link (btleplug) and the command line.
+//! `main.rs` adds the command line, and `ble.rs` the BLE link (btleplug, the `ble` feature).
 
 pub mod client;
 pub mod config;
