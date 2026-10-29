@@ -52,19 +52,32 @@ driven by the bridge's own driver: `cargo test --manifest-path crates/emulator-r
 
 ## First install
 
-Over the C3's own USB port with `espflash`: one merged image holding the bootloader, the partition
-table and the app in `ota_0`, with `otadata` blank (the bootloader then runs `ota_0`).
+Over the C3's own USB port with `hoverboard-cli install-esp` (`specs/bridge-onboarding.md` section
+3), from one merged image holding the bootloader, the partition table and the app in `ota_0`, with
+`otadata` blank (the bootloader then runs `ota_0`). CI builds it as `hoverboard-bridge-install.bin`;
+locally:
 
 ```
 espflash save-image --chip esp32c3 --merge --flash-size 4mb \
   --bootloader bootloader/bootloader.bin --partition-table partitions.csv \
   --target-app-partition ota_0 \
   target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/hoverboard-bridge-install.bin
-espflash write-bin 0x0 target/img/hoverboard-bridge-install.bin
+hoverboard-cli install-esp target/img/hoverboard-bridge-install.bin bridge.json
 ```
 
+`bridge.json` names the new bridge and its network, in the file format of `cli-config.md`:
+
+```
+{ "device": { "name": "offroad-slave" }, "wifi": { "ssid": "<network>", "pass": "<password>" } }
+```
+
+`install-esp` finds the port by the C3's USB ids (`303a:1001`), or takes `--serial PORT`. If a
+bridge answers there it names it and asks before erasing it (`--yes` skips the question). It writes
+the image, waits for the first boot, applies the file, resets the bridge and waits for it to join.
+The password is never printed and never read back (`config` shows `(set)`).
+
 The merged image is padded to the whole 4 MB, so it also erases `keys` and `otadata`: the bridge
-boots unassigned with its default name, and the next walk addresses it again.
+boots unassigned with its default name and no Wi-Fi, and the next walk addresses it again.
 
 The bootloader must be `bootloader/bootloader.bin`, not `espflash`'s bundled one: that one is built
 without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, so it never marks a new slot pending and never
