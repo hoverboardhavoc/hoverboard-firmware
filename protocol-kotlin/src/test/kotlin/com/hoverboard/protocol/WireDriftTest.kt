@@ -114,6 +114,7 @@ class WireDriftTest {
         assertEquals(0x31, Opcode.ConfigWrite.value, "crates/net/src/pdu.rs, Opcode::ConfigWrite")
         assertEquals(0x32, Opcode.ConfigResp.value, "crates/net/src/pdu.rs, Opcode::ConfigResp")
         assertEquals(0x33, Opcode.ConfigWriteMulti.value, "crates/net/src/pdu.rs, Opcode::ConfigWriteMulti")
+        assertEquals(0x36, Opcode.ConfigCompact.value, "crates/net/src/pdu.rs, Opcode::ConfigCompact")
 
         assertNull(Opcode.fromU8(0x04), "0x04 is a reserved hole: specs/l3.md, Discovery and address assignment")
         assertNull(Opcode.fromU8(0x05), "0x05 is a reserved hole: specs/l3.md, Discovery and address assignment")

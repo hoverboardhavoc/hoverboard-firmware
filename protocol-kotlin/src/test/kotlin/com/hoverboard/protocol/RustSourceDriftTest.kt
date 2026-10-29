@@ -2012,11 +2012,12 @@ class RustSourceDriftTest {
                 "selfHold" to "u8", "vbatt" to "u8", "buzzer" to "u8", "ledGreen" to "u8",
                 "ledOrange" to "u8", "ledRed" to "u8", "padA" to "u8", "padB" to "u8",
                 "button" to "u8", "imuScl" to "u8", "imuSda" to "u8", "imuModel" to "u8",
-                "motors" to "[MotorFields; 2]",
+                "motors" to "[MotorFields; store::MOTORS as usize]",
             ),
             members(boardLib, "BoardFields"),
             "board::BoardFields drifted from BoardFields",
         )
+
         assertEquals(
             listOf(
                 "hallA" to "u8", "hallB" to "u8", "hallC" to "u8",
@@ -2036,9 +2037,11 @@ class RustSourceDriftTest {
             literal("PIN_ABSENT", findOne(rust("crates/store/src/field.rs"), """^pub\s+const\s+PIN_ABSENT\s*:\s*u8\s*=\s*([^;]+);""", "PIN_ABSENT").groupValues[1], "PIN_ABSENT"),
             "store::PIN_ABSENT drifted",
         )
+        // The board crate sizes its per-motor arrays by `store::MOTORS` (checked in the member list
+        // above), so the count is read where it is declared.
         assertEquals(
             BoardFields.MOTORS,
-            literal("motors", findOne(boardLib, """pub\s+motors\s*:\s*\[MotorFields;\s*(\d+)\]""", "motor count").groupValues[1], "motor count"),
+            literal("MOTORS", findOne(rust("crates/store/src/field.rs"), """^pub\s+const\s+MOTORS\s*:\s*u8\s*=\s*([^;]+);""", "store::MOTORS").groupValues[1], "motor count"),
             "the number of motors a field set carries drifted",
         )
     }

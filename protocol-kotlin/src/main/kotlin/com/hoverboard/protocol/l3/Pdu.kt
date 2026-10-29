@@ -77,6 +77,7 @@ enum class Opcode(val value: Int) {
     ConfigWrite(0x31),
     ConfigResp(0x32),
     ConfigWriteMulti(0x33),
+    ConfigCompact(0x36),
     ;
 
     companion object {
