@@ -648,7 +648,12 @@ fn file_command(
             return Err("nothing written".into());
         }
     }
-    let after = config::execute(&mut b, &plan)?;
+    let after = config::execute(&mut b, &plan).map_err(|r| {
+        for l in config::written_lines(&b.name, &plan, &reads, &r) {
+            println!("{l}");
+        }
+        r.msg
+    })?;
     for l in config::report(&b.name, &plan, &reads, &after) {
         println!("{l}");
     }
