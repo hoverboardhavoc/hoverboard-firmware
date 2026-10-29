@@ -17,5 +17,7 @@
 # Local reference: MCU manuals + bench notes (not for publish)
 /reference/
 
+# The bridge's Wi-Fi credentials were a build-time file; they are store fields now
+# (specs/bridge-onboarding.md), and the ignore stays so an old copy never reaches a commit.
 apps/hoverboard-bridge/.wifi.env
 __pycache__/

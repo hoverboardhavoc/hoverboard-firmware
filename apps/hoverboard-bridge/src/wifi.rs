@@ -2,9 +2,11 @@
 //! console on TCP (`specs/hoverboard-bridge.md`, "The terminal tool", "The Wi-Fi console") and the mDNS
 //! name.
 //!
-//! - **Station.** The network name and password are build-time settings, `ESP_WIFI_SSID` and
-//!   `ESP_WIFI_PASS` in the environment of the build; nothing is provisioned at run time. The bridge
-//!   joins as a station, takes an address by DHCP, and joins again whenever the association drops.
+//! - **Station.** The network name and password are the store's `wifi.ssid` and `wifi.pass`, read
+//!   once at boot (`hoverboard_bridge_core::node::station`, `specs/bridge-onboarding.md` section
+//!   2.1). With no network stored the station is not started and nothing here runs; `ESP_INFO`
+//!   reads not configured ([`set_state`]). The bridge joins as a station, takes an address by DHCP,
+//!   and joins again whenever the association drops.
 //!   BLE runs beside it on the same radio (`esp-radio`'s coexistence). Its transmit power is
 //!   capped at [`MAX_TX_POWER`] after every start, before it joins.
 //! - **Console.** TCP port [`CONSOLE_PORT`] carries the same L2 stream as the USB console, the
@@ -47,18 +49,9 @@ use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Timer};
 use esp_hal::rng::Rng;
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{Config, Interface, WifiController};
+use esp_radio::wifi::{AuthenticationMethod, Config, Interface, WifiController};
 use espsvc::WifiState;
 use heapless09::Vec;
-
-const SSID: &str = env!(
-    "ESP_WIFI_SSID",
-    "set ESP_WIFI_SSID (and ESP_WIFI_PASS) to the Wi-Fi network the bridge joins, in the build's environment"
-);
-const PASSWORD: &str = env!(
-    "ESP_WIFI_PASS",
-    "set ESP_WIFI_PASS (and ESP_WIFI_SSID) to the Wi-Fi network the bridge joins, in the build's environment"
-);
 
 /// The console's TCP port: the one the bench's serial-to-TCP relay used.
 pub const CONSOLE_PORT: u16 = 5333;
@@ -113,6 +106,25 @@ static ADDRESS: AtomicU32 = AtomicU32::new(0);
 /// How often [`watch`] looks at the station.
 const WATCH: Duration = Duration::from_millis(250);
 
+/// Set the station's state before [`watch`] runs: what `ESP_INFO` reads for a station that is not
+/// configured, and so never watched.
+pub fn set_state(s: WifiState) {
+    STATE.store(s as u8, Ordering::Relaxed);
+}
+
+/// The station's configuration for the network `ssid` with password `pass`, both UTF-8
+/// (`hoverboard_bridge_core::node::Station::Join`). An empty password is an open network.
+pub fn config(ssid: &str, pass: &str) -> Config {
+    let sta = StationConfig::default()
+        .with_ssid(ssid.into())
+        .with_password(pass.into());
+    Config::Station(if pass.is_empty() {
+        sta.with_auth_method(AuthenticationMethod::None)
+    } else {
+        sta
+    })
+}
+
 /// The station's state and, while it is up, its address.
 pub fn state() -> (WifiState, [u8; 4]) {
     let s = WifiState::from_u8(STATE.load(Ordering::Relaxed)).unwrap_or(WifiState::Down);
@@ -146,14 +158,10 @@ pub static GDB_OUT: Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, 4> = Chann
 /// Service loop to GDB listener: the session ended on the protocol side; close the connection.
 pub static GDB_CLOSE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// Join the network and join it again whenever the association drops, forever.
+/// Join the network `config` names ([`config`]) and join it again whenever the association drops,
+/// forever.
 #[embassy_executor::task]
-pub async fn station(mut controller: WifiController<'static>) {
-    let config = Config::Station(
-        StationConfig::default()
-            .with_ssid(SSID.into())
-            .with_password(PASSWORD.into()),
-    );
+pub async fn station(mut controller: WifiController<'static>, config: Config) {
     loop {
         if matches!(controller.is_connected(), Ok(true)) {
             let _e = controller.wait_for_disconnect_async().await;
