@@ -1,7 +1,7 @@
-//! The walk and the configuration commands (`specs/hoverboard-bridge.md`, "The terminal tool"): the whole
-//! walk with `net`'s [`Controller`], then `node.class` and `device.name` read from every address;
-//! `CONFIG_READ` and `CONFIG_WRITE` typed as the store's registry says; and `--node` resolved to
-//! an address by number or by name.
+//! The walk and the configuration requests (`specs/hoverboard-bridge.md`, "The terminal tool"): the
+//! whole walk with `net`'s [`Controller`], then `node.class` and `device.name` read from every
+//! address; `CONFIG_READ`, `CONFIG_WRITE` (a value or an un-store) and `CONFIG_COMPACT`; and `--node`
+//! resolved to an address by number or by name.
 
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,7 @@ pub fn status_name(status: u8) -> String {
         CFG_READ_ONLY => "read-only".into(),
         CFG_NO_SPACE => "no space".into(),
         CFG_COMMIT_FAILED => "commit failed".into(),
+        CFG_DEFAULT => "default".into(),
         s => format!("status {s}"),
     }
 }
@@ -144,19 +145,18 @@ impl ConfigResp {
     }
 }
 
-/// Send a `CONFIG_*` request for `key` from `src` to `dst` and wait for its `CONFIG_RESP`. A
-/// request to `0x00` is answered by the node on the tool's own link, whatever its address.
-fn config<W: Wire>(
+/// Send a `CONFIG_*` request `op` with `payload` from `src` to `dst` and wait for the `CONFIG_RESP`
+/// whose first two bytes are `echo` (the key, or `[0, 0]` for the acks that name none). A request
+/// to `0x00` is answered by the node on the tool's own link, whatever its address.
+fn exchange<W: Wire>(
     wire: &mut W,
     op: Opcode,
     src: u8,
     dst: u8,
-    key: Key,
-    value: &[u8],
+    payload: &[u8],
+    echo: [u8; 2],
 ) -> Result<ConfigResp, String> {
-    let mut payload = vec![key.field_id, key.index];
-    payload.extend_from_slice(value);
-    let pdu = Pdu::from_op(op, src, dst, &payload);
+    let pdu = Pdu::from_op(op, src, dst, payload);
     let mut buf = [0u8; net::walk::MAX_PDU];
     let n = pdu
         .encode(&mut buf)
@@ -171,7 +171,7 @@ fn config<W: Wire>(
                 && p.dst == src
                 && from
                 && p.payload.len() >= 4
-                && p.payload[..2] == [key.field_id, key.index]
+                && p.payload[..2] == echo
             {
                 return Ok(ConfigResp {
                     status: p.payload[2],
@@ -182,6 +182,20 @@ fn config<W: Wire>(
         }
     }
     Err(format!("no CONFIG_RESP from {dst:#04x}"))
+}
+
+/// Send a `CONFIG_*` request for `key` and wait for its `CONFIG_RESP`.
+fn config<W: Wire>(
+    wire: &mut W,
+    op: Opcode,
+    src: u8,
+    dst: u8,
+    key: Key,
+    value: &[u8],
+) -> Result<ConfigResp, String> {
+    let mut payload = vec![key.field_id, key.index];
+    payload.extend_from_slice(value);
+    exchange(wire, op, src, dst, &payload, [key.field_id, key.index])
 }
 
 /// `CONFIG_READ` of `key` at `dst`.
@@ -201,6 +215,25 @@ pub fn write<W: Wire>(
     let mut v = vec![kind.tag()];
     v.extend_from_slice(bytes);
     config(wire, Opcode::ConfigWrite, src, dst, key, &v)
+}
+
+/// `CONFIG_WRITE` of the tombstone tag with no value: un-store `key` at `dst`
+/// (`specs/cli-config.md` section 6.2).
+pub fn unstore<W: Wire>(wire: &mut W, src: u8, dst: u8, key: Key) -> Result<ConfigResp, String> {
+    config(
+        wire,
+        Opcode::ConfigWrite,
+        src,
+        dst,
+        key,
+        &[store::ERASED_TAG],
+    )
+}
+
+/// `CONFIG_COMPACT` at `dst` (`specs/cli-config.md` section 6.3): the status of its
+/// `[0, 0, status, 0]` ack.
+pub fn compact<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<u8, String> {
+    exchange(wire, Opcode::ConfigCompact, src, dst, &[], [0, 0]).map(|r| r.status)
 }
 
 /// Read `node.class` and `device.name` from every address the walk found, in address order.
@@ -259,9 +292,13 @@ pub fn resolve(spec: &str, found: &[Found]) -> Result<u8, String> {
         .filter(|f| f.name.as_deref() == Some(spec))
         .map(|f| f.addr)
         .collect();
+    let names = || {
+        let n: Vec<&str> = found.iter().filter_map(|f| f.name.as_deref()).collect();
+        n.join(", ")
+    };
     match named[..] {
         [a] => Ok(a),
-        [] => Err(format!("no node named {spec}")),
+        [] => Err(format!("no node named {spec} (nodes: {})", names())),
         _ => Err(format!("more than one node is named {spec}")),
     }
 }
@@ -278,70 +315,6 @@ pub fn parse_key(s: &str) -> Result<Key, String> {
         field_id: byte(id)?,
         index: byte(index)?,
     })
-}
-
-/// `text` as a value of the registry's type for `key`, encoded as `CONFIG_WRITE` carries it.
-pub fn parse_value(key: Key, text: &str) -> Result<(Type, Vec<u8>), String> {
-    let def = store::lookup_key(key).ok_or_else(|| {
-        format!(
-            "no field {:#04x} index {} in the registry",
-            key.field_id, key.index
-        )
-    })?;
-    let bad = || format!("not a {:?}: {text}", def.kind);
-    let int = |lo: i128, hi: i128| {
-        parse_int(text)
-            .filter(|v| (lo..=hi).contains(v))
-            .ok_or_else(bad)
-    };
-    let bytes = match def.kind {
-        Type::U8 => vec![int(0, u8::MAX.into())? as u8],
-        Type::U16 => (int(0, u16::MAX.into())? as u16).to_le_bytes().to_vec(),
-        Type::U32 => (int(0, u32::MAX.into())? as u32).to_le_bytes().to_vec(),
-        Type::U64 => (int(0, u64::MAX.into())? as u64).to_le_bytes().to_vec(),
-        Type::I16 => (int(i16::MIN.into(), i16::MAX.into())? as i16)
-            .to_le_bytes()
-            .to_vec(),
-        Type::I32 => (int(i32::MIN.into(), i32::MAX.into())? as i32)
-            .to_le_bytes()
-            .to_vec(),
-        Type::I64 => (int(i64::MIN.into(), i64::MAX.into())? as i64)
-            .to_le_bytes()
-            .to_vec(),
-        Type::Bool => match text {
-            "1" | "true" | "on" => vec![1],
-            "0" | "false" | "off" => vec![0],
-            _ => return Err(bad()),
-        },
-        Type::Str => text.as_bytes().to_vec(),
-        Type::Blob => {
-            let h = text.trim_start_matches("0x");
-            if !h.len().is_multiple_of(2) {
-                return Err(bad());
-            }
-            (0..h.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| bad()))
-                .collect::<Result<_, _>>()?
-        }
-    };
-    Ok((def.kind, bytes))
-}
-
-/// A value as `config` prints it.
-pub fn show(v: &Value) -> String {
-    match *v {
-        Value::U8(x) => format!("{x} ({x:#04x})"),
-        Value::U16(x) => format!("{x} ({x:#06x})"),
-        Value::U32(x) => format!("{x} ({x:#010x})"),
-        Value::U64(x) => x.to_string(),
-        Value::I16(x) => x.to_string(),
-        Value::I32(x) => x.to_string(),
-        Value::I64(x) => x.to_string(),
-        Value::Bool(x) => x.to_string(),
-        Value::Str(s) => format!("{:?}", String::from_utf8_lossy(s)),
-        Value::Bytes(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
-    }
 }
 
 #[cfg(test)]

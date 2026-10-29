@@ -1,0 +1,613 @@
+[
+  {
+    "id": 1,
+    "path": "node.address",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "board_owned": true,
+    "read_only": false
+  },
+  {
+    "id": 2,
+    "path": "link.set",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "board_owned": true,
+    "read_only": false
+  },
+  {
+    "id": 3,
+    "path": "node.class",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": true
+  },
+  {
+    "id": 16,
+    "path": "device.name",
+    "type": "str",
+    "index": "single",
+    "count": 1,
+    "kind": "str",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 32,
+    "path": "current.limit",
+    "type": "u32",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 33,
+    "path": "method",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "enum",
+    "labels": {
+      "six_step": 0,
+      "sine": 1,
+      "foc": 2
+    },
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 34,
+    "path": "control.mode",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "enum",
+    "labels": {
+      "throttle": 0,
+      "balance": 1
+    },
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 35,
+    "path": "control.rider_required",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "bool",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 36,
+    "path": "control.battery_floor",
+    "type": "i16",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 37,
+    "path": "control.frame",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "enum",
+    "labels": {
+      "pivoting": 0,
+      "rigid": 1
+    },
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 38,
+    "path": "control.side",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "enum",
+    "labels": {
+      "left": 0,
+      "right": 1
+    },
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 48,
+    "path": "scaffold.blob",
+    "type": "blob",
+    "index": "single",
+    "count": 1,
+    "kind": "blob",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 64,
+    "path": "board.self_hold",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 65,
+    "path": "board.vbatt",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 66,
+    "path": "board.buzzer",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 67,
+    "path": "led.green",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 68,
+    "path": "led.orange",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 69,
+    "path": "led.red",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 70,
+    "path": "pad.a",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 71,
+    "path": "pad.b",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 72,
+    "path": "imu.scl",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 73,
+    "path": "imu.sda",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 74,
+    "path": "hall.a",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 75,
+    "path": "hall.b",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 76,
+    "path": "hall.c",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 77,
+    "path": "gate.hi_a",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 78,
+    "path": "gate.hi_b",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 79,
+    "path": "gate.hi_c",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 80,
+    "path": "gate.lo_a",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 81,
+    "path": "gate.lo_b",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 82,
+    "path": "gate.lo_c",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 83,
+    "path": "board.button",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 84,
+    "path": "current.phase_a",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 85,
+    "path": "current.phase_b",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 96,
+    "path": "imu.model",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 97,
+    "path": "imu.gyro_bias",
+    "type": "i32",
+    "index": "array",
+    "count": 3,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 98,
+    "path": "direction",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "enum",
+    "labels": {
+      "forward": 0,
+      "reverse": 1
+    },
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 99,
+    "path": "align_offset",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "range": [
+      0,
+      5
+    ],
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 100,
+    "path": "gate.dead_time",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 101,
+    "path": "imu.axis_sign",
+    "type": "i32",
+    "index": "array",
+    "count": 6,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 102,
+    "path": "current.sense",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "bool",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 103,
+    "path": "current.cal",
+    "type": "u16",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 104,
+    "path": "imu.axis_role",
+    "type": "u8",
+    "index": "array",
+    "count": 2,
+    "kind": "enum",
+    "labels": {
+      "x": 1,
+      "y": 2,
+      "z": 3
+    },
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 105,
+    "path": "board.vbatt_cal",
+    "type": "i16",
+    "index": "array",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 106,
+    "path": "board.pack_cells",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 107,
+    "path": "current.noise_floor",
+    "type": "u16",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 108,
+    "path": "board.input_polarity",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "bits",
+    "bits": {
+      "button": 0,
+      "pad_a": 1,
+      "pad_b": 2
+    },
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 109,
+    "path": "odometer",
+    "type": "u32",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "board_owned": true,
+    "read_only": false
+  },
+  {
+    "id": 110,
+    "path": "pole_pairs",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 111,
+    "path": "wheel_diameter_mm",
+    "type": "u16",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 112,
+    "path": "attitude.level_trim",
+    "type": "i16",
+    "index": "array",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 117,
+    "path": "control.drive_turn",
+    "type": "i16",
+    "index": "array",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 120,
+    "path": "machine.drive_mode",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "enum",
+    "labels": {
+      "single": 0,
+      "bound": 1,
+      "differential": 2,
+      "rigid": 3
+    },
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 121,
+    "path": "control.sf_gains",
+    "type": "i16",
+    "index": "array",
+    "count": 4,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 122,
+    "path": "control.gain_max",
+    "type": "i16",
+    "index": "array",
+    "count": 4,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 123,
+    "path": "control.reference",
+    "type": "i16",
+    "index": "array",
+    "count": 2,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 124,
+    "path": "control.pos_clamp",
+    "type": "i16",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  }
+]
