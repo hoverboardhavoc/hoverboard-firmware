@@ -269,6 +269,34 @@ fn a_boards_store_as_a_file_through_the_binary() {
         (code, err.trim()),
         (Some(1), "error: unknown option --bogus")
     );
+    // A flag before the command word still makes it a diff: a link that cannot be opened is 2.
+    let empty = scratch("empty.json");
+    std::fs::write(&empty, "{}").unwrap();
+    for args in [
+        &["--tcp", "127.0.0.1:9", "--yes", "diff", "x", &empty][..],
+        &["--replace", "--tcp=127.0.0.1:9", "diff", "x", &empty],
+        &["--tcp=127.0.0.1:9", "--replace", "diff", "x", &empty],
+    ] {
+        let (code, _, err) = cli_code(args);
+        assert_eq!(code, Some(2), "{args:?}: {err}");
+    }
+    // An unknown command word is a usage error before any link is opened.
+    let idle = TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = format!("--tcp={}", idle.local_addr().unwrap());
+    for args in [
+        &[at.as_str(), "bogus"][..],
+        &["--yes", at.as_str(), "bogus", "x"],
+    ] {
+        let (code, _, err) = cli_code(args);
+        assert_eq!(code, Some(1), "{args:?}: {err}");
+        assert!(err.starts_with("error: usage: "), "{err}");
+    }
+    idle.set_nonblocking(true).unwrap();
+    assert_eq!(
+        idle.accept().map(|_| ()).unwrap_err().kind(),
+        ErrorKind::WouldBlock,
+        "an unknown command connected"
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
