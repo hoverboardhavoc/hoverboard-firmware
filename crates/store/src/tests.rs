@@ -1762,6 +1762,20 @@ mod tombstone {
     }
 
     #[test]
+    fn a_torn_tombstone_is_not_copied_by_compaction_and_the_value_before_it_stands() {
+        // The tombstone's header lands, its commit halfword does not; a compaction then skips
+        // the torn record and keeps the committed value before it.
+        let mut f = FailingMockFlash::new(holding(), 1);
+        let key = MOTOR_CURRENT_LIMIT.key();
+        assert!(Store::mount(&mut f).unwrap().erase_value(key).is_err());
+        let mut f = MockFlash::from_image(PS, f.as_bytes());
+        Store::mount(&mut f).unwrap().compact().unwrap();
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(s.get_value(key).unwrap(), (Value::U32(15_000), Stored::Yes));
+        assert_eq!(s.get(MOTOR_METHOD), 2);
+    }
+
+    #[test]
     fn one_for_a_key_with_no_record_writes_nothing() {
         let mut f = holding();
         let before = f.as_bytes().to_vec();

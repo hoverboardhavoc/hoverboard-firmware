@@ -648,15 +648,18 @@ pub fn validate(fields: &BoardFields, caps: &impl Capabilities, reserved: &[u8])
         // a dead time at or above the floor). The advanced-timer derivation waits for the
         // capability stage.
         /// A coherent-but-underived gate group (check-2 output, check-4 input).
+        #[derive(Clone, Copy)]
         struct GateGroup {
             hi: [Pin; 3],
             lo: [Pin; 3],
             dead_time: u8,
         }
-        let mut gate_groups: [Option<GateGroup>; store::MOTORS as usize] = [None, None];
+        let mut gate_groups: [Option<GateGroup>; store::MOTORS as usize] =
+            [None; store::MOTORS as usize];
         /// A coherent-but-underived phase-current pair (check-2 output, check-4 input).
         type PhaseGroup = [Pin; 2];
-        let mut phase_groups: [Option<PhaseGroup>; store::MOTORS as usize] = [None, None];
+        let mut phase_groups: [Option<PhaseGroup>; store::MOTORS as usize] =
+            [None; store::MOTORS as usize];
         for (m, mf) in fields.motors.iter().enumerate() {
             let mref = |f: BoardField| FieldRef {
                 field: f,
