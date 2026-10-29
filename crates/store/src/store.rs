@@ -14,7 +14,7 @@ use base::error::FlashError;
 
 use crate::field::{lookup_key, BlobField, Field, StrField};
 use crate::flash::Flash;
-use crate::key::{Key, Scalar, Type};
+use crate::key::{Key, Scalar, Type, ERASED_TAG};
 use crate::record::{self, Header, HeaderScan, MAGIC, PAGE_HEADER_LEN};
 use crate::value::Value;
 
@@ -63,6 +63,17 @@ impl From<StoreError> for DynError {
     fn from(e: StoreError) -> Self {
         DynError::Store(e)
     }
+}
+
+/// Whether [`Store::get_value`]'s answer came from a record or from the field's default
+/// (`specs/cli-config.md` section 6.1): what the L3 `CONFIG_READ` reports as `CFG_OK` against
+/// `CFG_DEFAULT`, so a client can tell a key the board holds from one that follows the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stored {
+    /// The newest committed record of the key holds a value.
+    Yes,
+    /// The key has no record, or its newest record is a tombstone: the value is the default.
+    No,
 }
 
 /// The log-structured flash config store. Generic over the [`Flash`] seam.
@@ -252,19 +263,41 @@ impl<'f, F: Flash> Store<'f, F> {
     /// `Str`/`Bytes`), and falls back to the registered default when the key is absent, the stored
     /// record is the wrong type, or its bytes are malformed. `UnknownKey` if no field declares the id.
     ///
+    /// [`Stored`] comes from the same walk: `No` when the key has no record or its newest record is
+    /// a tombstone, `Yes` otherwise (a wrong-type record is still a record, and reads the default).
+    ///
     /// This is the dynamic `set`/`get` the store offers directly today (write-through); there is no
     /// apply-live / persist-when-disarmed split (`specs/l3.md`, "`CONFIG_*` is the wire face").
-    pub fn get_value(&self, key: Key) -> Result<Value<'_>, DynError> {
+    pub fn get_value(&self, key: Key) -> Result<(Value<'_>, Stored), DynError> {
         let def = lookup_key(key).ok_or(DynError::UnknownKey)?;
-        if let Some((off, h)) = self.find_latest(key) {
-            if h.type_tag == def.kind.tag() {
-                let bytes = record::value_bytes(self.flash.as_bytes(), off, &h);
-                if let Some(v) = Value::decode(def.kind, bytes) {
-                    return Ok(v);
+        match self.find_latest(key) {
+            Some((off, h)) if h.type_tag != ERASED_TAG => {
+                let mut v = def.default;
+                if h.type_tag == def.kind.tag() {
+                    let bytes = record::value_bytes(self.flash.as_bytes(), off, &h);
+                    if let Some(d) = Value::decode(def.kind, bytes) {
+                        v = d;
+                    }
                 }
+                Ok((v, Stored::Yes))
             }
+            _ => Ok((def.default, Stored::No)),
         }
-        Ok(def.default)
+    }
+
+    /// Un-store `key` (`specs/storage-layer.md`, "Read / write model"): append a tombstone, so the
+    /// next read returns the default and reports [`Stored::No`]. Registry-checked like
+    /// [`Store::set_value`] (`UnknownKey`, `ReadOnly`). A key with no record, or whose newest record
+    /// is already a tombstone, is left alone and nothing is written.
+    pub fn erase_value(&mut self, key: Key) -> Result<(), DynError> {
+        let def = lookup_key(key).ok_or(DynError::UnknownKey)?;
+        if def.read_only {
+            return Err(DynError::ReadOnly);
+        }
+        match self.find_latest(key) {
+            Some((_, h)) if h.type_tag != ERASED_TAG => Ok(self.append(key, ERASED_TAG, &[])?),
+            _ => Ok(()),
+        }
     }
 
     /// Dynamic write by raw [`Key`] (the L3 `CONFIG_WRITE` path). Validates the value's [`Type`]
@@ -292,7 +325,8 @@ impl<'f, F: Flash> Store<'f, F> {
     }
 
     /// Pack the latest record per key into the spare page (header-last), then erase the old page. The
-    /// only erase. Key-agnostic: it preserves the latest record of every key it sees, known or not.
+    /// only erase. Key-agnostic: it preserves the latest record of every key it sees, known or not,
+    /// except a key whose latest record is a tombstone, which it drops.
     ///
     /// Every header of the source log is CRC-checked exactly once, by the pass at (1a); the copy
     /// walk and the supersede scan then hop that validated chain with
@@ -360,6 +394,11 @@ impl<'f, F: Flash> Store<'f, F> {
             };
             // Is there a later committed record of the same key? If so this one is superseded.
             if has_later_record(region, next, log_end, key) {
+                continue;
+            }
+            // The latest record is a tombstone: nothing is copied, so the key is gone from the new
+            // page (`specs/storage-layer.md`, "A tombstone is dropped, not copied").
+            if h.type_tag == ERASED_TAG {
                 continue;
             }
             // Copy this record verbatim into the spare, in ascending [`COMPACT_CHUNK`] pieces. The

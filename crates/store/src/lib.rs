@@ -44,18 +44,21 @@ mod tests;
 
 pub use field::{
     lookup, lookup_key, BlobField, Field, FieldDef, FieldEntry, IndexedField, StrField,
-    ATTITUDE_LEVEL_TRIM, BOARD_BUTTON, BOARD_BUZZER, BOARD_INPUT_POLARITY, BOARD_PACK_CELLS,
-    BOARD_SELF_HOLD, BOARD_VBATT, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR, CONTROL_DRIVE_TURN,
-    CONTROL_FRAME, CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_POS_CLAMP, CONTROL_REFERENCE,
-    CONTROL_RIDER_REQUIRED, CONTROL_SF_GAINS, CONTROL_SIDE, DEVICE_NAME, IMU_AXIS_ROLE,
-    IMU_AXIS_SIGN, IMU_GYRO_BIAS, IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN, LED_GREEN, LED_ORANGE,
-    LED_RED, LINK_SET, MACHINE_DRIVE_MODE, MOTOR_ALIGN_OFFSET, MOTOR_CURRENT_CAL,
-    MOTOR_CURRENT_LIMIT, MOTOR_CURRENT_SENSE, MOTOR_DEAD_TIME, MOTOR_DIRECTION, MOTOR_GATE_HI_A,
-    MOTOR_GATE_HI_B, MOTOR_GATE_HI_C, MOTOR_GATE_LO_A, MOTOR_GATE_LO_B, MOTOR_GATE_LO_C,
-    MOTOR_HALL_A, MOTOR_HALL_B, MOTOR_HALL_C, MOTOR_METHOD, MOTOR_NOISE_FLOOR, MOTOR_ODOMETER,
-    MOTOR_PHASE_A, MOTOR_PHASE_B, NODE_ADDRESS, NODE_CLASS, PAD_A, PAD_B, PIN_ABSENT, REGISTRY,
-    REGISTRY_LEN, SOME_BLOB,
+    ATTITUDE_LEVEL_TRIM, BOARD_BUTTON, BOARD_BUZZER, BOARD_INPUT_POLARITY, BOARD_OWNED,
+    BOARD_PACK_CELLS, BOARD_SELF_HOLD, BOARD_VBATT, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
+    CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_POS_CLAMP,
+    CONTROL_REFERENCE, CONTROL_RIDER_REQUIRED, CONTROL_SF_GAINS, CONTROL_SIDE, DEVICE_NAME,
+    IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS, IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN, LED_GREEN,
+    LED_ORANGE, LED_RED, LINK_SET, MACHINE_DRIVE_MODE, MOTORS, MOTOR_ALIGN_OFFSET,
+    MOTOR_CURRENT_CAL, MOTOR_CURRENT_LIMIT, MOTOR_CURRENT_SENSE, MOTOR_DEAD_TIME, MOTOR_DIRECTION,
+    MOTOR_GATE_HI_A, MOTOR_GATE_HI_B, MOTOR_GATE_HI_C, MOTOR_GATE_LO_A, MOTOR_GATE_LO_B,
+    MOTOR_GATE_LO_C, MOTOR_HALL_A, MOTOR_HALL_B, MOTOR_HALL_C, MOTOR_METHOD, MOTOR_NOISE_FLOOR,
+    MOTOR_ODOMETER, MOTOR_PHASE_A, MOTOR_PHASE_B, NODE_ADDRESS, NODE_CLASS, PAD_A, PAD_B,
+    PIN_ABSENT, REGISTRY, REGISTRY_LEN, SOME_BLOB,
 };
+// The host-only name table (`specs/cli-config.md` section 3), behind the `names` feature.
+#[cfg(feature = "names")]
+pub use field::names::{by_id, FieldName, Index, Kind, NAMES};
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (see field.rs);
 // re-export them only when the feature is on so a production build's API stays the genuine tunables.
 #[cfg(feature = "test-fields")]
@@ -64,8 +67,8 @@ pub use field::{
     T_STR_VAL, T_VAL, VAR_VALUE,
 };
 pub use flash::Flash;
-pub use key::{Key, Scalar, Type};
-pub use store::{scalar_or_default, DynError, Store, StoreError};
+pub use key::{Key, Scalar, Type, ERASED_TAG};
+pub use store::{scalar_or_default, DynError, Store, StoreError, Stored};
 pub use value::Value;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -130,7 +133,7 @@ pub fn run<F: Flash>(flash: &mut F, cmd: u32) -> u32 {
                 0
             } else {
                 match store.get_value(key) {
-                    Ok(Value::U32(v)) => v,
+                    Ok((Value::U32(v), _)) => v,
                     // A wrong-typed or unknown read is a scenario failure, not a 0 the host would
                     // read as "absent": publish a sentinel the host cannot mistake for T_VAL.
                     _ => 0xDEAD_0001,

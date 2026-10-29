@@ -380,7 +380,7 @@ impl Mesh {
 
     fn persisted_addr(&mut self, board: usize) -> u8 {
         let s = Store::mount(&mut self.boards[board].flash).unwrap();
-        match s.get_value(NODE_ADDRESS.key()).unwrap() {
+        match s.get_value(NODE_ADDRESS.key()).unwrap().0 {
             Value::U8(a) => a,
             _ => panic!("node_address not a u8"),
         }
@@ -735,7 +735,7 @@ fn re_assigning_the_same_address_re_persists_and_re_acks_idempotently() {
 
     // The persisted value is 0x05 either way.
     let s = Store::mount(&mut flash).unwrap();
-    assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap(), Value::U8(0x05));
+    assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap().0, Value::U8(0x05));
 }
 
 #[test]
@@ -782,7 +782,7 @@ fn an_assign_that_fills_the_page_compacts_and_still_persists() {
     assert_eq!(ack_status(&ack), Some((0x07, STATUS_OK)));
     assert_eq!(resp.addr(), 0x07);
     let s = Store::mount(&mut flash).unwrap();
-    assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap(), Value::U8(0x07));
+    assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap().0, Value::U8(0x07));
 }
 
 /// Pull `(new_addr, status)` out of an emitted ASSIGN_ACK, if present.
@@ -861,7 +861,7 @@ fn a_two_hop_config_write_is_relayed_through_the_gateway() {
     // And it really is on the slave's flash (index 1 is the slave).
     let on_flash = {
         let s = Store::mount(&mut m.boards[1].flash).unwrap();
-        match s.get_value(key).unwrap() {
+        match s.get_value(key).unwrap().0 {
             Value::U8(v) => v,
             other => panic!("unexpected {other:?}"),
         }
@@ -1209,7 +1209,7 @@ fn an_armed_board_refuses_assign_no_persist_no_adopt() {
     assert_eq!(ack_status(&emits), Some((0x05, STATUS_OK)));
     assert_eq!(resp.addr(), 0x05);
     let s = Store::mount(&mut flash).unwrap();
-    assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap(), Value::U8(0x05));
+    assert_eq!(s.get_value(NODE_ADDRESS.key()).unwrap().0, Value::U8(0x05));
 }
 
 #[test]

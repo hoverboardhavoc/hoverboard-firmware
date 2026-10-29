@@ -395,5 +395,6 @@ pub fn mount_store_image(
     ));
     store
         .get_value(key)
+        .map(|(v, _)| v)
         .map_err(|e| BridgeError::MemAp(format!("store get_value: {e:?}")))
 }

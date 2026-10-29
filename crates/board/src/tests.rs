@@ -24,7 +24,7 @@ fn blank_board() -> BoardFields {
         imu_scl: ABSENT,
         imu_sda: ABSENT,
         imu_model: 0,
-        motors: [MotorFields::ABSENT; 2],
+        motors: [MotorFields::ABSENT; store::MOTORS as usize],
     }
 }
 
@@ -290,7 +290,7 @@ fn all_absent_board_is_a_valid_empty_plan() {
         imu_scl: ABSENT,
         imu_sda: ABSENT,
         imu_model: 0,
-        motors: [MotorFields::ABSENT; 2],
+        motors: [MotorFields::ABSENT; store::MOTORS as usize],
     };
     let plan = validate(&fields, &MockChip::F103C8, RESERVED).plan.unwrap();
     assert_eq!(plan, BoardPlan::default());

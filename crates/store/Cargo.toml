@@ -42,6 +42,11 @@ chip2k = ["runtime-hal/detect-internals"]
 # (`cargo test -p store --features test-fields`; CI passes `-F store/test-fields`).
 test-fields = []
 
+# The host-only name table (`NAMES`, `specs/cli-config.md` section 3): every field's path, index kind
+# and display kind, for hoverboard-cli and the tools that take their names from it. OFF by default,
+# so the firmware image carries no name. The store's own tests compile the table without it.
+names = []
+
 # The crafted-region dump tool for the silicon bench oracle (it uses `store::scenarios`, behind
 # `test-fields`). `required-features` keeps a plain `cargo test -p store` from trying to compile it
 # without the feature (it would fail on the gated scenario ids).
