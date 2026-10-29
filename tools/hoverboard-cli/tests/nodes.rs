@@ -29,19 +29,38 @@ fn machine() -> Machine<'static> {
     Machine::new(flash, svc)
 }
 
-/// What the machine holds once the clients are done: the bridge's address and stored name, and the
-/// `DRIVE_CMD`s each board took.
+/// What the machine holds once the clients are done: the bridge's address and stored name, the
+/// `DRIVE_CMD`s each board took, and the opcodes each client connection sent.
 struct After {
     esp: u8,
     name: Vec<u8>,
     drives: [usize; 2],
+    ops: Vec<Vec<u8>>,
+}
+
+/// The bytes a client sent, framed back into packets for [`After::ops`].
+#[derive(Default)]
+struct Tap(Vec<u8>);
+
+impl hoverboard_cli::wire::ByteLink for Tap {
+    fn write(&mut self, _bytes: &[u8]) {}
+    fn read(&mut self, _timeout: Duration) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+    fn window(&self) -> usize {
+        1
+    }
 }
 
 /// Serve the bridge's TCP console for `connections` clients one after the other, running the whole
 /// machine between reads, and letting the probe windows close whenever nothing moves.
 fn serve(listener: TcpListener, connections: usize) -> After {
+    use hoverboard_cli::wire::Wire;
     let mut m = machine();
+    let mut ops = Vec::new();
     for _ in 0..connections {
+        let mut tap = hoverboard_cli::wire::Framed::new(Tap::default());
+        let mut sent = Vec::new();
         let (mut sock, _) = listener.accept().unwrap();
         m.router.connect(Port::Tcp);
         sock.set_read_timeout(Some(Duration::from_millis(1)))
@@ -51,7 +70,13 @@ fn serve(listener: TcpListener, connections: usize) -> After {
         loop {
             match sock.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => m.router.on_bytes(Port::Tcp, &buf[..n]),
+                Ok(n) => {
+                    m.router.on_bytes(Port::Tcp, &buf[..n]);
+                    tap.inner().0.extend_from_slice(&buf[..n]);
+                    while let Some(p) = tap.recv(Duration::ZERO) {
+                        sent.push(p[0]);
+                    }
+                }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(_) => break,
             }
@@ -68,6 +93,7 @@ fn serve(listener: TcpListener, connections: usize) -> After {
             }
         }
         m.router.disconnect(Port::Tcp);
+        ops.push(sent);
     }
     let drives = |got: &[(u8, u8)]| {
         got.iter()
@@ -78,6 +104,7 @@ fn serve(listener: TcpListener, connections: usize) -> After {
         esp: m.node.addr(),
         name: m.node.store().get_text(store::DEVICE_NAME).to_vec(),
         drives: [drives(&m.master.got), drives(&m.slave.got)],
+        ops,
     }
 }
 
@@ -325,6 +352,57 @@ fn a_boards_store_as_a_file_through_the_binary() {
          rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n"
     );
     server.join().unwrap();
+}
+
+#[test]
+fn an_address_needs_no_walk_and_a_name_does() {
+    // `specs/cli-config.md` section 4.1: an address is reached by attaching and reading its
+    // `device.name`, the slave included, which the bridge reaches through the master by flooding
+    // until the reply teaches the route; a name needs the walk.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 6));
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+    let (code, out, err) = run(&["config", "0x02", "control.mode"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "Hoverboard: control.mode = throttle (default)");
+    let (code, _, err) = run(&["config", "0x02", "device.name", "rover-right"]);
+    assert_eq!(code, Some(0), "{err}");
+    // The prefix is the name the read returns.
+    let (code, out, err) = run(&["config", "0x02", "control.mode"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "rover-right: control.mode = throttle (default)");
+    let (code, out, err) = run(&["config", "rover-right", "control.mode"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "rover-right: control.mode = throttle (default)");
+    // An address nothing answers: an error naming it, and no walk to fall back on.
+    let (code, _, err) = run(&["config", "0x05", "control.mode"]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains(
+            "no answer from 0x05; `hoverboard-cli nodes` lists the nodes this link reaches"
+        ),
+        "{err}"
+    );
+    let (code, out, err) = run(&["compact", "0x02"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "rover-right: compact: ok");
+
+    let after = server.join().unwrap();
+    let probe = net::pdu::Opcode::ProbePorts.to_u8();
+    let hello = net::pdu::Opcode::NodeHello.to_u8();
+    for (i, sent) in after.ops.iter().enumerate() {
+        assert_eq!(sent.first(), Some(&hello), "connection {i} attaches first");
+        assert_eq!(
+            sent.contains(&probe),
+            i == 3,
+            "connection {i} sent {sent:02x?}: only the one naming a node walks"
+        );
+    }
 }
 
 #[test]

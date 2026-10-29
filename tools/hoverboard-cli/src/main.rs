@@ -27,9 +27,11 @@
 //!                               console through a serial-to-TCP relay
 //! ```
 //!
-//! A node is an address (`0x03`) or a `device.name`. `nodes` walks the machine with `net`'s
-//! controller and lists every node's address, class and name; `name` walks, then writes the node's
-//! `device.name` and prints the status by name.
+//! A node is an address (`0x03`) or a `device.name`. An address is reached directly: the tool
+//! attaches and reads the node's `device.name`, with no walk. A name needs the walk, which reads
+//! every node's name and resolves it. `nodes` walks the machine with `net`'s controller and lists
+//! every node's address, class and name; `name` writes the node's `device.name` and prints the
+//! status by name.
 //!
 //! `config`, `dump`, `diff`, `apply`, `replace` and `compact` treat a board's store as a file
 //! (`specs/cli-config.md`): a field goes by its name in the store's name table (`motors.1.hall.a`,
@@ -520,6 +522,48 @@ fn label(f: &Found) -> String {
     }
 }
 
+/// Reach the node `spec` names (`specs/cli-config.md` section 4.1): an address by attaching and
+/// reading its `device.name`, with no walk (a frame to an address the forwarders have not learned
+/// is flooded until the reply teaches the route); a name by walking and resolving it. The node's
+/// class is read only for a name (the walk reads it); [`class_of`] reads it for an address.
+fn reach(wire: &mut impl Wire, spec: &str) -> Result<(u8, Found), String> {
+    if nodes::parse_int(spec).is_none() {
+        return walk_to(wire, spec);
+    }
+    let addr = nodes::resolve(spec, &[])?;
+    let src = attach(wire)?;
+    let r = nodes::read(wire, src, addr, store::DEVICE_NAME.key()).map_err(|_| {
+        format!(
+            "no answer from {addr:#04x}; `hoverboard-cli nodes` lists the nodes this link reaches"
+        )
+    })?;
+    let name = match r.value() {
+        Some(store::Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+        _ => None,
+    };
+    Ok((
+        src,
+        Found {
+            addr,
+            class: None,
+            name,
+        },
+    ))
+}
+
+/// `f`'s `node.class`, read from the node when reaching it did not.
+fn class_of(wire: &mut impl Wire, src: u8, f: &Found) -> Option<u8> {
+    f.class.or_else(|| {
+        match nodes::read(wire, src, f.addr, store::NODE_CLASS.key())
+            .ok()?
+            .value()
+        {
+            Some(store::Value::U8(c)) => Some(c),
+            _ => None,
+        }
+    })
+}
+
 /// Walk and resolve `spec` to a node the walk found.
 fn walk_to(wire: &mut impl Wire, spec: &str) -> Result<(u8, Found), String> {
     let (src, found) = walk(wire)?;
@@ -570,7 +614,7 @@ fn file_command(
 ) -> Result<bool, String> {
     let files = load_files(paths, flags.force)?;
     let mut wire = Framed::new(via.open()?);
-    let (src, f) = walk_to(&mut wire, spec)?;
+    let (src, f) = reach(&mut wire, spec)?;
     let mut b = Board {
         wire: &mut wire,
         src,
@@ -639,7 +683,8 @@ fn esp_client(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
     let mut wire = Framed::new(via.open()?);
     let (src, dst) = match node {
         Some(spec) => {
-            let (src, f) = walk_to(&mut wire, spec)?;
+            let (src, mut f) = reach(&mut wire, spec)?;
+            f.class = class_of(&mut wire, src, &f);
             if f.class != Some(net::walk::CLASS_BRIDGE) {
                 return Err(format!(
                     "{} is a {}, not a bridge",
@@ -878,7 +923,7 @@ fn run(args: &[String]) -> Result<u8, String> {
             _ => return Err("dump needs <node> [<file>]".into()),
         };
         let mut wire = Framed::new(via.open()?);
-        let (src, f) = walk_to(&mut wire, spec)?;
+        let (src, f) = reach(&mut wire, spec)?;
         let mut b = Board {
             wire: &mut wire,
             src,
@@ -915,7 +960,7 @@ fn run(args: &[String]) -> Result<u8, String> {
             return Err("compact needs <node>".into());
         };
         let mut wire = Framed::new(via.open()?);
-        let (src, f) = walk_to(&mut wire, spec)?;
+        let (src, f) = reach(&mut wire, spec)?;
         let status = nodes::compact(&mut wire, src, f.addr)?;
         println!("{}: compact: {}", node_name(&f), nodes::status_name(status));
         config_outcome(status)?;
@@ -964,7 +1009,8 @@ fn run(args: &[String]) -> Result<u8, String> {
             return Err("name needs <node> <text>".into());
         };
         let mut wire = Framed::new(via.open()?);
-        let (src, f) = walk_to(&mut wire, spec)?;
+        let (src, mut f) = reach(&mut wire, spec)?;
+        f.class = class_of(&mut wire, src, &f);
         let key = store::DEVICE_NAME.key();
         let r = nodes::write(
             &mut wire,
@@ -998,7 +1044,7 @@ fn run(args: &[String]) -> Result<u8, String> {
             config::stop_on(&checks, flags.force)?;
         }
         let mut wire = Framed::new(via.open()?);
-        let (src, f) = walk_to(&mut wire, spec)?;
+        let (src, f) = reach(&mut wire, spec)?;
         let mut b = Board {
             wire: &mut wire,
             src,
