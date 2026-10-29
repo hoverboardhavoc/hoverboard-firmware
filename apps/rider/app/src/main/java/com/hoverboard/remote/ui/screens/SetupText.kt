@@ -55,6 +55,7 @@ private fun refusalText(r: CfgRefusal): Int = when (r) {
     CfgRefusal.NO_SPACE -> R.string.setup_write_refused_no_space
     CfgRefusal.COMMIT_FAILED -> R.string.setup_write_refused_commit
     CfgRefusal.READ_ONLY -> R.string.setup_write_refused_read_only
+    CfgRefusal.SECRET -> R.string.setup_write_refused_secret
 }
 
 private fun blockedText(b: Blocked): Int = when (b) {

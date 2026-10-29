@@ -121,6 +121,13 @@ object Walk {
     const val CFG_DEFAULT = 9
 
     /**
+     * `CONFIG_RESP` status: a `CONFIG_READ` of a stored secret (`store::SECRET`, `wifi.pass`;
+     * `specs/bridge-onboarding.md` section 2.2). The key holds a value and none follows: no node
+     * reads a secret back over a link. The app reads no secret, so it meets this only as a refusal.
+     */
+    const val CFG_SECRET = 10
+
+    /**
      * `TUNE_WRITE`: set one live-tunable value in the board's RAM, replying `CONFIG_RESP`
      * (`specs/rider-ui.md` section 4). The payload is `CONFIG_WRITE`'s
      * `[field_id, index, type_tag, value...]`.
