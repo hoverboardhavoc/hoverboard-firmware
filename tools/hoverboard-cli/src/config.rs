@@ -355,8 +355,27 @@ pub struct Plan {
     pub steps: Vec<Step>,
     /// Keys the files name whose value the board already holds.
     pub unchanged: usize,
-    /// Keys the board stores that no file names (`apply` leaves them alone).
-    pub kept: Vec<Key>,
+    /// Keys the board stores that `apply` leaves alone, and why.
+    pub kept: Vec<(Key, Kept)>,
+}
+
+/// Why `apply` leaves a stored key alone (`specs/cli-config.md` section 4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// No file names it.
+    NotInFile,
+    /// A file gives it as `null`.
+    NullInFile,
+}
+
+impl Kept {
+    /// How its line ends.
+    fn note(self) -> &'static str {
+        match self {
+            Kept::NotInFile => "(stored, not in the file)",
+            Kept::NullInFile => "(stored, null in the file)",
+        }
+    }
 }
 
 impl Plan {
@@ -377,8 +396,9 @@ impl Plan {
 
 /// Plan the files against what the board answered (`specs/cli-config.md` section 4.3). Only
 /// `replace` un-stores: a `null` for a key the board stores, and every key the board stores that no
-/// file names, except the board-owned ones. `apply` leaves both alone (section 2.1), so applying
-/// one board's dump to another never removes the second board's values. `Err` for a file's key the board does not know, or a value for an id the table does not
+/// file names, except the board-owned ones. `apply` leaves both alone (section 2.1) and lists them
+/// as kept, so applying one board's dump to another never removes the second board's values; a
+/// `null` for a key the board does not store is unchanged. `Err` for a file's key the board does not know, or a value for an id the table does not
 /// name that the board's type cannot take.
 pub fn plan(
     files: &Files,
@@ -417,6 +437,10 @@ pub fn plan(
         let holds = |b: &[u8]| r.tag == storage.tag() && r.bytes == b;
         let act = match &bytes {
             None if r.status == CFG_OK && replace => Some(Act::Unstore),
+            None if r.status == CFG_OK => {
+                plan.kept.push((e.key, Kept::NullInFile));
+                continue;
+            }
             None => None,
             Some(b) if holds(b) && r.status == CFG_OK => None,
             Some(b) if holds(b) => Some(Act::Pin),
@@ -450,7 +474,7 @@ pub fn plan(
                 bytes: None,
             });
         } else {
-            plan.kept.push(key);
+            plan.kept.push((key, Kept::NotInFile));
         }
     }
     Ok(plan)
@@ -526,11 +550,12 @@ pub fn report(
         let then = after.get(&s.key).cloned().unwrap_or_else(|| predicted(s));
         lines.push(change_line(name, s.key, &before[&s.key], &then));
     }
-    for k in &plan.kept {
+    for (k, why) in &plan.kept {
         lines.push(format!(
-            "{name}: kept: {} = {} (stored, not in the file)",
+            "{name}: kept: {} = {} {}",
             path_of(*k),
-            shown(*k, &before[k])
+            shown(*k, &before[k]),
+            why.note()
         ));
     }
     if plan
@@ -1007,27 +1032,45 @@ mod tests {
     }
 
     /// `apply` never un-stores: a `null` (a position a dump of another board did not store) leaves
-    /// the key alone; `replace` un-stores it (`specs/cli-config.md` section 2.1).
+    /// the key alone, listed as kept when the board stores it and unchanged when it does not;
+    /// `replace` un-stores it (`specs/cli-config.md` sections 2.1 and 4.3).
     #[test]
     fn a_null_unstores_under_replace_and_is_left_alone_under_apply() {
         let f = files(&[(
             "dump.json",
-            json!({ "control": { "sf_gains": [3491, null] } }),
+            json!({ "control": { "sf_gains": [3491, null, null] } }),
         )]);
         let stored = |v: i16| ConfigResp {
             status: CFG_OK,
             tag: Type::I16.tag(),
             bytes: v.to_le_bytes().to_vec(),
         };
-        let reads: Reads = [(k(0x79, 0), stored(3491)), (k(0x79, 1), stored(4002))]
-            .into_iter()
-            .collect();
+        let default = ConfigResp {
+            status: CFG_DEFAULT,
+            ..stored(0)
+        };
+        let reads: Reads = [
+            (k(0x79, 0), stored(3491)),
+            (k(0x79, 1), stored(4002)),
+            (k(0x79, 2), default),
+        ]
+        .into_iter()
+        .collect();
         let apply = plan(&f, &reads, &[], false).unwrap();
         assert!(apply.steps.is_empty(), "{:?}", apply.steps);
         assert_eq!(apply.unchanged, 2);
+        assert_eq!(apply.kept, [(k(0x79, 1), Kept::NullInFile)]);
+        assert_eq!(
+            report("rover-left", &apply, &reads, &BTreeMap::new()),
+            [
+                "rover-left: 0 changed, 0 pinned, 2 unchanged, 1 kept",
+                "rover-left: kept: control.sf_gains[1] = 4002 (stored, null in the file)",
+            ]
+        );
         let replace = plan(&f, &reads, &[], true).unwrap();
         let steps: Vec<(Key, Act)> = replace.steps.iter().map(|s| (s.key, s.act)).collect();
         assert_eq!(steps, [(k(0x79, 1), Act::Unstore)]);
+        assert!(replace.kept.is_empty());
     }
 
     #[test]
