@@ -30,7 +30,6 @@ protocol-kotlin/
   src/test/kotlin/com/hoverboard/protocol/
     L2Test, PduTest, StoreWireTest, WalkTest, BleWalkTest    behaviour, ported with the code
     OrientationTest, BoardLayoutTest, PinPickerTest          the Rust's own vectors, ported
-    LayoutPresetsTest                                        the shipped layouts, validated
     WireDriftTest                                            hand-copied wire pins
     RustSourceDriftTest                                      reads the Rust and compares
 ```

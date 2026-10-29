@@ -62,6 +62,10 @@ const val LAYOUT_PART_UNKNOWN_TAG = "layout_part_unknown"
  * the screen shows one verdict over the whole staged layout, Apply is refused outright unless that
  * verdict is clean, and the changes are listed as a delta from what the board holds.
  *
+ * It adjusts a board that is already onboarded. Taking a board from blank to a bootable layout is
+ * done from `hoverboard-cli` at the bench (`hoverboard-specs/decision-cli-onboarding.md`), so this
+ * screen offers no whole-layout presets.
+ *
  * The verdict is exact, not advisory: the board's boot validator is a pure function of these fields,
  * the part's capabilities and the reserved pins, and the app runs that same function
  * ([com.hoverboard.protocol.board.validate]). What it cannot know without a reboot is whether the
@@ -100,8 +104,6 @@ fun LayoutScreen(
         if (armed) Lock()
         state.notice?.let { Notice(it, state, actions) }
         Status(state, actions)
-        Presets(state, actions)
-        LatchConfirmation(state, actions)
         if (state.part != null) Verdict(state)
         Delta(state, armed, actions)
         PowerCycle(state)
