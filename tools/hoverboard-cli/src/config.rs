@@ -262,8 +262,9 @@ pub fn plan_keys(files: &Files) -> Vec<Key> {
 }
 
 /// Read `keys` from the board. A key the board does not know is left out of the reads and
-/// returned: for a key a file names that stops the command (the image and the tool's table
-/// disagree); for one of the table's own it means the image predates the field.
+/// returned: for a key a file names that stops the command unless `--force` writes it with the
+/// table's type ([`plan`]); for one of the table's own the files leave out it means the image
+/// predates the field.
 pub fn read_board<W: Wire>(
     b: &mut Board<'_, W>,
     keys: &[Key],
@@ -389,6 +390,8 @@ pub struct Plan {
     pub unchanged: usize,
     /// Keys the board stores that `apply` leaves alone, and why.
     pub kept: Vec<(Key, Kept)>,
+    /// The problems `--force` let through, as warnings.
+    pub warnings: Vec<String>,
 }
 
 /// Why `apply` leaves a stored key alone (`specs/cli-config.md` section 4.3).
@@ -430,27 +433,37 @@ impl Plan {
 /// `replace` un-stores: a `null` for a key the board stores, and every key the board stores that no
 /// file names, except the board-owned ones. `apply` leaves both alone (section 2.1) and lists them
 /// as kept, so applying one board's dump to another never removes the second board's values; a
-/// `null` for a key the board does not store is unchanged. `Err` for a file's key the board does not know, or a value for an id the table does not
-/// name that the board's type cannot take.
+/// `null` for a key the board does not store is unchanged.
+///
+/// A file's key the board answers `CFG_UNKNOWN_KEY` to stops the plan, unless the table names it and
+/// `force` is given: then it is written with the table's type, as a warning (an image whose read
+/// path does not register the key but whose write path stores it, `specs/cli-config.md` section 5).
+/// `Err` for every problem that stops, or a value for an id the table does not name that the
+/// board's type cannot take.
 pub fn plan(
     files: &Files,
     reads: &Reads,
     unknown: &[Key],
     replace: bool,
+    force: bool,
 ) -> Result<Plan, Vec<Problem>> {
     let mut plan = Plan::default();
     let mut problems = Vec::new();
+    let unread = not_readable();
     for e in &files.entries {
-        if unknown.contains(&e.key) {
-            problems.push(Problem::stop(format!(
-                "{}: the board does not know this key, so its image is older or newer than this \
-                 tool's table: update whichever is behind",
-                path_of(e.key)
-            )));
-            continue;
-        }
-        let Some(r) = reads.get(&e.key) else {
-            continue;
+        let r = if unknown.contains(&e.key) {
+            let p = unknown_key(&path_of(e.key), e.key);
+            let go = !p.stops(force);
+            problems.push(p);
+            if !go {
+                continue;
+            }
+            &unread
+        } else {
+            match reads.get(&e.key) {
+                Some(r) => r,
+                None => continue,
+            }
         };
         let storage = match row_of(e.key) {
             Some(row) => row.storage,
@@ -462,7 +475,7 @@ pub fn plan(
         let bytes = match encode(e.key, storage, &e.value) {
             Ok((b, _)) => b,
             Err(p) => {
-                problems.push(p);
+                problems.push(Problem::stop(p.msg));
                 continue;
             }
         };
@@ -490,9 +503,10 @@ pub fn plan(
             None => plan.unchanged += 1,
         }
     }
-    if !problems.is_empty() {
-        return Err(problems);
+    if problems.iter().any(|p| p.stops(force)) {
+        return Err(problems.into_iter().filter(|p| p.stops(force)).collect());
     }
+    plan.warnings = warnings(&problems, force);
     for key in table_keys() {
         let named = files.entries.iter().any(|e| e.key == key);
         let row = row_of(key).expect("a table key");
@@ -514,9 +528,41 @@ pub fn plan(
     Ok(plan)
 }
 
+/// The problem of a key the board answers `CFG_UNKNOWN_KEY` to, `what` naming it in the message:
+/// one `--force` lets through when the table names the key (its type is the table's), a stop when
+/// it does not (nothing gives a type to write it with).
+fn unknown_key(what: &str, key: Key) -> Problem {
+    let msg = format!(
+        "{what}: the board does not know this key, so its image is older or newer than this \
+         tool's table: update whichever is behind"
+    );
+    match row_of(key) {
+        Some(_) => Problem::forceable(format!("{msg} (--force writes it with the table's type)")),
+        None => Problem::stop(msg),
+    }
+}
+
+/// What a board answers for a key its read path does not register.
+fn not_readable() -> ConfigResp {
+    ConfigResp {
+        status: CFG_UNKNOWN_KEY,
+        tag: 0,
+        bytes: Vec::new(),
+    }
+}
+
+/// The board's answer for `key` in `before`, or [`not_readable`] for a key it did not know.
+fn before_of(before: &Reads, key: Key) -> ConfigResp {
+    before.get(&key).cloned().unwrap_or_else(not_readable)
+}
+
 /// A value as a line shows it, with ` (default)` when the board stores nothing. A secret shows as
-/// `(set)` when stored and `(default)` when not, never as its value.
+/// `(set)` when stored and `(default)` when not, never as its value. A key the board does not know
+/// shows as `(not readable)`.
 pub fn shown(key: Key, r: &ConfigResp) -> String {
+    if r.status == CFG_UNKNOWN_KEY {
+        return "(not readable)".into();
+    }
     if secret(key) {
         return if r.status == CFG_DEFAULT {
             "(default)"
@@ -595,7 +641,7 @@ pub fn report(
     let mut lines = vec![summary];
     for s in &plan.steps {
         let then = after.get(&s.key).cloned().unwrap_or_else(|| predicted(s));
-        lines.push(change_line(name, s.key, &before[&s.key], &then));
+        lines.push(change_line(name, s.key, &before_of(before, s.key), &then));
     }
     for (k, why) in &plan.kept {
         lines.push(format!(
@@ -615,8 +661,15 @@ pub fn report(
     lines
 }
 
-/// The line for one written key: `name: path: before -> after`.
+/// The line for one written key: `name: path: before -> after`, or for a key whose read-back the
+/// board answers `CFG_UNKNOWN_KEY` to, the write's own `CFG_OK` as the evidence.
 pub fn change_line(name: &str, key: Key, before: &ConfigResp, after: &ConfigResp) -> String {
+    if after.status == CFG_UNKNOWN_KEY {
+        return format!(
+            "{name}: {}: written; the board cannot read it back",
+            path_of(key)
+        );
+    }
     format!(
         "{name}: {}: {} -> {}",
         path_of(key),
@@ -689,7 +742,7 @@ pub fn written_lines(name: &str, plan: &Plan, before: &Reads, r: &Refused) -> Ve
         Some(change_line(
             name,
             s.key,
-            &before[&s.key],
+            &before_of(before, s.key),
             r.written.get(&s.key)?,
         ))
     });
@@ -728,8 +781,9 @@ pub struct Written {
 }
 
 /// `config <node> <path> <value>`: write `text` to `key` in the file's value forms. `force` lets
-/// through the checks of `specs/cli-config.md` section 5 that it may; the board's own refusals
-/// stand.
+/// through the checks of `specs/cli-config.md` section 5 that it may, a key the table names and the
+/// board answers `CFG_UNKNOWN_KEY` to among them (written with the table's type); the board's own
+/// refusals stand.
 pub fn config_write<W: Wire>(
     b: &mut Board<'_, W>,
     key: Key,
@@ -738,15 +792,12 @@ pub fn config_write<W: Wire>(
 ) -> Result<Written, String> {
     stop_on(&write_checks(key), force)?;
     let before = b.read(key)?;
+    let mut problems = Vec::new();
     if before.status == CFG_UNKNOWN_KEY {
-        return Err(format!(
-            "{}: {}: the board does not know this key, so its image is older or newer than this \
-             tool's table: update whichever is behind",
-            b.name,
-            path_of(key)
-        ));
-    }
-    if !answered(&before) {
+        let p = unknown_key(&format!("{}: {}", b.name, path_of(key)), key);
+        stop_on(std::slice::from_ref(&p), force)?;
+        problems.push(p);
+    } else if !answered(&before) {
         return Err(format!(
             "{}: {}: {}",
             b.name,
@@ -763,6 +814,7 @@ pub fn config_write<W: Wire>(
     let value = crate::names::from_text(row, storage, text);
     let (bytes, warn) = encode(key, storage, &value).map_err(|p| p.msg)?;
     stop_on(&warn, force)?;
+    problems.extend(warn);
     let status = b.write(key, storage, bytes.as_deref())?;
     if status != CFG_OK {
         return Err(format!(
@@ -778,7 +830,7 @@ pub fn config_write<W: Wire>(
         lines.push(PIN_NOTE.into());
     }
     Ok(Written {
-        warnings: warnings(&warn, force),
+        warnings: warnings(&problems, force),
         lines,
     })
 }
@@ -887,7 +939,7 @@ mod tests {
         assert!(f.problems.is_empty(), "{:?}", f.problems);
         let mut b = board(lp);
         let (reads, unknown) = read_board(&mut b, &plan_keys(f))?;
-        let plan = plan(f, &reads, &unknown, replace).map_err(|p| format!("{p:?}"))?;
+        let plan = plan(f, &reads, &unknown, replace, false).map_err(|p| format!("{p:?}"))?;
         let after = execute(&mut b, &plan).map_err(|r| r.msg)?;
         let lines = report(&b.name, &plan, &reads, &after);
         Ok((plan, lines))
@@ -1047,7 +1099,7 @@ mod tests {
         let refused = |lp: &mut Loop| {
             let mut b = board(lp);
             let (reads, unknown) = read_board(&mut b, &plan_keys(&f)).unwrap();
-            let plan = plan(&f, &reads, &unknown, false).unwrap();
+            let plan = plan(&f, &reads, &unknown, false, false).unwrap();
             let r = execute(&mut b, &plan).unwrap_err();
             let lines = written_lines(&b.name, &plan, &reads, &r);
             (r.msg, lines)
@@ -1109,7 +1161,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let apply = plan(&f, &reads, &[], false).unwrap();
+        let apply = plan(&f, &reads, &[], false, false).unwrap();
         assert!(apply.steps.is_empty(), "{:?}", apply.steps);
         assert_eq!(apply.unchanged, 2);
         assert_eq!(apply.kept, [(k(0x79, 1), Kept::NullInFile)]);
@@ -1120,7 +1172,7 @@ mod tests {
                 "rover-left: kept: control.sf_gains[1] = 4002 (stored, null in the file)",
             ]
         );
-        let replace = plan(&f, &reads, &[], true).unwrap();
+        let replace = plan(&f, &reads, &[], true, false).unwrap();
         let steps: Vec<(Key, Act)> = replace.steps.iter().map(|s| (s.key, s.act)).collect();
         assert_eq!(steps, [(k(0x79, 1), Act::Unstore)]);
         assert!(replace.kept.is_empty());
@@ -1145,7 +1197,7 @@ mod tests {
         let reads: Reads = [(k(0x10, 0), name), (k(0x22, 0), mode)]
             .into_iter()
             .collect();
-        let plan = plan(&f, &reads, &[], true).unwrap();
+        let plan = plan(&f, &reads, &[], true, false).unwrap();
         assert_eq!(
             report("esp", &plan, &reads, &BTreeMap::new()),
             [
@@ -1263,11 +1315,16 @@ mod tests {
         let mut b = board(&mut lp);
         let (reads, unknown) = read_board(&mut b, &plan_keys(&f)).unwrap();
         assert_eq!(unknown, [k(0x99, 0)]);
-        let e = plan(&f, &reads, &unknown, false).unwrap_err();
+        let e = plan(&f, &reads, &unknown, false, false).unwrap_err();
         assert_eq!(
             e[0].msg,
             "0x99.0: the board does not know this key, so its image is older or newer than this \
              tool's table: update whichever is behind"
+        );
+        // The table gives no type for it, so --force does not write it either.
+        assert_eq!(
+            plan(&f, &reads, &unknown, false, true).unwrap_err()[0].msg,
+            e[0].msg
         );
         // A registered id the table did not name would be written with the board's type: the raw
         // form of a named one is the same key, checked the same way.
