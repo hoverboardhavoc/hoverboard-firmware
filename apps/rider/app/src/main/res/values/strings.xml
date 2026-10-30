@@ -154,7 +154,7 @@
 
     <!-- Battery, when the board sends 0 cV: that is UNKNOWN, not a board measuring zero volts. The
          label states that fact and never a cause, because UNKNOWN is broader than "cannot sense":
-         a master whose board.vbatt IS staged publishes UNKNOWN until its motor is brought up,
+         a master whose board.battery.pin IS staged publishes UNKNOWN until its motor is brought up,
          VBATT_RAW being 0 until then (specs/sensing-and-safety.md), so naming one cause would send
          a bench operator to re-stage a field that was already right. The note names both as
          alternatives. No number and no bar are drawn, so these two carry the whole statement. -->
@@ -166,6 +166,7 @@
          eight-cell pack above full and a ten-cell pack nearly empty). So the volts are shown and
          the percentage is withheld, with the one place that settles it named. -->
     <string name="telemetry_battery_no_pack">No charge figure: nobody has told this machine how many cells its pack has. Set it under Setup, in Drive.</string>
+    <string name="telemetry_battery_unknown_chemistry">No charge figure: this board\'s battery chemistry is not one this app knows. Set it under Setup, in Drive.</string>
 
     <!-- Current, beside the battery (specs/rider-ui.md 3.6). TWO figures per board, because the
          board measures the PHASE current the motor feels and a bench supply reads the DC LINK, and
@@ -370,6 +371,10 @@
     <string name="setup_field_rider_required">Rider required (balance mode)</string>
     <string name="setup_field_battery_floor">Low-battery floor (cV)</string>
     <string name="setup_field_pack_cells">Battery cells in series</string>
+    <string name="setup_field_battery_chemistry">Battery chemistry</string>
+    <string name="setup_choice_li_ion">Li-ion (NMC)</string>
+    <string name="setup_choice_lev50">LEV50</string>
+    <string name="setup_choice_lto">LTO</string>
     <string name="setup_field_gain_max_gp">Gain maximum, gp</string>
     <string name="setup_field_gain_max_gr">Gain maximum, gr</string>
     <string name="setup_field_gain_max_gx">Gain maximum, gx</string>
@@ -428,7 +433,10 @@
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
-    <string name="setup_note_pack_cells">0 = not set, and then the Ride screen shows pack volts with no percentage. Set the same count on both boards: one pack feeds them both. A cell counts as full at 4.2 V and empty at 3.0 V.</string>
+    <string name="setup_note_battery_chemistry">Picks the resting-voltage table the Ride screen\'s percentage reads. Set the same on both boards.</string>
+    <string name="setup_floor_above_full">This floor is at or above the stated pack\'s full voltage, so every balance engage is refused.</string>
+    <string name="setup_floor_below_empty">This floor is below the stated pack\'s empty voltage, so it refuses no engage before the pack is flat.</string>
+    <string name="setup_note_pack_cells">0 = not set, and then the Ride screen shows pack volts with no percentage. Set the same count on both boards: one pack feeds them both. The chemistry below sets what a full and an empty cell are.</string>
     <string name="setup_note_gain_max">The largest value the Tune sliders and the board accept for this gain; the minimum is 0. A gain above it is clamped down to it.</string>
     <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset.</string>
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>

@@ -1,45 +1,86 @@
 package com.hoverboard.remote.model
 
+import com.hoverboard.protocol.store.Fields
+import com.hoverboard.remote.model.BatteryReading.Unjudged.Why
 import kotlin.math.roundToInt
 
 /**
- * State of charge from pack voltage, per series cell.
+ * State of charge from a resting pack voltage, per series cell and per chemistry
+ * (`specs/rider-ui.md` 3.6d).
  *
- * The endpoints are a cell's, not a pack's: 4.2 V full and 3.0 V empty, which is the band the
- * machines here run their lithium packs over (the rover's LEV50 module is eight of them, about 24
- * to 33.6 V). A pack's endpoints are those multiplied by how many cells it has, which the board
- * stores and nothing else can work out ([com.hoverboard.protocol.store.Fields.BOARD_PACK_CELLS]).
- * It replaces a 29.4 V / 21.7 V pair compiled into this file, which described a seven-cell pack no
- * machine here runs and pinned both of them at 100%.
+ * Each chemistry is a table of eleven resting cell voltages at 0, 10, ... 100 % charge, read
+ * linearly between points and clamped at the ends. A pack's voltages are the table's multiplied
+ * by how many cells it has ([com.hoverboard.protocol.store.Fields.BOARD_BATTERY_CELLS]), and which
+ * table is the pack's own [com.hoverboard.protocol.store.Fields.BOARD_BATTERY_CHEMISTRY]. The
+ * points are held in centivolts, the battery word's unit, so a pack's endpoints are exact.
  *
- * **The map between the endpoints is linear, and that is still a placeholder.** A lithium cell is
- * flat through the middle and steep at both ends, so this over-reads the top of the discharge and
- * under-reads the bottom. Fitting the real shape needs a logged discharge of the pack in question
- * and nobody has run one; the endpoints were the part that made the gauge useless, and the shape
- * is tracked separately in `specs/todo.md`, the open model gaps.
+ * **The tables are typical datasheet shapes, not measurements of these packs.** A logged discharge
+ * replaces a row when one is run (`specs/todo.md`, the open model gaps). They read RESTING voltage: under load a pack
+ * sags and the gauge under-reads.
  */
 object BatteryCurve {
-
-    /** A full cell, volts. Eight of these is the rover pack's 33.6 V. */
-    const val FULL_VOLTS_PER_CELL: Float = 4.2f
-
-    /** An empty cell, volts: the same 3.0 V per cell the firmware's low-battery floor defaults to. */
-    const val EMPTY_VOLTS_PER_CELL: Float = 3.0f
 
     /** Battery is considered low at or below this fraction of remaining charge. */
     const val LOW_FRACTION: Float = 0.15f
 
-    /** A full pack of [cells] series cells, volts. */
-    fun fullVolts(cells: Int): Float = cells * FULL_VOLTS_PER_CELL
+    /** Each chemistry's resting cell voltage at 0, 10, ... 100 %, centivolts. */
+    private val TABLES: Map<Int, IntArray> = mapOf(
+        Fields.BatteryChemistry.LI_ION to
+            intArrayOf(300, 345, 355, 362, 368, 374, 380, 388, 397, 407, 420),
+        Fields.BatteryChemistry.LEV50 to
+            intArrayOf(275, 350, 358, 363, 368, 373, 379, 386, 394, 402, 410),
+        Fields.BatteryChemistry.LTO to
+            intArrayOf(170, 215, 222, 226, 229, 232, 236, 240, 245, 252, 270),
+    )
 
-    /** An empty pack of [cells] series cells, volts. */
-    fun emptyVolts(cells: Int): Float = cells * EMPTY_VOLTS_PER_CELL
+    /**
+     * A pack of [cells] cells of [chemistry] from empty to full, centivolts, or null for a
+     * chemistry this app has no table for.
+     */
+    fun packCentivolts(cells: Int, chemistry: Int): IntRange? =
+        TABLES[chemistry]?.let { cells * it.first()..cells * it.last() }
 
-    /** Remaining charge in [0f, 1f] for [volts] across [cells] cells, clamped to the endpoints. */
-    fun fraction(volts: Float, cells: Int): Float {
-        val empty = emptyVolts(cells)
-        return ((volts - empty) / (fullVolts(cells) - empty)).coerceIn(0f, 1f)
+    /**
+     * Remaining charge in [0f, 1f] for [volts] across [cells] cells of [chemistry], clamped at the
+     * table's ends, or null for a chemistry this app has no table for.
+     */
+    fun fraction(volts: Float, cells: Int, chemistry: Int): Float? {
+        val table = TABLES[chemistry] ?: return null
+        val perCell = volts * CENTIVOLTS_PER_VOLT / cells
+        if (perCell <= table.first()) return 0f
+        if (perCell >= table.last()) return 1f
+        val upper = table.indexOfFirst { it > perCell }
+        val lo = table[upper - 1]
+        val step = (perCell - lo) / (table[upper] - lo)
+        return (upper - 1 + step) / (table.size - 1)
     }
+
+    private const val CENTIVOLTS_PER_VOLT = 100f
+}
+
+/**
+ * Whether [floor] (`board.battery.floor`, centivolts) sits outside the stated pack: at or above
+ * its full voltage, or below its empty one (`specs/rider-ui.md` 3.6d). Null when there is nothing
+ * to judge: no floor (`<= 0`), no stated cell count, or a chemistry this app has no table for.
+ */
+fun floorOutsidePack(floor: Int?, cells: Int?, chemistry: Int?): FloorOutside? {
+    if (floor == null || floor <= 0) return null
+    if (cells == null || cells <= 0) return null
+    val pack = chemistry?.let { BatteryCurve.packCentivolts(cells, it) } ?: return null
+    return when {
+        floor >= pack.last -> FloorOutside.AT_OR_ABOVE_FULL
+        floor < pack.first -> FloorOutside.BELOW_EMPTY
+        else -> null
+    }
+}
+
+/** Which side of the stated pack a low-battery floor falls on ([floorOutsidePack]). */
+enum class FloorOutside {
+    /** No pack of this kind rests above the floor, so every balance engage is refused. */
+    AT_OR_ABOVE_FULL,
+
+    /** The floor is under an empty pack, so it never refuses an engage before the pack is flat. */
+    BELOW_EMPTY,
 }
 
 /**
@@ -53,13 +94,22 @@ sealed interface BatteryReading {
     data object NoReading : BatteryReading
 
     /**
-     * A measured pack voltage with no pack to judge it against: nothing has stated how many cells
-     * this machine runs, so there is a number and no state of charge.
+     * A measured pack voltage with no pack to judge it against, for the reason [why]: there is a
+     * number and no state of charge.
      *
      * Not a gauge at an assumed pack. The same 30 V is a flat ten-cell pack and an over-charged
      * eight-cell one, and a percentage drawn from a guess is the defect this type exists to end.
      */
-    data class Unjudged(val volts: Float) : BatteryReading
+    data class Unjudged(val volts: Float, val why: Why) : BatteryReading {
+        /** What is missing. */
+        enum class Why {
+            /** Nothing has stated how many cells this machine runs. */
+            NO_CELLS,
+
+            /** The stated chemistry is a byte this app has no table for, or it is unread. */
+            UNKNOWN_CHEMISTRY,
+        }
+    }
 
     /**
      * A measured pack voltage against the stated pack: the voltage, how full it is and whether
@@ -76,17 +126,20 @@ sealed interface BatteryReading {
 }
 
 /**
- * What [telemetry] and that machine's own [packCells] (`board.pack_cells`) come to.
+ * What [telemetry] and that machine's own [packCells] (`board.battery.cells`) and [chemistry]
+ * (`board.battery.chemistry`) come to.
  *
- * The cell count is read from the board rather than compiled in, because the two machines here run
- * different packs and a client cannot derive one from a voltage: a resting 30 V is an eight-cell
- * pack above full and a ten-cell pack nearly empty. Absent or 0, the pack has not been stated and
- * the voltage is reported [BatteryReading.Unjudged] rather than judged against a guess.
+ * Both are read from the board rather than compiled in, because the machines here run different
+ * packs and a client cannot derive one from a voltage: a resting 30 V is an eight-cell pack above
+ * full and a ten-cell pack nearly empty. A cell count that is absent or 0, or a chemistry that is
+ * unread or unknown, leaves the voltage [BatteryReading.Unjudged] rather than judged against a
+ * guess.
  */
-fun batteryReading(telemetry: TelemetryUi?, packCells: Int?): BatteryReading {
+fun batteryReading(telemetry: TelemetryUi?, packCells: Int?, chemistry: Int?): BatteryReading {
     val volts = telemetry?.batteryVolts ?: return BatteryReading.NoReading
-    if (packCells == null || packCells <= 0) return BatteryReading.Unjudged(volts)
-    val fraction = BatteryCurve.fraction(volts, packCells)
+    if (packCells == null || packCells <= 0) return BatteryReading.Unjudged(volts, Why.NO_CELLS)
+    val fraction = chemistry?.let { BatteryCurve.fraction(volts, packCells, it) }
+        ?: return BatteryReading.Unjudged(volts, Why.UNKNOWN_CHEMISTRY)
     return BatteryReading.Charge(
         volts = volts,
         fraction = fraction,
