@@ -1008,8 +1008,8 @@ fn the_station_starts_only_from_a_store_holding_a_usable_network() {
         station(&s)
     };
     let join = |ssid: &str, pass: &str| Station::Join {
-        ssid: heapless::Vec::from_slice(ssid.as_bytes()).unwrap(),
-        pass: heapless::Vec::from_slice(pass.as_bytes()).unwrap(),
+        ssid: heapless::String::try_from(ssid).unwrap(),
+        pass: heapless::String::try_from(pass).unwrap(),
     };
 
     // No network: off, and ESP_INFO reads not configured.
@@ -1031,6 +1031,16 @@ fn the_station_starts_only_from_a_store_holding_a_usable_network() {
     assert_eq!(on.network(), Some(("bench", "hunter2hunter2")));
     assert_eq!(on.state(), espsvc::WifiState::Down);
     assert_eq!(off.network(), None);
+    // Debug names the network and never prints the password.
+    assert_eq!(
+        std::format!("{on:?}"),
+        "Join { ssid: \"bench\", pass: (set) }"
+    );
+    assert_eq!(
+        std::format!("{:?}", join("cafe", "")),
+        "Join { ssid: \"cafe\", pass: (empty) }"
+    );
+    assert_eq!(std::format!("{off:?}"), "Off");
     // An open network: a name and no password.
     assert_eq!(boot(Some("cafe"), None), join("cafe", ""));
     assert_eq!(boot(Some("cafe"), Some("")), join("cafe", ""));
