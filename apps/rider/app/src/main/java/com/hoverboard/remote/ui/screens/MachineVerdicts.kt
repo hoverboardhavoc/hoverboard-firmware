@@ -14,11 +14,11 @@ import com.hoverboard.remote.SetupState
 import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.machine
 import com.hoverboard.remote.model.DriveMode
-import com.hoverboard.remote.model.driveModeLabel
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.model.driveModeLabel
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.FgMuted
 
 /** Test tag on the disagreement badge, wherever it is shown. */
 const val MACHINE_BADGE_TAG = "setup_machine_badge"
@@ -33,11 +33,11 @@ const val MACHINE_BADGE_TAG = "setup_machine_badge"
 /** The disagreement badge of 3.7: the boards do not hold what the machine needs them to. */
 @Composable
 internal fun Badge() {
-    Text(
+    CautionText(
         stringResource(R.string.setup_machine_disagree),
-        color = AccentRed,
         modifier = Modifier.testTag(MACHINE_BADGE_TAG),
     )
+
 }
 
 /** The frame as the machine holds it, naming each board's value when they differ. */
@@ -93,15 +93,15 @@ internal fun MachineRowVerdict(field: SetupField, state: SetupState) {
     val small = MaterialTheme.typography.bodySmall
     when (field) {
         SetupFields.CONTROL_FRAME -> {
-            Text(frameVerdict(state, pair.frame), style = small, color = TextSecondary)
+            Text(frameVerdict(state, pair.frame), style = small, color = FgMuted)
             if (pair.frame is FramePair.Differ) Badge()
         }
         SetupFields.DRIVE_MODE -> {
-            Text(modeVerdict(state, pair.mode), style = small, color = TextSecondary)
+            Text(modeVerdict(state, pair.mode), style = small, color = FgMuted)
             if (pair.mode is ModePair.Differ) Badge()
         }
         SetupFields.CONTROL_SIDE -> {
-            Text(sideVerdict(state, pair.side), style = small, color = TextSecondary)
+            Text(sideVerdict(state, pair.side), style = small, color = FgMuted)
             if (pair.side is SidePair.BothRight) Badge()
         }
         else -> Unit

@@ -19,12 +19,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.model.Throttle
-import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.ThrottleForward
-import com.hoverboard.remote.ui.theme.ThrottleReverse
-import com.hoverboard.remote.ui.theme.ThrottleTrack
-import com.hoverboard.remote.ui.theme.ZeroLine
+import com.hoverboard.remote.ui.theme.BgCode
+import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.Primary
 
 /**
  * The DIFFERENTIAL mode's two-axis stick (`specs/rider-ui.md` 3.2): one pad producing `(v, s)`,
@@ -55,7 +52,6 @@ fun JoystickPad(
     steer: Int,
     engaged: Boolean,
     enabled: Boolean,
-    armed: Boolean,
     onMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
     onRelease: () -> Unit,
     modifier: Modifier = Modifier,
@@ -90,7 +86,6 @@ fun JoystickPad(
                 }
             }
             .drawBehind { drawJoystick(speed = speed, steer = steer, maxSpeed = maxSpeed, held = engaged) }
-            .border(ARMED_OUTLINE, if (armed) AccentRed else Color.Transparent, shape)
             .testTag(JOYSTICK_TAG),
     )
 }
@@ -104,21 +99,21 @@ private fun DrawScope.drawJoystick(speed: Int, steer: Int, maxSpeed: Int, held: 
     val zeroY = Throttle.ZERO_FRACTION * h
     val zeroX = Throttle.ZERO_FRACTION * w
 
-    drawRect(color = ThrottleTrack)
+    drawRect(color = BgCode)
     drawRect(
-        color = ThrottleForward.copy(alpha = ZONE_ALPHA),
+        color = Primary.copy(alpha = ZONE_ALPHA),
         topLeft = Offset(0f, 0f),
         size = Size(w, zeroY),
     )
     drawRect(
-        color = ThrottleReverse.copy(alpha = ZONE_ALPHA),
+        color = Color.Transparent,
         topLeft = Offset(0f, zeroY),
         size = Size(w, h - zeroY),
     )
 
     // The two rest lines: no travel across, no turn down.
-    drawLine(color = ZeroLine, start = Offset(0f, zeroY), end = Offset(w, zeroY), strokeWidth = LINE_WIDTH * 2)
-    drawLine(color = ZeroLine, start = Offset(zeroX, 0f), end = Offset(zeroX, h), strokeWidth = LINE_WIDTH)
+    drawLine(color = FgFaint, start = Offset(0f, zeroY), end = Offset(w, zeroY), strokeWidth = LINE_WIDTH * 2)
+    drawLine(color = FgFaint, start = Offset(zeroX, 0f), end = Offset(zeroX, h), strokeWidth = LINE_WIDTH)
 
     if (maxSpeed == 0) return
     val v = (speed.toFloat() / maxSpeed).coerceIn(-1f, 1f)
@@ -128,7 +123,7 @@ private fun DrawScope.drawJoystick(speed: Int, steer: Int, maxSpeed: Int, held: 
         x = (zeroX + s * HALF_SPAN * w).coerceIn(radius, w - radius),
         y = (zeroY - v * HALF_SPAN * h).coerceIn(radius, h - radius),
     )
-    val colour = if (speed >= 0) ThrottleForward else ThrottleReverse
+    val colour = if (speed >= 0) Primary else Primary
     if (held) {
         drawCircle(color = colour, radius = radius, center = centre)
     } else {

@@ -1,7 +1,7 @@
 package com.hoverboard.remote.ui.screens
 
-import androidx.compose.foundation.border
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,10 +31,13 @@ import com.hoverboard.remote.TuneActions
 import com.hoverboard.remote.TuneNotice
 import com.hoverboard.remote.TuneState
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.BgElevated
+import com.hoverboard.remote.ui.theme.Border
+import com.hoverboard.remote.ui.theme.Caution
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
 
 /** Test tag on the stale statement (the target is not reachable, or its last request went unanswered). */
 const val TUNE_STALE_TAG = "tune_stale"
@@ -107,7 +110,7 @@ fun TuneScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(stringResource(R.string.tune_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+        Text(stringResource(R.string.tune_title), style = MaterialTheme.typography.headlineSmall, color = Fg)
         NodeChips(state.motors, state.target, actions::selectTarget, TUNE_NODE_TAG)
         state.notice?.let { Notice(it, state, actions) }
         if (stale) Stale()
@@ -136,7 +139,7 @@ private fun Buttons(state: TuneState, armed: Boolean, actions: TuneActions) {
         Text(
             pluralStringResource(R.plurals.tune_unsaved_count, unsaved.size, unsaved.size),
             style = MaterialTheme.typography.titleMedium,
-            color = AccentYellow,
+            color = Primary,
         )
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -153,8 +156,8 @@ private fun Buttons(state: TuneState, armed: Boolean, actions: TuneActions) {
     }
     if (armed) Caption(R.string.tune_save_armed_note)
     when {
-        state.reading -> Text(stringResource(R.string.tune_reading), color = TextSecondary)
-        state.writing -> Text(stringResource(R.string.tune_writing), color = TextSecondary)
+        state.reading -> Text(stringResource(R.string.tune_reading), color = FgMuted)
+        state.writing -> Text(stringResource(R.string.tune_writing), color = FgMuted)
         state.address != null -> OutlinedButton(onClick = actions::refresh) {
             Text(stringResource(R.string.tune_refresh))
         }
@@ -175,11 +178,11 @@ private fun Bounds(state: TuneState, armed: Boolean, actions: TuneActions) {
     Text(
         stringResource(R.string.tune_bounds_title),
         style = MaterialTheme.typography.titleMedium,
-        color = TextPrimary,
+        color = Fg,
         modifier = Modifier.testTag(TUNE_BOUNDS_TAG),
     )
     Caption(R.string.tune_bounds_body)
-    if (armed) Text(stringResource(R.string.tune_bounds_armed), color = AccentRed)
+    if (armed) Text(stringResource(R.string.tune_bounds_armed), color = Primary)
     for (field in SetupFields.DRIVE_BOUNDS) BoundRow(state, field, armed, actions)
 }
 
@@ -192,7 +195,7 @@ private fun Ride(ride: @Composable () -> Unit) {
     Text(
         stringResource(R.string.tune_ride_title),
         style = MaterialTheme.typography.titleMedium,
-        color = TextPrimary,
+        color = Fg,
         modifier = Modifier.testTag(TUNE_RIDE_TAG),
     )
     Caption(R.string.tune_ride_body)
@@ -215,12 +218,12 @@ private fun Stale() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(2.dp, AccentRed, RoundedCornerShape(8.dp))
+            .border(2.dp, Caution, RoundedCornerShape(8.dp))
             .padding(12.dp)
             .testTag(TUNE_STALE_TAG),
     ) {
-        Text(stringResource(R.string.tune_stale_title), style = MaterialTheme.typography.titleMedium, color = AccentRed)
-        Text(stringResource(R.string.tune_stale_body), style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+        CautionText(stringResource(R.string.tune_stale_title), style = MaterialTheme.typography.titleMedium)
+        Text(stringResource(R.string.tune_stale_body), style = MaterialTheme.typography.bodyMedium, color = Fg)
     }
 }
 
@@ -229,11 +232,13 @@ private fun Notice(notice: TuneNotice, state: TuneState, actions: TuneActions) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(AccentYellow.copy(alpha = 0.15f), RoundedCornerShape(8.dp))
+            .background(BgElevated, RoundedCornerShape(8.dp))
+            .border(1.dp, Border, RoundedCornerShape(8.dp))
+
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(tuneNoticeText(notice), modifier = Modifier.weight(1f), color = TextPrimary)
+        Text(tuneNoticeText(notice), modifier = Modifier.weight(1f), color = Fg)
         // The slot was taken, the board was not asked: a read pass is the retry (a tap is re-tapped).
         if (notice == TuneNotice.SlotBusy && state.address != null) {
             TextButton(onClick = actions::refresh, modifier = Modifier.testTag(TUNE_RETRY_TAG)) {

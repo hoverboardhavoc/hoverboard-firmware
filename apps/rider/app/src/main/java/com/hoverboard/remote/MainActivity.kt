@@ -2,9 +2,11 @@ package com.hoverboard.remote
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -39,20 +41,25 @@ import com.hoverboard.remote.ui.screens.RideControls
 import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.TuneScreen
 import com.hoverboard.remote.ui.screens.nodeLabel
-import com.hoverboard.remote.ui.theme.DarkBackground
+import com.hoverboard.remote.ui.theme.Bg
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.koin.androidx.compose.koinViewModel
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Light icons on black whatever the phone's own theme: the default style follows the
+        // system and would draw dark icons on the black bars in light mode (`specs/rider-ui.md` 3.10).
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         setContent {
             HoverboardRemoteTheme {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(DarkBackground)
+                        .background(Bg)
                         .systemBarsPadding(),
                 ) {
                     HoverboardRoot()

@@ -24,12 +24,11 @@ import com.hoverboard.protocol.store.Gains
 import com.hoverboard.remote.R
 import com.hoverboard.remote.TuneActions
 import com.hoverboard.remote.TuneState
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
-import kotlinx.coroutines.delay
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 /** Test tag on gain [index]'s read-back staged value. */
 fun tuneStagedTag(index: Int): String = "tune_staged_$index"
@@ -125,7 +124,7 @@ internal fun GainRow(state: TuneState, index: Int, actions: TuneActions) {
             Text(
                 stringResource(R.string.tune_converging_row, seconds(converging)),
                 style = MaterialTheme.typography.bodySmall,
-                color = AccentYellow,
+                color = Primary,
             )
         }
     }
@@ -170,7 +169,7 @@ private fun StepsAndSlider(
     Text(
         stringResource(R.string.tune_range, max.toString()),
         style = MaterialTheme.typography.bodySmall,
-        color = TextSecondary,
+        color = FgMuted,
     )
     val top = gainSliderTop(index, max)
     if (top < max) Caption(R.string.tune_slider_span, listOf(top.toString()))
@@ -183,32 +182,32 @@ private fun StepsAndSlider(
 @Composable
 private fun Header(index: Int, staged: Int?, pending: Int?, converging: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(GAIN_NAMES[index], style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+        Text(GAIN_NAMES[index], style = MaterialTheme.typography.titleMedium, color = Fg)
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 stringResource(R.string.tune_staged),
                 style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary,
+                color = FgMuted,
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     staged?.toString() ?: stringResource(R.string.tune_unread),
                     style = MaterialTheme.typography.titleLarge,
-                    color = TextPrimary,
+                    color = Fg,
                     modifier = Modifier.testTag(tuneStagedTag(index)),
                 )
                 if (converging) {
                     Text(
                         " " + stringResource(R.string.tune_converging_mark),
                         style = MaterialTheme.typography.titleLarge,
-                        color = AccentYellow,
+                        color = Primary,
                     )
                 }
                 if (pending != null && pending != staged) {
                     Text(
                         stringResource(R.string.tune_pending, pending.toString()),
                         style = MaterialTheme.typography.titleLarge,
-                        color = AccentGreen,
+                        color = Primary,
                         modifier = Modifier
                             .padding(start = 12.dp)
                             .testTag(tunePendingTag(index)),

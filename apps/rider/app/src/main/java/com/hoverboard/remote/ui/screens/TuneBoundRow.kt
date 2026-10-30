@@ -26,8 +26,8 @@ import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.display
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
 import kotlin.math.roundToInt
 
 /** Test tag on drive bound [key]'s row. */
@@ -59,13 +59,13 @@ internal fun BoundRow(state: TuneState, field: SetupField, armed: Boolean, actio
             Text(
                 stringResource(field.label),
                 style = MaterialTheme.typography.titleSmall,
-                color = TextPrimary,
+                color = Fg,
                 modifier = Modifier.weight(1f),
             )
             Text(
                 stored?.toString() ?: stringResource(R.string.tune_bound_unread),
                 style = MaterialTheme.typography.titleLarge,
-                color = TextPrimary,
+                color = Fg,
             )
         }
         BoundSlider(field, range, stored, editable, actions)
@@ -74,7 +74,7 @@ internal fun BoundRow(state: TuneState, field: SetupField, armed: Boolean, actio
             Text(
                 stringResource(R.string.setup_default, field.def.default.display()),
                 style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
+                color = FgMuted,
             )
         }
         field.note?.let { Caption(it, field.noteArgs) }

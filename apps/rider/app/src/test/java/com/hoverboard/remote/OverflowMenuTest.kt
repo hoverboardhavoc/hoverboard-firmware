@@ -221,7 +221,7 @@ class OverflowMenuTest {
     }
 
     /**
-     * Whether [argb] is `AccentRed` as drawn: the outline is antialiased over a dark background, so
+     * Whether [argb] is `Primary` as drawn: the outline is antialiased over a dark background, so
      * its edge pixels are the tint at a partial alpha and only the interior matches exactly. Each
      * channel is compared against the tint's own, which is what makes this a test of the TINT and
      * not of the renderer.
@@ -240,9 +240,10 @@ class OverflowMenuTest {
         const val RED_SHIFT = 16
         const val GREEN_SHIFT = 8
 
-        /** The green and the blue channel of `AccentRed` (0xFFFF4D4D), which the tint has to match. */
-        const val ARMED_GREEN = 0x4D
-        const val ARMED_BLUE = 0x4D
+        /** The green and the blue channel of `Primary` (0xFFFF5A00), which the tint has to match. */
+        const val ARMED_GREEN = 0x5A
+        const val ARMED_BLUE = 0x00
+
 
         /** How far a channel may sit above the tint's own and still be that tint, compositing aside. */
         const val MARGIN = 0x1A

@@ -2,10 +2,10 @@ package com.hoverboard.remote
 
 import android.app.Application
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasAnyAncestor
@@ -35,8 +35,8 @@ import com.hoverboard.remote.ui.screens.SETUP_FRAME_BAD_TAG
 import com.hoverboard.remote.ui.screens.SETUP_FRAME_WRITING_TAG
 import com.hoverboard.remote.ui.screens.SETUP_LOCK_TAG
 import com.hoverboard.remote.ui.screens.SETUP_NODE_TAG
-import com.hoverboard.remote.ui.screens.nodeChipTag
 import com.hoverboard.remote.ui.screens.SetupScreen
+import com.hoverboard.remote.ui.screens.nodeChipTag
 import com.hoverboard.remote.ui.screens.setupAdvancedTag
 import com.hoverboard.remote.ui.screens.setupRetryTag
 import com.hoverboard.remote.ui.screens.setupRowTag

@@ -1,5 +1,8 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicObs
+import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.BatteryReading
@@ -9,9 +12,6 @@ import com.hoverboard.remote.model.FloorOutside
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.floorOutsidePack
-import com.hoverboard.protocol.linkctl.ChipTag
-import com.hoverboard.protocol.linkctl.CyclicObs
-import com.hoverboard.protocol.linkctl.CyclicState
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull

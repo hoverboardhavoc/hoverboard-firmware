@@ -7,8 +7,8 @@ import com.hoverboard.protocol.config.ConfigWriteResult
 import com.hoverboard.protocol.config.Malformed
 import com.hoverboard.protocol.config.ReadValue
 import com.hoverboard.protocol.config.Refused
-import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.StagedValue
+import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.TuneReadResult
 import com.hoverboard.protocol.config.TuneVerified
 import com.hoverboard.protocol.config.TuneWriteResult

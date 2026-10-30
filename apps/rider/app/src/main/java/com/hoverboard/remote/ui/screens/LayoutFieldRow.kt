@@ -28,9 +28,9 @@ import com.hoverboard.remote.model.LayoutEditor
 import com.hoverboard.remote.model.LayoutGroup
 import com.hoverboard.remote.model.LayoutRow
 import com.hoverboard.remote.model.LayoutRows
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
 
 /** Test tag on one field's row. */
 fun layoutRowTag(key: Key): String = "layout_row_${key.fieldId}_${key.index}"
@@ -107,17 +107,18 @@ internal fun FieldRow(row: LayoutRow, state: LayoutState, editable: Boolean, act
     val stored = state.stored?.let { slot.of(it) }
     val staged = state.staged?.let { slot.of(it) }
     Panel(modifier = Modifier.testTag(layoutRowTag(slot.key))) {
-        Text(stringResource(row.label), style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+        Text(stringResource(row.label), style = MaterialTheme.typography.titleSmall, color = Fg)
         Text(
             text = when {
                 staged != null -> layoutValueText(slot, staged)
                 slot.key in state.unread -> stringResource(R.string.layout_field_unread)
                 else -> stringResource(R.string.layout_not_read)
             },
-            color = if (staged != null && staged != stored) AccentYellow else TextSecondary,
+            color = if (staged != null && staged != stored) Primary else FgMuted,
         )
         if (slot.key in state.written) {
-            Text(stringResource(R.string.layout_written_mark), color = AccentYellow)
+            Text(stringResource(R.string.layout_written_mark), color = Primary)
+
         }
         row.note?.let { Caption(it, row.noteArgs) }
         Editor(row, state, staged, editable, actions)

@@ -3,8 +3,6 @@ package com.hoverboard.remote.ui.screens
 import androidx.annotation.StringRes
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -25,16 +25,15 @@ import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.FramePair
 import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
-import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.BatteryReading
+import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.TelemetryPanel
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextSecondary
-import com.hoverboard.remote.ui.theme.ZeroLine
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
 import java.util.Locale
 
 /**
@@ -98,7 +97,7 @@ fun ControlScreen(
             Text(
                 text = frameStatsLine(state.frameStats),
                 style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary,
+                color = FgMuted,
                 modifier = Modifier.testTag(FRAME_STATS_TAG),
             )
         }
@@ -107,7 +106,6 @@ fun ControlScreen(
         TelemetryPanel(
             telemetry = state.telemetry,
             throttlePercent = state.throttlePercent,
-            armed = state.armed,
             // The selected board's pack voltage against the pack that board stores: the gauge is
             // drawn only where both are known (`specs/rider-ui.md` 3.6b).
             battery = state.selected?.let { state.batteryOf(it) } ?: BatteryReading.NoReading,
@@ -127,10 +125,9 @@ fun ControlScreen(
 
         if (rigidIsConfiguredButNotRunning(state)) {
             Spacer(modifier = Modifier.height(8.dp))
-            Text(
+            CautionText(
                 text = stringResource(R.string.drive_mode_rigid_not_leading),
                 style = MaterialTheme.typography.labelMedium,
-                color = AccentYellow,
                 modifier = Modifier.testTag(RIGID_NOT_LEADING_TAG),
             )
         }
@@ -139,7 +136,7 @@ fun ControlScreen(
         Text(
             text = stringResource(hint(state)),
             style = MaterialTheme.typography.bodyMedium,
-            color = if (state.isConnected) TextSecondary else AccentRed,
+            color = FgMuted,
         )
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -212,7 +209,7 @@ private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
         Text(
             text = stringResource(R.string.sim_rider_label),
             style = MaterialTheme.typography.labelMedium,
-            color = TextSecondary,
+            color = FgMuted,
         )
         Text(
             text = if (on) {
@@ -221,7 +218,7 @@ private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
                 stringResource(R.string.sim_rider_off)
             },
             style = MaterialTheme.typography.labelMedium,
-            color = if (on) AccentGreen else ZeroLine,
+            color = if (on) Primary else FgFaint,
         )
     }
 }

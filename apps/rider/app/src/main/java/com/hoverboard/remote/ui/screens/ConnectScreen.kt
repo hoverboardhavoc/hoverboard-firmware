@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -22,13 +23,17 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -36,12 +41,13 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.ble.ScanCandidate
 import com.hoverboard.remote.ble.SelectedBoard
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.PanelSurface
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.BgCode
+import com.hoverboard.remote.ui.theme.BgElevated
+import com.hoverboard.remote.ui.theme.Border
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.WarningGlyph
 
 /**
  * Connect screen (`specs/rider-ui.md` 3.0): pick the board out of what is nearby, connect, show
@@ -135,14 +141,66 @@ fun ConnectScreen(
             Text(
                 text = stringResource(R.string.connect_by_name_caption),
                 style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
+                color = FgMuted,
                 textAlign = TextAlign.Center,
             )
             Spacer(modifier = Modifier.height(8.dp))
             DeviceNameField(deviceName = deviceName, onDeviceNameChange = onDeviceNameChange)
         }
+        Spacer(modifier = Modifier.height(32.dp))
+        FontLicence()
     }
 }
+
+/**
+ * The font's notice (`specs/rider-ui.md` 3.10). The SIL Open Font License lets the fonts ship in the
+ * app provided each copy carries the copyright notice and the licence; the app has no about screen,
+ * so the line sits here, on the screen every session passes through, and opens the licence itself.
+ */
+@Composable
+private fun FontLicence() {
+    var open by rememberSaveable { mutableStateOf(false) }
+    Text(
+        text = stringResource(R.string.font_licence_line),
+        // bodySmall is Material's 12 sp style, on its own 16 sp lines.
+        style = MaterialTheme.typography.bodySmall,
+
+        color = FgMuted,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .clickable { open = true }
+            .testTag(FONT_LICENCE_TAG),
+    )
+    if (open) {
+        val context = LocalContext.current
+        val text = remember { context.assets.open(OFL_ASSET).bufferedReader().use { it.readText() } }
+        AlertDialog(
+            onDismissRequest = { open = false },
+            confirmButton = {
+                TextButton(onClick = { open = false }) { Text(stringResource(R.string.font_licence_close)) }
+            },
+            title = { Text(stringResource(R.string.font_licence_title)) },
+            text = {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                )
+            },
+            containerColor = BgCode,
+        )
+    }
+}
+
+/** Test tag on the font licence line at the foot of the Connect screen. */
+const val FONT_LICENCE_TAG = "font_licence"
+
+/** Test tag on the warning glyph that stands for a failed connect or attach. */
+const val CONNECT_FAILED_GLYPH_TAG = "connect_failed_glyph"
+
+/** The licence text, shipped with the fonts it covers. */
+private const val OFL_ASSET = "fonts/OFL.txt"
+
 
 /**
  * The scan and its results: a button to start looking, the rows it turns up, and a button to stop.
@@ -177,7 +235,7 @@ private fun BoardPicker(
                 if (finding) R.string.connect_finding else R.string.connect_nothing_seen,
             ),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
+            color = FgMuted,
             textAlign = TextAlign.Center,
         )
         return
@@ -206,8 +264,8 @@ private fun BoardRow(board: ScanCandidate, picked: Boolean, onClick: () -> Unit)
             .fillMaxWidth()
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(8.dp),
-        color = PanelSurface,
-        border = if (picked) BorderStroke(1.dp, AccentGreen) else null,
+        color = BgElevated,
+        border = BorderStroke(1.dp, if (picked) Primary else Border),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -218,19 +276,19 @@ private fun BoardRow(board: ScanCandidate, picked: Boolean, onClick: () -> Unit)
                 Text(
                     text = board.displayName ?: stringResource(R.string.connect_unnamed_board),
                     style = MaterialTheme.typography.titleMedium,
-                    color = TextPrimary,
+                    color = Fg,
                 )
                 Text(
                     text = board.address,
                     style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
+                    color = FgMuted,
                 )
             }
             if (picked) {
                 Text(
                     text = stringResource(R.string.connect_board_picked),
                     style = MaterialTheme.typography.labelMedium,
-                    color = AccentGreen,
+                    color = Primary,
                 )
             }
             // Only when the advertisement carried it: a scan result with no data has no strength
@@ -239,7 +297,7 @@ private fun BoardRow(board: ScanCandidate, picked: Boolean, onClick: () -> Unit)
                 Text(
                     text = stringResource(R.string.connect_rssi, rssi),
                     style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
+                    color = FgMuted,
                 )
             }
         }
@@ -277,14 +335,13 @@ private fun StatusIndicator(connectionState: ConnectionState) {
     if (busy) {
         CircularProgressIndicator(
             modifier = Modifier.size(48.dp),
-            color = AccentYellow,
+            color = Primary,
         )
+    } else if (connectionState == ConnectionState.ERROR || connectionState == ConnectionState.ATTACH_FAILED) {
+        // A failed connect or attach is a warning, so it is the warning glyph and not a red dot.
+        WarningGlyph(48.dp, modifier = Modifier.testTag(CONNECT_FAILED_GLYPH_TAG))
     } else {
-        val color = when (connectionState) {
-            ConnectionState.CONNECTED -> AccentGreen
-            ConnectionState.ERROR, ConnectionState.ATTACH_FAILED -> AccentRed
-            else -> MaterialTheme.colorScheme.outline
-        }
+        val color = if (connectionState == ConnectionState.CONNECTED) Primary else MaterialTheme.colorScheme.outline
         Surface(
             modifier = Modifier.size(48.dp),
             shape = CircleShape,
@@ -292,6 +349,7 @@ private fun StatusIndicator(connectionState: ConnectionState) {
             content = {},
         )
     }
+
 }
 
 @Composable

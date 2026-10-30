@@ -18,11 +18,11 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.BoardFields
+import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.board.PIN_ABSENT
-import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.Pin
 import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.store.Fields

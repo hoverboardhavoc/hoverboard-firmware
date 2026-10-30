@@ -21,21 +21,20 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.R
 import com.hoverboard.remote.FieldWrite
+import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupActions
 import com.hoverboard.remote.SetupState
 import com.hoverboard.remote.WriteState
@@ -47,12 +46,13 @@ import com.hoverboard.remote.model.TakesEffect
 import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.display
 import com.hoverboard.remote.model.fitsOneWrite
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.PanelSurface
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.Tone
+import com.hoverboard.remote.ui.theme.ToneText
+import com.hoverboard.remote.ui.theme.WarningText
 
 /**
  * One field: its stored value, what came of the app's own write of it, when the board will use a
@@ -73,7 +73,7 @@ internal fun FieldRow(
     val stored = state.values[key]
     val write = state.writes[key]
     Panel(modifier = Modifier.testTag(setupRowTag(key))) {
-        Text(stringResource(field.label), style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+        Text(stringResource(field.label), style = MaterialTheme.typography.titleSmall, color = Fg)
         Text(
             text = when {
                 stored != null -> stringResource(R.string.setup_stored, stored.display())
@@ -83,16 +83,16 @@ internal fun FieldRow(
                 key in state.unread -> stringResource(R.string.setup_unread)
                 else -> stringResource(R.string.setup_not_read_yet)
             },
-            color = TextSecondary,
+            color = FgMuted,
         )
         FloorWarning(field, state)
         if (field.showDefault) {
-            Text(stringResource(R.string.setup_default, field.def.default.display()), color = TextSecondary)
+            Text(stringResource(R.string.setup_default, field.def.default.display()), color = FgMuted)
         }
         // Every row says so while the board is armed, rather than one banner saying it once: the
         // board refuses every config write then, and the refusal belongs to each field.
         if (armed && field.takesEffect != null) {
-            Text(stringResource(R.string.setup_row_armed), color = AccentRed)
+            Text(stringResource(R.string.setup_row_armed), color = Primary)
         }
         write?.let { WriteResult(field, it, editable, actions) }
         TakeEffect(field)
@@ -122,15 +122,15 @@ private fun FloorWarning(field: SetupField, state: SetupState) {
         FloorOutside.AT_OR_ABOVE_FULL -> R.string.setup_floor_above_full
         FloorOutside.BELOW_EMPTY -> R.string.setup_floor_below_empty
     }
-    Text(stringResource(text), color = AccentYellow, modifier = Modifier.testTag(SETUP_FLOOR_OUTSIDE_TAG))
+    CautionText(stringResource(text), modifier = Modifier.testTag(SETUP_FLOOR_OUTSIDE_TAG))
 }
 
 /** What came of this row's write ([writeStatus]), and a retry for the ones that can be sent again. */
 @Composable
 private fun WriteResult(field: SetupField, write: FieldWrite, editable: Boolean, actions: SetupActions) {
-    val (body, colour) = writeStatus(field, write)
+    val (body, tone) = writeStatus(field, write)
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(body, modifier = Modifier.weight(1f), color = colour)
+        ToneText(body, tone, modifier = Modifier.weight(1f))
         if (write.failed) {
             TextButton(
                 onClick = { actions.retry(field.key) },
@@ -142,7 +142,7 @@ private fun WriteResult(field: SetupField, write: FieldWrite, editable: Boolean,
 }
 
 /**
- * What this row's write said, and the colour to say it in, for a row that renders it inline and for
+ * What this row's write said, and the tone to say it in, for a row that renders it inline and for
  * the Machine section's two boards.
  *
  * A [TakesEffect.RESTART] field still marked written has not been taken up: the model drops that
@@ -150,14 +150,14 @@ private fun WriteResult(field: SetupField, write: FieldWrite, editable: Boolean,
  * that no restart has happened. Nothing asks the operator to assert one.
  */
 @Composable
-internal fun writeStatus(field: SetupField, write: FieldWrite): Pair<String, Color> {
+internal fun writeStatus(field: SetupField, write: FieldWrite): Pair<String, Tone> {
     val restartDue = field.takesEffect == TakesEffect.RESTART
     val (text, colour) = when (write.state) {
         // The same word the screen-level indicator uses: one string for one fact.
-        WriteState.Sending -> R.string.setup_writing to TextSecondary
+        WriteState.Sending -> R.string.setup_writing to Tone.MUTED
         WriteState.Written ->
-            (if (restartDue) R.string.setup_write_awaiting_restart else R.string.setup_write_written) to AccentGreen
-        else -> writeFailureText(write.state) to AccentYellow
+            (if (restartDue) R.string.setup_write_awaiting_restart else R.string.setup_write_written) to Tone.PRIMARY
+        else -> writeFailureText(write.state) to Tone.WARNING
     }
     val body = when (val st = write.state) {
         is WriteState.Mismatch -> stringResource(text, write.want.display(), st.stored?.display() ?: "?")
@@ -202,7 +202,7 @@ internal fun Chips(field: SetupField, editor: Editor.Chips, shown: Value?, edita
         }
     }
     if (current != null && editor.choices.none { it.value.toLong() == current }) {
-        Text(stringResource(R.string.setup_choice_unknown, current.toString()), color = AccentYellow)
+        CautionText(stringResource(R.string.setup_choice_unknown, current.toString()))
     }
 }
 
@@ -256,6 +256,7 @@ internal fun Entry(field: SetupField, shown: Value?, editable: Boolean, onSet: (
         } else {
             stringResource(R.string.setup_invalid)
         }
-        Text(reason, style = MaterialTheme.typography.bodySmall, color = AccentRed)
+        WarningText(reason, style = MaterialTheme.typography.bodySmall)
+
     }
 }

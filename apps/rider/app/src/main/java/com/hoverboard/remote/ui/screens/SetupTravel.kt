@@ -15,7 +15,7 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.model.MachineTravel
 import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.machineOdometer
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.FgMuted
 
 /** Test tag on the Travel section. */
 const val TRAVEL_SECTION_TAG = "setup_travel"
@@ -83,7 +83,7 @@ private fun BoardOdometer(tag: String, reading: OdometerReading) {
         Text(
             text = tag,
             style = MaterialTheme.typography.labelMedium,
-            color = TextSecondary,
+            color = FgMuted,
             modifier = Modifier.width(ODOMETER_TAG_WIDTH),
         )
         when (reading) {
@@ -104,7 +104,7 @@ private fun BoardOdometer(tag: String, reading: OdometerReading) {
             OdometerReading.Silent -> Text(
                 text = stringResource(R.string.setup_travel_silent),
                 style = MaterialTheme.typography.bodyMedium,
-                color = TextSecondary,
+                color = FgMuted,
             )
         }
     }
@@ -123,7 +123,7 @@ private fun MachineOdometer(travel: MachineTravel?) {
         Text(
             text = stringResource(R.string.setup_travel_machine),
             style = MaterialTheme.typography.labelMedium,
-            color = TextSecondary,
+            color = FgMuted,
             modifier = Modifier.width(ODOMETER_TAG_WIDTH),
         )
         Text(
@@ -137,7 +137,7 @@ private fun MachineOdometer(travel: MachineTravel?) {
                 is MachineTravel.Edges -> stringResource(R.string.setup_travel_machine_value, travel.edges)
             },
             style = MaterialTheme.typography.bodyMedium,
-            color = if (travel == null) TextSecondary else MaterialTheme.colorScheme.onSurface,
+            color = if (travel == null) FgMuted else MaterialTheme.colorScheme.onSurface,
         )
     }
 }

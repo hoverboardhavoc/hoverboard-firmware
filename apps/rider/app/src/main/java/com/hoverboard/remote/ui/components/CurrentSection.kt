@@ -16,7 +16,7 @@ import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.machineSupplyAmps
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.FgMuted
 
 /**
  * The machine's current, beside the battery it is drawn from (`specs/rider-ui.md` 3.6).
@@ -57,7 +57,7 @@ internal fun CurrentSection(rows: List<Pair<String, CurrentReading>>) {
     Text(
         text = stringResource(R.string.telemetry_current_note),
         style = MaterialTheme.typography.bodySmall,
-        color = TextSecondary,
+        color = FgMuted,
     )
 }
 
@@ -76,7 +76,7 @@ private fun BoardCurrent(tag: String, reading: CurrentReading) {
         Text(
             text = tag,
             style = MaterialTheme.typography.labelMedium,
-            color = TextSecondary,
+            color = FgMuted,
             modifier = Modifier.width(BOARD_TAG_WIDTH),
         )
         // Exhaustive on the sealed type rather than an else: a fifth way to have no figure is a
@@ -113,7 +113,7 @@ private fun MachineCurrent(amps: Float?) {
         Text(
             text = stringResource(R.string.telemetry_current_machine),
             style = MaterialTheme.typography.labelMedium,
-            color = TextSecondary,
+            color = FgMuted,
             modifier = Modifier.width(BOARD_TAG_WIDTH),
         )
         if (amps == null) {
@@ -134,7 +134,7 @@ private fun NoFigure(@StringRes text: Int) {
     Text(
         text = stringResource(text),
         style = MaterialTheme.typography.bodyMedium,
-        color = TextSecondary,
+        color = FgMuted,
     )
 }
 

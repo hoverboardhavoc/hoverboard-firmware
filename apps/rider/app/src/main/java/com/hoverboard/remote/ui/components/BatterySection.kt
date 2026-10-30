@@ -20,10 +20,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.BatteryReading
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.Caution
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
 
 /**
  * Pack voltage, state of charge and the charge bar: three rows that each depend on one more fact
@@ -52,9 +52,8 @@ internal fun BatterySection(battery: BatteryReading) {
 @Composable
 private fun ChargedBattery(battery: BatteryReading.Charge) {
     val barColor = when {
-        battery.low -> AccentRed
-        battery.fraction <= BATTERY_WARN_FRACTION -> AccentYellow
-        else -> AccentGreen
+        battery.low -> Caution
+        else -> Primary
     }
 
     Row(
@@ -65,7 +64,7 @@ private fun ChargedBattery(battery: BatteryReading.Charge) {
         Text(
             text = stringResource(R.string.telemetry_battery),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
+            color = FgMuted,
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -85,10 +84,9 @@ private fun ChargedBattery(battery: BatteryReading.Charge) {
     BatteryBar(fraction = battery.fraction, color = barColor)
     if (battery.low) {
         Spacer(modifier = Modifier.height(8.dp))
-        Text(
+        CautionText(
             text = stringResource(R.string.telemetry_battery_low),
             style = MaterialTheme.typography.labelLarge,
-            color = AccentRed,
         )
     }
 }
@@ -111,7 +109,7 @@ private fun UnjudgedBattery(battery: BatteryReading.Unjudged) {
         Text(
             text = stringResource(R.string.telemetry_battery),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
+            color = FgMuted,
         )
         Text(
             text = stringResource(R.string.telemetry_battery_value, battery.volts),
@@ -129,7 +127,7 @@ private fun UnjudgedBattery(battery: BatteryReading.Unjudged) {
             },
         ),
         style = MaterialTheme.typography.bodySmall,
-        color = TextSecondary,
+        color = FgMuted,
     )
 }
 
@@ -152,19 +150,19 @@ private fun UnknownBattery() {
         Text(
             text = stringResource(R.string.telemetry_battery),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
+            color = FgMuted,
         )
         Text(
             text = stringResource(R.string.telemetry_battery_unknown),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
+            color = FgMuted,
         )
     }
     Spacer(modifier = Modifier.height(8.dp))
     Text(
         text = stringResource(R.string.telemetry_battery_unknown_note),
         style = MaterialTheme.typography.bodySmall,
-        color = TextSecondary,
+        color = FgMuted,
     )
 }
 
@@ -188,5 +186,4 @@ private fun BatteryBar(fraction: Float, color: Color) {
     }
 }
 
-private const val BATTERY_WARN_FRACTION = 0.30f
 private const val TRACK_ALPHA = 0.25f

@@ -1,9 +1,9 @@
 package com.hoverboard.remote
 
 import android.app.Application
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasAnyAncestor
@@ -26,13 +26,13 @@ import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SetupGroup
 import com.hoverboard.remote.ui.screens.MACHINE_BADGE_TAG
-import com.hoverboard.remote.ui.screens.MACHINE_SECTION_TAG
 import com.hoverboard.remote.ui.screens.MACHINE_MODE_TAG
+import com.hoverboard.remote.ui.screens.MACHINE_SECTION_TAG
+import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.machineModeTag
 import com.hoverboard.remote.ui.screens.machineModeUseTag
 import com.hoverboard.remote.ui.screens.machineSideTag
 import com.hoverboard.remote.ui.screens.machineWriteTag
-import com.hoverboard.remote.ui.screens.SetupScreen
 import com.hoverboard.remote.ui.screens.setupAdvancedTag
 import com.hoverboard.remote.ui.screens.setupRowTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme

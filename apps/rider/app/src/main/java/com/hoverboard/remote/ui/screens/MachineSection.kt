@@ -27,7 +27,8 @@ import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.driveModeLabel
 import com.hoverboard.remote.rightWheelSending
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.ToneText
 
 /** Test tag on the Machine section. */
 const val MACHINE_SECTION_TAG = "setup_machine"
@@ -99,7 +100,7 @@ private fun ModeRow(state: SetupState, pair: ModePair, editable: Boolean, action
                 )
             }
         }
-        Text(modeVerdict(state, pair), color = TextSecondary)
+        Text(modeVerdict(state, pair), color = FgMuted)
         if (pair is ModePair.Differ) {
             Badge()
             // The one-tap answer to a disagreement: either value the boards hold, written to all.
@@ -138,7 +139,7 @@ private fun FrameRow(state: SetupState, pair: FramePair, editable: Boolean, acti
                 )
             }
         }
-        Text(frameVerdict(state, pair), color = TextSecondary)
+        Text(frameVerdict(state, pair), color = FgMuted)
         if (pair is FramePair.Differ) Badge()
         PairWrite(state, SetupFields.CONTROL_FRAME)
         TakeEffect(SetupFields.CONTROL_FRAME)
@@ -168,7 +169,7 @@ private fun SideRow(state: SetupState, pair: SidePair, editable: Boolean, action
                 )
             }
         }
-        Text(sideVerdict(state, pair), color = TextSecondary)
+        Text(sideVerdict(state, pair), color = FgMuted)
         if (pair is SidePair.BothRight) Badge()
         PairWrite(state, SetupFields.CONTROL_SIDE)
         TakeEffect(SetupFields.CONTROL_SIDE)
@@ -184,12 +185,13 @@ private fun SideRow(state: SetupState, pair: SidePair, editable: Boolean, action
 private fun PairWrite(state: SetupState, field: SetupField) {
     for (address in state.boards.keys.sorted()) {
         val write = state.setupOf(address).writes[field.key] ?: continue
-        val (line, colour) = writeStatus(field, write)
-        Text(
+        val (line, tone) = writeStatus(field, write)
+        ToneText(
             stringResource(R.string.setup_machine_board_line, boardLabel(state, address), line),
+            tone,
             style = MaterialTheme.typography.bodySmall,
-            color = colour,
             modifier = Modifier.testTag(machineWriteTag(field.key, address)),
         )
+
     }
 }
