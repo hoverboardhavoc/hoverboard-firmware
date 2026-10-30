@@ -564,12 +564,15 @@ object SetupFields {
 
     /**
      * The rows the attach-time ride-facts read takes from EVERY motor controller: [MACHINE]'s three,
-     * the pack's cell count and chemistry, and the rider requirement. Each is a fact a screen
-     * states before Setup has ever been opened, so every copy is read and a machine that disagrees
-     * is visible.
+     * the pack's cell count and chemistry, the rider requirement, and what the Ride screen's
+     * instruments read beside the telemetry (`specs/rider-ui.md` 3.1): the low-battery floor the
+     * ring turns caution at, the IMU model that decides the attitude corner and the TILT and IMU
+     * lamps, and the current limit a phase bar is full at. Each is a fact a screen states before
+     * Setup has ever been opened, so every copy is read and a machine that disagrees is visible.
      */
     val MOTOR_FACTS: List<SetupField> =
-        MACHINE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED
+        MACHINE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED + BATTERY_FLOOR + IMU_MODEL + MOTOR_CURRENT_LIMIT
+
 
     /**
      * The rows the attach-time read takes from EVERY node, before anything else: what each node is

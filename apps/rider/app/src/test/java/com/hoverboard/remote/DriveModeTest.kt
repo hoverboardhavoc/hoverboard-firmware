@@ -4,7 +4,7 @@ import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.model.DriveFallback
+import com.hoverboard.remote.model.DriveRefusal
 import com.hoverboard.remote.model.DriveMix
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.RiderCommand
@@ -48,7 +48,7 @@ class DriveModeTest : RiderVmTest() {
 
         val state = currentState()
         assertEquals(DriveMode.SINGLE, state.driveMode)
-        assertNull(state.drive.fallback, "SINGLE is what both boards store")
+        assertNull(state.drive.refusal, "SINGLE is what both boards store")
         assertEquals(setOf(0x01), transport.frames.last().commands.keys)
     }
 
@@ -306,32 +306,35 @@ class DriveModeTest : RiderVmTest() {
     }
 
     /**
-     * A role the app cannot see is a board it cannot address, so the mode falls back to SINGLE and
-     * the strip says why: with no leader reported, and with BOTH boards claiming the lead.
+     * A role the app cannot see is a board it cannot address, so the app refuses the arm and says
+     * why (`specs/rider-ui.md` 3.1c): with no leader reported, and with BOTH boards claiming the
+     * lead. The pad is RIGID's, the mode the machine stores, and nothing is armed.
      */
     @Test
-    fun `rigid falls back to single until exactly one board reports leading`() = runTest(dispatcher) {
+    fun `rigid is refused until exactly one board reports leading`() = runTest(dispatcher) {
         stored(DriveMode.RIGID)
         connectPair()
         var state = currentState()
-        assertEquals(DriveMode.SINGLE, state.driveMode, "no board reports leading")
-        assertEquals(DriveFallback.NO_LEADER, state.drive.fallback)
+        assertEquals(DriveMode.RIGID, state.driveMode, "the stored mode's pad")
+        assertEquals(DriveRefusal.NO_LEADER, state.drive.refusal)
         assertEquals(DriveMode.RIGID, state.drive.stored)
+        assertTrue(state.drive.targets.boards.isEmpty(), "no board reports leading")
+        assertFalse(state.canArm)
 
         for (b in listOf(0x01, 0x02)) transport.emitCyclicState(rigid(CyclicState.FLAG_LEADER), from = b)
         runCurrent()
-        assertEquals(DriveFallback.NO_LEADER, currentState().drive.fallback, "two leaders name no leader")
+        assertEquals(DriveRefusal.NO_LEADER, currentState().drive.refusal, "two leaders name no leader")
 
         leaderIs(0x01)
         state = currentState()
         assertEquals(DriveMode.RIGID, state.driveMode)
-        assertNull(state.drive.fallback)
+        assertNull(state.drive.refusal)
     }
 
     // --- the mode in force (`specs/rider-ui.md` 3.2) ------------------------------------------
 
     @Test
-    fun `copies that disagree drive single and say so`() = runTest(dispatcher) {
+    fun `copies that disagree refuse the arm and say so`() = runTest(dispatcher) {
         stored(DriveMode.BOUND, 0x01)
         stored(DriveMode.DIFFERENTIAL, 0x02)
         connectPair()
@@ -339,50 +342,56 @@ class DriveModeTest : RiderVmTest() {
 
         val state = currentState()
         assertEquals(DriveMode.SINGLE, state.driveMode)
-        assertEquals(DriveFallback.DISAGREE, state.drive.fallback)
-        assertEquals(setOf(0x01), transport.frames.last().commands.keys)
+        assertEquals(DriveRefusal.DISAGREE, state.drive.refusal)
+        assertFalse(state.armed, "the app never drives a mode the machine does not store")
+        assertTrue(transport.frames.last().commands.isEmpty())
     }
 
     @Test
-    fun `a copy that has not answered drives single`() = runTest(dispatcher) {
+    fun `a copy that has not answered refuses the arm`() = runTest(dispatcher) {
         stored(DriveMode.BOUND)
         transport.unreadable += Fields.MACHINE_DRIVE_MODE.key()
         connectPair()
 
         val state = currentState()
         assertEquals(DriveMode.SINGLE, state.driveMode)
-        assertEquals(DriveFallback.UNREAD, state.drive.fallback)
+        assertEquals(DriveRefusal.UNREAD, state.drive.refusal)
+        assertFalse(state.canArm)
     }
 
     @Test
-    fun `a stored byte that names no mode drives single`() = runTest(dispatcher) {
+    fun `a stored byte that names no mode refuses the arm`() = runTest(dispatcher) {
         for (b in listOf(0x01, 0x02)) transport.store[b to Fields.MACHINE_DRIVE_MODE.key()] = Value.U8(9)
         connectPair()
 
-        assertEquals(DriveFallback.UNKNOWN_MODE, currentState().drive.fallback)
+        assertEquals(DriveRefusal.UNKNOWN_MODE, currentState().drive.refusal)
     }
 
     /** A mode that drives two motor controllers on a machine where the walk found one. */
     @Test
-    fun `a two-board mode with one motor controller drives single`() = runTest(dispatcher) {
+    fun `a two-board mode with one motor controller refuses the arm`() = runTest(dispatcher) {
         stored(DriveMode.BOUND, 0x01)
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01)
         viewModel.onArmToggle()
 
         val state = currentState()
-        assertEquals(DriveMode.SINGLE, state.driveMode)
-        assertEquals(DriveFallback.NOT_TWO, state.drive.fallback)
-        assertEquals(setOf(0x01), transport.frames.last().commands.keys)
+        assertEquals(DriveMode.BOUND, state.driveMode, "the stored mode's pad")
+        assertEquals(DriveRefusal.NOT_TWO, state.drive.refusal)
+        assertFalse(state.armed)
+        assertTrue(transport.frames.last().commands.isEmpty())
     }
 
     @Test
-    fun `differential with no right wheel drives single`() = runTest(dispatcher) {
+    fun `differential with no right wheel refuses the arm on the stick`() = runTest(dispatcher) {
         stored(DriveMode.DIFFERENTIAL)
         transport.store[0x01 to Fields.CONTROL_SIDE.key()] = Value.U8(Fields.ControlSide.LEFT)
         connectPair()
 
-        assertEquals(DriveFallback.NO_RIGHT_WHEEL, currentState().drive.fallback)
+        val state = currentState()
+        assertEquals(DriveRefusal.NO_RIGHT_WHEEL, state.drive.refusal)
+        assertEquals(DriveMode.DIFFERENTIAL, state.driveMode)
+        assertFalse(state.canArm)
     }
 
     /**
@@ -396,7 +405,7 @@ class DriveModeTest : RiderVmTest() {
 
         val state = currentState()
         assertTrue(state.motorControllers.isEmpty())
-        assertEquals(DriveFallback.UNREAD, state.drive.fallback)
+        assertEquals(DriveRefusal.UNREAD, state.drive.refusal)
         assertFalse(state.canArm)
         viewModel.onArmToggle()
         assertFalse(currentState().armed)

@@ -358,6 +358,7 @@ data class SetupState(
     val motor: Int? = null,
     val boards: Map<Int, BoardSetup> = emptyMap(),
     val notice: SetupNotice? = null,
+    val rideFactsRead: Boolean = false,
 ) {
     /** Every node, in address order, with its class and name as far as this session has read them. */
     val nodes: List<NodeInfo>
@@ -432,6 +433,13 @@ data class SetupState(
      */
     fun packChemistryOf(address: Int): Int? =
         setupOf(address).values[SetupFields.BATTERY_CHEMISTRY.key]?.asLong()?.toInt()
+
+    /**
+     * The board at [address]'s stored ride fact [field] (one of [SetupFields.MOTOR_FACTS]), or null
+     * while this session has not read it from that board.
+     */
+    fun rideFactOf(address: Int, field: SetupField): Int? =
+        setupOf(address).values[field.key]?.asLong()?.toInt()
 
     /**
      * Whether the target node's stored low-battery floor sits outside its own stated pack
@@ -675,6 +683,7 @@ class SetupModel(
                 st.copy(
                     addresses = emptyList(),
                     attached = null,
+                    rideFactsRead = false,
                     target = st.board ?: st.target,
                     motor = st.selectedMotor ?: st.motor,
                     boards = st.boards.mapValues { (_, b) -> b.dropped() },
@@ -772,7 +781,11 @@ class SetupModel(
                 for (field in SetupFields.MOTOR_FACTS) for (node in mcs) readOne(node, field.key)
                 for (node in mcs) readCountsPerAmp(node)
                 for (node in mcs) readWheelGeometry(node)
+                // The Ride screen's lamp test runs once per connection, when this first completes
+                // (`specs/rider-ui.md` 3.1b): the facts that decide which lamps apply are in.
+                _state.update { it.copy(rideFactsRead = true) }
             } finally {
+
                 op.unlock()
                 next()
             }

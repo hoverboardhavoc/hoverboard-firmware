@@ -7,13 +7,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.BiasAlignment
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -21,19 +21,26 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.ui.theme.Atkinson
 import com.hoverboard.remote.ui.theme.BgCode
+import com.hoverboard.remote.ui.theme.Border
 import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.FgMuted
 import com.hoverboard.remote.ui.theme.Primary
 
 /**
- * Deadman throttle pad (SPEC §9). A vertical pad active across its WHOLE height: touch
- * anywhere to drive, release to stop. The centre line (0.5 H) is zero/rest; the top half is
- * forward (top edge = MAX forward) and the bottom half is reverse (bottom edge = MAX reverse),
- * symmetric. The forward zone is tinted green and the reverse zone red, with the status label
- * on the centre/rest line, so it's clear where "stop" is and which way is forward/reverse.
+ * Deadman throttle pad (SPEC §9), drawn as the 8a pad (`specs/rider-ui.md` 3.1). A vertical pad
+ * active across its WHOLE height: touch anywhere to drive, release to stop. The centre line is
+ * zero; the top half is forward (top edge = MAX forward) and the bottom half reverse, symmetric.
+ *
+ * The forward half is tinted [Primary] while the pad is live (connected and armed), and the thumb,
+ * a full-width bar at the demand's height, is [Primary] while live and [FgMuted] otherwise. It is
+ * drawn while a finger is down or a demand is out, so a pad at rest shows its zero line.
  *
  * Reports raw (y, height) on press/move so the §9 math + safety live in the ViewModel:
  *  - [onMove] is called on press-down and every move while held.
@@ -41,27 +48,25 @@ import com.hoverboard.remote.ui.theme.Primary
  *
  * @param speed current commanded wire speed, used only to draw the thumb position.
  * @param engaged whether a touch is currently held in the engage zone.
- * @param enabled whether the pad accepts touches at all.
- * @param armed whether the machine's motors are live. Drawn as a red outline, and separate from
- *   [enabled] on purpose: [enabled] answers "will this pad take a finger", [armed] answers "are the
- *   motors live", and the outline is one of the two surfaces that carry the armed state now that the
- *   screen has no armed banner ([com.hoverboard.remote.ui.screens.ControlScreen]).
+ * @param enabled whether the pad accepts touches at all, which is also whether it is live.
+ * @param blocked whether a board the arm would arm reports an arm-blocking fault: the zero line and
+ *   the direction words dim to [BLOCKED_ALPHA].
  */
 @Composable
 fun ThrottlePad(
     speed: Int,
     engaged: Boolean,
     enabled: Boolean,
+    blocked: Boolean,
     onMove: (y: Float, height: Float) -> Unit,
     onRelease: () -> Unit,
     modifier: Modifier = Modifier,
     maxSpeed: Int = Throttle.MAX_SPEED,
 ) {
-    val shape = RoundedCornerShape(24.dp)
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(shape)
+    PadFrame(
+        blocked = blocked,
+        modifier = modifier.testTag(THROTTLE_TAG),
+        inputModifier = Modifier
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 awaitEachGesture {
@@ -80,79 +85,100 @@ fun ThrottlePad(
                     } while (event.changes.any { it.pressed })
                     onRelease()
                 }
-            }
-            .drawBehind { drawThrottle(speed = speed, maxSpeed = maxSpeed) }
-            .testTag(THROTTLE_TAG),
+            },
+        draw = {
+            drawPadSurface(live = enabled, blocked = blocked, crossLine = false)
+            if (engaged || speed != 0) drawThrottleThumb(speed, maxSpeed, live = enabled)
+        },
+    )
+}
+
+/**
+ * The pad's outline and its direction words over a surface [draw] paints, clipped to the pad's
+ * corners: the frame both pads share, so the throttle and the joystick are one drawing with a
+ * different thumb. [inputModifier] is the pad's gesture handling, inside the clip.
+ */
+@Composable
+internal fun PadFrame(
+    blocked: Boolean,
+    draw: DrawScope.() -> Unit,
+    modifier: Modifier = Modifier,
+    inputModifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(PAD_CORNER)
+    val words = FgFaint.copy(alpha = if (blocked) BLOCKED_ALPHA else 1f)
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .then(inputModifier)
+            .drawBehind(draw)
+            .border(1.dp, Border, shape),
     ) {
         Text(
-            text = if (engaged) {
-                stringResource(R.string.throttle_engaged)
-            } else {
-                stringResource(R.string.throttle_idle)
-            },
-            style = MaterialTheme.typography.titleMedium,
-            color = if (engaged) Primary else FgFaint,
-            // Sit on the zero/rest line (0.75 H), not the pad centre.
-            modifier = Modifier
-                .align(BiasAlignment(0f, fractionToBias(Throttle.ZERO_FRACTION)))
-                .padding(16.dp),
+            stringResource(R.string.pad_forward),
+            style = PAD_WORD,
+            color = words,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 10.dp),
+        )
+        Text(
+            stringResource(R.string.pad_reverse),
+            style = PAD_WORD,
+            color = words,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
         )
     }
 }
 
-private fun DrawScope.drawThrottle(speed: Int, maxSpeed: Int) {
+
+/**
+ * The pad's surface: [BgCode], the forward half tinted [Primary] at 12 percent while [live] and
+ * white at 3 percent otherwise, and the zero line; with [crossLine], the joystick's vertical
+ * no-turn line too. While [blocked] the lines draw at [BLOCKED_ALPHA].
+ */
+internal fun DrawScope.drawPadSurface(live: Boolean, blocked: Boolean, crossLine: Boolean) {
+    drawRect(BgCode)
+    val zeroY = Throttle.ZERO_FRACTION * size.height
+    drawRect(
+        color = if (live) Primary.copy(alpha = LIVE_TINT_ALPHA) else Color.White.copy(alpha = IDLE_TINT_ALPHA),
+        size = Size(size.width, zeroY),
+    )
+    val line = FgMuted.copy(alpha = ZERO_LINE_ALPHA * if (blocked) BLOCKED_ALPHA else 1f)
+    val stroke = ZERO_LINE_WIDTH.toPx()
+    drawLine(line, Offset(0f, zeroY), Offset(size.width, zeroY), stroke)
+    if (crossLine) {
+        val zeroX = Throttle.ZERO_FRACTION * size.width
+        drawLine(line, Offset(zeroX, 0f), Offset(zeroX, size.height), stroke)
+    }
+}
+
+private fun DrawScope.drawThrottleThumb(speed: Int, maxSpeed: Int, live: Boolean) {
     // A degenerate canvas draws nothing rather than throwing: a Column can starve this of height
-    // (measured on a OnePlus 8, where `h - THUMB_HEIGHT` came out -28 and crashed the process from
-    // inside draw). Losing a frame is recoverable; an exception in a draw lambda is not.
-    if (size.width <= 0f || size.height <= THUMB_HEIGHT) return
-    val h = size.height
-    val w = size.width
-
-    // Track background.
-    drawRect(color = BgCode)
-
-    val zeroY = Throttle.ZERO_FRACTION * h // 0.5 H, the zero / rest line (pad centre)
-
-    // The whole pad is active: tint forward (green) above the centre, reverse (red) below.
-    drawRect(
-        color = Primary.copy(alpha = ZONE_ALPHA),
-        topLeft = Offset(0f, 0f),
-        size = Size(w, zeroY),
-    )
-    drawRect(
-        color = Color.Transparent,
-        topLeft = Offset(0f, zeroY),
-        size = Size(w, h - zeroY),
-    )
-
-    // The zero / rest line at the centre (0.5 H).
-    drawLine(
-        color = FgFaint,
-        start = Offset(0f, zeroY),
-        end = Offset(w, zeroY),
-        strokeWidth = LINE_WIDTH * 2,
-    )
-
-    // Thumb: a band centred on the current commanded position, coloured by direction.
-    if (maxSpeed == 0) return
+    // (measured on a OnePlus 8, where the thumb's span came out negative and crashed the process
+    // from inside draw). Losing a frame is recoverable; an exception in a draw lambda is not.
+    val thumb = THUMB_HEIGHT.toPx()
+    if (size.width <= 0f || size.height <= thumb || maxSpeed == 0) return
+    val zeroY = Throttle.ZERO_FRACTION * size.height
     val t = (speed.toFloat() / maxSpeed).coerceIn(-1f, 1f)
-    // Invert §9 mapping: y = zeroY - t * (0.25 H).
-    val thumbY = zeroY - t * (THROTTLE_HALF_SPAN * h)
-    val thumbColor = if (speed >= 0) Primary else Primary
-    val bandHalf = THUMB_HEIGHT / 2f
-    drawRect(
-        color = thumbColor,
-        topLeft = Offset(0f, (thumbY - bandHalf).coerceIn(0f, h - THUMB_HEIGHT)),
-        size = Size(w, THUMB_HEIGHT),
+    val thumbY = zeroY - t * (THROTTLE_HALF_SPAN * size.height)
+    drawRoundRect(
+        color = if (live) Primary else FgMuted,
+        topLeft = Offset(0f, (thumbY - thumb / 2).coerceIn(0f, size.height - thumb)),
+        size = Size(size.width, thumb),
+        cornerRadius = CornerRadius(thumb / 2),
     )
 }
 
-/** Convert a top-down fraction [0,1] of the height to a Compose vertical bias [-1,+1]. */
-private fun fractionToBias(fraction: Float): Float = fraction * 2f - 1f
+/** The dimming of the pad's lines and words while a board the arm would arm reports a fault. */
+internal const val BLOCKED_ALPHA = 0.45f
 
-private const val LINE_WIDTH = 3f
-private const val THUMB_HEIGHT = 28f
+private const val LIVE_TINT_ALPHA = 0.12f
+private const val IDLE_TINT_ALPHA = 0.03f
+private const val ZERO_LINE_ALPHA = 0.6f
 private const val THROTTLE_HALF_SPAN = 0.5f // centre -> edge (mirrors Throttle.ACTIVE_HALF_SPAN)
-private const val ZONE_ALPHA = 0.12f
+private val PAD_CORNER = 24.dp
+private val ZERO_LINE_WIDTH = 2.dp
+private val THUMB_HEIGHT = 24.dp
+private val PAD_WORD = TextStyle(fontFamily = Atkinson, fontSize = 11.sp)
 
 const val THROTTLE_TAG = "throttle_pad"

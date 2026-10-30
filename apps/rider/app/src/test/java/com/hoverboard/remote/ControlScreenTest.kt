@@ -3,16 +3,18 @@ package com.hoverboard.remote
 import android.app.Application
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.down
-import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.up
@@ -21,27 +23,34 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.model.DriveFallback
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.DriveRefusal
 import com.hoverboard.remote.model.DriveTargets
+import com.hoverboard.remote.model.FaultDisarm
+import com.hoverboard.remote.model.FaultLamp
 import com.hoverboard.remote.model.FrameStats
+import com.hoverboard.remote.model.MachineTravel
 import com.hoverboard.remote.model.NodeInfo
+import com.hoverboard.remote.model.SpeedFacts
 import com.hoverboard.remote.model.TelemetryUi
+import com.hoverboard.remote.model.TripBaseline
+import com.hoverboard.remote.model.WheelGeometry
+import com.hoverboard.remote.model.totalKmText
+import com.hoverboard.remote.model.tripKmText
 import com.hoverboard.remote.ui.components.ARM_TAG
 import com.hoverboard.remote.ui.components.JOYSTICK_TAG
 import com.hoverboard.remote.ui.components.THROTTLE_TAG
-import com.hoverboard.remote.ui.screens.BOARD_CHIP_MACHINE_TAG
 import com.hoverboard.remote.ui.screens.ControlScreen
-import com.hoverboard.remote.ui.screens.DRIVE_CHIP_TAG
-import com.hoverboard.remote.ui.screens.DRIVE_FALLBACK_TAG
+import com.hoverboard.remote.ui.screens.FAULT_GRID_TAG
 import com.hoverboard.remote.ui.screens.FRAME_STATS_TAG
-import com.hoverboard.remote.ui.screens.RIGID_NOT_LEADING_TAG
-import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
-import com.hoverboard.remote.ui.screens.boardChipTag
+import com.hoverboard.remote.ui.screens.RIDE_PACK_TAG
+import com.hoverboard.remote.ui.screens.RIDE_SPEED_TAG
+import com.hoverboard.remote.ui.screens.RIDE_STATEMENT_TAG
+import com.hoverboard.remote.ui.screens.RIDE_TRIP_TAG
+import com.hoverboard.remote.ui.screens.lampTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -50,12 +59,9 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * What the ride screen says about the arm state, and how many places it says it.
- *
- * The screen used to carry an ARMED banner as well as the arm toggle, both reading the same flag
- * off the same state. Deleting the banner is only correct if the toggle still carries the whole
- * message, so these tests pin the two properties that made the banner deletable: there is exactly
- * ONE armed statement on screen, and the control that carries it is always tappable to stop.
+ * The Ride screen (`specs/rider-ui.md` 3.1 and 3.1b): where the arm state is said and how many
+ * times, that the drive pad does not move whatever the screen is saying, the statements under the
+ * ARM control, the fault grid and its sheet, and what a figure shows when it has no value.
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
@@ -67,188 +73,270 @@ class ControlScreenTest {
     val rules: RuleChain = composeHost(compose)
 
     private val context: Application = ApplicationProvider.getApplicationContext()
+    private fun s(id: Int, vararg args: Any) = context.getString(id, *args)
+
+    // --- the arm control -----------------------------------------------------------------------
 
     @Test
     fun armedStateIsStatedExactlyOnce() {
-        show(armed = true)
+        show(ride(armed = true, mode = DriveMode.SINGLE))
 
-        // One surface, not two. Counting nodes rather than asserting the banner's absence is the
-        // check that survives: a future second indicator would fail this without anyone having to
-        // remember the banner existed.
-        val armedStatements = compose
-            .onAllNodes(hasText(ARMED_WORD, substring = true))
-            .fetchSemanticsNodes()
-        assertEquals(1, armedStatements.size)
-
-        compose.onNodeWithText(context.getString(R.string.arm_disarm_action)).assertIsDisplayed()
+        // One surface, not two: a future second indicator would fail this.
+        assertEquals(1, compose.onAllNodes(hasText(ARMED_WORD, substring = true)).fetchSemanticsNodes().size)
+        compose.onNodeWithText(s(R.string.arm_disarm_action)).assertIsDisplayed()
     }
 
     @Test
     fun disarmedScreenMakesNoArmedStatement() {
-        show(armed = false)
+        show(ride(armed = false, mode = DriveMode.SINGLE))
 
-        assertEquals(
-            0,
-            compose.onAllNodes(hasText(ARMED_WORD, substring = true)).fetchSemanticsNodes().size,
-        )
-        compose.onNodeWithText(context.getString(R.string.arm_action)).assertIsDisplayed()
+        assertEquals(0, compose.onAllNodes(hasText(ARMED_WORD, substring = true)).fetchSemanticsNodes().size)
+        compose.onNodeWithText(s(R.string.arm_action)).assertIsDisplayed()
     }
 
     /**
-     * The safety property the banner deletion must not have taken with it: the toggle is the only
-     * stop control left, so it is tappable while armed even in the state that refuses ARMING (a
-     * deflected throttle). A stop control that can be unavailable is not a stop control.
+     * The toggle is the only stop control, so it is tappable while armed even in a state that
+     * refuses ARMING (a deflected throttle). A stop control that can be unavailable is not one.
      */
     @Test
     fun disarmIsTappableEvenWhileArmingIsRefused() {
         var toggles = 0
-        val state = UiState(
-            connectionState = ConnectionState.CONNECTED,
-            armed = true,
-            throttleSpeed = 4_000,
-            engaged = true,
-        )
-        // Precondition for the test to mean anything: this is a state where ARMING is refused.
+        val state = ride(armed = true, mode = DriveMode.SINGLE).copy(throttleSpeed = 4_000, engaged = true)
         assertTrue(!state.canArm)
 
-        compose.setContent {
-            HoverboardRemoteTheme {
-                ControlScreen(
-                    state = state,
-                    onArmToggle = { toggles++ },
-                    onThrottleMove = { _, _ -> },
-                    onJoystickMove = { _, _, _, _ -> },
-                    onThrottleRelease = {},
-                    onDisconnect = {},
-                    onSimulateRider = {},
-                    showSimulateRider = false,
-                )
-            }
-        }
+        show(state, onArmToggle = { toggles++ })
 
         compose.onNodeWithTag(ARM_TAG).assertHasClickAction().performClick()
         assertEquals(1, toggles)
     }
 
-    /**
-     * The bench affordance is a real control, not a constructor argument: the app stopped asserting
-     * the `INPUTS` rider bit as a copy of the arm level, and this row is the only remaining way to
-     * put it on the wire. A screen that carried the flag but no way to change it would leave a
-     * padless bench board unable to engage at all.
-     *
-     * It takes a LONG press. On a board that has pads this is not a display preference: the folded
-     * rider level is a term in the FSM's engage conjunction and its inverse enables the wind-down,
-     * so asserting it holds a machine engaged through the moment a rider steps off. A control with
-     * that authority, inches above the throttle, must not answer to a passing thumb.
-     */
+    /** A board the arm would arm reporting an arm-blocking bit refuses the arm (`specs/rider-ui.md` 3.1). */
     @Test
-    fun theSimulateRiderRowTogglesOnALongPressAndNotOnATap() {
-        var asked: Boolean? = null
-        showWithSimulateRider(onSimulateRider = { asked = it })
-
-        compose.onNodeWithText(context.getString(R.string.sim_rider_off)).assertIsDisplayed()
-
-        compose.onNodeWithTag(SIM_RIDER_TAG).performClick()
-        assertNull("a tap must not flip a control that can hold a board engaged", asked)
-
-        compose.onNodeWithTag(SIM_RIDER_TAG).performTouchInput { longClick() }
-        assertEquals(true, asked)
+    fun aBlockingFaultRefusesTheArm() {
+        val state = ride(armed = false, mode = DriveMode.SINGLE)
+            .reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL))
+        assertTrue(!state.canArm)
+        assertTrue(state.armBlocked)
+        // A held lamp alone refuses nothing: the board has cleared its latch.
+        val held = ride(armed = false, mode = DriveMode.SINGLE).copy(latchHeld = mapOf(0x01 to CyclicState.EV_LATCH_A))
+        assertTrue(held.canArm)
+        assertTrue("a held lamp still shows the grid", held.gridShows)
     }
 
-    /**
-     * And a rider's build does not carry it at all: the call site passes `BuildConfig.DEBUG`. The
-     * flag is a [ControlScreen] parameter rather than a read of `BuildConfig` inside the composable
-     * so that the absence is a property of the screen, testable in the build where the control
-     * exists.
-     */
-    /** `specs/control.md` (i): the arm control says the rider requirement is waived when it is. */
+    // --- the statements ------------------------------------------------------------------------
+
+    /** `specs/control.md` (i): the rider requirement waived, said under the arm control. */
     @Test
-    fun theArmControlSaysTheRiderRequirementIsWaivedOnlyWhenItIs() {
-        show(armed = false, riderWaiver = RiderWaiver.WAIVED)
-        // The arm control merges its texts into its own node, so the line is a text OF that node.
-        compose.onNode(hasTestTag(ARM_TAG) and hasText(context.getString(R.string.arm_rider_waived)))
-            .assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.arm_rider_maybe_waived)).assertDoesNotExist()
+    fun theStatementsSayTheRiderRequirementIsWaivedOnlyWhenItIs() {
+        show(ride(armed = false, mode = DriveMode.SINGLE).copy(riderWaiver = RiderWaiver.WAIVED))
+        compose.onNodeWithText(s(R.string.ride_rider_waived)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_rider_maybe_waived)).assertDoesNotExist()
+
+        update(ride(armed = false, mode = DriveMode.SINGLE).copy(riderWaiver = RiderWaiver.POSSIBLY))
+        compose.onNodeWithText(s(R.string.ride_rider_maybe_waived)).assertIsDisplayed()
+
+        update(ride(armed = false, mode = DriveMode.SINGLE))
+        compose.onNodeWithText(s(R.string.ride_rider_waived)).assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.ride_rider_maybe_waived)).assertDoesNotExist()
     }
 
-    /**
-     * When the app cannot tell what the board runs (a write this session, then a link drop) and the
-     * value it last ran or stores is 0, the arm control says the requirement MAY be waived: true
-     * whichever way the board turns out, and never claiming the certainty of the plain line.
-     */
+    /** The one disarm the rider did not ask for is said, and the next arm answers it. */
     @Test
-    fun theArmControlSaysTheRiderRequirementMayBeWaivedWhenItCannotTell() {
-        show(armed = false, riderWaiver = RiderWaiver.POSSIBLY)
-        compose.onNode(hasTestTag(ARM_TAG) and hasText(context.getString(R.string.arm_rider_maybe_waived)))
-            .assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.arm_rider_waived)).assertDoesNotExist()
-        assertTrue(context.getString(R.string.arm_rider_maybe_waived).contains("may be waived"))
-    }
-
-    /**
-     * The one disarm the rider did not ask for says so, on the control that carries every other
-     * thing this screen knows about the arm state. A machine that is not armed any more otherwise
-     * looks the same whether the app did it, the board faulted or the link went, and the rider
-     * goes looking at the machine for a cause that is not there (`specs/ble-reliability.md`, final
-     * section).
-     */
-    @Test
-    fun theArmControlSaysWhenTheAppDisarmedTheMachineItself() {
+    fun theStatementsSayWhenTheAppDisarmedTheMachineItself() {
         show(ride(armed = false, mode = DriveMode.SINGLE).copy(selfDisarmed = true))
+        compose.onNodeWithText(s(R.string.ride_self_disarmed)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.arm_action)).assertIsDisplayed()
 
-        compose.onNode(hasTestTag(ARM_TAG) and hasText(context.getString(R.string.arm_self_disarmed)))
-            .assertIsDisplayed()
-        // It is a report, not a refusal: the control still offers the arm it is explaining the
-        // absence of.
-        compose.onNodeWithText(context.getString(R.string.arm_action)).assertIsDisplayed()
-
-        // And it is answered by the arm that makes it stale.
         update(ride(armed = true, mode = DriveMode.SINGLE))
-        compose.onNodeWithText(context.getString(R.string.arm_self_disarmed)).assertDoesNotExist()
+        compose.onNodeWithText(s(R.string.ride_self_disarmed)).assertDoesNotExist()
     }
 
-    /** A machine the rider disarmed, or never armed, gets no such line. */
+    /** With no motor controller answered yet there is nothing to arm, and the line says so. */
     @Test
-    fun anOrdinaryDisarmedScreenClaimsNoSelfDisarm() {
-        show(armed = false)
+    fun withNoBoardToArmTheStatementSaysSo() {
+        show(
+            UiState(
+                connectionState = ConnectionState.CONNECTED,
+                nodes = listOf(NodeInfo(0x01, Fields.NodeClass.BRIDGE, "esp")),
+                attachedNode = 0x01,
+            ),
+        )
+        compose.onNodeWithText(s(R.string.ride_no_board)).assertIsDisplayed()
+    }
 
-        compose.onNodeWithText(context.getString(R.string.arm_self_disarmed)).assertDoesNotExist()
+    /** A drive refusal (`specs/rider-ui.md` 3.1c) is a statement with its short text. */
+    @Test
+    fun aDriveRefusalSaysWhy() {
+        val pair = ride(armed = false, mode = DriveMode.SINGLE, other = 0x02)
+        show(pair.driving(refused(DriveMode.RIGID, DriveRefusal.NO_LEADER)))
+        compose.onNodeWithText(s(R.string.drive_refusal_no_leader)).assertIsDisplayed()
+        // The pad is the stored mode's: RIGID steers.
+        compose.onNodeWithTag(JOYSTICK_TAG).assertIsDisplayed()
+
+        update(pair.driving(refused(null, DriveRefusal.DISAGREE)))
+        compose.onNodeWithText(s(R.string.drive_refusal_disagree)).assertIsDisplayed()
+
+        update(pair.driving(refused(DriveMode.BOUND, DriveRefusal.NOT_TWO)))
+        compose.onNodeWithText(s(R.string.drive_refusal_not_two, "BOUND", 2)).assertIsDisplayed()
+    }
+
+    /** A pair holding two frames refuses the arm: the warning, and the ARM label faint. */
+    @Test
+    fun aPairWithTwoDifferentFramesSaysItCannotArm() {
+        val frames = Machine(FramePair.Differ(mapOf(0x01 to true, 0x02 to false)), SidePair.NoneRight, ModePair.Unknown)
+        val state = ride(armed = false, mode = DriveMode.SINGLE, other = 0x02).copy(machine = frames)
+        assertTrue(!state.canArm)
+        show(state)
+
+        compose.onNodeWithText(s(R.string.ride_frames_differ)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.arm_action)).assertIsDisplayed()
+    }
+
+    /** The side warns and never refuses; one board and an unread frame each have their line. */
+    @Test
+    fun theMachineCautionsHaveTheirLines() {
+        val pair = ride(armed = false, mode = DriveMode.SINGLE, other = 0x02)
+        show(pair.copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.NoneRight, ModePair.Unknown)))
+        compose.onNodeWithText(s(R.string.ride_side_none_right)).assertIsDisplayed()
+
+        update(pair.copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.BothRight, ModePair.Unknown)))
+        compose.onNodeWithText(s(R.string.ride_side_both_right)).assertIsDisplayed()
+
+        update(pair.copy(machine = Machine(FramePair.Unknown, SidePair.Unknown, ModePair.Unknown, peerFound = true)))
+        compose.onNodeWithText(s(R.string.ride_frame_unread)).assertIsDisplayed()
+
+        update(ride(armed = false, mode = DriveMode.SINGLE).copy(machine = Machine.UNKNOWN))
+        compose.onNodeWithText(s(R.string.ride_frame_no_peer)).assertIsDisplayed()
+    }
+
+    /** The first two statements that apply are shown, in the table's order, and no more. */
+    @Test
+    fun atMostTwoStatementsAreShown() {
+        show(
+            ride(armed = false, mode = DriveMode.SINGLE).copy(
+                selfDisarmed = true,
+                riderWaiver = RiderWaiver.WAIVED,
+                machine = Machine.UNKNOWN,
+            ),
+        )
+        compose.onAllNodesWithTag(RIDE_STATEMENT_TAG).assertCountEquals(2)
+        compose.onNodeWithText(s(R.string.ride_self_disarmed)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_rider_waived)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_frame_no_peer)).assertDoesNotExist()
     }
 
     /**
-     * With no motor controller answered yet (or only a bridge found) there is nothing to arm, and
-     * the control says that rather than blaming a throttle nobody is holding.
+     * The fault disarm's statement names the lamp and the board, shows while the grid does not, and
+     * opens that lamp's sheet when tapped, releasing the drive first.
      */
     @Test
-    fun withNoBoardToArmTheControlSaysSo() {
-        show(armed = false, boards = emptyList())
+    fun theFaultDisarmStatementOpensItsLampsSheet() {
+        var releases = 0
+        val state = sided(armed = false).copy(faultDisarm = FaultDisarm(FaultLamp.HALL, 0x01))
+        show(state, onThrottleRelease = { releases++ })
 
-        compose.onNodeWithText(context.getString(R.string.arm_no_board)).assertExists()
-        compose.onNodeWithText(context.getString(R.string.arm_unavailable)).assertDoesNotExist()
+        val line = s(R.string.ride_disarmed_fault, s(R.string.lamp_hall_title), s(R.string.ride_board_left_inline))
+        compose.onNodeWithText(line).assertIsDisplayed().performClick()
+        assertEquals(1, releases)
+        compose.onNodeWithText(s(R.string.lamp_hall_when)).assertExists()
+
+        // While the grid shows, it says why, and the statement is not drawn.
+        update(state.reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL)))
+        compose.onNodeWithText(line).assertDoesNotExist()
     }
+
+    // --- the fault grid ------------------------------------------------------------------------
+
+    /** Dark when normal: no grid without a lit lamp or the lamp test. */
+    @Test
+    fun theGridShowsOnlyForALitLampOrTheLampTest() {
+        show(sided(armed = false))
+        compose.onNodeWithTag(FAULT_GRID_TAG).assertDoesNotExist()
+
+        update(sided(armed = false).reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL)))
+        compose.onNodeWithTag(FAULT_GRID_TAG).assertIsDisplayed()
+
+        update(sided(armed = false).copy(lampTest = true))
+        compose.onNodeWithTag(FAULT_GRID_TAG).assertIsDisplayed()
+    }
+
+    /** Tapping a lamp opens its sheet with its title, releases the drive first, and Close dismisses it. */
+    @Test
+    fun tappingALampOpensItsSheet() {
+        var releases = 0
+        show(
+            sided(armed = false).reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL)),
+            onThrottleRelease = { releases++ },
+        )
+
+        compose.onNodeWithTag(lampTag(FaultLamp.HALL)).performClick()
+        assertEquals("the scrim covers the pad, so the drive is released first", 1, releases)
+        compose.onNodeWithText(s(R.string.lamp_hall_title)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.lamp_where, s(R.string.lamp_board_left), "F8")).assertIsDisplayed()
+
+        compose.onNodeWithText(s(R.string.lamp_close)).performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText(s(R.string.lamp_hall_when)).assertDoesNotExist()
+    }
+
+    /** Every lamp's sheet has a title and three non-empty bodies. */
+    @Test
+    fun everyLampHasItsSheetText() {
+        for (lamp in FaultLamp.entries) {
+            for (id in listOf(lamp.title, lamp.whenShows, lamp.blocks, lamp.fix)) {
+                assertTrue("$lamp has an empty sheet string", s(id).isNotBlank())
+            }
+        }
+    }
+
+    /** A dark lamp opens too, and says it is not lit. */
 
     @Test
-    fun aBoardThatRequiresARiderGetsNoWaiverLine() {
-        show(armed = false)
-        compose.onNodeWithText(context.getString(R.string.arm_rider_waived)).assertDoesNotExist()
-        compose.onNodeWithText(context.getString(R.string.arm_rider_maybe_waived)).assertDoesNotExist()
+    fun aDarkLampsSheetSaysNotLit() {
+        show(sided(armed = false).reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL)))
+
+        compose.onNodeWithTag(lampTag(FaultLamp.CAL)).performClick()
+        compose.onNodeWithText(s(R.string.lamp_where, s(R.string.lamp_not_lit), "F9")).assertIsDisplayed()
     }
 
+    // --- the pad does not move -----------------------------------------------------------------
+
+    /**
+     * The pad's bounds in root coordinates are equal across every state the screen can be in, and
+     * the whole pad is on screen without scrolling at the test qualifier (`specs/rider-ui.md` 3.1d).
+     */
     @Test
-    fun theSimulateRiderRowIsAbsentUnlessTheBuildEnablesIt() {
-        show(armed = false)
-
-        compose.onNodeWithTag(SIM_RIDER_TAG).assertDoesNotExist()
-        compose.onNodeWithText(context.getString(R.string.sim_rider_label)).assertDoesNotExist()
+    fun thePadDoesNotMove() {
+        val riding = sided(armed = true).copy(throttleSpeed = 3_000, engaged = true)
+        val states = listOf(
+            riding,
+            sided(armed = true).copy(packCells = mapOf(0x01 to 10, 0x02 to 10)).reporting(0x01, board(battery = 3_050)),
+            sided(armed = false)
+                .reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL))
+                .reporting(0x02, board(fault = CyclicState.EV_IMU_LOSS)),
+            sided(armed = false).copy(lampTest = true),
+            sided(armed = false).copy(
+                telemetryByBoard = mapOf(0x02 to board()),
+                imuModel = mapOf(0x01 to 0, 0x02 to 0),
+            ),
+            sided(armed = false).copy(selfDisarmed = true, riderWaiver = RiderWaiver.WAIVED),
+            riding.copy(frameStats = mapOf(0x01 to FrameStats(412, 410), 0x02 to FrameStats(206, 1_310))),
+        )
+        show(states.first(), showFrameStats = true)
+        val first = padBounds()
+        for (state in states.drop(1)) {
+            update(state)
+            assertEquals("the pad moved in $state", first, padBounds())
+        }
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        assertTrue("the pad starts below the instruments", first.top > 0f)
+        assertTrue("the whole pad is on screen without scrolling: $first in $root", first.bottom <= root.bottom)
     }
+
+    private fun padBounds(): Rect = compose.onNodeWithTag(THROTTLE_TAG).fetchSemanticsNode().boundsInRoot
 
     // --- the drive control, per mode (`specs/rider-ui.md` 3.2) ---------------------------------
 
-    /**
-     * The modes with a turn axis get the two-axis stick; the ones that send one value per board
-     * keep the throttle pad. Exactly one control is on screen, so there is never a second surface a
-     * thumb could be on.
-     */
     @Test
     fun theJoystickIsTheControlInTheModesThatSteerAndTheThrottlePadInTheOthers() {
         show(ride(armed = true, mode = DriveMode.SINGLE))
@@ -258,73 +346,6 @@ class ControlScreenTest {
             compose.onNodeWithTag(if (steers) JOYSTICK_TAG else THROTTLE_TAG).assertIsDisplayed()
             compose.onNodeWithTag(if (steers) THROTTLE_TAG else JOYSTICK_TAG).assertDoesNotExist()
         }
-        assertTrue("DIFFERENTIAL and RIGID steer", DriveMode.entries.count { it.hasTurnAxis } == 2)
-    }
-
-    /**
-     * The Ride screen offers no drive-mode selector any more: the mode is the machine's stored
-     * setting, edited under Machine on Setup (`specs/rider-ui.md` 3.2). The strip names the mode in
-     * force as a read-only chip, and while the stored mode is the one in force it says nothing more.
-     */
-    @Test
-    fun theStripNamesTheModeInForceAndOffersNoSelector() {
-        show(ride(armed = false, mode = DriveMode.BOUND, other = 0x02))
-
-        compose.onNodeWithTag(DRIVE_CHIP_TAG).assertIsDisplayed()
-        compose.onNodeWithText(driveChip(R.string.drive_mode_bound)).assertIsDisplayed()
-        compose.onNodeWithTag(DRIVE_FALLBACK_TAG).assertDoesNotExist()
-        // No chip offers another mode: none of the other labels is on the screen.
-        for (label in listOf(R.string.drive_mode_single, R.string.drive_mode_differential, R.string.drive_mode_rigid)) {
-            compose.onNodeWithText(context.getString(label), substring = true).assertDoesNotExist()
-        }
-    }
-
-    /**
-     * A stored mode that cannot run on this machine falls back to SINGLE, and the strip says which
-     * mode the machine stores and why it is not in force (`specs/rider-ui.md` 3.2).
-     */
-    @Test
-    fun aFallbackToSingleSaysWhy() {
-        val rigid = context.getString(R.string.drive_mode_rigid)
-        show(
-            ride(armed = false, mode = DriveMode.SINGLE, other = 0x02)
-                .copy(drive = DriveInForce(single(), stored = DriveMode.RIGID, fallback = DriveFallback.NO_LEADER)),
-        )
-
-        compose.onNodeWithText(driveChip(R.string.drive_mode_single)).assertIsDisplayed()
-        compose.onNodeWithTag(DRIVE_FALLBACK_TAG).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.drive_fallback_no_leader, rigid)).assertIsDisplayed()
-
-        update(
-            ride(armed = false, mode = DriveMode.SINGLE, other = 0x02)
-                .copy(drive = DriveInForce(single(), stored = null, fallback = DriveFallback.DISAGREE)),
-        )
-        compose.onNodeWithText(context.getString(R.string.drive_fallback_disagree)).assertIsDisplayed()
-    }
-
-    /**
-     * The rigid sentence is said exactly once: when the machine is STORED as one rigid machine and
-     * no board is running as its leader. A pivoting machine is told nothing.
-     */
-    @Test
-    fun aRigidPairThatIsNotLeadingIsToldWhy() {
-        show(ride(armed = false, mode = DriveMode.SINGLE, other = 0x02))
-        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertDoesNotExist()
-
-        val configured = ride(armed = false, mode = DriveMode.SINGLE, other = 0x02)
-            .copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.OneRight(0x01), ModePair.Unknown))
-        update(configured)
-        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertIsDisplayed()
-
-        update(configured.reporting(0x01, leading()))
-        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertDoesNotExist()
-    }
-
-    /** Each mode's armed hint says what the stick does in it, and the rigid one says lean. */
-    @Test
-    fun theRigidModeSaysWhatTheStickDoes() {
-        show(ride(armed = true, mode = DriveMode.RIGID, other = 0x02).reporting(0x01, leading()))
-        compose.onNodeWithText(context.getString(R.string.throttle_hint_armed_rigid)).assertIsDisplayed()
     }
 
     /** The stick reports raw coordinates and its pad's size, and finger-up is a release. */
@@ -350,300 +371,63 @@ class ControlScreenTest {
         assertEquals(1, releases)
     }
 
-    /**
-     * Each chip says what ITS board says, under that board's label and tag. The screen is given a
-     * second board that is running while the first sits at rest.
-     */
+    // --- what a figure shows with no value -----------------------------------------------------
+
     @Test
-    fun eachBoardsChipReportsThatBoardsOwnState() {
-        show(
-            ride(armed = true, mode = DriveMode.DIFFERENTIAL, other = 0x02)
-                .reporting(0x01, reporting(MODE_OFF)).reporting(0x02, reporting(MODE_RUN)),
-        )
-        compose.onNodeWithText(chip(0x01, R.string.board_state_off)).assertIsDisplayed()
-        compose.onNodeWithText(chip(0x02, R.string.board_state_live)).assertIsDisplayed()
-        compose.onNode(hasTestTag(boardChipTag(0x02)) and hasText(chip(0x02, R.string.board_state_live)))
-            .assertIsDisplayed()
-    }
+    fun aMissingSpeedIsDashesAndSaysWhy() {
+        show(sided(armed = false).copy(telemetryByBoard = emptyMap()))
+        compose.onNodeWithTag(RIDE_SPEED_TAG).assertTextEquals(s(R.string.ride_figure_none))
+        compose.onNodeWithText(s(R.string.ride_no_board_reporting)).assertIsDisplayed()
 
-    /** A board the app has heard nothing from is silent, not idle: the chip claims no state for it. */
-    @Test
-    fun aBoardThatHasNotReportedIsSilent() {
-        show(ride(armed = false, mode = DriveMode.BOUND, other = 0x02).reporting(0x01, reporting(MODE_RUN)))
-        compose.onNodeWithText(chip(0x02, R.string.board_state_quiet)).assertIsDisplayed()
-    }
-
-    /** A fault on one board is on that board's chip and nowhere else. */
-    @Test
-    fun aFaultOnOneBoardStaysOnThatBoardsChip() {
-        show(
-            ride(armed = true, mode = DriveMode.BOUND, other = 0x02)
-                .reporting(0x01, reporting(MODE_RUN))
-                .reporting(0x02, reporting(MODE_RUN, fault = 0x01)),
-        )
-        compose.onNodeWithText(chip(0x01, R.string.board_state_live)).assertIsDisplayed()
-        compose.onNodeWithText(chip(0x02, R.string.board_state_fault)).assertIsDisplayed()
-    }
-
-    /** A bridge drives nothing and reports nothing, so the strip has no chip for it. */
-    @Test
-    fun aBridgeGetsNoChip() {
-        val nodes = listOf(
-            NodeInfo(0x01, Fields.NodeClass.BRIDGE, "hb-bridge-1a2b"),
-            NodeInfo(0x02, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME),
-        )
-        show(
-            ride(armed = false, mode = DriveMode.SINGLE)
-                .copy(nodes = nodes, selected = 0x02, telemetryByBoard = mapOf(0x02 to reporting(MODE_OFF))),
-        )
-        compose.onNodeWithTag(boardChipTag(0x01)).assertDoesNotExist()
-        compose.onNodeWithText(chip(0x02, R.string.board_state_off)).assertIsDisplayed()
-    }
-
-    /**
-     * Every state a board can report has a word on the chip, including the ones only a moment of a
-     * boot or a shutdown shows, and a mode byte from an image this build does not know.
-     */
-    @Test
-    fun theChipNamesEveryStateTheBoardCanReport() {
-        val ride = ride(armed = false, mode = DriveMode.SINGLE)
-        show(ride.reporting(0x01, reporting(MODE_INIT)))
-        compose.onNodeWithText(chip(0x01, R.string.board_state_starting))
-            .assertIsDisplayed()
-
-        update(ride.reporting(0x01, reporting(MODE_SHUTDOWN)))
-        compose.onNodeWithText(chip(0x01, R.string.board_state_stopping))
-            .assertIsDisplayed()
-
-        update(ride.reporting(0x01, reporting(MODE_UNALLOCATED)))
-        compose.onNodeWithText(chip(0x01, R.string.board_state_unrecognised))
-            .assertIsDisplayed()
-
-        update(ride.reporting(0x01, reporting(MODE_RUN, flags = CyclicState.FLAG_LOCKDOWN)))
-        compose.onNodeWithText(chip(0x01, R.string.board_state_lockdown))
-            .assertIsDisplayed()
-    }
-
-    /** One board's chip text: its label (name and address), then what that board says. */
-    private fun chip(address: Int, state: Int) =
-        context.getString(R.string.board_chip, "$BOARD_NAME 0x%02X".format(address), context.getString(state))
-
-    /** The read-only drive chip's text for the mode labelled [label]. */
-    private fun driveChip(label: Int) = context.getString(R.string.drive_chip, context.getString(label))
-
-    /** A board reporting [mode], with [fault] as its producer level mask and [flags] as its flags. */
-    private fun reporting(mode: Int, fault: Int = 0, flags: Int = 0) = TelemetryUi().merge(
-        CyclicState(
-            pitch = 0,
-            roll = 0,
-            wheelSpeed = 0,
-            battery = 3_780,
-            mode = mode,
-            fault = fault,
-            flags = flags,
-            peerDemand = 0,
-            wheelPos = 0,
-            wheelRate = 0,
-            obs = QUIET_OBS,
-        ),
-    )
-
-    /** A board reporting itself the rigid frame's leader. */
-    private fun leading() = reporting(MODE_OFF, flags = CyclicState.FLAG_LEADER)
-
-    /**
-     * A connected ride screen attached to 0x01, with [other] found by the walk, every node a motor
-     * controller and 0x01 selected, driving in [mode] as the mode in force. 0x01 has reported once
-     * (an empty reading), so the panel draws its rows.
-     */
-    private fun ride(armed: Boolean, mode: DriveMode, other: Int? = null): UiState {
-        val boards = listOfNotNull(0x01, other)
-        val targets = when (mode) {
-            DriveMode.SINGLE -> single()
-            DriveMode.DIFFERENTIAL -> DriveTargets(mode, listOf(0x01, 0x02), right = 0x01)
-            else -> DriveTargets(mode, listOf(0x01, 0x02))
-        }
-        return UiState(
-            connectionState = ConnectionState.CONNECTED,
-            armed = armed,
-            nodes = boards.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME) },
-            attachedNode = 0x01,
-            selected = 0x01,
-            drive = DriveInForce(targets, stored = mode, fallback = null),
-            driving = targets,
-            telemetryByBoard = mapOf(0x01 to TelemetryUi()),
-        )
-    }
-
-    /** SINGLE on 0x01. */
-    private fun single() = DriveTargets(DriveMode.SINGLE, listOf(0x01))
-
-    /** This state with [board] having last reported [telemetry]. */
-    private fun UiState.reporting(board: Int, telemetry: TelemetryUi) =
-        copy(telemetryByBoard = telemetryByBoard + (board to telemetry))
-
-    /**
-     * The state the ride screen below is composed from. A `setContent` is allowed once per test, so a
-     * test that walks several states writes them here and recomposes rather than showing the screen
-     * again.
-     */
-    private val rideState = mutableStateOf(UiState())
-
-    private fun show(
-        state: UiState,
-        onJoystickMove: (Float, Float, Float, Float) -> Unit = { _, _, _, _ -> },
-        onThrottleRelease: () -> Unit = {},
-    ) {
-        rideState.value = state
-        compose.setContent {
-            HoverboardRemoteTheme {
-                ControlScreen(
-                    state = rideState.value,
-                    onArmToggle = {},
-                    onThrottleMove = { _, _ -> },
-                    onJoystickMove = onJoystickMove,
-                    onThrottleRelease = onThrottleRelease,
-                    onDisconnect = {},
-                    onSimulateRider = {},
-                    showSimulateRider = false,
-                )
-            }
-        }
-    }
-
-    /** Put the shown screen in [state] and let it recompose. */
-    private fun update(state: UiState) {
-        rideState.value = state
-        compose.waitForIdle()
-    }
-
-    private fun showWithSimulateRider(onSimulateRider: (Boolean) -> Unit) = compose.setContent {
-        HoverboardRemoteTheme {
-            ControlScreen(
-                state = UiState(connectionState = ConnectionState.CONNECTED, simulateRider = false),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = onSimulateRider,
-                showSimulateRider = true,
-            )
-        }
-    }
-
-    private fun show(
-        armed: Boolean,
-        riderWaiver: RiderWaiver = RiderWaiver.NONE,
-        machine: Machine = Machine.UNKNOWN,
-        boards: List<Int> = listOf(0x01),
-    ) = compose.setContent {
-        HoverboardRemoteTheme {
-            ControlScreen(
-                state = UiState(
-                    connectionState = ConnectionState.CONNECTED,
-                    armed = armed,
-                    riderWaiver = riderWaiver,
-                    machine = machine,
-                    nodes = boards.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME) },
-                    attachedNode = boards.firstOrNull(),
-                    selected = boards.firstOrNull(),
-                    telemetryByBoard = boards.associateWith { TelemetryUi() },
-                    // SINGLE on the first board: a machine with a motor controller to arm.
-                    drive = DriveInForce(DriveTargets(DriveMode.SINGLE, boards.take(1)), DriveMode.SINGLE, null),
-                    driving = DriveTargets(DriveMode.SINGLE, boards.take(1)),
+        // Reporting, and the board holds no wheel diameter: the field is named as the CLI spells it.
+        update(
+            sided(armed = false).copy(
+                speedFacts = listOf(
+                    SpeedFacts(0, polePairs = 15, diameterMm = 0, side = 0),
                 ),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = {},
-                showSimulateRider = false,
-            )
-        }
-    }
-
-    // --- the rover pair (`specs/rider-ui.md` 3.7a) ---------------------------------------------
-
-    /**
-     * A machine holding two different frames: the arm control refuses, names each board's value,
-     * and the badge says so beside the board chips, before the control is ever tapped.
-     */
-    @Test
-    fun aPairWithTwoDifferentFramesRefusesTheArmAndBadgesTheChips() {
-        show(
-            armed = false,
-            machine = Machine(
-                FramePair.Differ(mapOf(0x01 to true, 0x02 to false)),
-                SidePair.NoneRight,
-                ModePair.Unknown,
             ),
-            boards = listOf(0x01, 0x02),
         )
-
-        compose.onNodeWithTag(BOARD_CHIP_MACHINE_TAG).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.board_chip_frame_differs)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.arm_blocked)).assertIsDisplayed()
-        val statement = context.getString(
-            R.string.arm_frames_differ,
-            "0x01 ${context.getString(R.string.setup_choice_frame_rigid)}, " +
-                "0x02 ${context.getString(R.string.setup_choice_frame_pivoting)}",
-        )
-        compose.onNodeWithText(statement).assertIsDisplayed()
+        compose.onNodeWithTag(RIDE_SPEED_TAG).assertTextEquals(s(R.string.ride_figure_none))
+        compose.onNodeWithText(s(R.string.ride_speed_unset, "motors.0.wheel_diameter_mm")).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_kmh)).assertDoesNotExist()
     }
 
-    /** The side warns and never refuses: the control still reads "tap to arm". */
+    /** No pack voltage is words, never 0.0 V; a voltage with no pack stated says what is missing. */
     @Test
-    fun aRigidPairWithNoRightWheelWarnsAndStillOffersTheArm() {
-        show(
-            armed = false,
-            machine = Machine(FramePair.Agree(rigid = true), SidePair.NoneRight, ModePair.Unknown),
-            boards = listOf(0x01, 0x02),
-        )
+    fun theWordsAPackLineHasForNoReading() {
+        show(sided(armed = false).reporting(0x01, board(battery = 0)).reporting(0x02, board(battery = 0)))
+        compose.onNodeWithTag(RIDE_PACK_TAG).assertTextEquals(s(R.string.ride_no_pack_voltage))
 
-        compose.onNodeWithText(context.getString(R.string.arm_action)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.arm_side_none_right)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.board_chip_no_right)).assertIsDisplayed()
+        update(sided(armed = false))
+        compose.onNodeWithTag(RIDE_PACK_TAG)
+            .assertTextEquals(s(R.string.ride_pack_unjudged, 37.8f, s(R.string.ride_cells_not_set)))
     }
 
-    /** A fresh pivoting pair is the factory state: no badge, nothing on the arm control. */
+    /** The trip line is blank while there is no machine distance, and reads both figures when there is. */
     @Test
-    fun aFreshPivotingPairSaysNothingAboutTheMachine() {
-        show(
-            armed = false,
-            machine = Machine(FramePair.Agree(rigid = false), SidePair.NoneRight, ModePair.Unknown),
-            boards = listOf(0x01, 0x02),
-        )
+    fun theTripLineReadsTripAndTotal() {
+        // No wheel geometry: the boards' travel is edges, not a distance, so the line is blank.
+        val edges = sided(armed = false).copy(trip = TripBaseline("AA:BB", 1_200_000))
+        assertTrue(edges.machineTravel !is MachineTravel.Distance)
+        show(edges)
+        compose.onNodeWithTag(RIDE_TRIP_TAG).assertTextEquals("")
 
-        compose.onNodeWithTag(BOARD_CHIP_MACHINE_TAG).assertDoesNotExist()
-        compose.onNodeWithText(context.getString(R.string.arm_action)).assertIsDisplayed()
+        val wheel = WheelGeometry(polePairs = 15, diameterMm = 165)
+        val odometer = board().cyclic!!.copy(obs = QUIET_OBS.copy(odometer = 1_000_000L))
+        val travelled = edges
+            .reporting(0x01, TelemetryUi().merge(odometer))
+            .reporting(0x02, TelemetryUi().merge(odometer))
+            .copy(wheelGeometry = mapOf(0x01 to wheel, 0x02 to wheel))
+        val total = (travelled.machineTravel as MachineTravel.Distance).millimetres
+        update(travelled)
+        compose.onNodeWithTag(RIDE_TRIP_TAG)
+            .assertTextEquals(s(R.string.ride_trip, tripKmText(total - 1_200_000), totalKmText(total)))
     }
 
-    /** One motor controller found: a warning that says to power the other, and no badge, because nothing is known. */
-    @Test
-    fun aSessionWithOneBoardWarnsThatTheOtherHalfIsUnknown() {
-        show(armed = false, machine = Machine.UNKNOWN, boards = listOf(0x01))
-
-        compose.onNodeWithTag(BOARD_CHIP_MACHINE_TAG).assertDoesNotExist()
-        compose.onNodeWithText(context.getString(R.string.arm_frame_no_peer)).assertIsDisplayed()
-    }
-
-    /** A second board that was found but did not answer: the remedy is reading it again. */
-    @Test
-    fun aFrameThatDidNotReadWarnsToReadAgain() {
-        show(
-            armed = false,
-            machine = Machine(FramePair.Unknown, SidePair.Unknown, ModePair.Unknown, peerFound = true),
-            boards = listOf(0x01, 0x02),
-        )
-
-        compose.onNodeWithText(context.getString(R.string.arm_frame_unread)).assertIsDisplayed()
-    }
 
     /**
-     * The debug-build stream line (`specs/rider-ui.md` 3.1): under the status strip when the build
-     * asks for it, one entry per source in address order, and nowhere when it does not.
+     * The debug-build stream line (`specs/rider-ui.md` 3.1): one entry per source in address order
+     * when the build asks for it, and nowhere when it does not.
      */
     @Test
     fun theFrameStatsLineShowsOnlyWhenTheBuildAsksForIt() {
@@ -657,9 +441,6 @@ class ControlScreenTest {
                     onThrottleMove = { _, _ -> },
                     onJoystickMove = { _, _, _, _ -> },
                     onThrottleRelease = {},
-                    onDisconnect = {},
-                    onSimulateRider = {},
-                    showSimulateRider = false,
                     showFrameStats = shown.value,
                 )
             }
@@ -673,6 +454,94 @@ class ControlScreenTest {
         compose.onNodeWithTag(FRAME_STATS_TAG).assertDoesNotExist()
     }
 
+    // --- fixtures ------------------------------------------------------------------------------
+
+    /** A board's frame: [fault] its word, [battery] centivolts, at rest in OFF. */
+    private fun board(fault: Int = 0, battery: Int = 3_780, flags: Int = 0) = TelemetryUi().merge(
+        CyclicState(
+            pitch = 0,
+            roll = 0,
+            wheelSpeed = 0,
+            battery = battery,
+            mode = 0,
+            fault = fault,
+            flags = flags,
+            peerDemand = 0,
+            wheelPos = 0,
+            wheelRate = 0,
+            obs = QUIET_OBS,
+        ),
+    )
+
+    /**
+     * A connected ride screen attached to 0x01, with [other] found by the walk, every node a motor
+     * controller and 0x01 selected, driving in [mode] as the mode in force. 0x01 has reported.
+     */
+    private fun ride(armed: Boolean, mode: DriveMode, other: Int? = null): UiState {
+        val boards = listOfNotNull(0x01, other)
+        val targets = when (mode) {
+            DriveMode.SINGLE -> DriveTargets(DriveMode.SINGLE, listOf(0x01))
+            DriveMode.DIFFERENTIAL -> DriveTargets(mode, listOf(0x01, 0x02), right = 0x01)
+            else -> DriveTargets(mode, listOf(0x01, 0x02))
+        }
+        return UiState(
+            connectionState = ConnectionState.CONNECTED,
+            armed = armed,
+            nodes = boards.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME) },
+            attachedNode = 0x01,
+            selected = 0x01,
+            drive = DriveInForce(targets, stored = mode, refusal = null),
+            driving = targets,
+            telemetryByBoard = boards.associateWith { board() },
+            machine = Machine(FramePair.Agree(rigid = false), SidePair.OneRight(0x02), ModePair.Agree(mode.byte)),
+        )
+    }
+
+    /** The pair BOUND, 0x01 the left wheel and 0x02 the right, both reporting. */
+    private fun sided(armed: Boolean) = ride(armed = armed, mode = DriveMode.BOUND, other = 0x02)
+        .copy(sides = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.RIGHT))
+
+    /** This disarmed state driving [drive], as the view model has it: the arm would arm its targets. */
+    private fun UiState.driving(drive: DriveInForce) = copy(drive = drive, driving = drive.targets)
+
+    private fun refused(stored: DriveMode?, why: DriveRefusal) =
+        DriveInForce(DriveTargets(stored ?: DriveMode.SINGLE, emptyList()), stored, why)
+
+    /** This state with [board] having last reported [telemetry]. */
+    private fun UiState.reporting(board: Int, telemetry: TelemetryUi) =
+        copy(telemetryByBoard = telemetryByBoard + (board to telemetry))
+
+    /** The state the screen is composed from: one `setContent` per test, recomposed by [update]. */
+    private val rideState = mutableStateOf(UiState())
+
+    private fun show(
+        state: UiState,
+        onArmToggle: () -> Unit = {},
+        onJoystickMove: (Float, Float, Float, Float) -> Unit = { _, _, _, _ -> },
+        onThrottleRelease: () -> Unit = {},
+        showFrameStats: Boolean = false,
+    ) {
+        rideState.value = state
+        compose.setContent {
+            HoverboardRemoteTheme {
+                ControlScreen(
+                    state = rideState.value,
+                    onArmToggle = onArmToggle,
+                    onThrottleMove = { _, _ -> },
+                    onJoystickMove = onJoystickMove,
+                    onThrottleRelease = onThrottleRelease,
+                    showFrameStats = showFrameStats,
+                )
+            }
+        }
+    }
+
+    /** Put the shown screen in [state] and let it recompose. */
+    private fun update(state: UiState) {
+        rideState.value = state
+        compose.waitForIdle()
+    }
+
     private companion object {
         /** The `device.name` every board in these states carries: the registry default. */
         const val BOARD_NAME = "Hoverboard"
@@ -681,13 +550,3 @@ class ControlScreenTest {
         const val ARMED_WORD = "ARMED"
     }
 }
-
-/** `CYCLIC_STATE.mode` as the firmware's mode machine emits it (`crates/state/src/mode.rs`,
- *  `ModeMachine`). */
-private const val MODE_OFF = 0
-private const val MODE_INIT = 1
-private const val MODE_RUN = 3
-private const val MODE_SHUTDOWN = 4
-
-/** A mode byte the firmware's machine never emits, which is what a newer image would look like. */
-private const val MODE_UNALLOCATED = 9

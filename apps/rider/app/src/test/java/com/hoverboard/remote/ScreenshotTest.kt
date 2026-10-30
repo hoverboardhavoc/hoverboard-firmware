@@ -7,22 +7,50 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.github.takahirom.roborazzi.captureRoboImage
+import com.github.takahirom.roborazzi.captureScreenRoboImage
+import com.hoverboard.protocol.board.Layout
+import com.hoverboard.protocol.board.LayoutSlot
+import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Gains
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.LinkConfig
+import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.DriveTargets
+import com.hoverboard.remote.model.FaultLamp
+import com.hoverboard.remote.model.MachineTravel
 import com.hoverboard.remote.model.NodeInfo
+import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.SpeedFacts
 import com.hoverboard.remote.model.TelemetryUi
+import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.model.TripBaseline
+import com.hoverboard.remote.model.WheelGeometry
+import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectScreen
+import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
+import com.hoverboard.remote.ui.screens.LayoutScreen
+import com.hoverboard.remote.ui.screens.MachineStatusSection
+import com.hoverboard.remote.ui.screens.RideTopBarStatus
+import com.hoverboard.remote.ui.screens.SetupScreen
+import com.hoverboard.remote.ui.screens.TuneScreen
+import com.hoverboard.remote.ui.screens.lampTag
 import com.hoverboard.remote.ui.theme.Bg
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
+import kotlin.math.PI
+import kotlin.math.roundToInt
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -31,9 +59,10 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * Roborazzi baseline screenshots of ConnectScreen and ControlScreen (house stack §Testing,
- * SPEC §12.2 layer 1). Composables are captured directly (no Activity), so no view hierarchy
- * or Koin graph is needed.
+ * Roborazzi baseline screenshots of the Connect screen, the 8a Ride screen and the Tune, Setup and
+ * board layout screens in the app theme (`specs/rider-ui.md` 3.1d and 3.10; house stack §Testing,
+ * SPEC §12.2 layer 1). Composables are captured directly (no Activity), so no view hierarchy or
+ * Koin graph is needed.
  *
  * Captures go through a compose test rule, not the standalone `captureRoboImage { }` overload.
  * The standalone overload syncs through Espresso, whose Robolectric idle loop never sees the
@@ -128,277 +157,315 @@ class ScreenshotTest {
         }
     }
 
+    // --- Ride, 8a (`specs/rider-ui.md` 3.1 and 3.1d) -------------------------------------------
+
+    /** Two boards, sides left and right, BOUND, armed, throttle forward, 7.4 km/h, a trip and a total. */
     @Test
-    fun controlScreen_connectedWithTelemetry() {
-        // 37.80 V pack, 850 hall edges in the window, and a board pulling 3.0 A at the motor for
-        // 2.0 A off the supply ([DRIVING_OBS] at [DRIVING_CAL] counts per amp).
-        val telemetry = TelemetryUi()
-            // battery is centivolts: 3780 cV = 37.8 V.
-            .merge(
-                CyclicState(
-                    pitch = -180,
-                    roll = 95,
-                    wheelSpeed = 850,
-                    battery = 3_780,
-                    mode = 3,
-                    fault = 0,
-                    flags = CyclicState.FLAG_RIDER,
-                    peerDemand = 0,
-                    wheelPos = 0,
-                    wheelRate = 0,
-                    obs = DRIVING_OBS,
-                ),
-            )
-        capture("control_armed") {
-            ControlScreen(
-                state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
-                    packCells = mapOf(0x01 to PACK_CELLS),
-                    packChemistry = mapOf(0x01 to Fields.BatteryChemistry.LI_ION),
-                    armed = true,
-                    throttleSpeed = 4_000,
-                    engaged = true,
-                    countsPerAmp = mapOf(0x01 to DRIVING_CAL),
-                ),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = {},
-                showSimulateRider = false,
-            )
+    fun ride_riding() {
+        capture("ride_riding") { Ride(riding()) }
+    }
+
+    /** As riding, with the pack under 15 percent: the ring in caution and the BATTERY LOW chip. */
+    @Test
+    fun ride_lowBattery() {
+        val riding = riding()
+        val low = riding.telemetryByBoard.mapValues { (_, t) -> t.withBattery(LOW_CV) }
+        val state = riding.copy(telemetryByBoard = low)
+        check(state.batteryIsLow)
+        capture("ride_low_battery") { Ride(state) }
+    }
+
+    /** Disarmed, HALL on the left board and IMU on the right: the grid, the ARM label faint, the pad dimmed. */
+    @Test
+    fun ride_fault() {
+        capture("ride_fault") { Ride(fault()) }
+    }
+
+    /** The fault with HALL's sheet open: the sheet is its own window, so the whole screen is captured. */
+    @Test
+    fun ride_faultSheet() {
+        setRide(fault())
+        compose.onNodeWithTag(lampTag(FaultLamp.HALL)).performClick()
+        compose.waitForIdle()
+        captureScreenRoboImage("src/test/screenshots/ride_fault_sheet.png")
+    }
+
+    /** One second into the lamp test, on the test clock. */
+    @Test
+    fun ride_lampTest() {
+        capture("ride_lamp_test", advanceMs = LAMP_TEST_PHASE_MS) {
+            Ride(sided(armed = false).copy(lampTest = true))
         }
     }
 
     /**
-     * Two boards bound (`specs/rider-ui.md` 3.2), armed and driving: each chip confirmed by that
-     * board's own telemetry, the pair running at once, and the waived rider requirement stated on
-     * the arm control (`specs/control.md` (i)).
+     * One board silent, the other with no wheel diameter, no pack voltage, its current calibration
+     * unread and no IMU fitted: every figure that has no value says so.
      */
     @Test
-    fun controlScreen_boundArmed() {
-        // The pair pulling unevenly, which is the thing a per-board current display is for: 0x01 at
-        // the full [DRIVING_OBS] window, 0x02 at three quarters of it.
-        val slaveObs = DRIVING_OBS.copy(phaseMean = DRIVING_OBS.phaseMean * 3 / 4)
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, 0, DRIVING_OBS, 0))
-        val slave = TelemetryUi().merge(CyclicState(-38, 12, 290, 3_765, 3, 0, 0, 0, 0, slaveObs, 0))
-        capture("control_bound_armed") {
-            ControlScreen(
-                state = connected(DriveMode.BOUND, mapOf(0x01 to telemetry, 0x02 to slave)).copy(
-                    riderWaiver = RiderWaiver.WAIVED,
-                    packCells = mapOf(0x01 to PACK_CELLS, 0x02 to PACK_CELLS),
-                    packChemistry = mapOf(
-                        0x01 to Fields.BatteryChemistry.LI_ION,
-                        0x02 to Fields.BatteryChemistry.LI_ION,
-                    ),
-                    countsPerAmp = mapOf(0x01 to DRIVING_CAL, 0x02 to DRIVING_CAL),
-                    armed = true,
-                    throttleSpeed = 6_000,
-                    engaged = true,
-                ),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = {},
-                showSimulateRider = false,
-            )
-        }
-    }
-
-    /**
-     * RIGID (`specs/rover-one-imu.md` section 7), armed and turning: the same two-axis stick, and
-     * the pair reporting the two roles the mode needs in force, 0x01 leading on `flags` bit1 and
-     * 0x02 following on bit2. One command goes to the leader; the capture is
-     * of a machine being leaned and turned as one body.
-     */
-    @Test
-    fun controlScreen_rigidArmed() {
-        val leader = TelemetryUi().merge(
-            CyclicState(-40, 10, 300, 3_780, 3, 0, CyclicState.FLAG_LEADER, 0, 0, QUIET_OBS, 0),
+    fun ride_unknown() {
+        val state = sided(armed = false).copy(
+            telemetryByBoard = mapOf(0x01 to board(battery = 0, pitch = 120, roll = -40)),
+            countsPerAmp = mapOf(0x02 to DRIVING_CAL),
+            imuModel = mapOf(0x01 to 0, 0x02 to IMU_FITTED),
+            speedFacts = listOf(SpeedFacts(0, polePairs = POLE_PAIRS, diameterMm = 0, side = Fields.ControlSide.LEFT)),
         )
-        val follower = TelemetryUi().merge(
-            CyclicState(0, 0, 295, 3_770, 3, 0, CyclicState.FLAG_FOLLOWER, -2_100, 0, QUIET_OBS, 0),
+        capture("ride_unknown") { Ride(state) }
+    }
+
+    /** DIFFERENTIAL, armed, the joystick deflected on both axes. */
+    @Test
+    fun ride_joystickArmed() {
+        val targets = DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02), right = 0x02)
+        val state = riding().copy(
+            drive = DriveInForce(targets, DriveMode.DIFFERENTIAL, refusal = null),
+            driving = targets,
+            throttleSpeed = Throttle.MAX_SPEED * 2 / 5,
+            steer = Throttle.MAX_SPEED / 3,
         )
-        capture("control_rigid_armed") {
-            ControlScreen(
-                state = connected(DriveMode.RIGID, mapOf(0x01 to leader, 0x02 to follower)).copy(
-                    machine = Machine(
-                        frame = FramePair.Agree(rigid = true),
-                        side = SidePair.OneRight(0x01),
-                        mode = ModePair.Agree(DriveMode.RIGID.byte),
-                        peerFound = true,
-                    ),
-                    armed = true,
-                    throttleSpeed = 9_000,
-                    steer = 14_000,
-                    engaged = true,
+        capture("ride_joystick_armed") { Ride(state) }
+    }
+
+    // --- the other screens, in the theme -------------------------------------------------------
+
+    @Test
+    fun tune_board() {
+        val keys = (0 until Gains.COUNT).map { Gains.key(Gains.CONTROL_SF_GAINS, it) }
+        val bounds = SetupFields.DRIVE_BOUNDS.associate { it.key to (it.def.default as Value.I16).v }
+        val state = TuneState(
+            target = 0x01,
+            motors = listOf(0x01, 0x02).map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME) },
+            boards = mapOf(
+                0x01 to BoardGains(
+                    staged = keys.zip(Gains.DEFAULT).toMap(),
+                    flash = keys.zip(Gains.DEFAULT).toMap(),
+                    stale = false,
+                    bounds = bounds,
                 ),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = {},
-                showSimulateRider = false,
-            )
+            ),
+        )
+        capture("tune_board") {
+            Pushed(AppDestination.TUNE) {
+                TuneScreen(state = state, armed = false, actions = NoTune, ride = {})
+            }
         }
     }
+
+    /** Setup for a motor controller, with the machine status section: one board's fault line, one bit-6 MODE line. */
+    @Test
+    fun setup_motorController() {
+        val values = SetupFields.ALL.associate { it.key to it.def.default } +
+            (SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.MOTOR_CONTROLLER))
+        val setup = SetupState(
+            addresses = listOf(0x01, 0x02),
+            attached = 0x01,
+            target = 0x01,
+            boards = mapOf(0x01 to BoardSetup(values = values)),
+        )
+        val status = sided(armed = false)
+            .reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL))
+            .reporting(0x02, board(fault = CyclicState.EV_MODE_FAULT, flags = CyclicState.FLAG_RIDER))
+        capture("setup_motor_controller") {
+            Pushed(AppDestination.SETUP) {
+                SetupScreen(
+                    state = setup,
+                    armed = false,
+                    telemetry = null,
+                    odometers = emptyList(),
+                    actions = Recorder(),
+                    status = { MachineStatusSection(status, showSimulateRider = false, onSimulateRider = {}) },
+                )
+            }
+        }
+    }
+
+    @Test
+    fun layout_editor() {
+        val values = Layout.SLOTS.associate { it.key to it.def.default } + (Fields.LINK_SET.key() to Value.U8(0))
+        val state = LayoutState(
+            board = 0x01,
+            chip = ChipTag.F103C8,
+            values = values,
+            linkSet = 0,
+            staged = checkNotNull(Layout.fieldsFrom(values)),
+        )
+        capture("layout_editor") {
+            Pushed(AppDestination.LAYOUT) { LayoutScreen(state = state, armed = false, actions = NoLayout) }
+        }
+    }
+
+    // --- fixtures ------------------------------------------------------------------------------
+
+    /** The Ride screen under the Ride top bar, so the link dots and the chip are in the image. */
+    @Composable
+    private fun Ride(state: UiState) {
+        ConnectedScreen(
+            destination = AppDestination.RIDE,
+            onDestination = {},
+            onLeaveDrive = {},
+            armed = state.armed,
+            ride = {
+                ControlScreen(
+                    state = state,
+                    onArmToggle = {},
+                    onThrottleMove = { _, _ -> },
+                    onJoystickMove = { _, _, _, _ -> },
+                    onThrottleRelease = {},
+                )
+            },
+            tune = {},
+            setup = {},
+            layout = {},
+            rideStatus = { RideTopBarStatus(state) },
+        )
+    }
+
+    /** [content] as the pushed [destination], under its top bar. */
+    @Composable
+    private fun Pushed(destination: AppDestination, content: @Composable () -> Unit) {
+        ConnectedScreen(
+            destination = destination,
+            onDestination = {},
+            onLeaveDrive = {},
+            armed = false,
+            ride = {},
+            tune = content,
+            setup = content,
+            layout = content,
+        )
+    }
+
+    private fun setRide(state: UiState) = compose.setContent {
+        HoverboardRemoteTheme {
+            Box(modifier = Modifier.fillMaxSize().background(Bg)) { Ride(state) }
+        }
+    }
+
+    /** A board's frame in [mode]: [fault] its word, [battery] centivolts, its attitude and window. */
+    private fun board(
+        fault: Int = 0,
+        battery: Int = RIDING_CV,
+        flags: Int = 0,
+        mode: Int = MODE_OFF,
+        pitch: Int = 0,
+        roll: Int = 0,
+        obs: CyclicObs = QUIET_OBS,
+    ) = TelemetryUi().merge(
+        CyclicState(
+            pitch = pitch,
+            roll = roll,
+            wheelSpeed = 0,
+            battery = battery,
+            mode = mode,
+            fault = fault,
+            flags = flags,
+            peerDemand = 0,
+            wheelPos = 0,
+            wheelRate = 0,
+            obs = obs,
+        ),
+    )
+
+    private fun TelemetryUi.withBattery(cv: Int) = merge(checkNotNull(cyclic).copy(battery = cv))
+
+    /** This state with [address] having last reported [telemetry]. */
+    private fun UiState.reporting(address: Int, telemetry: TelemetryUi) =
+        copy(telemetryByBoard = telemetryByBoard + (address to telemetry))
 
     /**
-     * DIFFERENTIAL (`specs/rider-ui.md` 3.2), armed and turning: the two-axis stick in place of the
-     * throttle pad, its thumb off centre on both axes, and both boards driven. The demand drawn is
-     * the mix's `v`; what each board is told is the pair the app sends, not a number on this screen.
-     * The second board has a fault of its own here, which is the state the strip could not show
-     * while it spoke for both boards at once.
+     * The pair at 0x01 (the left wheel) and 0x02 (the right), BOUND, both reporting at rest, every
+     * ride fact read: a ten-cell Li-ion pack, a 15 A limit, an IMU on each.
      */
-    @Test
-    fun controlScreen_differentialArmed() {
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, 0, QUIET_OBS, 0))
-        val slave = TelemetryUi().merge(CyclicState(-38, 12, 0, 3_760, 4, 0x01, 0, 0, 0, QUIET_OBS, 0))
-        capture("control_differential_armed") {
-            ControlScreen(
-                state = connected(DriveMode.DIFFERENTIAL, mapOf(0x01 to telemetry, 0x02 to slave)).copy(
-                    packCells = mapOf(0x01 to PACK_CELLS, 0x02 to PACK_CELLS),
-                    packChemistry = mapOf(
-                        0x01 to Fields.BatteryChemistry.LI_ION,
-                        0x02 to Fields.BatteryChemistry.LI_ION,
-                    ),
-                    armed = true,
-                    throttleSpeed = 9_000,
-                    steer = 14_000,
-                    engaged = true,
-                ),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = {},
-                showSimulateRider = false,
-            )
-        }
-    }
-
-    /** The state a rider sees on arrival: connected, live telemetry, motors NOT live. */
-    @Test
-    fun controlScreen_connectedDisarmed() {
-        val telemetry = TelemetryUi()
-            .merge(CyclicState(-180, 95, 0, 3_780, 0, 0, 0, 0, 0, QUIET_OBS, 0))
-        capture("control_disarmed") {
-            ControlScreen(
-                state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
-                    packCells = mapOf(0x01 to PACK_CELLS),
-                    packChemistry = mapOf(0x01 to Fields.BatteryChemistry.LI_ION),
-                    armed = false,
-                    throttleSpeed = 0,
-                    engaged = false,
-                ),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = {},
-                showSimulateRider = false,
-            )
-        }
-    }
-
-    /**
-     * What a board reporting UNKNOWN for its pack looks like, which is any board without
-     * `board.battery.pin`, and any board whose motor has not been brought up: the battery row
-     * says there is no reading and draws no number and no bar. The lockdown and fault chips are
-     * forced on here because the firmware cannot raise either of them yet, and a rendering nothing
-     * can exercise is a rendering nobody has looked at.
-     */
-    @Test
-    fun controlScreen_unknownBatteryAndAlarms() {
-        val telemetry = TelemetryUi()
-            .merge(
-                CyclicState(
-                    pitch = 120,
-                    roll = -40,
-                    wheelSpeed = 0,
-                    battery = 0,
-                    mode = 2,
-                    fault = 2,
-                    flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
-                    peerDemand = 0,
-                    wheelPos = 0,
-                    wheelRate = 0,
-                    obs = QUIET_OBS,
-                ),
-            )
-        capture("control_unknown_battery_and_alarms") {
-            ControlScreen(
-                state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
-                    packCells = mapOf(0x01 to PACK_CELLS),
-                    packChemistry = mapOf(0x01 to Fields.BatteryChemistry.LI_ION),
-                    armed = false,
-                    simulateRider = true,
-                ),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = {},
-                // The one capture that carries the bench control, because it is the one showing
-                // what a debug build on a bench board looks like. The rider-facing captures above
-                // pass false: a release build does not have the row at all.
-                showSimulateRider = true,
-            )
-        }
-    }
-
-    @Test
-    fun controlScreen_lowBattery() {
-        // 30.5 V on the ten-cell pack below: 0.5 V above its 30.0 V empty, so 4% and LOW.
-        val telemetry = TelemetryUi()
-            .merge(CyclicState(0, 0, 0, 3_050, 0, 0, 0, 0, 0, QUIET_OBS, 0))
-        capture("control_low_battery") {
-            ControlScreen(
-                state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
-                    packCells = mapOf(0x01 to PACK_CELLS),
-                    packChemistry = mapOf(0x01 to Fields.BatteryChemistry.LI_ION),
-                    armed = false,
-                    throttleSpeed = 0,
-                    engaged = false,
-                ),
-                onArmToggle = {},
-                onThrottleMove = { _, _ -> },
-                onJoystickMove = { _, _, _, _ -> },
-                onThrottleRelease = {},
-                onDisconnect = {},
-                onSimulateRider = {},
-                showSimulateRider = false,
-            )
-        }
-    }
-
-    /**
-     * A connected session attached to 0x01, whose walk found a motor controller at every address in
-     * [telemetry] (each having last reported that reading), driving in [mode] with 0x01 selected
-     * and as the right wheel.
-     */
-    private fun connected(mode: DriveMode, telemetry: Map<Int, TelemetryUi>): UiState {
-        val boards = telemetry.keys.sorted()
-        val targets = when (mode) {
-            DriveMode.SINGLE -> DriveTargets(mode, listOf(0x01))
-            DriveMode.DIFFERENTIAL -> DriveTargets(mode, boards, right = 0x01)
-            else -> DriveTargets(mode, boards)
-        }
+    private fun sided(armed: Boolean): UiState {
+        val boards = listOf(0x01, 0x02)
+        val targets = DriveTargets(DriveMode.BOUND, boards)
         return UiState(
             connectionState = ConnectionState.CONNECTED,
-            nodes = boards.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+            armed = armed,
+            nodes = boards.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME) },
             attachedNode = 0x01,
             selected = 0x01,
-            drive = DriveInForce(targets, stored = mode, fallback = null),
+            drive = DriveInForce(targets, stored = DriveMode.BOUND, refusal = null),
             driving = targets,
-            telemetryByBoard = telemetry,
+            machine = Machine(
+                FramePair.Agree(rigid = false),
+                SidePair.OneRight(0x02),
+                ModePair.Agree(DriveMode.BOUND.byte),
+            ),
+            telemetryByBoard = boards.associateWith { board() },
+            countsPerAmp = boards.associateWith { DRIVING_CAL },
+            packCells = boards.associateWith { PACK_CELLS },
+            packChemistry = boards.associateWith { Fields.BatteryChemistry.LI_ION },
+            sides = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.RIGHT),
+            currentLimit = boards.associateWith { LIMIT_MA },
+            imuModel = boards.associateWith { IMU_FITTED },
+            batteryFloor = boards.associateWith { 0 },
+            wheelGeometry = boards.associateWith { WheelGeometry(POLE_PAIRS, DIAMETER_MM) },
+            speedFacts = listOf(
+                SpeedFacts(0, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.LEFT),
+                SpeedFacts(0, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.RIGHT),
+            ),
         )
+    }
+
+
+    /** Riding: armed, throttle forward, 7.4 km/h, 6.8 A and 5.1 A, a trip and a total. */
+    private fun riding(): UiState {
+        val wheel = WheelGeometry(POLE_PAIRS, DIAMETER_MM)
+        val rate = (RIDING_KMH / KMH_PER_RATE).roundToInt()
+        fun driving(amps: Float, pitch: Int, roll: Int) = board(
+            mode = MODE_RUN,
+            pitch = pitch,
+            roll = roll,
+            obs = DRIVING_OBS.copy(phaseMean = (amps * DRIVING_CAL).roundToInt(), odometer = ODOMETER_EDGES),
+        )
+        val state = sided(armed = true).copy(
+            throttleSpeed = Throttle.MAX_SPEED * 2 / 5,
+            engaged = true,
+            telemetryByBoard = mapOf(
+                0x01 to driving(LEFT_AMPS, pitch = 230, roll = -80),
+                0x02 to driving(RIGHT_AMPS, pitch = 210, roll = -60),
+            ),
+            wheelGeometry = mapOf(0x01 to wheel, 0x02 to wheel),
+            speedFacts = listOf(
+                SpeedFacts(rate, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.LEFT),
+                SpeedFacts(-rate, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.RIGHT),
+            ),
+        )
+        val total = (state.machineTravel as MachineTravel.Distance).millimetres
+        return state.copy(trip = TripBaseline(pick = "AA:BB:CC:DD:EE:FF", millimetres = total - TRIP_MM))
+            .also { check((it.ring.second as BatteryReading.Charge).percent in 70..80) }
+    }
+
+    /** Disarmed, HALL on the left board and IMU on the right. */
+    private fun fault(): UiState = sided(armed = false)
+        .reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL, pitch = 20, roll = -10))
+        .reporting(0x02, board(fault = CyclicState.EV_IMU_LOSS))
+
+    /** No-op Tune actions: a capture taps nothing. */
+    private object NoTune : TuneActions {
+        override fun onShown() = Unit
+        override fun onHidden() = Unit
+        override fun selectTarget(address: Int) = Unit
+        override fun refresh() = Unit
+        override fun slide(key: Key, value: Int) = Unit
+        override fun slideEnd(key: Key, value: Int) = Unit
+        override fun setBound(key: Key, value: Int) = Unit
+        override fun save() = Unit
+        override fun revert() = Unit
+        override fun dismissNotice() = Unit
+    }
+
+    /** No-op layout actions. */
+    private object NoLayout : LayoutActions {
+        override fun onShown() = Unit
+        override fun onHidden() = Unit
+        override fun refresh() = Unit
+        override fun stage(slot: LayoutSlot, raw: Int) = Unit
+        override fun revert(slot: LayoutSlot) = Unit
+        override fun revertAll() = Unit
+        override fun apply() = Unit
+        override fun dismissNotice() = Unit
     }
 
     /**
@@ -425,5 +492,33 @@ class ScreenshotTest {
     private companion object {
         /** Spinner phase for the busy screenshots: far enough in to draw a visible arc. */
         const val SPINNER_PHASE_MS = 500L
+
+        /** One second into the two-second lamp test. */
+        const val LAMP_TEST_PHASE_MS = 1_000L
+
+        const val BOARD_NAME = "Hoverboard"
+        const val MODE_OFF = 0
+        const val MODE_RUN = 3
+
+        /** 39.00 V on ten Li-ion cells is 3.90 V a cell: 72 percent. */
+        const val RIDING_CV = 3_900
+
+        /** 34.70 V on ten Li-ion cells: 12 percent, under the 15 percent low edge. */
+        const val LOW_CV = 3_470
+
+        const val LIMIT_MA = 15_000
+        const val LEFT_AMPS = 6.8f
+        const val RIGHT_AMPS = 5.1f
+        const val IMU_FITTED = 1
+        const val POLE_PAIRS = 15
+        const val DIAMETER_MM = 165
+        const val RIDING_KMH = 7.4
+
+        /** km/h per unit of `wheel_rate` on this wheel (`specs/rider-ui.md` 3.1a). */
+        const val KMH_PER_RATE = 50.0 / 4096 / (6 * POLE_PAIRS) * PI * DIAMETER_MM * 0.0036
+
+        /** About 413 km of lifetime travel on each wheel, and a 3.1 km trip. */
+        const val ODOMETER_EDGES = 71_700_000L
+        const val TRIP_MM = 3_100_000L
     }
 }

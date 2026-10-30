@@ -42,40 +42,20 @@
     <string name="font_licence_title">Font licence</string>
     <string name="font_licence_close">Close</string>
 
-
-    <!-- Control screen -->
-    <string name="control_title">Control</string>
-    <string name="throttle_hint_armed">Hold the throttle to drive · release to stop</string>
-    <string name="throttle_hint_disarmed">Tap ARM to enable the motors</string>
-    <string name="throttle_hint_armed_bound">Bound: both boards get this demand · release to stop</string>
-    <string name="throttle_hint_armed_differential">Differential: up to drive, sideways to turn · release to stop</string>
-    <string name="throttle_hint_armed_rigid">Rigid body: up to lean, sideways to turn · release to stop</string>
+    <!-- Ride screen, Setup's machine status section -->
 
     <!-- Drive mode (specs/rider-ui.md 3.2): a machine setting stored on the motor controllers
-         (machine.drive_mode), edited under Machine on Setup. The Ride strip shows the one in force. -->
+         (machine.drive_mode), edited under Machine on Setup. Setup's machine status section shows the one in force. -->
     <string name="drive_mode_single">Single board</string>
     <string name="drive_mode_bound">Bound (both boards)</string>
     <string name="drive_mode_differential">Differential (steer)</string>
     <string name="drive_mode_rigid">Rigid body (one machine)</string>
     <string name="drive_mode_rigid_not_leading">Both boards are set to one rigid machine, but neither is running as its leader yet. Set both to Balance under Drive on the Setup tab, and arm once so a new setting takes hold.</string>
 
-    <!-- The read-only chip naming the drive mode in force. %1$s is a drive_mode_* label. -->
-    <string name="drive_chip">DRIVE: %1$s</string>
-    <!-- Why the drive is Single board although the machine stores another mode. %1$s is the stored
-         mode's drive_mode_* label. -->
-    <string name="drive_fallback_unread">Driving one board: the drive mode has not been read from every board yet.</string>
-    <string name="drive_fallback_disagree">Driving one board: the boards store different drive modes. Pick one under Machine on the Setup tab.</string>
-    <string name="drive_fallback_unknown_mode">Driving one board: the boards store a drive mode this app does not know.</string>
-    <!-- %2$d is how many motor controllers the walk found. -->
-    <string name="drive_fallback_not_two">Driving one board: %1$s needs two boards and %2$d were found.</string>
-    <string name="drive_fallback_no_leader">Driving one board: %1$s needs exactly one board leading the rigid frame, and none is (or both are).</string>
-    <string name="drive_fallback_no_right">Driving one board: %1$s needs exactly one board set as the right wheel. Pick it under Machine on the Setup tab.</string>
-
     <!-- Per-board chips. %1$s is the board's label (its name and address), %2$s what that board
          says about itself. Never the word ARMED here: the arm control is the one armed statement on
          the screen. -->
     <string name="board_chip">%1$s · %2$s</string>
-    <string name="board_chip_none">NO MOTOR CONTROLLER FOUND YET</string>
     <string name="board_state_quiet">SILENT</string>
     <string name="board_state_off">OFF</string>
     <string name="board_state_starting">STARTING UP</string>
@@ -84,28 +64,15 @@
     <string name="board_state_fault">FAULT</string>
     <string name="board_state_lockdown">HELD STOPPED</string>
     <string name="board_state_unrecognised">UNKNOWN STATE</string>
-    <!-- The disagreement badge (specs/rider-ui.md 3.7 and 3.7a), beside the board chips so a
-         mismatched pair is visible before the arm control is ever tapped. -->
-    <string name="board_chip_frame_differs">THE BOARDS ARE SET TO DIFFERENT FRAMES</string>
-    <string name="board_chip_mode_differs">THE BOARDS STORE DIFFERENT DRIVE MODES</string>
-    <string name="board_chip_both_right">BOTH BOARDS ARE SET AS THE RIGHT WHEEL</string>
-    <string name="board_chip_no_right">NEITHER BOARD IS SET AS THE RIGHT WHEEL</string>
 
     <!-- Arm control. The one tappable arm surface; there is no separate armed banner. -->
-    <string name="arm_action">TAP TO ARM</string>
-    <string name="arm_disarm_action">ARMED · TAP TO DISARM</string>
-    <string name="arm_unavailable">RELEASE THROTTLE TO ARM</string>
-    <!-- No motor controller has answered its class yet, or the walk found only a bridge. -->
-    <string name="arm_no_board">NO BOARD TO ARM YET</string>
-    <!-- Shown on the arm control after the app disarmed the machine itself, which it does whenever
-         it stops being on screen (MainViewModel.onAppBackgrounded). Cleared by the next arm. -->
-    <string name="arm_self_disarmed">The app disarmed this machine when it stopped being on screen. Nothing faulted and the board is still connected. Tap to arm again.</string>
+    <string name="arm_action">ARM</string>
+    <string name="arm_disarm_action">ARMED · tap to disarm</string>
     <!-- Shown on the arm control when the board runs with CONTROL_RIDER_REQUIRED at 0 (specs/control.md (i)). -->
     <string name="arm_rider_waived">Rider requirement waived: in balance mode, arming engages. Hold the frame upright when arming.</string>
     <!-- Shown instead when the app cannot tell what the board runs (written this session, link dropped since) and the value it last ran or stores is 0. -->
     <string name="arm_rider_maybe_waived">Rider requirement may be waived: the app cannot tell what the board is running. In balance mode, arming may engage. Hold the frame upright when arming.</string>
     <!-- The arm refusal and the two warnings of specs/rider-ui.md 3.7a. Only the frame refuses. -->
-    <string name="arm_blocked">CANNOT ARM</string>
     <!-- %1$s lists each board's address and frame (setup_choice_frame_pivoting or _rigid). -->
     <string name="arm_frames_differ">The boards are set to different frames (%1$s). One wheel would try to balance the machine and the other would freewheel. Set them the same under Machine on the Setup tab.</string>
     <string name="arm_frame_unread">The app has not read the frame setting on both boards, so it cannot tell whether they match. Open Setup and tap Read again.</string>
@@ -116,41 +83,21 @@
     <string name="throttle_label_forward">FWD</string>
     <string name="throttle_label_reverse">REV</string>
     <string name="throttle_label_zero">0</string>
-    <string name="throttle_engaged">ENGAGED</string>
 
+    <!-- The drive pad's direction words (`specs/rider-ui.md` 3.1). -->
+    <string name="pad_forward">forward</string>
+    <string name="pad_reverse">reverse</string>
     <!-- Bench affordance: stand in for foot pads the board does not have wired. Debug builds
          only, and a long press rather than a tap, so the label has to say so. -->
     <string name="sim_rider_label">SIMULATE RIDER · HOLD</string>
     <string name="sim_rider_on">ON</string>
     <string name="sim_rider_off">OFF</string>
-    <string name="throttle_idle">IDLE · STOPPED</string>
 
     <!-- Telemetry -->
-    <string name="telemetry_title">Telemetry</string>
     <string name="telemetry_link_a">Wheel A</string>
     <string name="telemetry_link_b">Wheel B</string>
     <string name="telemetry_link_alive">LINK</string>
     <string name="telemetry_link_dead">DOWN</string>
-    <string name="telemetry_battery">Battery</string>
-    <string name="telemetry_battery_value">%1$.1f V</string>
-    <string name="telemetry_battery_percent">%1$d%%</string>
-    <string name="telemetry_battery_low">LOW BATTERY</string>
-    <!-- The machine's speed from CYCLIC_STATE.wheel_rate (specs/rider-ui.md 3.1a). -->
-    <string name="telemetry_speed">Speed</string>
-    <string name="telemetry_speed_tenths">%1$.1f km/h</string>
-    <string name="telemetry_speed_whole">%1$d km/h</string>
-    <string name="telemetry_speed_none">none</string>
-    <!-- %1$s is a comma-separated list of field names as the host config tool spells them. -->
-    <string name="telemetry_speed_unread">No speed yet: %1$s not read from the board.</string>
-    <string name="telemetry_speed_unset">No speed: %1$s not set. Set it with the host config tool.</string>
-    <string name="telemetry_throttle">Throttle</string>
-    <string name="telemetry_throttle_value">%1$d%%</string>
-    <string name="telemetry_pitch">Pitch</string>
-    <string name="telemetry_roll">Roll</string>
-    <string name="telemetry_angle_value">%1$.1f\u00B0</string>
-    <!-- The board's own state bits. RIDER is drawn lit or dim; the alarms only when they assert. -->
-    <string name="telemetry_chip_rider">RIDER</string>
-    <string name="telemetry_chip_lockdown">LOCKDOWN</string>
     <!-- One line per set fault bit of CYCLIC_STATE.fault: %1$s is the board's label, %2$s the cause. -->
     <string name="telemetry_fault_cause">FAULT %1$s: %2$s</string>
     <string name="fault_cause_comms_loss">peer link lost</string>
@@ -163,39 +110,12 @@
     <string name="fault_cause_motor_period">motor period lost</string>
     <string name="fault_cause_motor_arm">arm aborted</string>
 
-    <!-- Shown whenever no fault is asserting, so silence does not read as "healthy". The chip is
-         drawn from CYCLIC_STATE.fault, which is the attached board's OWN producer mask
-         (orchestrator::events::Levels::own_mask), so a quiet panel is one board's word about
-         itself and not the machine's. -->
-    <string name="telemetry_fault_unreported">No fault producer is asserted on the selected board. That is one board\'s own producers; every other board has its own chip above, so this cannot clear the machine.</string>
-
-    <!-- Battery, when the board sends 0 cV: that is UNKNOWN, not a board measuring zero volts. The
-         label states that fact and never a cause, because UNKNOWN is broader than "cannot sense":
-         a master whose board.battery.pin IS staged publishes UNKNOWN until its motor is brought up,
-         VBATT_RAW being 0 until then (specs/sensing-and-safety.md), so naming one cause would send
-         a bench operator to re-stage a field that was already right. The note names both as
-         alternatives. No number and no bar are drawn, so these two carry the whole statement. -->
-    <string name="telemetry_battery_unknown">no reading</string>
-    <string name="telemetry_battery_unknown_note">This board is reporting no pack voltage. Either it does not sense the rail, or its motor has not been brought up.</string>
-
-    <!-- Battery, when the voltage is known and the pack is not: how full a pack is depends on how
-         many cells it has, which no frame carries and no voltage reveals (a resting 30 V is an
-         eight-cell pack above full and a ten-cell pack nearly empty). So the volts are shown and
-         the percentage is withheld, with the one place that settles it named. -->
-    <string name="telemetry_battery_no_pack">No charge figure: nobody has told this machine how many cells its pack has. Set it under Setup, in Drive.</string>
-    <string name="telemetry_battery_no_chemistry">No charge figure: this board\'s battery chemistry has not been read yet.</string>
-    <string name="telemetry_battery_unknown_chemistry">No charge figure: this board\'s battery chemistry is not one this app knows. Set it under Setup, in Drive.</string>
-
-    <!-- Current, beside the battery (specs/rider-ui.md 3.6). TWO figures per board, because the
-         board measures the PHASE current the motor feels and a bench supply reads the DC LINK, and
-         taking one for the other cost a morning on 2026-10-09. One row per board, because two
-         wheels pulling differently is worth seeing and each board carries its own calibration.
-         Every state names the subject, so the block needs no heading above it on a screen that is
-         already dense. The wording of the figures is terse because the row has to stay ONE line:
-         the throttle pad below has a height floor, and a wrapped row or a fourth line of note
-         pushes it off the screen (apps/rider ControlScreenTest). The note is the whole honesty of
-         the display: the scale has not been checked against a meter, and the figure is the
-         bridge's share alone. -->
+    <!-- Current (specs/rider-ui.md 3.6), on Setup's machine status section. TWO figures per board,
+         because the board measures the PHASE current the motor feels and a bench supply reads the DC
+         LINK, and taking one for the other cost a morning on 2026-10-09. One row per board, because
+         two wheels pulling differently is worth seeing and each board carries its own calibration.
+         The note states the footing: the scale has not been checked against a meter, and the
+         figure is the bridge's share alone. -->
     <string name="telemetry_current_value">%1$.1f A motor \u00B7 %2$.1f A supply</string>
     <!-- The sum of the two boards' supply figures, which is what the bench supply's own reading
          can be compared against: one board's figure is only a share of it. Drawn for a pair only,
@@ -211,9 +131,6 @@
     <string name="telemetry_current_coasting">coasting, no current driven</string>
     <string name="telemetry_current_unscaled">waiting for this board\'s calibration</string>
     <string name="telemetry_current_note">Figures rest on each board\'s own calibration, which has not been checked against a meter yet, and leave out the 0.08 A each board draws for itself.</string>
-
-    <string name="telemetry_no_data">Waiting for telemetry…</string>
-    <string name="telemetry_disconnected">Disconnected: reconnect to drive</string>
 
     <!-- Overflow menu (specs/rider-ui.md section 2a) -->
     <string name="nav_ride">Ride</string>
@@ -726,4 +643,116 @@
     <string name="layout_notice_refused">The board refused the write to %1$s.</string>
     <!-- %1$s is the previous board\'s address. -->
     <string name="layout_notice_board_changed">A different board attached. The layout read from board %1$s was dropped: pins are a fact about one board.</string>
+
+    <!-- The fault lamp grid and each lamp's sheet (`specs/rider-ui.md` 3.1b), verbatim from what the firmware does. -->
+    <string name="lamp_link_title">Board link lost</string>
+    <string name="lamp_link_when">This board has had no state frame from the other board for 0.1 s. It counts only once the other board has been heard since power-up, so a board that never heard its partner shows nothing here. It goes out when a frame arrives.</string>
+    <string name="lamp_link_blocks">Arming. An armed board shuts down, and on a rigid machine the other board stops its wheel too. The app disarms; tap ARM once the link returns.</string>
+    <string name="lamp_link_fix">Check the cable between the two boards, and that the other board has power.</string>
+    <string name="lamp_tilt_title">Tilted past 45°</string>
+    <string name="lamp_tilt_when">This board\'s pitch or roll passed 45° either way. The board checks this whenever its IMU is working, armed or not, in Throttle as in Balance. The app disarms when it lights, and the lamp goes out once the machine is upright.</string>
+    <string name="lamp_tilt_blocks">Arming. An armed board shuts down at once, and on a rigid machine the other board stops its wheel too.</string>
+    <string name="lamp_tilt_fix">Stand the machine upright, then tap ARM. A machine that has fallen cannot right itself and drive off, because the app has disarmed.</string>
+    <string name="lamp_imu_title">IMU not answering</string>
+    <string name="lamp_imu_when">Five reads of this board\'s IMU in a row failed (20 ms). It goes out after 25 good reads in a row (0.1 s); while it is lit, the board tries the IMU once a second. Only a board whose IMU answered at power-up can show it.</string>
+    <string name="lamp_imu_blocks">Arming. An armed board shuts down and the app disarms. Tap ARM once the IMU answers.</string>
+    <string name="lamp_imu_fix">Check the IMU\'s connector and wiring on this board.</string>
+    <string name="lamp_latch_title">Motor fault latched</string>
+    <string name="lamp_latch_when">One of two trips while armed. The phase current reached twice the current limit, or stayed over the limit for 64 PWM periods in a row (4 ms). Or the board was armed for 10 minutes without its balance loop in its run state, which in Throttle mode is any 10 minutes armed. The board clears the latch as it reaches OFF, about 8 ms later; the app keeps the lamp lit until you tap ARM.</string>
+    <string name="lamp_latch_blocks">Nothing once the board is at OFF. An armed board shuts down when it trips, and the app disarms. Tapping ARM clears the lamp and arms.</string>
+    <string name="lamp_latch_fix">After a current trip, check for a stalled wheel or a short on the phase wires. The 10-minute trip is the stock idle timeout and needs no fix.</string>
+    <string name="lamp_latch2_title">Second motor fault latched</string>
+    <string name="lamp_latch2_when">The second motor\'s latch, with the same two trips as LATCH. This firmware drives one motor per board, so here it lights only with LATCH, from the 10-minute idle timeout.</string>
+    <string name="lamp_latch2_blocks">Nothing once the board is at OFF. An armed board shuts down when it trips, and the app disarms. Tapping ARM clears the lamp and arms.</string>
+    <string name="lamp_latch2_fix">None: the 10-minute idle timeout needs no fix.</string>
+    <string name="lamp_hall_title">Hall sensor fault</string>
+    <string name="lamp_hall_when">The motor\'s hall sensors read all three low or all three high for more than 64 PWM periods in a row (4 ms). It stays lit until the board is powered off and on.</string>
+    <string name="lamp_hall_blocks">Arming, for the rest of this power-up. An armed board shuts down.</string>
+    <string name="lamp_hall_fix">Check the hall connector and its wires (5 V, ground and the three signals), then power the board off and on.</string>
+    <string name="lamp_cal_title">Current calibration refused</string>
+    <string name="lamp_cal_when">At power-up the board measures its two phase-current sensors with the bridge off. The zero it measured was outside the accepted window, or the measurement did not complete. This is decided once per power-up.</string>
+    <string name="lamp_cal_blocks">Arming, for the rest of this power-up. Without a trusted zero the board cannot hold its current limit.</string>
+    <string name="lamp_cal_fix">Power the board off and on with the wheel at rest. If it is refused again, the current-sense circuit on this board needs checking.</string>
+    <string name="lamp_period_title">Motor timer stalled</string>
+    <string name="lamp_period_when">The motor\'s PWM interrupt, which runs the commutation 16,000 times a second, fell below half its rate for five control ticks in a row (20 ms). It goes out after 25 good ticks in a row (0.1 s).</string>
+    <string name="lamp_period_blocks">Arming. An armed board shuts down and the app disarms. Tap ARM once it goes out.</string>
+    <string name="lamp_period_fix">Power the board off and on. If it comes back, note when it happened and report it: the firmware\'s motor timer stopped.</string>
+    <string name="lamp_arm_title">Arm aborted</string>
+    <string name="lamp_arm_when">An arm stopped before the bridge was switched on. Every arm first re-reads the stored settings and refuses one the board cannot use, for example an IMU orientation that is not a rotation, then checks that the motor interrupt is running.</string>
+    <string name="lamp_arm_blocks">Arming. The app disarms when it lights, which releases a refused setting\'s lamp. A motor interrupt that was not running holds it until the board is powered off and on.</string>
+    <string name="lamp_arm_fix">If the IMU orientation was just changed, set it again on Setup, then tap ARM. If the lamp comes back with nothing changed, power the board off and on.</string>
+
+    <!-- The Ride screen, 8a (`specs/rider-ui.md` 3.1). -->
+    <string name="ride_slot_left">L</string>
+    <string name="ride_slot_right">R</string>
+    <string name="ride_lamp_test">LAMP TEST</string>
+    <string name="ride_battery_low">BATTERY LOW</string>
+    <string name="ride_kmh">km/h</string>
+    <string name="ride_figure_none">--</string>
+    <string name="ride_no_board_reporting">no board reporting</string>
+    <string name="ride_speed_unread">not read from the board: %1$s</string>
+    <string name="ride_speed_unset">not set: %1$s</string>
+    <string name="ride_pack">"%1$.1f V   %2$d %%"</string>
+    <string name="ride_pack_unjudged">"%1$.1f V   %2$s"</string>
+    <string name="ride_no_pack_voltage">no pack voltage</string>
+    <string name="ride_cells_not_set">cells not set</string>
+    <string name="ride_chemistry_not_read">chemistry not read</string>
+    <string name="ride_chemistry_unknown">chemistry unknown</string>
+    <string name="ride_pitch">pitch %1$s°</string>
+    <string name="ride_roll">roll %1$s°</string>
+    <string name="ride_pitch_none">pitch --</string>
+    <string name="ride_roll_none">roll --</string>
+    <string name="ride_no_imu">no IMU</string>
+    <string name="ride_phase_amps">%1$.1f A</string>
+    <string name="ride_phase_none">-- A</string>
+    <string name="ride_phase_off">off</string>
+    <string name="ride_phase_word">phase</string>
+    <string name="ride_trip">"Trip %1$s km     Total %2$s km"</string>
+    <!-- The Ride statements under the ARM control, one line each (`specs/rider-ui.md` 3.1). -->
+    <string name="ride_disarmed_fault">Disarmed: %1$s, %2$s.</string>
+    <string name="ride_board_left_inline">left board</string>
+    <string name="ride_board_right_inline">right board</string>
+    <string name="ride_self_disarmed">Disarmed by the app when it left the screen.</string>
+    <string name="ride_frames_differ">Cannot arm: the boards are set to different frames.</string>
+    <string name="ride_no_board">No motor controller found yet.</string>
+    <string name="ride_rider_waived">Rider waived: arming engages balance. Hold it upright.</string>
+    <string name="ride_rider_maybe_waived">Rider may be waived: hold it upright when arming.</string>
+    <string name="ride_frame_unread">Frame not read from both boards yet.</string>
+    <string name="ride_frame_no_peer">Only one board found: frames cannot be compared.</string>
+    <string name="ride_side_none_right">Neither board is set as the right wheel.</string>
+    <string name="ride_side_both_right">Both boards are set as the right wheel.</string>
+    <string name="ride_side_unknown">Right wheel not read from both boards yet.</string>
+    <!-- The drive refusal (`specs/rider-ui.md` 3.1c): the Ride statement, then Setup's line. -->
+    <string name="drive_refusal_unread">Reading the drive mode from every board.</string>
+    <string name="drive_refusal_disagree">Cannot arm: the boards store different drive modes.</string>
+    <string name="drive_refusal_unknown_mode">Cannot arm: the boards store an unknown drive mode.</string>
+    <string name="drive_refusal_not_two">Cannot arm: %1$s needs two boards, %2$d found.</string>
+    <string name="drive_refusal_no_leader">Cannot arm: no single board leads the rigid frame.</string>
+    <string name="drive_refusal_no_right">Cannot arm: no single board is the right wheel.</string>
+    <string name="drive_refusal_unread_long">Cannot arm yet: the drive mode has not been read from every board.</string>
+    <string name="drive_refusal_disagree_long">Cannot arm: the boards store different drive modes. Pick one under Machine.</string>
+    <string name="drive_refusal_unknown_mode_long">Cannot arm: the boards store a drive mode this app does not know.</string>
+    <string name="drive_refusal_not_two_long">Cannot arm: %1$s needs two boards and %2$d were found.</string>
+    <string name="drive_refusal_no_leader_long">Cannot arm: RIGID needs exactly one board leading the rigid frame, and none is (or both are). A board takes a new frame or control mode when it arms or powers up, and arming is refused here, so power the boards off and on.</string>
+    <string name="drive_refusal_no_right_long">Cannot arm: DIFFERENTIAL needs exactly one board set as the right wheel. Pick it under Machine.</string>
+    <!-- A fault lamp's sheet (`specs/rider-ui.md` 3.1b). -->
+    <string name="lamp_where">%1$s · %2$s</string>
+    <string name="lamp_not_lit">Not lit</string>
+    <string name="lamp_board_left">Left board</string>
+    <string name="lamp_board_right">Right board</string>
+    <string name="lamp_boards_both">Left and right boards</string>
+    <string name="lamp_boards_and">%1$s and %2$s</string>
+    <string name="lamp_head_when">When it shows</string>
+    <string name="lamp_head_blocks">What it blocks</string>
+    <string name="lamp_head_fix">Fix</string>
+    <string name="lamp_close">Close</string>
+    <!-- Setup's machine status section (`specs/rider-ui.md` 3.1c). -->
+    <string name="status_title">Machine status</string>
+    <string name="status_drive">Drive: %1$s, %2$s</string>
+    <string name="status_drive_none">Drive: no motor controller found yet.</string>
+    <string name="status_and">%1$s and %2$s</string>
+    <string name="status_rider">Rider</string>
+    <string name="status_no_rider">No rider</string>
+    <string name="status_lockdown">LOCKDOWN</string>
+    <string name="board_mode_demoted">MODE %1$s: the board is not running the control mode it stores (Balance with no working IMU runs Throttle), or both boards claim the rigid lead.</string>
 </resources>

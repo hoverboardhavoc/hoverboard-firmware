@@ -7,7 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
@@ -47,15 +47,18 @@ const val UP_ICON_TAG = "up_icon"
 /** Test tag on [destination]'s item in the overflow menu. */
 fun menuItemTag(destination: AppDestination): String = "menu_item_${destination.name.lowercase()}"
 
+/** Test tag on the overflow menu's Disconnect item. */
+const val MENU_DISCONNECT_TAG = "menu_item_disconnect"
+
 /**
- * The top bar surface's armed outline: [Primary] while armed (`specs/rider-ui.md` section 2a).
+ * The top bar surface's armed outline: [Primary] while armed (`specs/rider-ui.md` section 2a and
+ * 3.1).
  *
- * The Ride screen makes armed state legible by tinting its two big surfaces
- * ([com.hoverboard.remote.ui.screens.ControlScreen], section 3.1), and the pushed destinations show
- * none of those surfaces. The tint used to sit on the overflow icon, which a pushed destination does
- * not have, so it sits on the bar SURFACE instead and reads on every screen. Drawn as the outline
- * the telemetry panel and the throttle pad already use, in the same colour, so it reads as the same
- * signal, and it keeps the title and the icons legible where a filled red bar would not.
+ * The Ride screen makes armed state legible in [Primary] on the filled ARM control and the pad's
+ * tinted half and thumb ([com.hoverboard.remote.ui.screens.ControlScreen]), and the pushed
+ * destinations show none of those. The tint used to sit on the overflow icon, which a pushed
+ * destination does not have, so it sits on the bar SURFACE instead and reads on every screen, as an
+ * outline that keeps the icons legible where a filled bar would not.
  */
 internal fun armedBarOutline(armed: Boolean): Color = if (armed) Primary else Color.Transparent
 
@@ -87,6 +90,9 @@ internal fun armedBarOutline(armed: Boolean): Color = if (armed) Primary else Co
  * @param onLeaveDrive release the drive demand: called on every destination change, because the
  *   screen being left may have had a finger on a pad.
  * @param armed whether the board is armed, which the top bar surface carries as an outline.
+ * @param onDisconnect the overflow menu's last item ([com.hoverboard.remote.MainViewModel.disconnect]).
+ * @param rideStatus what Ride's top bar carries before its overflow icon, in place of a title
+ *   ([RideTopBarStatus]).
  */
 @Composable
 fun ConnectedScreen(
@@ -99,6 +105,8 @@ fun ConnectedScreen(
     setup: @Composable () -> Unit,
     layout: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    onDisconnect: () -> Unit = {},
+    rideStatus: @Composable () -> Unit = {},
 ) {
     // System back pops a pushed destination back to the root. On the root it is left unhandled, so
     // it leaves the app, which is the Android contract for a top-level destination.
@@ -113,6 +121,11 @@ fun ConnectedScreen(
             armed = armed,
             onPush = goTo,
             onUp = { goTo(AppDestination.ROOT) },
+            onDisconnect = {
+                onLeaveDrive()
+                onDisconnect()
+            },
+            rideStatus = rideStatus,
         )
         Box(modifier = Modifier.weight(1f)) {
             when (destination) {
@@ -126,11 +139,12 @@ fun ConnectedScreen(
 }
 
 /**
- * The top bar: the destination's name on an armed-outlined surface, with the root's overflow menu
- * or a pushed destination's up arrow.
+ * The top bar, 48 dp, on an armed-outlined surface: on Ride the board link dots and the chip
+ * ([rideStatus]) and the overflow menu; on a pushed destination its up arrow and its name.
  *
- * Exactly one of the two slots is filled, which is the navigation model made visible: the root has
- * no higher destination to go up to, and a pushed destination has no menu to hop sideways with.
+ * Exactly one of the two navigation slots is filled, which is the navigation model made visible:
+ * the root has no higher destination to go up to, and a pushed destination has no menu to hop
+ * sideways with.
  */
 @Composable
 private fun TopBar(
@@ -138,20 +152,26 @@ private fun TopBar(
     armed: Boolean,
     onPush: (AppDestination) -> Unit,
     onUp: () -> Unit,
+    onDisconnect: () -> Unit,
+    rideStatus: @Composable () -> Unit,
 ) {
     // The armed state is said in words as well as drawn, because an outline is the one indication a
-    // screen reader cannot read out. It goes on the title, which every destination has, now that the
-    // tint is off the icon one of them lacks.
+    // screen reader cannot read out. Ride draws no title, so the bar itself carries the name.
     val title = stringResource(destination.label)
-    val spoken = if (armed) stringResource(R.string.nav_title_armed, title) else null
+    val spoken = if (armed) stringResource(R.string.nav_title_armed, title) else title
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(TOP_BAR_HEIGHT)
             .testTag(TOP_BAR_TAG)
-            .border(ARMED_OUTLINE, armedBarOutline(armed)),
+            .border(ARMED_OUTLINE, armedBarOutline(armed))
+            .semantics(mergeDescendants = false) { contentDescription = spoken },
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (!destination.isRoot) {
+        if (destination.isRoot) {
+            Box(modifier = Modifier.weight(1f)) { rideStatus() }
+            OverflowMenu(onPush, onDisconnect)
+        } else {
             IconButton(onClick = onUp, modifier = Modifier.testTag(UP_ICON_TAG)) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -159,27 +179,22 @@ private fun TopBar(
                     tint = Fg,
                 )
             }
-        }
-        Text(
-            title,
-            style = MaterialTheme.typography.titleLarge,
-            color = Fg,
-            modifier = Modifier
-                .weight(1f)
-                .padding(start = if (destination.isRoot) TITLE_INSET else 0.dp)
-                .semantics {
-                    if (spoken != null) contentDescription = spoken
-                },
-        )
-        if (destination.isRoot) {
-            OverflowMenu(onPush)
+            Text(
+                title,
+                style = MaterialTheme.typography.titleLarge,
+                color = Fg,
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
 
-/** Ride's three-dot menu: the three destinations it pushes, behind a tap target and no gesture. */
+/**
+ * Ride's three-dot menu: the three destinations it pushes and, last, Disconnect, behind a tap
+ * target and no gesture.
+ */
 @Composable
-private fun OverflowMenu(onPush: (AppDestination) -> Unit) {
+private fun OverflowMenu(onPush: (AppDestination) -> Unit, onDisconnect: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
         // The tag is on the button, not the icon inside it: the button merges its descendants'
@@ -202,9 +217,18 @@ private fun OverflowMenu(onPush: (AppDestination) -> Unit) {
                     modifier = Modifier.testTag(menuItemTag(d)),
                 )
             }
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.connect_disconnect)) },
+                onClick = {
+                    open = false
+                    onDisconnect()
+                },
+                modifier = Modifier.testTag(MENU_DISCONNECT_TAG),
+            )
         }
     }
 }
 
-/** The title's inset on the root, where no up arrow has already indented it. */
-private val TITLE_INSET = 16.dp
+/** 2a's top bar height. */
+private val TOP_BAR_HEIGHT = 48.dp
+

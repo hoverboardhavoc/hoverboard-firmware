@@ -36,6 +36,9 @@ import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ConnectedScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.LayoutScreen
+import com.hoverboard.remote.ui.screens.MachineStatusSection
+import com.hoverboard.remote.ui.screens.RideTopBarStatus
+
 import com.hoverboard.remote.ui.screens.PermissionScreen
 import com.hoverboard.remote.ui.screens.RideControls
 import com.hoverboard.remote.ui.screens.SetupScreen
@@ -236,6 +239,8 @@ private fun Connected(
         onDestination = onDestination,
         onLeaveDrive = viewModel::onThrottleRelease,
         armed = state.armed,
+        onDisconnect = viewModel::disconnect,
+        rideStatus = { RideTopBarStatus(state) },
         ride = {
             ControlScreen(
                 state = state,
@@ -243,12 +248,6 @@ private fun Connected(
                 onThrottleMove = viewModel::onThrottleMove,
                 onJoystickMove = viewModel::onJoystickMove,
                 onThrottleRelease = viewModel::onThrottleRelease,
-                onDisconnect = viewModel::disconnect,
-                onSimulateRider = viewModel::setSimulateRider,
-                // Debug builds only. The control can hold a padded board engaged through a
-                // step-off (ControlScreen has the argument), and a rider's build has no
-                // business carrying it.
-                showSimulateRider = BuildConfig.DEBUG,
                 // Debug builds only (`specs/rider-ui.md` 3.1): the per-source frame count and
                 // longest gap, a bench instrument with nothing to tell a rider.
                 showFrameStats = BuildConfig.DEBUG,
@@ -273,24 +272,46 @@ private fun Connected(
                 },
             )
         },
-        setup = {
-            SetupScreen(
-                state = setupState,
-                armed = state.armed,
-                // The node the selector names, not the attached one: each board's readings arrive
-                // under its own address, so the screen shows the one it is editing.
-                telemetry = setupState.board?.let { state.telemetryOf(it) },
-                // Every motor controller, unlike the line above: the Travel section's machine
-                // figure is the mean of the wheels, so it needs them all whichever node is edited.
-                odometers = state.motorControllers.map { nodeLabel(it) to state.odometerOf(it.address) },
-                actions = viewModel.setup,
-            )
-        },
+        setup = { Setup(state, setupState, viewModel.setup, viewModel::setSimulateRider) },
         layout = {
             LayoutScreen(
                 state = layoutState,
                 armed = state.armed,
                 actions = viewModel.layout,
+            )
+        },
+    )
+}
+
+/**
+ * Setup for the node its selector names, with the machine status section at its top
+ * (`specs/rider-ui.md` 3.1c), which covers every board whatever the selector says.
+ */
+@Composable
+private fun Setup(
+    state: UiState,
+    setupState: SetupState,
+    actions: SetupActions,
+    onSimulateRider: (Boolean) -> Unit,
+) {
+    SetupScreen(
+        state = setupState,
+        armed = state.armed,
+        // The node the selector names, not the attached one: each board's readings arrive
+        // under its own address, so the screen shows the one it is editing.
+        telemetry = setupState.board?.let { state.telemetryOf(it) },
+        // Every motor controller, unlike the line above: the Travel section's machine
+        // figure is the mean of the wheels, so it needs them all whichever node is edited.
+        odometers = state.motorControllers.map { nodeLabel(it) to state.odometerOf(it.address) },
+        actions = actions,
+        status = {
+            MachineStatusSection(
+                state = state,
+                // Debug builds only. The control can hold a padded board engaged through a
+                // step-off (MachineStatusSection has the argument), and a rider's build has
+                // no business carrying it.
+                showSimulateRider = BuildConfig.DEBUG,
+                onSimulateRider = onSimulateRider,
             )
         },
     )

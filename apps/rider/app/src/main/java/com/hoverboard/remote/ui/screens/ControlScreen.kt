@@ -1,9 +1,5 @@
 package com.hoverboard.remote.ui.screens
 
-import androidx.annotation.StringRes
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,59 +7,57 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.background
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.hoverboard.remote.FramePair
+import androidx.compose.ui.unit.sp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
-import com.hoverboard.remote.model.BatteryReading
-import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.FaultLamp
 import com.hoverboard.remote.model.FrameStats
-import com.hoverboard.remote.ui.components.ArmToggle
-import com.hoverboard.remote.ui.components.TelemetryPanel
+import com.hoverboard.remote.model.MachineTravel
+import com.hoverboard.remote.model.totalKmText
+import com.hoverboard.remote.model.tripKmText
+import com.hoverboard.remote.ui.theme.CautionGlyph
 import com.hoverboard.remote.ui.theme.CautionText
 import com.hoverboard.remote.ui.theme.FgFaint
 import com.hoverboard.remote.ui.theme.FgMuted
-import com.hoverboard.remote.ui.theme.Primary
 import java.util.Locale
 
 /**
- * Main control screen: the telemetry panel, the arm toggle and the drive control.
+ * The Ride screen, the 8a "Dial" design (`specs/rider-ui.md` 3.1): riding information and the
+ * controls that move and stop the machine, with as little text as the facts allow.
  *
- * The drive control is the throttle in SINGLE and BOUND, and the two-axis joystick in DIFFERENTIAL,
- * which is the mode that needs a turn axis (`specs/rider-ui.md` 3.2). One at a time: a mode change
- * is refused while armed, so the control under the thumb never changes meaning mid-drive.
+ * **The drive pad does not move.** The screen is a column of fixed-height slots from the top of the
+ * content area: the instruments (276 dp), the pad (280 dp), the ARM control (52 dp), 12 dp apart.
+ * Nothing above the pad changes height with state, and everything that changes with state sits
+ * below it (the statements, the fault grid, the trip line, the debug line), so a thumb on the pad
+ * means the same demand whatever the screen is saying. The column scrolls, so a phone shorter than
+ * the layout scrolls the bottom away rather than squeezing the pad, whose HEIGHT is its resolution.
  *
- * Laid out for ONE thumb. The throttle is full width and takes all the remaining height, because it
- * is the control being modulated and the only one that is held; the arm toggle is a tap above it.
- * An earlier version put a held arm pad beside the throttle and it was wrong: the throttle is
- * already occupying the hand, so a second sustained touch just costs the rider their other hand.
- * See [com.hoverboard.remote.MainViewModel] for the safety argument.
+ * Laid out for ONE thumb: the pad is the control being modulated and the only one that is held; the
+ * arm toggle is a tap under it. See [com.hoverboard.remote.MainViewModel] for the safety argument.
  *
- * The drive control is disabled outright while disarmed, so neither pad can show travel that
- * nothing is being asked to perform.
- *
- * ## One arm surface, not two
- *
- * This screen used to carry a full-width ARMED banner above the telemetry as well as the
- * [ArmToggle]. Both read `armed` off the same [UiState], so the banner held no state the toggle
- * lacked and could say nothing the toggle could not; it was one more thing to keep in agreement for
- * no information. It is gone, and [ArmToggle] is the single arm control and indicator.
- *
- * What the banner was actually buying was GLANCEABILITY: armed state legible from anywhere on the
- * screen, not just from the control at the bottom. That is kept without a second textual element by
- * tinting the two big surfaces instead. While armed, the telemetry panel and the throttle pad both
- * carry a red outline, so the armed state reads from the top of the screen, the middle, and the
- * control itself.
+ * Per-board state, the drive mode and the machine's configuration statements are on Setup's
+ * machine status section (3.1c); the board link dots and the BATTERY LOW and LAMP TEST chips are in
+ * the top bar ([RideTopBarStatus]).
  */
 @Composable
 fun ControlScreen(
@@ -72,89 +66,121 @@ fun ControlScreen(
     onThrottleMove: (y: Float, height: Float) -> Unit,
     onJoystickMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
     onThrottleRelease: () -> Unit,
-    onDisconnect: () -> Unit,
-    onSimulateRider: (Boolean) -> Unit,
-    showSimulateRider: Boolean,
     modifier: Modifier = Modifier,
     showFrameStats: Boolean = false,
 ) {
-    // Scrollable, and the pad has a FLOOR rather than a weight. With `weight(1f)` in a fixed-height
-    // Column the pad gets whatever the rows above leave, which on a phone whose fixed content fills
-    // the screen is nothing: measured 0 dp on a OnePlus 8 on 2026-10-09, which crashed the draw.
-    // The throttle is the screen's primary control and its HEIGHT is its resolution (the y position
-    // is the demand), so it gets a guaranteed size and the screen scrolls when that does not fit.
+    var sheet by rememberSaveable { mutableStateOf<FaultLamp?>(null) }
+    val open = { lamp: FaultLamp ->
+        onThrottleRelease()
+        sheet = lamp
+    }
     Column(
         modifier = modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .verticalScroll(rememberScrollState()),
     ) {
-        Header(connected = state.isConnected, onDisconnect = onDisconnect)
-        Spacer(modifier = Modifier.height(8.dp))
-        BoardChips(state)
-        if (showFrameStats && state.frameStats.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = frameStatsLine(state.frameStats),
-                style = MaterialTheme.typography.labelSmall,
-                color = FgMuted,
-                modifier = Modifier.testTag(FRAME_STATS_TAG),
-            )
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-
-        TelemetryPanel(
-            telemetry = state.telemetry,
-            throttlePercent = state.throttlePercent,
-            // The selected board's pack voltage against the pack that board stores: the gauge is
-            // drawn only where both are known (`specs/rider-ui.md` 3.6b).
-            battery = state.selected?.let { state.batteryOf(it) } ?: BatteryReading.NoReading,
-            // Each motor controller's own window words against its own calibration, one row for
-            // every board the session FOUND, whether or not it is currently reporting: a board that
-            // has gone quiet is a thing to show, not to hide.
-            currents = state.motorControllers.map { nodeLabel(it) to state.currentOf(it.address) },
-            speed = state.speed,
-            // The board the panel's telemetry is from, which every fault line names.
-            board = state.selected?.let { a -> state.nodeAt(a)?.let { nodeLabel(it) } ?: boardHex(a) } ?: "",
-        )
-
-        if (showSimulateRider) {
-            Spacer(modifier = Modifier.height(8.dp))
-            SimulateRiderRow(on = state.simulateRider, onChange = onSimulateRider)
-        }
-
-        if (rigidIsConfiguredButNotRunning(state)) {
-            Spacer(modifier = Modifier.height(8.dp))
-            CautionText(
-                text = stringResource(R.string.drive_mode_rigid_not_leading),
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.testTag(RIGID_NOT_LEADING_TAG),
-            )
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = stringResource(hint(state)),
-            style = MaterialTheme.typography.bodyMedium,
-            color = FgMuted,
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
+        RideInstruments(state)
+        Spacer(modifier = Modifier.height(SLOT_GAP))
         RideControls(
             state = state,
             onArmToggle = onArmToggle,
             onThrottleMove = onThrottleMove,
             onJoystickMove = onJoystickMove,
             onThrottleRelease = onThrottleRelease,
+            gridShowing = state.gridShows,
+            onOpenLamp = open,
+            modifier = Modifier.padding(horizontal = GUTTER),
         )
+        Column(modifier = Modifier.padding(horizontal = GUTTER).padding(bottom = 16.dp)) {
+            if (state.gridShows) {
+                Spacer(modifier = Modifier.height(SLOT_GAP))
+                FaultGrid(state, onOpen = open)
+            }
+            Spacer(modifier = Modifier.height(SLOT_GAP))
+            TripLine(state)
+            if (showFrameStats && state.frameStats.isNotEmpty()) {
+                Text(
+                    text = frameStatsLine(state.frameStats),
+                    style = ride(10.sp),
+                    color = FgFaint,
+                    modifier = Modifier.testTag(FRAME_STATS_TAG),
+                )
+            }
+        }
+    }
+    sheet?.let { LampSheet(state, it, onDismiss = { sheet = null }) }
+}
+
+/**
+ * "Trip 3.1 km     Total 413 km": the machine's travel and that less the trip's baseline, blank
+ * and keeping its height while there is no machine distance.
+ */
+@Composable
+private fun TripLine(state: UiState) {
+    val total = state.machineTravel as? MachineTravel.Distance
+    val trip = state.trip.trip(total)
+    val text = if (total == null || trip == null) {
+        ""
+    } else {
+        stringResource(R.string.ride_trip, tripKmText(trip), totalKmText(total.millimetres))
+    }
+    Text(
+        text = text,
+        style = ride(14.sp),
+        color = FgMuted,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().testTag(RIDE_TRIP_TAG),
+    )
+}
+
+/**
+ * What Ride's top bar carries (`specs/rider-ui.md` 3.1): a link dot per board slot at the start,
+ * in [FgMuted] while the phone hears that board and the caution glyph while it is silent, each with
+ * its slot label; and at the end, before the overflow icon, LAMP TEST during the lamp test, else
+ * BATTERY LOW with the caution glyph while the pack is low, else nothing.
+ */
+@Composable
+fun RideTopBarStatus(state: UiState, modifier: Modifier = Modifier) {
+    Row(modifier = modifier.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        for (slot in state.slots.all) {
+            val heard = state.telemetryOf(slot.address) != null
+            Box(Modifier.size(DOT_BOX), contentAlignment = Alignment.Center) {
+                if (heard) {
+                    Box(Modifier.size(8.dp).background(FgMuted, CircleShape))
+                } else {
+                    CautionGlyph(DOT_BOX)
+                }
+            }
+            Spacer(Modifier.width(4.dp))
+            Text(
+                slotLabel(slot),
+                style = ride(11.sp),
+                color = FgMuted,
+                modifier = Modifier.testTag(linkDotTag(slot.address)),
+            )
+            Spacer(Modifier.width(10.dp))
+        }
+        Spacer(Modifier.weight(1f))
+        when {
+            state.lampTest -> Text(
+                stringResource(R.string.ride_lamp_test),
+                style = ride(12.sp, letterSpacing = 1.sp),
+                color = FgMuted,
+                modifier = Modifier.testTag(RIDE_CHIP_TAG),
+            )
+            state.batteryIsLow -> CautionText(
+                stringResource(R.string.ride_battery_low),
+                style = ride(12.sp, FontWeight.Bold, letterSpacing = 0.8.sp),
+                modifier = Modifier.testTag(RIDE_CHIP_TAG),
+            )
+        }
     }
 }
 
 /**
- * The debug-build stream line under the status strip (`specs/rider-ui.md` 3.1;
- * `specs/link-control.md`, "Counting what is staged (2026-10-25)"): for each source address heard
- * this session, in address order, the frames received and the longest gap between two of them, e.g.
+ * The debug-build stream line under the strip (`specs/rider-ui.md` 3.1; `specs/link-control.md`,
+ * "Counting what is staged (2026-10-25)"): for each source address heard this session, in address
+ * order, the frames received and the longest gap between two of them, e.g.
  * `0x01 412 · gap 0.41 s   0x02 206 · gap 1.31 s`. A gap past the 1.2 s quiet window on the
  * forward's source is the SILENT flicker, and the board's own count of the forwards it staged
  * (`CTRL_OBS` word 40) says which side of the link lost them.
@@ -166,116 +192,20 @@ internal fun frameStatsLine(stats: Map<Int, FrameStats>): String =
 
 private const val MS_PER_S = 1000.0
 
-/**
- * The bench affordance that stands in for foot pads.
- *
- * The app no longer asserts the `INPUTS` rider bit as a copy of the arm level, because the boards
- * have real pads and a remote that claims a rider overrides them
- * ([com.hoverboard.remote.model.RiderCommand.inputs]). A bench board with no pads wired reads no
- * rider at all, though, so this is the switch that puts the level back on the wire deliberately.
- *
- * ## Why it is gated twice, and why it dies with the link
- *
- * On a board that DOES have pads, this control is not a display preference. The folded rider level
- * is a term in the FSM's engage conjunction and its inverse is what enables the wind-down, so a
- * remote asserting rider holds a machine engaged through the moment the rider steps off. That is a
- * bigger authority than anything else on this screen, and it
- * sat one unconfirmed tap above the throttle.
- *
- * So: the row exists only in debug builds ([showSimulateRider] is `BuildConfig.DEBUG` at the call
- * site), because the bench flow installs a debug build and a rider's build should not carry the
- * control at all; and inside that build it takes a LONG PRESS, not a tap, so a thumb travelling to
- * the throttle cannot flip it. The label says HOLD, so the affordance is not a hidden gesture. It
- * is also cleared whenever the link drops ([com.hoverboard.remote.MainViewModel]), so it can never
- * follow the app from the padless board it was set for onto one that has pads.
- */
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun SimulateRiderRow(on: Boolean, onChange: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                // A tap deliberately does nothing: this is the control that can hold a machine
-                // engaged, and it is inches from the throttle.
-                onClick = {},
-                onLongClick = { onChange(!on) },
-            )
-            .testTag(SIM_RIDER_TAG)
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = stringResource(R.string.sim_rider_label),
-            style = MaterialTheme.typography.labelMedium,
-            color = FgMuted,
-        )
-        Text(
-            text = if (on) {
-                stringResource(R.string.sim_rider_on)
-            } else {
-                stringResource(R.string.sim_rider_off)
-            },
-            style = MaterialTheme.typography.labelMedium,
-            color = if (on) Primary else FgFaint,
-        )
-    }
-}
+/** 8a's side gutter. */
+private val GUTTER = 24.dp
 
+/** The link dot's box: the 10 dp caution glyph, or the 8 dp dot centred in it. */
+private val DOT_BOX = 10.dp
 
-/** The line above the drive control: what the stick does in the mode being driven, or why nothing. */
-@StringRes
-private fun hint(state: UiState): Int = when {
-    !state.isConnected -> R.string.telemetry_disconnected
-    !state.armed -> R.string.throttle_hint_disarmed
-    else -> when (state.driveMode) {
-        DriveMode.RIGID -> R.string.throttle_hint_armed_rigid
-        DriveMode.DIFFERENTIAL -> R.string.throttle_hint_armed_differential
-        DriveMode.BOUND -> R.string.throttle_hint_armed_bound
-        DriveMode.SINGLE -> R.string.throttle_hint_armed
-    }
-}
-
-/**
- * Whether the machine is stored as one rigid machine and yet no board is leading one.
- *
- * This is the state RIGID's fallback needs a sentence for beyond the strip's: the frame was set
- * under Machine, so the owner is expecting the mode, and the boards are still resolving to something
- * else, which on this firmware means the control mode is not balance or the frame has not been armed
- * in yet. An ordinary pivoting machine reaches none of this and is told nothing, which is why the
- * test is the stored frame rather than the absent leader.
- */
-private fun rigidIsConfiguredButNotRunning(state: UiState): Boolean {
-    val frame = state.machine.frame
-    return frame is FramePair.Agree && frame.rigid && state.leader == null
-}
-
-@Composable
-private fun Header(connected: Boolean, onDisconnect: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = stringResource(R.string.control_title),
-            style = MaterialTheme.typography.headlineSmall,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
-        if (connected) {
-            OutlinedButton(onClick = onDisconnect) {
-                Text(stringResource(R.string.connect_disconnect))
-            }
-        }
-    }
-}
-
-/** Test tag for the bench rider-simulation row. */
-const val SIM_RIDER_TAG = "simulate_rider"
-
-/** Test tag for the debug-build per-source frame line under the status strip. */
+/** Test tag for the debug-build per-source frame line under the strip. */
 const val FRAME_STATS_TAG = "frame_stats"
 
-/** Test tag for the line that explains a rigid pair whose boards are not leading yet. */
-const val RIGID_NOT_LEADING_TAG = "rigid_not_leading"
+/** Test tag on the trip line. */
+const val RIDE_TRIP_TAG = "ride_trip"
+
+/** Test tag on the top bar's chip (LAMP TEST or BATTERY LOW). */
+const val RIDE_CHIP_TAG = "ride_chip"
+
+/** Test tag on the link dot label of the board at [address]. */
+fun linkDotTag(address: Int): String = "link_dot_${boardHex(address)}"

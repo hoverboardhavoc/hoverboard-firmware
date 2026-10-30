@@ -22,6 +22,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectedScreen
+import com.hoverboard.remote.ui.screens.MENU_DISCONNECT_TAG
 import com.hoverboard.remote.ui.screens.OVERFLOW_ICON_TAG
 import com.hoverboard.remote.ui.screens.TOP_BAR_TAG
 import com.hoverboard.remote.ui.screens.UP_ICON_TAG
@@ -66,6 +67,7 @@ class OverflowMenuTest {
     /** What a run can ask the app afterwards: how often the throttle was released, and system back. */
     private class Rig {
         var released = 0
+        var disconnects = 0
         lateinit var back: OnBackPressedDispatcher
     }
 
@@ -85,6 +87,7 @@ class OverflowMenuTest {
                     tune = { Text("TUNE-CONTENT") },
                     setup = { Text("SETUP-CONTENT") },
                     layout = { Text("LAYOUT-CONTENT") },
+                    onDisconnect = { rig.disconnects++ },
                 )
             }
         }
@@ -129,6 +132,25 @@ class OverflowMenuTest {
         compose.onNodeWithTag(menuItemTag(AppDestination.SETUP)).assertIsDisplayed()
         compose.onNodeWithTag(menuItemTag(AppDestination.LAYOUT)).assertIsDisplayed()
         compose.onNodeWithTag(menuItemTag(AppDestination.RIDE)).assertDoesNotExist()
+    }
+
+    /**
+     * Disconnect is the menu's last item (`specs/rider-ui.md` 3.1: the Ride screen's own Disconnect
+     * button is gone), and it calls the view model's disconnect, after the destinations it pushes.
+     */
+    @Test
+    fun disconnectIsTheMenusLastItemAndCallsDisconnect() {
+        val rig = show(AppDestination.RIDE)
+
+        compose.onNodeWithTag(OVERFLOW_ICON_TAG).performClick()
+        val items = (AppDestination.PUSHED.map { menuItemTag(it) } + MENU_DISCONNECT_TAG)
+            .map { compose.onNodeWithTag(it).assertIsDisplayed().fetchSemanticsNode().boundsInRoot.top }
+        assertEquals("the pushed destinations, then Disconnect, top to bottom", items.sorted(), items)
+        compose.onNodeWithText(s(R.string.connect_disconnect)).assertIsDisplayed()
+
+        compose.onNodeWithTag(MENU_DISCONNECT_TAG).performClick()
+        assertEquals(1, rig.disconnects)
+        compose.onNodeWithTag(MENU_DISCONNECT_TAG).assertDoesNotExist()
     }
 
     /**
