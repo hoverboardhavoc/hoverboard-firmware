@@ -2,6 +2,7 @@
 //! the command line and in a file, and the form a value takes in a file. The table itself is the
 //! store's (`store::NAMES`, `crates/store/src/field.rs`); this module only applies it.
 
+use net::walk::{CONFIG_RESP_VALUE_MAX, CONFIG_WRITE_VALUE_MAX};
 use serde_json::{Map, Value as Json};
 use store::{by_id, FieldName, Index, Key, Kind, Type, Value, MOTORS, NAMES, PIN_ABSENT};
 
@@ -456,7 +457,7 @@ pub fn encode(
         }
         (Some(Kind::Str), _) | (None, _) if storage == Type::Str => {
             let s = v.as_str().ok_or_else(|| bad("a string"))?;
-            return Ok((Some(s.as_bytes().to_vec()), warn));
+            return fits(key, s.as_bytes().to_vec()).map(|b| (Some(b), warn));
         }
         (Some(Kind::Blob), _) | (None, _) if storage == Type::Blob => {
             let h = v.as_str().ok_or_else(|| bad("a hex string"))?;
@@ -466,7 +467,7 @@ pub fn encode(
                 .map(|i| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok()))
                 .collect::<Option<Vec<u8>>>()
                 .ok_or_else(|| bad("a hex string"))?;
-            return Ok((Some(b), warn));
+            return fits(key, b).map(|b| (Some(b), warn));
         }
         (None, Json::Bool(b)) if storage == Type::Bool => i128::from(*b),
         _ => json_int(v).ok_or_else(|| bad("an integer"))?,
@@ -486,6 +487,26 @@ pub fn encode(
     }
     let width = storage.fixed_len().unwrap_or(0);
     Ok((Some(int.to_le_bytes()[..width].to_vec()), warn))
+}
+
+/// `bytes` for `key` if the board can take them and answer: a write carries at most
+/// [`CONFIG_WRITE_VALUE_MAX`] value bytes, and its echo and every later read of the key at most
+/// [`CONFIG_RESP_VALUE_MAX`], except for a secret's, which carry no value. A longer value always
+/// stops, naming its length but not the value.
+fn fits(key: Key, bytes: Vec<u8>) -> Result<Vec<u8>, Problem> {
+    let (max, carrier) = if row_of(key).is_some_and(|r| r.secret()) {
+        (CONFIG_WRITE_VALUE_MAX, "one CONFIG_WRITE carries")
+    } else {
+        (CONFIG_RESP_VALUE_MAX, "a CONFIG_RESP carries back")
+    };
+    if bytes.len() > max {
+        return Err(Problem::stop(format!(
+            "{}: {} bytes, more than the {max} {carrier}",
+            path_of(key),
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// The name table as `fields --json` prints it (`specs/cli-config.md` section 3, "The other
@@ -742,6 +763,52 @@ mod tests {
             "board.input_polarity: unknown bit \"pad_c\" (button, pad_a, pad_b)"
         );
         assert_eq!(stop(k(0x10, 0), json!(5)), "device.name: a string, not 5");
+    }
+
+    /// `specs/bridge-onboarding.md` section 2.1: a value longer than the board can take in one
+    /// `CONFIG_WRITE` and answer in one `CONFIG_RESP` stops before anything is sent, naming its
+    /// length and the limit and never a secret's value.
+    #[test]
+    fn a_value_longer_than_one_pdu_carries_always_stops() {
+        use serde_json::json;
+        let at = |key: Key, v: Json| {
+            let row = row_of(key).unwrap();
+            encode(key, row.storage, &v)
+        };
+        let resp = CONFIG_RESP_VALUE_MAX;
+        let write = CONFIG_WRITE_VALUE_MAX;
+        let name = k(0x10, 0);
+        assert!(at(name, json!("n".repeat(resp))).is_ok());
+        let e = at(name, json!("n".repeat(resp + 1))).unwrap_err();
+        assert!(!e.force);
+        assert_eq!(
+            e.msg,
+            format!(
+                "device.name: {} bytes, more than the {resp} a CONFIG_RESP carries back",
+                resp + 1
+            )
+        );
+        let blob = k(0x30, 0);
+        assert!(at(blob, json!("ab".repeat(resp))).is_ok());
+        let e = at(blob, json!("ab".repeat(resp + 1))).unwrap_err();
+        assert!(e.msg.contains(&format!("{} bytes", resp + 1)), "{}", e.msg);
+        // An unnamed id with the board's type takes the same limit.
+        let raw = k(0x99, 0);
+        assert!(encode(raw, Type::Str, &json!("r".repeat(resp + 1))).is_err());
+
+        // A secret's echo carries no value: the write is its only bound.
+        let pass = k(0x12, 0);
+        assert!(at(pass, json!("p".repeat(write))).is_ok());
+        let long = "p".repeat(write + 1);
+        let e = at(pass, json!(long)).unwrap_err();
+        assert_eq!(
+            e.msg,
+            format!(
+                "wifi.pass: {} bytes, more than the {write} one CONFIG_WRITE carries",
+                write + 1
+            )
+        );
+        assert!(!e.msg.contains(&long));
     }
 
     #[test]

@@ -1668,8 +1668,7 @@ fn a_bridge_refuses_wifi_credentials_its_station_cannot_use_and_a_board_stores_t
     let (b, d) = (m.live_addr(bridge), m.live_addr(board));
     let ssid = store::WIFI_SSID.key();
     let pass = store::WIFI_PASS.key();
-    // The longest value one CONFIG_WRITE carries: the PDU less its header, the key and the tag.
-    let writable = MAX_PDU - pdu::HEADER_LEN - 3;
+    let writable = CONFIG_WRITE_VALUE_MAX;
     assert!(writable < WIFI_PASS_MAX);
     let long_ssid = [b's'; WIFI_SSID_MAX + 1];
     let short = [b'p'; WIFI_PASS_MIN - 1];
@@ -1702,6 +1701,31 @@ fn a_bridge_refuses_wifi_credentials_its_station_cannot_use_and_a_board_stores_t
         let w = m.config_write(b, key, Value::Str(v));
         assert_eq!(resp_status(&w), CFG_OK, "{key:?} {}", v.len());
     }
+}
+
+/// The value limits are what the PDU encoder takes: a `CONFIG_WRITE` of [`CONFIG_WRITE_VALUE_MAX`]
+/// value bytes and a `CONFIG_RESP` of [`CONFIG_RESP_VALUE_MAX`] fill one PDU, and a byte more
+/// fits neither.
+#[test]
+fn the_config_value_limits_fill_one_pdu() {
+    let fits = |op: Opcode, head: usize, value: usize| {
+        let payload = std::vec![0u8; head + value];
+        let mut buf = [0u8; MAX_PDU];
+        Pdu::from_op(op, 0x80, 0x01, &payload).encode(&mut buf).ok()
+    };
+    assert_eq!(
+        fits(Opcode::ConfigWrite, 3, CONFIG_WRITE_VALUE_MAX),
+        Some(MAX_PDU)
+    );
+    assert_eq!(
+        fits(Opcode::ConfigWrite, 3, CONFIG_WRITE_VALUE_MAX + 1),
+        None
+    );
+    assert_eq!(
+        fits(Opcode::ConfigResp, 4, CONFIG_RESP_VALUE_MAX),
+        Some(MAX_PDU)
+    );
+    assert_eq!(fits(Opcode::ConfigResp, 4, CONFIG_RESP_VALUE_MAX + 1), None);
 }
 
 #[test]

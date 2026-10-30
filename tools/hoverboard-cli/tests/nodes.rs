@@ -405,6 +405,49 @@ fn a_boards_store_as_a_file_through_the_binary() {
     server.join().unwrap();
 }
 
+/// `specs/bridge-onboarding.md` section 3: a value longer than one `CONFIG_WRITE` carries is
+/// refused by the file check, before `apply` opens a link and before `install-esp` touches the port.
+#[test]
+fn a_value_one_pdu_cannot_carry_is_refused_before_any_link_or_install() {
+    let max = net::walk::CONFIG_WRITE_VALUE_MAX;
+    let long = "p".repeat(max + 1);
+    let creds = scratch("long-pass.json");
+    std::fs::write(
+        &creds,
+        format!(r#"{{ "wifi": {{ "ssid": "bench", "pass": "{long}" }} }}"#),
+    )
+    .unwrap();
+    let refusal = format!(
+        "error: {creds}: wifi.pass: {} bytes, more than the {max} one CONFIG_WRITE carries",
+        max + 1
+    );
+
+    let idle = TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = format!("--tcp={}", idle.local_addr().unwrap());
+    let (code, out, err) = cli_code(&[&at, "apply", "0x01", &creds]);
+    assert_eq!(code, Some(1));
+    assert_eq!(err.trim(), refusal);
+    assert!(!out.contains(&long) && !err.contains(&long));
+    idle.set_nonblocking(true).unwrap();
+    assert_eq!(
+        idle.accept().map(|_| ()).unwrap_err().kind(),
+        ErrorKind::WouldBlock,
+        "apply connected"
+    );
+
+    // install-esp checks the files before the guard opens the port: the port named here does not
+    // exist, so a run that reached it would fail on the port instead.
+    let image = scratch("install.bin");
+    let mut bytes = vec![0xFFu8; 4 * 1024 * 1024];
+    bytes[0] = 0xE9;
+    std::fs::write(&image, bytes).unwrap();
+    let port = scratch("no-such-port");
+    let (code, out, err) = cli_code(&["--serial", &port, "install-esp", &image, &creds, "--yes"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(err.trim(), refusal);
+    assert!(out.is_empty(), "{out}");
+}
+
 #[test]
 fn an_address_needs_no_walk_and_a_name_does() {
     // `specs/cli-config.md` section 4.1: an address is reached by attaching and reading its
