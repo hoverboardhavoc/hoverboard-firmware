@@ -19,10 +19,12 @@ data class NodeInfo(val address: Int, val nodeClass: Int?, val name: String?) {
 }
 
 /**
- * Why the app drives in SINGLE although the machine stores another mode, or cannot trust what it
- * stores (`specs/rider-ui.md` 3.2): the Ride status strip says which.
+ * Why the app refuses to arm the machine it is attached to although it can read what the machine
+ * stores, or cannot trust what it stores (`specs/rider-ui.md` 3.1c): the Ride statements say which
+ * in short, and Setup's machine status section in full. The app never drives a mode the machine
+ * does not store, so none of these falls back to driving one board.
  */
-enum class DriveFallback {
+enum class DriveRefusal {
     /** A node's class, or a motor controller's stored mode, has not been read this session. */
     UNREAD,
 
@@ -43,18 +45,20 @@ enum class DriveFallback {
 }
 
 /**
- * The drive mode in force and the motor controllers it addresses (`specs/rider-ui.md` section 2 and
- * 3.2): the stored mode when every copy agrees and its precondition holds on the connected machine,
- * else SINGLE with [fallback] saying why.
+ * The drive mode in force and the motor controllers it addresses (`specs/rider-ui.md` section 2,
+ * 3.2 and 3.1c): the stored mode and its boards when every copy agrees and its precondition holds
+ * on the connected machine. Else [refusal] says why, and [targets] carries the stored mode where
+ * one is known (SINGLE where it is not) and NO boards, so the arm is refused through the rule
+ * [com.hoverboard.remote.UiState.canArm] already has and the pad drawn is the stored mode's.
  *
  * @param stored the mode the machine stores, when every copy agrees on one this app knows, else null.
  */
-data class DriveInForce(val targets: DriveTargets, val stored: DriveMode?, val fallback: DriveFallback?) {
+data class DriveInForce(val targets: DriveTargets, val stored: DriveMode?, val refusal: DriveRefusal?) {
     val mode: DriveMode get() = targets.mode
 
     companion object {
         /** No node attached: nothing to drive and nothing to say. */
-        val NONE = DriveInForce(DriveTargets.NONE, stored = null, fallback = null)
+        val NONE = DriveInForce(DriveTargets.NONE, stored = null, refusal = null)
 
         /**
          * The mode in force on the machine [nodes] describes.
@@ -72,16 +76,25 @@ data class DriveInForce(val targets: DriveTargets, val stored: DriveMode?, val f
             selected: Int?,
         ): DriveInForce {
             val mcs = nodes.filter { it.isMotorController }.map { it.address }
-            val single = DriveTargets(DriveMode.SINGLE, listOfNotNull(selected?.takeIf { it in mcs }))
             val (mode, unread) = stored(nodes, mcs, storedMode)
-            if (mode == null) return DriveInForce(single, stored = null, fallback = unread)
+            if (unread != null) return refused(mode, unread)
+            if (mode == null) return DriveInForce(DriveTargets.NONE, stored = null, refusal = null)
             val why = precondition(mode, mcs, side, leaders)
             return when {
-                why != null -> DriveInForce(single, mode, why)
-                mode == DriveMode.SINGLE -> DriveInForce(single, mode, fallback = null)
-                else -> DriveInForce(DriveTargets(mode, mcs, rightWheel(mode, mcs, side)), mode, fallback = null)
+                why != null -> refused(mode, why)
+                mode == DriveMode.SINGLE -> DriveInForce(
+                    DriveTargets(DriveMode.SINGLE, listOfNotNull(selected?.takeIf { it in mcs })),
+                    mode,
+                    refusal = null,
+                )
+                else -> DriveInForce(DriveTargets(mode, mcs, rightWheel(mode, mcs, side)), mode, refusal = null)
             }
         }
+
+        /** A refusal: the stored mode where it is known, for the pad, and no board to arm. */
+        private fun refused(stored: DriveMode?, why: DriveRefusal): DriveInForce =
+            DriveInForce(DriveTargets(stored ?: DriveMode.SINGLE, emptyList()), stored, why)
+
 
         /**
          * The mode every motor controller stores, or null with the reason it cannot be trusted. Null
@@ -91,14 +104,15 @@ data class DriveInForce(val targets: DriveTargets, val stored: DriveMode?, val f
             nodes: List<NodeInfo>,
             mcs: List<Int>,
             storedMode: (Int) -> Int?,
-        ): Pair<DriveMode?, DriveFallback?> {
+        ): Pair<DriveMode?, DriveRefusal?> {
+
             val copies = mcs.map(storedMode)
             val distinct = copies.toSet()
             val why = when {
-                nodes.any { it.nodeClass == null } || null in copies -> DriveFallback.UNREAD
+                nodes.any { it.nodeClass == null } || null in copies -> DriveRefusal.UNREAD
                 mcs.isEmpty() -> null
-                distinct.size > 1 -> DriveFallback.DISAGREE
-                else -> DriveFallback.UNKNOWN_MODE.takeIf { DriveMode.of(checkNotNull(distinct.single())) == null }
+                distinct.size > 1 -> DriveRefusal.DISAGREE
+                else -> DriveRefusal.UNKNOWN_MODE.takeIf { DriveMode.of(checkNotNull(distinct.single())) == null }
             }
             val mode = if (why == null && mcs.isNotEmpty()) DriveMode.of(checkNotNull(distinct.single())) else null
             return mode to why
@@ -110,12 +124,12 @@ data class DriveInForce(val targets: DriveTargets, val stored: DriveMode?, val f
             mcs: List<Int>,
             side: (Int) -> Int?,
             leaders: Set<Int>,
-        ): DriveFallback? =
+        ): DriveRefusal? =
             when {
                 !mode.drivesBoth -> null
-                mcs.size != 2 -> DriveFallback.NOT_TWO
-                mode == DriveMode.RIGID && leaders.count { it in mcs } != 1 -> DriveFallback.NO_LEADER
-                mode == DriveMode.DIFFERENTIAL && rightWheel(mode, mcs, side) == null -> DriveFallback.NO_RIGHT_WHEEL
+                mcs.size != 2 -> DriveRefusal.NOT_TWO
+                mode == DriveMode.RIGID && leaders.count { it in mcs } != 1 -> DriveRefusal.NO_LEADER
+                mode == DriveMode.DIFFERENTIAL && rightWheel(mode, mcs, side) == null -> DriveRefusal.NO_RIGHT_WHEEL
                 else -> null
             }
 

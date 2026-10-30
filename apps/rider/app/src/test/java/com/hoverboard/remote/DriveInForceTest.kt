@@ -1,7 +1,7 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.store.Fields
-import com.hoverboard.remote.model.DriveFallback
+import com.hoverboard.remote.model.DriveRefusal
 import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
@@ -15,9 +15,10 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 
 /**
- * The mode-in-force rules of `specs/rider-ui.md` 3.2, on [DriveInForce.of] alone: the stored mode
- * when every copy agrees and its precondition holds, else SINGLE with the reason, and the motor
- * controllers each mode addresses. A bridge is never among them.
+ * The mode-in-force rules of `specs/rider-ui.md` 3.2 and 3.1c, on [DriveInForce.of] alone: the
+ * stored mode when every copy agrees and its precondition holds, else a refusal with the reason and
+ * no boards, keeping the stored mode where one is known; and the motor controllers each mode
+ * addresses. A bridge is never among them.
  */
 class DriveInForceTest {
 
@@ -46,7 +47,7 @@ class DriveInForceTest {
         assertEquals(DriveTargets(DriveMode.RIGID, listOf(0x01, 0x02)), rigid.targets)
         for (mode in DriveMode.entries) {
             val inForce = of(modes = both(mode), leaders = setOf(0x01))
-            assertNull(inForce.fallback, "$mode")
+            assertNull(inForce.refusal, "$mode")
             assertEquals(mode, inForce.stored)
         }
     }
@@ -62,32 +63,49 @@ class DriveInForceTest {
     }
 
     @Test
-    fun `a disagreement, an unread copy or an unknown byte falls back to single`() {
-        assertEquals(DriveFallback.DISAGREE, of(modes = mapOf(0x01 to 1, 0x02 to 2)).fallback)
-        assertEquals(DriveFallback.UNREAD, of(modes = mapOf(0x01 to 1, 0x02 to null)).fallback)
-        assertEquals(DriveFallback.UNKNOWN_MODE, of(modes = mapOf(0x01 to 7, 0x02 to 7)).fallback)
+    fun `a disagreement, an unread copy or an unknown byte is a refusal with no boards`() {
+        assertEquals(DriveRefusal.DISAGREE, of(modes = mapOf(0x01 to 1, 0x02 to 2)).refusal)
+        assertEquals(DriveRefusal.UNREAD, of(modes = mapOf(0x01 to 1, 0x02 to null)).refusal)
+        assertEquals(DriveRefusal.UNKNOWN_MODE, of(modes = mapOf(0x01 to 7, 0x02 to 7)).refusal)
         val unreadClass = listOf(NodeInfo(0x01, mc, "r"), NodeInfo(0x02, null, null))
-        assertEquals(DriveFallback.UNREAD, of(nodes = unreadClass).fallback, "a node that may be a motor controller")
-        for (f in listOf(of(modes = mapOf(0x01 to 1, 0x02 to 2)), of(nodes = unreadClass))) {
-            assertEquals(DriveTargets(DriveMode.SINGLE, listOf(0x01)), f.targets)
+        assertEquals(DriveRefusal.UNREAD, of(nodes = unreadClass).refusal, "a node that may be a motor controller")
+        // Nothing is known to be stored, so the pad is SINGLE's, and nothing is armed.
+        val unknown = listOf(
+            of(modes = mapOf(0x01 to 1, 0x02 to 2)),
+            of(nodes = unreadClass),
+            of(modes = mapOf(0x01 to 7, 0x02 to 7)),
+        )
+        for (f in unknown) {
+            assertEquals(DriveTargets(DriveMode.SINGLE, emptyList()), f.targets)
+            assertNull(f.stored)
         }
     }
 
     @Test
-    fun `each precondition that fails falls back to single with its reason`() {
+    fun `each precondition that fails is a refusal that keeps the stored mode for the pad`() {
         val one = pair.take(1)
         for (mode in listOf(DriveMode.BOUND, DriveMode.DIFFERENTIAL, DriveMode.RIGID)) {
             val f = of(nodes = one, modes = mapOf(0x01 to mode.byte), leaders = setOf(0x01))
-            assertEquals(DriveFallback.NOT_TWO, f.fallback, "$mode on one motor controller")
-            assertEquals(DriveTargets(DriveMode.SINGLE, listOf(0x01)), f.targets)
+            assertEquals(DriveRefusal.NOT_TWO, f.refusal, "$mode on one motor controller")
+            // The app never drives a mode the machine does not store: no fallback to SINGLE.
+            assertEquals(DriveTargets(mode, emptyList()), f.targets, "$mode keeps its pad and arms nothing")
+            assertEquals(mode, f.stored)
         }
-        assertEquals(DriveFallback.NO_LEADER, of(modes = both(DriveMode.RIGID)).fallback)
-        assertEquals(DriveFallback.NO_LEADER, of(modes = both(DriveMode.RIGID), leaders = setOf(0x01, 0x02)).fallback)
+        val stored = listOf(
+            of(modes = both(DriveMode.RIGID)),
+            of(modes = both(DriveMode.DIFFERENTIAL), sides = emptyMap()),
+        )
+        for (f in stored) {
+            assertTrue(f.targets.boards.isEmpty())
+            assertEquals(f.stored, f.mode)
+        }
+        assertEquals(DriveRefusal.NO_LEADER, of(modes = both(DriveMode.RIGID)).refusal)
+        assertEquals(DriveRefusal.NO_LEADER, of(modes = both(DriveMode.RIGID), leaders = setOf(0x01, 0x02)).refusal)
         val noRight = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.LEFT)
         val twoRight = mapOf(0x01 to Fields.ControlSide.RIGHT, 0x02 to Fields.ControlSide.RIGHT)
         val unreadSide = mapOf(0x01 to Fields.ControlSide.RIGHT, 0x02 to null)
         for (sides in listOf(noRight, twoRight, unreadSide)) {
-            assertEquals(DriveFallback.NO_RIGHT_WHEEL, of(modes = both(DriveMode.DIFFERENTIAL), sides = sides).fallback)
+            assertEquals(DriveRefusal.NO_RIGHT_WHEEL, of(modes = both(DriveMode.DIFFERENTIAL), sides = sides).refusal)
         }
     }
 
@@ -107,5 +125,7 @@ class DriveInForceTest {
     fun `targets that cannot be driven are not constructed`() {
         assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.SINGLE, listOf(0x01, 0x02)) }
         assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02)) }
+        // A refused DIFFERENTIAL names its mode and addresses nobody, so it needs no right wheel.
+        assertTrue(DriveTargets(DriveMode.DIFFERENTIAL, emptyList()).boards.isEmpty())
     }
 }

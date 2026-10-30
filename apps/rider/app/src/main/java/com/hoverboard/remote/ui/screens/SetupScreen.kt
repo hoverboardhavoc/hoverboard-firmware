@@ -80,6 +80,9 @@ fun setupRowTag(key: Key): String = "setup_row_${key.fieldId}_${key.index}"
  * @param odometers how far each motor controller's wheel has travelled, labelled by its node
  *   label ([TravelSection]). Every board rather than the selected one, because the machine's figure
  *   is the mean of the wheels.
+ * @param status the machine status section ([MachineStatusSection], `specs/rider-ui.md` 3.1c):
+ *   the first thing after the title, with the armed lock, above the node selector, because it covers
+ *   every board and does not follow the selector.
  */
 @Composable
 fun SetupScreen(
@@ -89,6 +92,7 @@ fun SetupScreen(
     odometers: List<Pair<String, OdometerReading>>,
     actions: SetupActions,
     modifier: Modifier = Modifier,
+    status: @Composable () -> Unit = {},
 ) {
     DisposableEffect(actions) {
         actions.onShown()
@@ -104,8 +108,10 @@ fun SetupScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.headlineSmall, color = Fg)
-        NodeChips(state.nodes, state.board, actions::selectTarget, SETUP_NODE_TAG)
         if (armed) Lock()
+        status()
+        NodeChips(state.nodes, state.board, actions::selectTarget, SETUP_NODE_TAG)
+
         state.notice?.let { Notice(it, actions) }
         Status(state, actions)
         if (state.storedFrameUnsafe) FrameBad()

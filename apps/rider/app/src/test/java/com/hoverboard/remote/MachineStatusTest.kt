@@ -1,11 +1,21 @@
 package com.hoverboard.remote
 
 import android.app.Application
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicObs
@@ -13,12 +23,17 @@ import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.BatteryReading
-import com.hoverboard.remote.model.CurrentReading
-import com.hoverboard.remote.model.SpeedReading
+import com.hoverboard.remote.model.ConnectionState
+import com.hoverboard.remote.model.DriveInForce
+import com.hoverboard.remote.model.DriveMode
+import com.hoverboard.remote.model.DriveRefusal
+import com.hoverboard.remote.model.DriveTargets
+import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.batteryReading
-import com.hoverboard.remote.model.currentReading
-import com.hoverboard.remote.ui.components.TelemetryPanel
+import com.hoverboard.remote.ui.screens.MachineStatusSection
+import com.hoverboard.remote.ui.screens.RIGID_NOT_LEADING_TAG
+import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -30,25 +45,21 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * What the telemetry panel says about state it has always decoded and never shown, and, more
+ * What Setup's machine status section (`specs/rider-ui.md` 3.1c) says about each board's own state,
+ * which the Ride screen's telemetry panel used to show for the selected board alone, and, more
  * importantly, what it refuses to say.
  *
- * Two of the values it now renders are known-wrong in the firmware, and each is wrong in a way that
- * a naive rendering would launder into a reassurance:
- *
- *  - `CYCLIC_STATE.fault` is the reporting board's OWN producer mask and the other board's state
- *    is not in front of the rider, so a quiet green indicator would tell a rider their machine is
- *    healthy on the strength of one board's word.
- *  - `battery` is 0 for UNKNOWN, which is the firmware declining to report rather than a
- *    measurement, and which is broader than "cannot sense the rail": a master whose `board.battery.pin`
- *    is staged reports it too until its motor is brought up. Rendered as a number it was 0.00 V,
- *    which on a rider's screen is a flat pack.
+ * `CYCLIC_STATE.fault` is the reporting board's OWN producer mask, so a quiet green indicator would
+ * tell a rider their machine is healthy on the strength of one board's word: each board has its own
+ * row, and a quiet row covers only that board. `battery` is 0 for UNKNOWN, which is the firmware
+ * declining to report rather than a measurement, and is pinned in the model here; the Ride screen's
+ * pack line has its own tests ([ControlScreenTest]).
  *
  * So these tests pin absences as hard as they pin presences.
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
-class TelemetryPanelTest {
+class MachineStatusTest {
 
     private val compose = createComposeRule()
 
@@ -58,33 +69,52 @@ class TelemetryPanelTest {
     private val context: Application = ApplicationProvider.getApplicationContext()
 
     @Test
-    fun riderChipIsDrawnWhenTheBoardSeesARider() {
+    fun riderIsStatedWhenTheBoardSeesARider() {
         show(TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_RIDER)))
 
-        compose.onNodeWithText(context.getString(R.string.telemetry_chip_rider)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.status_rider)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.status_no_rider)).assertDoesNotExist()
     }
 
     @Test
-    fun riderChipIsDrawnWhenItDoesNotToo() {
-        // A board reporting no rider IS reporting something: its pads read low. Both values mean
-        // something, so unlike the alarms this chip is drawn lit or dim rather than hidden.
+    fun noRiderIsStatedTooBecauseItIsAReading() {
+        // A board reporting no rider IS reporting something: its pads read low.
         show(TelemetryUi().merge(cyclic(flags = 0)))
 
-        compose.onNodeWithText(context.getString(R.string.telemetry_chip_rider)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.status_no_rider)).assertIsDisplayed()
     }
 
     @Test
-    fun noLockdownChipWhileTheBoardIsNotInLockdown() {
+    fun noLockdownLineWhileTheBoardIsNotInLockdown() {
         show(TelemetryUi().merge(cyclic(flags = 0)))
 
-        compose.onNodeWithText(context.getString(R.string.telemetry_chip_lockdown)).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.status_lockdown)).assertDoesNotExist()
     }
 
     @Test
-    fun lockdownChipAppearsWhenTheBoardAssertsIt() {
+    fun lockdownLineAppearsWhenTheBoardAssertsIt() {
         show(TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_LOCKDOWN)))
 
-        compose.onNodeWithText(context.getString(R.string.telemetry_chip_lockdown)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.status_lockdown)).assertIsDisplayed()
+        compose.onNodeWithText(boardRow(R.string.board_state_lockdown)).assertIsDisplayed()
+    }
+
+    /** A board nothing has arrived from is SILENT, with no line under it that would be a reading. */
+    @Test
+    fun aSilentBoardIsSilentAndSaysNothingElse() {
+        show(null)
+
+        compose.onNodeWithText(boardRow(R.string.board_state_quiet)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.status_no_rider)).assertDoesNotExist()
+    }
+
+    /** Bit 6 is a readback the board runs through, stated as caution and never as a fault. */
+    @Test
+    fun theModeReadbackIsALineAndNotAFault() {
+        show(TelemetryUi().merge(cyclic(fault = CyclicState.EV_MODE_FAULT)))
+
+        compose.onNodeWithText(context.getString(R.string.board_mode_demoted, BOARD)).assertIsDisplayed()
+        compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
     }
 
     /**
@@ -104,29 +134,18 @@ class TelemetryPanelTest {
         compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
     }
 
-    /**
-     * ...but silence on its own says too little. Absence claims nothing only to a reader who
-     * already knows what the byte covers; to anyone else a screen with no fault line looks exactly
-     * like a working whole-machine fault display that happens to be clear. So a quiet panel says
-     * what its silence does not cover, the same way the battery says its number is not measured.
-     */
+    /** A board with a fault bit set says FAULT on its own row, and its peer's row does not. */
     @Test
-    fun aQuietPanelSaysWhatItsSilenceDoesNotCover() {
-        show(TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_RIDER)))
+    fun aFaultStaysOnItsOwnBoardsRow() {
+        show(
+            TelemetryUi().merge(cyclic(fault = CyclicState.EV_MOTOR_HALL)),
+            peer = TelemetryUi().merge(cyclic(mode = 0)),
+        )
 
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_fault_unreported))
+        compose.onNodeWithText(boardRow(R.string.board_state_fault)).assertIsDisplayed()
+        val peerRow = context.getString(R.string.board_chip, PEER, context.getString(R.string.board_state_off))
+        compose.onNodeWithText(peerRow)
             .assertIsDisplayed()
-    }
-
-    /** And it goes away once something IS reporting, because then it would be the false statement. */
-    @Test
-    fun theUnreportedNoteYieldsToAnActualFault() {
-        show(TelemetryUi().merge(cyclic(flags = 0, fault = 2)))
-
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_fault_unreported))
-            .assertDoesNotExist()
     }
 
     /**
@@ -198,42 +217,14 @@ class TelemetryPanelTest {
         show(TelemetryUi().merge(cyclic(flags = 0, fault = 0xC0 or CyclicState.EV_COMMS_LOSS)))
 
         compose.onNodeWithText(faultLine(R.string.fault_cause_comms_loss)).assertIsDisplayed()
-        compose.onAllNodesWithText(FAULT_WORD, substring = true).assertCountEquals(1)
+        compose.onAllNodesWithText("$FAULT_WORD $BOARD", substring = true).assertCountEquals(1)
     }
 
     private fun faultLine(cause: Int): String =
         context.getString(R.string.telemetry_fault_cause, BOARD, context.getString(cause))
 
-    /**
-     * A board that sends `battery = 0` is a board reporting UNKNOWN, and the panel says exactly
-     * that and no more: no voltage, no percent, no bar. The number this replaced was 0.00 V, which
-     * claimed a measurement the board never made and read as a flat pack while doing it.
-     */
-    @Test
-    fun aBoardReportingUnknownGetsNoReadingAtAll() {
-        // A throttle of 42% so the one percent this panel legitimately shows cannot be mistaken
-        // for a state of charge: both render through "%1$d%%", so at 0% they are the same string.
-        show(TelemetryUi().merge(cyclic(battery = 0)), throttlePercent = 42)
-
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_unknown))
-            .assertIsDisplayed()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_unknown_note))
-            .assertIsDisplayed()
-
-        // The two renderings this replaces: a voltage, and a state of charge scored off it.
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 0.0f))
-            .assertDoesNotExist()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 0))
-            .assertDoesNotExist()
-        // And nothing claims the pack is low, which an absent reading must not do either.
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_low))
-            .assertDoesNotExist()
-    }
+    private fun boardRow(state: Int): String =
+        context.getString(R.string.board_chip, BOARD, context.getString(state))
 
     /**
      * The absence is in the model, not only in the panel, so nothing downstream can score a pack
@@ -259,86 +250,6 @@ class TelemetryPanelTest {
         assertEquals(BatteryReading.NoReading, batteryReading(TelemetryUi(), PACK_CELLS, LI_ION))
     }
 
-    @Test
-    fun aSensedVoltageIsShownAndScoredAgainstTheStatedPack() {
-        // 29.0 V on eight Li-ion cells is 3.625 V a cell, a twelfth of the way from the table's
-        // 30% (3.62 V) to its 40% (3.68 V), so 31%.
-        show(TelemetryUi().merge(cyclic(battery = 2_900)), packCells = PACK_CELLS)
-
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 29.0f))
-            .assertIsDisplayed()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 31))
-            .assertIsDisplayed()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_unknown))
-            .assertDoesNotExist()
-    }
-
-    /**
-     * The same voltage with no pack stated: the number stands, the percentage does not.
-     *
-     * A percent needs the cell count, which arrives from the board's store and not on the wire, so
-     * an unstated pack has no state of charge to show. The curve it used to be scored against was
-     * a seven-cell one compiled into the app, which read 29.0 V as a full pack on both machines
-     * here (`specs/todo.md`, the `BatteryCurve` entry).
-     */
-    /** A chemistry byte this app has no table for: the number stands and the line names the chemistry. */
-    @Test
-    fun aSensedVoltageWithAnUnknownChemistryIsShownWithNoPercentage() {
-        show(TelemetryUi().merge(cyclic(battery = 2_900)), chemistry = 9)
-
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 29.0f))
-            .assertIsDisplayed()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_unknown_chemistry))
-            .assertIsDisplayed()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 31))
-            .assertDoesNotExist()
-    }
-
-    @Test
-    fun aSensedVoltageWithNoStatedPackIsShownWithNoPercentage() {
-        show(TelemetryUi().merge(cyclic(battery = 2_900)), packCells = null)
-
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 29.0f))
-            .assertIsDisplayed()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_no_pack))
-            .assertExists()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 31))
-            .assertDoesNotExist()
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 100))
-            .assertDoesNotExist()
-    }
-
-    /** The speed reads in km/h, to a tenth below 10 (`specs/rider-ui.md` 3.1a). */
-    @Test
-    fun theSpeedReadsInKmPerHour() {
-        show(TelemetryUi().merge(cyclic()), speed = SpeedReading.Kmh(3.26))
-
-        compose.onNodeWithText(context.getString(R.string.telemetry_speed)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.telemetry_speed_tenths, 3.3)).assertIsDisplayed()
-    }
-
-    /** With a geometry field unset there is no speed, and the line under it names the field. */
-    @Test
-    fun anUnsetGeometryFieldIsNamedAndNoSpeedIsShown() {
-        val missing = SpeedReading.NoSpeed(unread = emptyList(), unset = listOf(SpeedReading.POLE_PAIRS))
-        show(TelemetryUi().merge(cyclic()), speed = missing)
-
-        compose.onNodeWithText(context.getString(R.string.telemetry_speed_none)).assertIsDisplayed()
-        compose.onNodeWithText(context.getString(R.string.telemetry_speed_unset, SpeedReading.POLE_PAIRS))
-            .assertIsDisplayed()
-        compose.onNodeWithText("km/h", substring = true).assertDoesNotExist()
-    }
-
     /**
      * The current display (`specs/rider-ui.md` 3.6): both figures, each worded for WHICH current
      * it is. The two differ by the duty and answer different questions, and a panel showing one
@@ -347,7 +258,7 @@ class TelemetryPanelTest {
     @Test
     fun bothCurrentFiguresAreDrawnAndEachSaysWhichOneItIs() {
         // 910 counts at 455 counts per amp is 2.0 A at the motor, half-duty is 1.0 A at the supply.
-        show(TelemetryUi().merge(cyclic()), current = amps(mean = 910, duty = CyclicObs.DUTY_FULL / 2))
+        show(driving(mean = 910, duty = CyclicObs.DUTY_FULL / 2))
 
         compose
             .onNodeWithText(context.getString(R.string.telemetry_current_value, 2.0f, 1.0f))
@@ -362,7 +273,7 @@ class TelemetryPanelTest {
      */
     @Test
     fun theCurrentFiguresCarryWhatTheyRestOn() {
-        show(TelemetryUi().merge(cyclic()), current = amps(mean = 910, duty = CyclicObs.DUTY_FULL))
+        show(driving(mean = 910, duty = CyclicObs.DUTY_FULL))
 
         compose.onNodeWithText(context.getString(R.string.telemetry_current_note)).assertIsDisplayed()
     }
@@ -370,7 +281,7 @@ class TelemetryPanelTest {
     /** Nothing has arrived from the board, which is not the same as a board carrying no current. */
     @Test
     fun aBoardNothingHasArrivedFromSaysSoAndShowsNoAmps() {
-        show(TelemetryUi().merge(cyclic()), current = CurrentReading.Silent)
+        show(null)
 
         compose.onNodeWithText(context.getString(R.string.telemetry_current_silent)).assertIsDisplayed()
         assertNoFigures()
@@ -383,7 +294,8 @@ class TelemetryPanelTest {
      */
     @Test
     fun aBoardWithItsMotorsDownSaysSoAndShowsNoAmps() {
-        show(TelemetryUi().merge(cyclic()), current = CurrentReading.MotorsOff)
+        // Mode 0 is OFF: the motor path is down.
+        show(TelemetryUi().merge(cyclic(mode = 0)))
 
         compose.onNodeWithText(context.getString(R.string.telemetry_current_motors_off)).assertIsDisplayed()
         assertNoFigures()
@@ -392,7 +304,7 @@ class TelemetryPanelTest {
     /** A period that drove nothing: the magnitude it measured is the sense chain's own noise. */
     @Test
     fun aCoastingBoardSaysSoAndShowsNoAmps() {
-        show(TelemetryUi().merge(cyclic()), current = CurrentReading.Coasting)
+        show(TelemetryUi().merge(cyclic()))
 
         compose.onNodeWithText(context.getString(R.string.telemetry_current_coasting)).assertIsDisplayed()
         assertNoFigures()
@@ -401,7 +313,7 @@ class TelemetryPanelTest {
     /** No scale yet: amps at the registry default would be some other board's constant. */
     @Test
     fun aBoardWhoseCalibrationIsUnreadSaysSoAndShowsNoAmps() {
-        show(TelemetryUi().merge(cyclic()), current = CurrentReading.Unscaled)
+        show(driving(mean = 910, duty = CyclicObs.DUTY_FULL), countsPerAmp = null)
 
         compose.onNodeWithText(context.getString(R.string.telemetry_current_unscaled)).assertIsDisplayed()
         assertNoFigures()
@@ -410,9 +322,9 @@ class TelemetryPanelTest {
     /** One board in the session, one row: the second is for a pair, and so is the total. */
     @Test
     fun aSessionWithOneBoardDrawsOneRowAndNoTotal() {
-        show(TelemetryUi().merge(cyclic()), current = amps(mean = 910, duty = CyclicObs.DUTY_FULL))
+        show(driving(mean = 910, duty = CyclicObs.DUTY_FULL))
 
-        compose.onNodeWithText(PEER).assertDoesNotExist()
+        compose.onNodeWithText(PEER, substring = true).assertDoesNotExist()
         compose.onNodeWithText(context.getString(R.string.telemetry_current_machine)).assertDoesNotExist()
     }
 
@@ -423,9 +335,8 @@ class TelemetryPanelTest {
     @Test
     fun aPairAddsItsTwoSupplyFiguresIntoAMachineTotal() {
         show(
-            TelemetryUi().merge(cyclic()),
-            current = amps(mean = 910, duty = CyclicObs.DUTY_FULL / 2),
-            peerCurrent = amps(mean = 455, duty = CyclicObs.DUTY_FULL / 2),
+            driving(mean = 910, duty = CyclicObs.DUTY_FULL / 2),
+            peer = driving(mean = 455, duty = CyclicObs.DUTY_FULL / 2),
         )
 
         compose
@@ -436,11 +347,7 @@ class TelemetryPanelTest {
     /** And says so rather than falling back to the one figure it has. */
     @Test
     fun aPairWithOneBoardNotReportingShowsNoTotal() {
-        show(
-            TelemetryUi().merge(cyclic()),
-            current = amps(mean = 910, duty = CyclicObs.DUTY_FULL),
-            peerCurrent = CurrentReading.Silent,
-        )
+        show(driving(mean = 910, duty = CyclicObs.DUTY_FULL), peerFound = true)
 
         compose
             .onNodeWithText(context.getString(R.string.telemetry_current_machine_incomplete))
@@ -455,14 +362,10 @@ class TelemetryPanelTest {
      */
     @Test
     fun aPairDrawsBothBoardsAndASilentPeerStillGetsItsColumn() {
-        show(
-            TelemetryUi().merge(cyclic()),
-            current = amps(mean = 910, duty = CyclicObs.DUTY_FULL),
-            peerCurrent = CurrentReading.Silent,
-        )
+        show(driving(mean = 910, duty = CyclicObs.DUTY_FULL), peerFound = true)
 
-        compose.onNodeWithText(BOARD).assertIsDisplayed()
-        compose.onNodeWithText(PEER).assertIsDisplayed()
+        compose.onAllNodesWithText(BOARD).assertCountEquals(1)
+        compose.onAllNodesWithText(PEER).assertCountEquals(1)
         compose.onNodeWithText(context.getString(R.string.telemetry_current_silent)).assertIsDisplayed()
     }
 
@@ -472,11 +375,9 @@ class TelemetryPanelTest {
         compose.onNodeWithText(SUPPLY_FIGURE, substring = true).assertDoesNotExist()
     }
 
-    /** What [currentReading] makes of a board at [mean] counts and [duty], at 455 counts per amp. */
-    private fun amps(mean: Int, duty: Int): CurrentReading = currentReading(
-        TelemetryUi().merge(cyclic().copy(obs = QUIET_OBS.copy(phaseMean = mean, dutyOn = duty))),
-        countsPerAmp = 455,
-    )
+    /** A board pulling [mean] counts at [duty], running (mode 3). */
+    private fun driving(mean: Int, duty: Int): TelemetryUi =
+        TelemetryUi().merge(cyclic(mode = 3).copy(obs = QUIET_OBS.copy(phaseMean = mean, dutyOn = duty)))
 
     private fun cyclic(
         flags: Int = 0,
@@ -484,12 +385,13 @@ class TelemetryPanelTest {
         // A sensed 29.0 V, so a case that is not about the battery still renders the full
         // reading rather than the no-reading branch.
         battery: Int = 2_900,
+        mode: Int = 2,
     ) = CyclicState(
         pitch = 0,
         roll = 0,
         wheelSpeed = 0,
         battery = battery,
-        mode = 2,
+        mode = mode,
         fault = fault,
         flags = flags,
         peerDemand = 0,
@@ -498,29 +400,157 @@ class TelemetryPanelTest {
         obs = QUIET_OBS,
     )
 
+    /**
+     * The section over a session whose walk found [BOARD] at 0x01, last reporting [telemetry] (null:
+     * silent), and with [peer] or [peerFound] [PEER] at 0x02.
+     */
     private fun show(
-        telemetry: TelemetryUi,
-        throttlePercent: Int = 0,
-        packCells: Int? = PACK_CELLS,
-        chemistry: Int? = LI_ION,
-        current: CurrentReading = CurrentReading.Silent,
-        peerCurrent: CurrentReading? = null,
-        speed: SpeedReading = SpeedReading.Kmh(0.0),
+        telemetry: TelemetryUi?,
+        peer: TelemetryUi? = null,
+        peerFound: Boolean = peer != null,
+        countsPerAmp: Int? = 455,
+    ) {
+        val addresses = if (peerFound) listOf(0x01, 0x02) else listOf(0x01)
+        val reports = listOfNotNull(telemetry?.let { 0x01 to it }, peer?.let { 0x02 to it }).toMap()
+        val state = UiState(
+            connectionState = ConnectionState.CONNECTED,
+            nodes = addresses.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+            attachedNode = 0x01,
+            telemetryByBoard = reports,
+            countsPerAmp = countsPerAmp?.let { c -> addresses.associateWith { c } }.orEmpty(),
+        )
+        compose.setContent {
+            HoverboardRemoteTheme {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    MachineStatusSection(state, showSimulateRider = false, onSimulateRider = {})
+                }
+            }
+        }
+    }
+
+    // --- the drive, the machine, and the bench control -----------------------------------------
+
+    /** The drive in force and the boards it addresses, by node label. */
+    @Test
+    fun theDriveLineNamesTheModeAndItsBoards() {
+        showState(pair(DriveInForce(DriveTargets(DriveMode.BOUND, listOf(0x01, 0x02)), DriveMode.BOUND, null)))
+
+        val both = context.getString(R.string.status_and, BOARD, PEER)
+        compose.onNodeWithText(context.getString(R.string.status_drive, "BOUND", both)).assertIsDisplayed()
+    }
+
+    /** A drive refusal is the drive line's long text (`specs/rider-ui.md` 3.1c). */
+    @Test
+    fun aDriveRefusalIsTheLongLine() {
+        val refused = DriveInForce(DriveTargets(DriveMode.RIGID, emptyList()), DriveMode.RIGID, DriveRefusal.NO_LEADER)
+        showState(pair(refused))
+
+        compose.onNodeWithText(context.getString(R.string.drive_refusal_no_leader_long)).assertIsDisplayed()
+    }
+
+    /**
+     * The rigid sentence is said exactly once: when the machine is STORED as one rigid machine and
+     * no board is running as its leader. A pivoting machine is told nothing.
+     */
+    @Test
+    fun aRigidPairThatIsNotLeadingIsToldWhy() {
+        val configured = pair(DriveInForce.NONE)
+            .copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.OneRight(0x01), ModePair.Unknown))
+        showState(configured)
+        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun aPivotingPairIsNotToldAboutTheRigidLead() {
+        val pivoting = Machine(FramePair.Agree(rigid = false), SidePair.NoneRight, ModePair.Unknown)
+        showState(pair(DriveInForce.NONE).copy(machine = pivoting))
+        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertDoesNotExist()
+    }
+
+    /** Every state a board can report has a word on its row. */
+    @Test
+    fun theRowNamesEveryStateTheBoardCanReport() {
+        for ((mode, word) in listOf(1 to R.string.board_state_starting, 3 to R.string.board_state_live,
+            4 to R.string.board_state_stopping, 9 to R.string.board_state_unrecognised)) {
+            assertEquals(word, wordFor(mode))
+        }
+    }
+
+    /**
+     * The bench affordance takes a LONG press: on a board that has pads it holds a machine engaged
+     * through the moment a rider steps off, so it must not answer to a passing thumb.
+     */
+    @Test
+    fun theSimulateRiderRowTogglesOnALongPressAndNotOnATap() {
+        var asked: Boolean? = null
+        showState(pair(DriveInForce.NONE), showSimulateRider = true, onSimulateRider = { asked = it })
+
+        compose.onNodeWithTag(SIM_RIDER_TAG).performScrollTo().performClick()
+        assertNull("a tap must not flip a control that can hold a board engaged", asked)
+        compose.onNodeWithTag(SIM_RIDER_TAG).performTouchInput { longClick() }
+        assertEquals(true, asked)
+    }
+
+    /** And a rider's build does not carry it at all: the call site passes `BuildConfig.DEBUG`. */
+    @Test
+    fun theSimulateRiderRowIsAbsentUnlessTheBuildEnablesIt() {
+        showState(pair(DriveInForce.NONE))
+        compose.onNodeWithTag(SIM_RIDER_TAG).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.sim_rider_label)).assertDoesNotExist()
+    }
+
+    /** What the row for a board reporting [mode] says, read off the screen. */
+    private fun wordFor(mode: Int): Int {
+        val words = listOf(
+            R.string.board_state_off, R.string.board_state_starting, R.string.board_state_live,
+            R.string.board_state_stopping, R.string.board_state_unrecognised,
+        )
+        val frame = TelemetryUi().merge(cyclic(mode = mode))
+        rows.value = pair(DriveInForce.NONE).copy(telemetryByBoard = mapOf(0x01 to frame))
+        if (!composed) {
+            composed = true
+            compose.setContent {
+                HoverboardRemoteTheme {
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        MachineStatusSection(rows.value, showSimulateRider = false, onSimulateRider = {})
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+        return words.single { w ->
+            compose.onAllNodesWithText(context.getString(R.string.board_chip, BOARD, context.getString(w)))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    private val rows = mutableStateOf(UiState())
+    private var composed = false
+
+    /** A connected pair at 0x01 and 0x02, both at rest, with [drive] in force. */
+    private fun pair(drive: DriveInForce) = UiState(
+        connectionState = ConnectionState.CONNECTED,
+        nodes = listOf(0x01, 0x02).map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+        attachedNode = 0x01,
+        drive = drive,
+        driving = drive.targets,
+        telemetryByBoard = mapOf(0x01 to TelemetryUi().merge(cyclic()), 0x02 to TelemetryUi().merge(cyclic())),
+    )
+
+    private fun showState(
+        state: UiState,
+        showSimulateRider: Boolean = false,
+        onSimulateRider: (Boolean) -> Unit = {},
     ) = compose.setContent {
         HoverboardRemoteTheme {
-            TelemetryPanel(
-                telemetry = telemetry,
-                throttlePercent = throttlePercent,
-                battery = batteryReading(telemetry, packCells, chemistry),
-                currents = listOfNotNull(BOARD to current, peerCurrent?.let { PEER to it }),
-                speed = speed,
-                board = BOARD,
-            )
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                MachineStatusSection(state, showSimulateRider = showSimulateRider, onSimulateRider = onSimulateRider)
+            }
         }
     }
 
     private companion object {
-        /** The two boards' row labels, as the Ride screen names them ([com.hoverboard.remote.ui.screens.nodeLabel]). */
+        /** The two boards' labels ([com.hoverboard.remote.ui.screens.nodeLabel]). */
         const val BOARD = "Hoverboard 0x01"
         const val PEER = "Hoverboard 0x02"
 

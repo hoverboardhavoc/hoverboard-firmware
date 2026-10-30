@@ -2,6 +2,7 @@ package com.hoverboard.remote
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.ble.BoardScanner
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.ble.LinkConfig
@@ -16,20 +17,33 @@ import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.DriveTargets
+import com.hoverboard.remote.model.FaultDisarm
+import com.hoverboard.remote.model.FaultLamp
 import com.hoverboard.remote.model.FrameStats
+import com.hoverboard.remote.model.LampFacts
+import com.hoverboard.remote.model.MachineTravel
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.OdometerReading
+import com.hoverboard.remote.model.RideSlots
 import com.hoverboard.remote.model.RiderCommand
+import com.hoverboard.remote.model.SetupField
+import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SpeedFacts
 import com.hoverboard.remote.model.SpeedReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.model.TripBaseline
 import com.hoverboard.remote.model.WheelGeometry
+import com.hoverboard.remote.model.batteryLow
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
+import com.hoverboard.remote.model.machineOdometer
 import com.hoverboard.remote.model.machineSpeed
 import com.hoverboard.remote.model.odometerReading
+import com.hoverboard.remote.model.rideSlots
 import com.hoverboard.remote.model.rigidLeader
+import com.hoverboard.remote.model.ringReading
+import com.hoverboard.remote.model.shownLamps
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -67,7 +81,7 @@ import kotlinx.coroutines.launch
  * @param riderWaiver whether a board the arm control arms runs, or may run, with
  *   `CONTROL_RIDER_REQUIRED` at 0 ([SetupState.riderWaiver]), which the arm control states.
  * @param machine the machine's frame, side and drive mode as this session has read them on every
- *   motor controller ([SetupState.machine]), which the arm control acts on and the strip badges
+ *   motor controller ([SetupState.machine]), which the arm control acts on and Setup's machine status section states
  *   (`specs/rider-ui.md` 3.7a).
  * @param nodes every node the walk found, in address order, with its class and name as far as they
  *   are read ([SetupState.nodes], `specs/rider-ui.md` section 2).
@@ -94,6 +108,19 @@ import kotlinx.coroutines.launch
  *   ([SetupState.wheelGeometryOf]): what turns that wheel's counted hall edges into a distance.
  * @param speedFacts each REPORTING motor controller's wheel rate with its geometry and side
  *   ([SetupState.speedFactsOf]), in address order: what [speed] is computed from.
+ * @param sides each board's stored `control.side`, from the same read: what places it in a Ride
+ *   slot ([slots]).
+ * @param batteryFloor each board's `board.battery.floor`, centivolts, from the same read: where the
+ *   Ride ring turns caution ([batteryLow]).
+ * @param imuModel each board's `imu.model`, from the same read: 0 is no IMU fitted.
+ * @param currentLimit each board's `motors.0.current.limit`, milliamps, from the same read: what a
+ *   Ride phase bar is full at.
+ * @param faultDisarm why the app dropped the arm level by itself for a board fault, kept until the
+ *   next ARM tap ([MainViewModel.onArmToggle], `specs/rider-ui.md` 3.1).
+ * @param latchHeld each board's latch bits the app holds lit since it last saw them, until the next
+ *   ARM tap (`specs/rider-ui.md` 3.1b): a board clears its latch about 8 ms after the trip.
+ * @param lampTest whether the once-per-connection lamp test is on (`specs/rider-ui.md` 3.1b).
+ * @param trip the trip's baseline ([TripBaseline]).
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -123,6 +150,14 @@ data class UiState(
     val packChemistry: Map<Int, Int> = emptyMap(),
     val wheelGeometry: Map<Int, WheelGeometry> = emptyMap(),
     val speedFacts: List<SpeedFacts> = emptyList(),
+    val sides: Map<Int, Int> = emptyMap(),
+    val batteryFloor: Map<Int, Int> = emptyMap(),
+    val imuModel: Map<Int, Int> = emptyMap(),
+    val currentLimit: Map<Int, Int> = emptyMap(),
+    val faultDisarm: FaultDisarm? = null,
+    val latchHeld: Map<Int, Int> = emptyMap(),
+    val lampTest: Boolean = false,
+    val trip: TripBaseline = TripBaseline.NONE,
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -186,6 +221,46 @@ data class UiState(
      */
     val speed: SpeedReading get() = machineSpeed(speedFacts)
 
+    /** The Ride screen's two board slots ([rideSlots]). */
+    val slots: RideSlots get() = rideSlots(motorControllers.map { it.address }) { sides[it] }
+
+    /** The motor controllers the phone hears, in address order. */
+    val reporting: List<Int> get() = motorControllers.map { it.address }.filter { it in telemetryByBoard }
+
+    /** The board at [address]'s live fault word, its arm-blocking bits only; 0 while it is silent. */
+    fun blockingOf(address: Int): Int =
+        (telemetryByBoard[address]?.cyclic?.fault ?: 0) and CyclicState.ARM_BLOCKING_BITS
+
+    /**
+     * Whether a board the arm would arm reports an arm-blocking bit, which that board would refuse
+     * anyway (`specs/rider-ui.md` 3.1): the arm is refused and the pad's lines dim. A lamp the app
+     * only HOLDS lit is not a bit any board reports, so it refuses nothing.
+     */
+    val armBlocked: Boolean get() = driving.boards.any { blockingOf(it) != 0 }
+
+    /**
+     * Each reporting board's fault word as the grid draws it: its live arm-blocking bits and the
+     * latch bits the app holds for it ([latchHeld]). A silent board has left the inbox, and its
+     * lamps with it.
+     */
+    val lampWords: Map<Int, Int> get() = reporting.associateWith { blockingOf(it) or (latchHeld[it] ?: 0) }
+
+    /** The lamps the grid shows ([shownLamps]). */
+    val lamps: List<FaultLamp>
+        get() = shownLamps(motorControllers.map { LampFacts(it.address, imuModel[it.address]) }, lampWords)
+
+    /** Whether the fault grid is drawn: a lamp is lit, or the lamp test is on (`specs/rider-ui.md` 3.1b). */
+    val gridShows: Boolean get() = lampTest || lampWords.values.any { it != 0 }
+
+    /** The battery ring's board and reading ([ringReading]). */
+    val ring: Pair<Int?, BatteryReading> get() = ringReading(reporting, ::batteryOf)
+
+    /** Whether the ring reads low ([batteryLow]) against its own board's floor. */
+    val batteryIsLow: Boolean get() = ring.let { (a, r) -> batteryLow(r, a?.let { batteryFloor[it] }) }
+
+    /** The machine's travel: the mean of every motor controller's wheel ([machineOdometer]). */
+    val machineTravel: MachineTravel? get() = machineOdometer(motorControllers.map { odometerOf(it.address) })
+
     /**
      * Whether the arm control will accept a press right now.
      *
@@ -196,11 +271,14 @@ data class UiState(
      * always available.
      *
      * False too while the boards are known to hold different frames ([MachineArm.FramesDiffer]),
-     * and while the drive mode in force addresses no motor controller at all: there is nothing to
-     * arm until a node has answered that it is one.
+     * while the drive mode in force addresses no motor controller at all (no node has answered that
+     * it is one, or the app refuses the stored mode, [DriveInForce.refusal]), and while a board the
+     * arm would arm reports an arm-blocking bit ([armBlocked]).
      */
     val canArm: Boolean
-        get() = isConnected && !engaged && !disconnecting && !machineArm.refuses && drive.targets.boards.isNotEmpty()
+        get() = isConnected && !engaged && !disconnecting && !machineArm.refuses &&
+            drive.targets.boards.isNotEmpty() && !armBlocked
+
 
     /** Commanded throttle as a percent of MAX_SPEED, signed (-100..100). */
     val throttlePercent: Int get() = (throttleSpeed * PERCENT) / Throttle.MAX_SPEED
@@ -348,6 +426,19 @@ class MainViewModel(
     private val boardsSeen = MutableStateFlow<List<ScanCandidate>>(emptyList())
 
     /**
+     * The lamp test (`specs/rider-ui.md` 3.1b): on for [LAMP_TEST_MS] once per connection, from the
+     * moment the ride facts read first completes, unless a board already reports an arm-blocking
+     * bit, and off the moment one appears, so a real lamp is never mixed with test lamps.
+     * [lampTestDone] is whether this connection has had its chance at one.
+     */
+    private val lampTestOn = MutableStateFlow(false)
+    private var lampTestDone = false
+    private var lampTestJob: Job? = null
+
+    /** The trip's baseline ([TripBaseline]): it outlives a link, and is the process's. */
+    private val trip = MutableStateFlow(TripBaseline.NONE)
+
+    /**
      * What the session knows about its nodes, gathered for [uiState]: the node list, the machine
      * statement, the drive in force, and each board's own telemetry by the address its frames
      * arrive under. The one place those are put together, so no screen has to work any of them out.
@@ -404,6 +495,8 @@ class MainViewModel(
                 selfDisarmed = l.selfDisarmed,
                 simulateRider = l.simulateRider,
                 driving = l.armedTargets ?: DriveTargets.NONE,
+                faultDisarm = l.faultDisarm,
+                latchHeld = l.latchHeld,
             )
         }.combine(boards) { ui, b ->
             val driving = if (ui.armed) ui.driving else b.drive.targets
@@ -424,12 +517,21 @@ class MainViewModel(
                 speedFacts = mcs.mapNotNull { a ->
                     b.telemetry[a]?.wheelRateQ12?.let { b.setup.speedFactsOf(a, it) }
                 },
+                sides = b.setup.rideFacts(mcs, SetupFields.CONTROL_SIDE),
+                batteryFloor = b.setup.rideFacts(mcs, SetupFields.BATTERY_FLOOR),
+                imuModel = b.setup.rideFacts(mcs, SetupFields.IMU_MODEL),
+                currentLimit = b.setup.rideFacts(mcs, SetupFields.MOTOR_CURRENT_LIMIT),
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
         }.combine(transport.frameStats) { ui, stats ->
             ui.copy(frameStats = stats)
+        }.combine(lampTestOn) { ui, on ->
+            ui.copy(lampTest = on)
+        }.combine(trip) { ui, t ->
+            ui.copy(trip = t)
         }
+
             .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(STATE_TIMEOUT_MS),
@@ -447,16 +549,95 @@ class MainViewModel(
         // it holds the FSM's engage conjunction and suppresses the step-off wind-down. A setting
         // that outlives the board it was made for is not a setting, it is a latch.
         transport.connectionState
-            .onEach { if (it != ConnectionState.CONNECTED) local.value = LocalState() }
+            .onEach {
+                if (it != ConnectionState.CONNECTED) {
+                    local.value = LocalState()
+                    endLampTest()
+                    lampTestDone = false
+                }
+            }
+            .launchIn(viewModelScope)
+        // The lamp test starts when this connection's ride facts are first all in.
+        setup.state
+            .onEach { if (it.rideFactsRead) maybeStartLampTest() }
+            .launchIn(viewModelScope)
+        // The trip's baseline follows the machine's travel and the board picked.
+        combine(setup.state, transport.telemetry, settings.selectedBoard) { st, byBoard, pick ->
+            val mcs = st.motorControllers
+            val travel = machineOdometer(mcs.map { odometerReading(byBoard[it], st.wheelGeometryOf(it)) })
+            pick?.address to travel
+        }
+            .onEach { (pick, travel) -> trip.update { it.next(pick, travel) } }
             .launchIn(viewModelScope)
         // What the drive addresses follows what the session reads: the nodes' classes, the stored
         // mode and side, and the leader flags. Re-sent on every change, so a disarmed frame reaches
         // the boards the mode in force names as soon as the reads that name them answer, and an
         // armed RIGID frame follows its leader.
+        // Each board's fault word is read here before the send, so a blocking bit on a board the
+        // app arms takes the arm level off the wire on the frame that carried it.
         combine(setup.state, transport.telemetry, ::Pair)
-            .onEach { sendCurrent() }
+            .onEach { (_, byBoard) ->
+                onFaultWords(byBoard)
+                sendCurrent()
+            }
             .launchIn(viewModelScope)
     }
+
+    /**
+     * Fold every board's fault word in (`specs/rider-ui.md` 3.1 and 3.1b).
+     *
+     * - **The latch hold.** A LATCH or LATCH 2 bit seen once stays lit, per board and per bit,
+     *   until the next ARM tap: the board clears its latch about 8 ms after the trip, so without
+     *   the hold the lamp would almost never be seen.
+     * - **The fault disarm.** An arm-blocking bit on any board the app arms, while the app holds
+     *   the arm level, drops the level at once, by the path [onAppBackgrounded] takes, and keeps it
+     *   dropped until the rider taps ARM again. So no lamp clearing by itself re-arms a board: the
+     *   mode machine re-arms from OFF only while the power request is held, and the app no longer
+     *   holds it. The cause is kept as [LocalState.faultDisarm].
+     * - **The lamp test** ends the moment a board reports an arm-blocking bit.
+     */
+    private fun onFaultWords(byBoard: Map<Int, TelemetryUi>) {
+        val words = byBoard.mapValues { (_, t) -> (t.cyclic?.fault ?: 0) and CyclicState.ARM_BLOCKING_BITS }
+        if (words.values.any { it != 0 }) endLampTest()
+        local.update { l ->
+            val held = l.latchHeld.toMutableMap()
+            for ((board, word) in words) {
+                val latched = word and FaultLamp.LATCH_BITS
+                if (latched != 0) held[board] = (held[board] ?: 0) or latched
+            }
+            val cause = if (l.armed) faultCause(l.armedTargets?.boards.orEmpty(), words) else null
+            val next = if (cause == null) l else l.disarmed(selfDisarm = false).copy(faultDisarm = cause)
+            next.copy(latchHeld = held)
+        }
+    }
+
+    /** The first lamp lit on the first of [armed] that reports one, or null while none does. */
+    private fun faultCause(armed: List<Int>, words: Map<Int, Int>): FaultDisarm? =
+        armed.firstNotNullOfOrNull { board ->
+            FaultLamp.lit(words[board] ?: 0).firstOrNull()?.let { FaultDisarm(it, board) }
+        }
+
+    /** Start this connection's lamp test, or skip it while a board reports an arm-blocking bit. */
+    private fun maybeStartLampTest() {
+        if (lampTestDone || transport.connectionState.value != ConnectionState.CONNECTED) return
+        lampTestDone = true
+        val blocking = transport.telemetry.value.values.any {
+            (it.cyclic?.fault ?: 0) and CyclicState.ARM_BLOCKING_BITS != 0
+        }
+        if (blocking) return
+        lampTestOn.value = true
+        lampTestJob = viewModelScope.launch {
+            delay(LAMP_TEST_MS)
+            lampTestOn.value = false
+        }
+    }
+
+    private fun endLampTest() {
+        lampTestJob?.cancel()
+        lampTestJob = null
+        lampTestOn.value = false
+    }
+
 
     /** Begin scanning + connecting to the peripheral. */
     fun connect() {
@@ -587,10 +768,23 @@ class MainViewModel(
         val st = setup.state.value
         val targets = st.driveInForce(transport.telemetry.value).targets
         val refused = local.value.engaged || disconnecting.value || st.machine.armStatement.refuses
-        if (refused || targets.boards.isEmpty()) return
-        // A fresh arm answers the "the app disarmed this" line, so it goes with the press that
-        // makes it stale rather than lingering over a machine that is armed again.
-        local.update { it.copy(armed = true, selfDisarmed = false, armedTargets = targets) }
+        // A board the arm would arm reports an arm-blocking bit: it would refuse the arm itself
+        // (`specs/rider-ui.md` 3.1b). A lamp the app only holds lit refuses nothing.
+        val telemetry = transport.telemetry.value
+        val blocked = targets.boards.any { (telemetry[it]?.cyclic?.fault ?: 0) and CyclicState.ARM_BLOCKING_BITS != 0 }
+        if (refused || blocked || targets.boards.isEmpty()) return
+        // A fresh arm answers the "the app disarmed this" lines, so it goes with the press that
+        // makes them stale rather than lingering over a machine that is armed again; the same tap
+        // clears the latch lamps the app was holding lit.
+        local.update {
+            it.copy(
+                armed = true,
+                selfDisarmed = false,
+                faultDisarm = null,
+                latchHeld = emptyMap(),
+                armedTargets = targets,
+            )
+        }
         sendCurrent()
     }
 
@@ -734,6 +928,10 @@ class MainViewModel(
      *
      * [armedTargets] is the set of boards the arm latched, and part of the arm: it is null whenever
      * [armed] is false.
+     *
+     * [faultDisarm] and [latchHeld] are what the screen says about faults the app has seen this
+     * session: both outlive a disarm and both are cleared by the tap that arms, and by the link
+     * going, which resets everything here.
      */
     private data class LocalState(
         val armed: Boolean = false,
@@ -743,14 +941,22 @@ class MainViewModel(
         val selfDisarmed: Boolean = false,
         val simulateRider: Boolean = false,
         val armedTargets: DriveTargets? = null,
+        val faultDisarm: FaultDisarm? = null,
+        val latchHeld: Map<Int, Int> = emptyMap(),
     ) {
         /**
-         * The all-stop state: no arm level, no demand, no touch. Operator settings survive, and
-         * [selfDisarm] records whether the app took the arm level by itself rather than the rider
-         * asking for it, which is the one thing about a disarm the rider cannot see for themselves.
+         * The all-stop state: no arm level, no demand, no touch. Operator settings and the fault
+         * report survive, and [selfDisarm] records whether the app took the arm level by itself
+         * rather than the rider asking for it, which is the one thing about a disarm the rider
+         * cannot see for themselves.
          */
         fun disarmed(selfDisarm: Boolean): LocalState =
-            LocalState(selfDisarmed = selfDisarm, simulateRider = simulateRider)
+            LocalState(
+                selfDisarmed = selfDisarm,
+                simulateRider = simulateRider,
+                faultDisarm = faultDisarm,
+                latchHeld = latchHeld,
+            )
     }
 
     companion object {
@@ -764,6 +970,14 @@ class MainViewModel(
          */
         const val DISARM_SETTLE_MS: Long = (LinkConfig.INPUTS_CHANGE_REPEATS + 1) * LinkConfig.SEND_INTERVAL_MS
 
+        /** How long the lamp test lights every shown lamp (`specs/rider-ui.md` 3.1b). */
+        const val LAMP_TEST_MS: Long = 2_000L
+
+
         private const val STATE_TIMEOUT_MS = 5_000L
     }
 }
+
+/** Each of [mcs]'s stored ride fact [field] ([SetupState.rideFactOf]), for the boards it is read from. */
+private fun SetupState.rideFacts(mcs: List<Int>, field: SetupField): Map<Int, Int> =
+    mcs.mapNotNull { a -> rideFactOf(a, field)?.let { a to it } }.toMap()

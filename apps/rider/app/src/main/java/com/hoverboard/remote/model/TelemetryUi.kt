@@ -181,8 +181,8 @@ data class TelemetryUi(
      *
      * The mask is the board's OWN producers (`orchestrator::events::Levels::own_mask`), so a
      * false here means "no producer is asserted on the board this app is attached to", not "the
-     * machine is healthy", and the UI does not render it as the latter: see
-     * [com.hoverboard.remote.ui.components.TelemetryPanel].
+     * machine is healthy", and the UI does not render it as the latter: each board has its own row
+     * on Setup's machine status section ([com.hoverboard.remote.ui.screens.MachineStatusSection]).
      */
     val anyFault: Boolean
         get() = faultCauses.isNotEmpty()

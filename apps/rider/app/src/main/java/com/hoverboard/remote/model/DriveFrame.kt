@@ -71,16 +71,21 @@ enum class DriveMode(val byte: Int) {
  * mode reaches.
  *
  * @param boards every motor controller the drive addresses, which is also every board the arm
- *   control arms. Never a bridge.
+ *   control arms. Never a bridge. Empty for a drive the app refuses ([DriveInForce.refusal]),
+ *   which still names its mode so the screen draws that mode's pad.
  * @param right the board that is the right wheel, for [DriveMode.DIFFERENTIAL] only.
  */
 data class DriveTargets(val mode: DriveMode, val boards: List<Int>, val right: Int? = null) {
     init {
         require(mode.drivesBoth || boards.size <= 1) { "SINGLE addresses one board" }
-        require(mode != DriveMode.DIFFERENTIAL || (right != null && right in boards && boards.size == 2)) {
+        require(
+            mode != DriveMode.DIFFERENTIAL || boards.isEmpty() ||
+                (right != null && right in boards && boards.size == 2),
+        ) {
             "DIFFERENTIAL needs its right wheel among its two boards"
         }
     }
+
 
     companion object {
         /** Nothing addressed: no motor controller known yet. */
