@@ -2,18 +2,19 @@ import os, sys, struct
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 from parse import parse_header, committed, rec_size, PAGE, PAGE_HEADER_LEN
 NAMES = {0x01:"node.address",0x02:"link.set",0x10:"device.name",0x20:"motor.current_limit",
- 0x21:"motor.method",0x22:"control.mode",0x23:"control.rider_required",0x24:"control.battery_floor",
- 0x25:"control.frame",0x26:"control.side",0x40:"board.self_hold",0x41:"board.vbatt",
+ 0x21:"motor.method",0x22:"control.mode",0x23:"control.rider_required",0x24:"board.battery.floor",
+ 0x25:"control.frame",0x26:"control.side",0x40:"board.self_hold",0x41:"board.battery.pin",
  0x42:"board.buzzer",0x43:"led.green",0x44:"led.orange",0x45:"led.red",0x46:"pad.a",0x47:"pad.b",
  0x48:"imu.scl_pin",0x49:"imu.sda_pin",0x4A:"motor.hall_a",0x4B:"motor.hall_b",0x4C:"motor.hall_c",
  0x4D:"motor.gate_hi_a",0x4E:"motor.gate_hi_b",0x4F:"motor.gate_hi_c",0x50:"motor.gate_lo_a",
  0x51:"motor.gate_lo_b",0x52:"motor.gate_lo_c",0x54:"motor.sense_a",0x55:"motor.sense_b",
  0x60:"imu.model",0x61:"imu.gyro_bias",0x62:"motor.direction",0x63:"motor.align_offset",
  0x64:"motor.dead_time",0x65:"imu.axis_sign",0x66:"motor.current_sense",0x67:"motor.current_cal",
- 0x68:"imu.axis_role",0x69:"board.vbatt_cal",0x6B:"motor.noise_floor",0x70:"attitude.level_trim",
+ 0x68:"imu.axis_role",0x69:"board.battery.cal",0x6A:"board.battery.cells",0x6B:"motor.noise_floor",0x70:"attitude.level_trim",
  0x71:"retired.gain_a",0x72:"retired.gain_b",0x73:"retired.drive_lean",0x74:"retired.gain_max3",
  0x75:"control.drive_turn",0x76:"retired.speed_loop",0x77:"retired.kd",0x78:"machine.drive_mode",
- 0x79:"control.sf_gains",0x7A:"control.gain_max",0x7B:"control.reference",0x7C:"control.pos_clamp"}
+ 0x79:"control.sf_gains",0x7A:"control.gain_max",0x7B:"control.reference",0x7C:"control.pos_clamp",
+ 0x7F:"board.battery.chemistry"}
 def dec(tag, b):
     if tag==1: return str(b[0])
     if tag==2: return str(int.from_bytes(b,"little"))

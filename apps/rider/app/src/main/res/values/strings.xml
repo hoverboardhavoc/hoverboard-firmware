@@ -166,6 +166,7 @@
          eight-cell pack above full and a ten-cell pack nearly empty). So the volts are shown and
          the percentage is withheld, with the one place that settles it named. -->
     <string name="telemetry_battery_no_pack">No charge figure: nobody has told this machine how many cells its pack has. Set it under Setup, in Drive.</string>
+    <string name="telemetry_battery_no_chemistry">No charge figure: this board\'s battery chemistry has not been read yet.</string>
     <string name="telemetry_battery_unknown_chemistry">No charge figure: this board\'s battery chemistry is not one this app knows. Set it under Setup, in Drive.</string>
 
     <!-- Current, beside the battery (specs/rider-ui.md 3.6). TWO figures per board, because the
