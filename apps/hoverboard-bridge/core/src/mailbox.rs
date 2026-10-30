@@ -303,18 +303,18 @@ impl<P: SwdPins> MailboxPort<P> {
                 Ok(_) => {}
             }
         }
-        // Inbound to the board: the oldest queued frame first; a refused frame stays for the next
-        // poll.
+        // Inbound to the board: the oldest queued frame first; a frame the ring has no room for
+        // stays for the next poll. The link reports a refused write as a dropped frame too, so the
+        // latched write error is read first: only a frame the link itself cannot carry is dropped.
         while let Some(p) = self.queue.first() {
             let bytes = p.bytes.clone();
-            if self.link.send(&bytes).is_err() {
-                self.queue.remove(0);
-                self.dropped += 1;
-                continue;
-            }
+            let sent = self.link.send(&bytes);
             match self.link.transport_mut().serial_mut().take_write_error() {
                 None => {
                     self.queue.remove(0);
+                    if sent.is_err() {
+                        self.dropped += 1;
+                    }
                 }
                 Some(BridgeError::NotDraining { .. }) => break,
                 Some(BridgeError::MemAp(_)) => return self.lost(now),

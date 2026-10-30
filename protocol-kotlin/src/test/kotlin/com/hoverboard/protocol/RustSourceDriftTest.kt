@@ -759,6 +759,29 @@ class RustSourceDriftTest {
     }
 
     /**
+     * The secret mark's status (`crates/net/src/walk.rs`, `CFG_SECRET`), answered with no value for
+     * a read of a stored `wifi.pass` (`crates/store/src/field.rs`, `WIFI_PASS`, id `0x12`), which the
+     * app meets only as a refusal. The number is read out of the Rust, so renumbering it there fails
+     * here until the mirror and the refusal follow.
+     */
+    @Test
+    fun theSecretStatusMatchesTheFirmware() {
+        val m = findOne(
+            rust("crates/net/src/walk.rs"),
+            """^pub\s+const\s+CFG_SECRET\s*:\s*u8\s*=\s*([^;]+);""",
+            "walk.rs CFG_SECRET",
+        )
+        val secret = literal("CFG_SECRET", m.groupValues[1], "walk.rs status")
+        assertEquals(secret, Walk.CFG_SECRET)
+        assertEquals(
+            com.hoverboard.protocol.config.CfgRefusal.SECRET,
+            com.hoverboard.protocol.config.CfgRefusal.fromCode(secret),
+        )
+        assertEquals(0x12, Fields.WIFI_PASS.id)
+        assertEquals(0x11, Fields.WIFI_SSID.id)
+    }
+
+    /**
      * Exact-set comparison against `Type::tag` in `crates/store/src/key.rs`.
      *
      * Scoped to `tag()`'s own body: that file matches on `Type` in several places (`from_tag`, the

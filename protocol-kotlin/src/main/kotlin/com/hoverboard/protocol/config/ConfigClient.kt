@@ -40,6 +40,9 @@ enum class CfgRefusal(val code: Int) {
 
     /** The board compacted but could not commit the packed page, so it reclaimed no space. */
     COMMIT_FAILED(Walk.CFG_COMMIT_FAILED),
+
+    /** A read of a stored secret (`wifi.pass`): the node never gives its value back. */
+    SECRET(Walk.CFG_SECRET),
     ;
 
     companion object {

@@ -5,10 +5,15 @@
 //! Every command checks the files completely before it reads the board, reads every key the table
 //! names (and every key a file names), plans, and only then writes: one `CONFIG_WRITE` per key,
 //! values and un-stores alike, then reads every written key back and reports what the board holds.
+//!
+//! A secret (`store::SECRET`, `wifi.pass`; `specs/bridge-onboarding.md` section 2.2) is never
+//! printed, the board's or the file's: both show as `(set)`. `dump` leaves a stored one out and
+//! says so, `apply` and `replace` write one a file gives every time and count it as changed, and
+//! `replace` never un-stores one the files leave out.
 
 use std::collections::{BTreeMap, HashMap};
 
-use net::walk::{CFG_DEFAULT, CFG_OK, CFG_UNKNOWN_KEY};
+use net::walk::{CFG_DEFAULT, CFG_OK, CFG_SECRET, CFG_UNKNOWN_KEY};
 use serde_json::{Map, Value as Json};
 use store::{Index, Key, Kind, Type, ERASED_TAG};
 
@@ -213,8 +218,25 @@ impl FileReader<'_> {
     }
 }
 
-/// What the board answered for every key read (`CFG_OK` or `CFG_DEFAULT`, with the value).
+/// What the board answered for every key read (`CFG_OK` or `CFG_DEFAULT` with the value, or
+/// `CFG_SECRET` with none).
 pub type Reads = BTreeMap<Key, ConfigResp>;
+
+/// Whether a read answered a successful read: `CFG_OK`, `CFG_DEFAULT`, or `CFG_SECRET` for a stored
+/// secret.
+fn answered(r: &ConfigResp) -> bool {
+    matches!(r.status, CFG_OK | CFG_DEFAULT | CFG_SECRET)
+}
+
+/// Whether the board stores the key: `CFG_OK`, or `CFG_SECRET` for a secret.
+fn stored(r: &ConfigResp) -> bool {
+    matches!(r.status, CFG_OK | CFG_SECRET)
+}
+
+/// Whether `key` is a secret ([`store::SECRET`]).
+fn secret(key: Key) -> bool {
+    row_of(key).is_some_and(|r| r.secret())
+}
 
 /// The keys `dump` reads: every key the table names, less the board-owned and read-only fields.
 pub fn dump_keys() -> Vec<Key> {
@@ -251,7 +273,7 @@ pub fn read_board<W: Wire>(
     for &key in keys {
         let r = b.read(key)?;
         match r.status {
-            CFG_OK | CFG_DEFAULT => {
+            _ if answered(&r) => {
                 reads.insert(key, r);
             }
             CFG_UNKNOWN_KEY => unknown.push(key),
@@ -304,6 +326,16 @@ pub fn to_file(reads: &Reads) -> Json {
         );
     }
     Json::Object(top)
+}
+
+/// The lines `dump` prints for what it left out of the file: each stored secret, which no node
+/// reads back (`specs/bridge-onboarding.md` section 2.2).
+pub fn left_out(name: &str, reads: &Reads) -> Vec<String> {
+    dump_keys()
+        .into_iter()
+        .filter(|k| reads.get(k).is_some_and(|r| r.status == CFG_SECRET))
+        .map(|k| format!("{name}: {} stored, not readable, left out", path_of(k)))
+        .collect()
 }
 
 /// The place for dotted `path` in `obj`, making the objects on the way (rule 1, section 2.1).
@@ -436,12 +468,14 @@ pub fn plan(
         };
         let holds = |b: &[u8]| r.tag == storage.tag() && r.bytes == b;
         let act = match &bytes {
-            None if r.status == CFG_OK && replace => Some(Act::Unstore),
-            None if r.status == CFG_OK => {
+            None if stored(r) && replace => Some(Act::Unstore),
+            None if stored(r) => {
                 plan.kept.push((e.key, Kept::NullInFile));
                 continue;
             }
             None => None,
+            // A secret cannot be compared, so a value for one is always written.
+            Some(_) if secret(e.key) => Some(Act::Change),
             Some(b) if holds(b) && r.status == CFG_OK => None,
             Some(b) if holds(b) => Some(Act::Pin),
             Some(_) => Some(Act::Change),
@@ -462,8 +496,8 @@ pub fn plan(
     for key in table_keys() {
         let named = files.entries.iter().any(|e| e.key == key);
         let row = row_of(key).expect("a table key");
-        let stored = reads.get(&key).is_some_and(|r| r.status == CFG_OK);
-        if named || !stored || row.board_owned() || row.read_only() {
+        let is_stored = reads.get(&key).is_some_and(stored);
+        if named || !is_stored || row.board_owned() || row.read_only() || row.secret() {
             continue;
         }
         if replace {
@@ -480,8 +514,17 @@ pub fn plan(
     Ok(plan)
 }
 
-/// A value as a line shows it, with ` (default)` when the board stores nothing.
+/// A value as a line shows it, with ` (default)` when the board stores nothing. A secret shows as
+/// `(set)` when stored and `(default)` when not, never as its value.
 pub fn shown(key: Key, r: &ConfigResp) -> String {
+    if secret(key) {
+        return if r.status == CFG_DEFAULT {
+            "(default)"
+        } else {
+            "(set)"
+        }
+        .into();
+    }
     if r.tag == ERASED_TAG && r.bytes.is_empty() {
         return "(default)".into();
     }
@@ -662,9 +705,15 @@ pub fn written_lines(name: &str, plan: &Plan, before: &Reads, r: &Refused) -> Ve
 /// `config <node> <path>`: the line for the key's value, ` (default)` when nothing is stored.
 pub fn config_read<W: Wire>(b: &mut Board<'_, W>, key: Key) -> Result<String, String> {
     let r = b.read(key)?;
-    match r.status {
-        CFG_OK | CFG_DEFAULT => Ok(format!("{}: {} = {}", b.name, path_of(key), shown(key, &r))),
-        s => Err(format!("{}: {}: {}", b.name, path_of(key), status_name(s))),
+    if answered(&r) {
+        Ok(format!("{}: {} = {}", b.name, path_of(key), shown(key, &r)))
+    } else {
+        Err(format!(
+            "{}: {}: {}",
+            b.name,
+            path_of(key),
+            status_name(r.status)
+        ))
     }
 }
 
@@ -697,7 +746,7 @@ pub fn config_write<W: Wire>(
             path_of(key)
         ));
     }
-    if before.status != CFG_OK && before.status != CFG_DEFAULT {
+    if !answered(&before) {
         return Err(format!(
             "{}: {}: {}",
             b.name,
@@ -1227,6 +1276,127 @@ mod tests {
         let (plan, _) = run(&mut lp, &f, false).unwrap();
         assert_eq!(plan.steps[0].storage, Type::U32);
         assert_eq!(plan.steps[0].bytes, Some(12000u32.to_le_bytes().to_vec()));
+    }
+
+    /// `specs/bridge-onboarding.md` section 2.2 on a board model: `config`, `dump`, `apply`,
+    /// `replace` and `diff` (the plan `diff` prints) never print the password, write it whenever a
+    /// file gives it, and `replace` never un-stores it unless a file says `null`.
+    #[test]
+    fn a_secret_is_never_printed_written_whenever_given_and_kept_by_replace() {
+        const PASS: &str = "hunter2hunter2";
+        let pass = k(0x12, 0);
+        let mut lp = Loop::new();
+        let mut all: Vec<String> = Vec::new();
+
+        // config: (default) unstored, (set) once written.
+        let mut b = board(&mut lp);
+        let l = config_read(&mut b, pass).unwrap();
+        assert_eq!(l, "rover-left: wifi.pass = (default)");
+        all.push(l);
+        let w = config_write(&mut b, pass, PASS, false).unwrap();
+        assert_eq!(w.lines, ["rover-left: wifi.pass: (default) -> (set)"]);
+        all.extend(w.lines);
+        let l = config_read(&mut b, pass).unwrap();
+        assert_eq!(l, "rover-left: wifi.pass = (set)");
+        all.push(l);
+
+        // apply: the password is written every time and counted as changed, so diff's plan
+        // always has a change for a file that carries it.
+        let creds = files(&[(
+            "wifi.json",
+            json!({ "wifi": { "ssid": "bench", "pass": PASS } }),
+        )]);
+        let (plan, lines) = run(&mut lp, &creds, false).unwrap();
+        assert_eq!(
+            lines,
+            [
+                "rover-left: 2 changed, 0 pinned, 0 unchanged",
+                "rover-left: wifi.ssid: \"\" (default) -> \"bench\"",
+                "rover-left: wifi.pass: (set) -> (set)",
+            ]
+        );
+        assert!(plan.changes());
+        all.extend(lines);
+        let (plan, lines) = run(&mut lp, &creds, false).unwrap();
+        assert_eq!(
+            lines,
+            [
+                "rover-left: 1 changed, 0 pinned, 1 unchanged",
+                "rover-left: wifi.pass: (set) -> (set)",
+            ]
+        );
+        assert!(
+            plan.changes(),
+            "diff exits 1 for a file that carries the password"
+        );
+        all.extend(lines);
+
+        // dump: the password is left out of the file and named on its own line.
+        let mut b = board(&mut lp);
+        let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
+        assert_eq!(reads[&pass].status, CFG_SECRET);
+        let dumped = to_file(&reads);
+        assert_eq!(dumped, json!({ "wifi": { "ssid": "bench" } }));
+        let notes = left_out("rover-left", &reads);
+        assert_eq!(
+            notes,
+            ["rover-left: wifi.pass stored, not readable, left out"]
+        );
+        all.extend(notes);
+
+        // replace from the dump keeps the password: nothing to write, nothing to un-store.
+        let f = files(&[("dump.json", dumped)]);
+        let (plan, lines) = run(&mut lp, &f, true).unwrap();
+        assert!(!plan.changes(), "{:?}", plan.steps);
+        assert_eq!(lines, ["rover-left: 0 changed, 0 pinned, 1 unchanged"]);
+        assert_eq!(records(&mut lp)[&pass].status, CFG_SECRET);
+        // apply leaves it alone under a null, and lists it as kept.
+        let null = files(&[("null.json", json!({ "wifi": { "pass": null } }))]);
+        let (_, lines) = run(&mut lp, &null, false).unwrap();
+        assert_eq!(
+            lines,
+            [
+                "rover-left: 0 changed, 0 pinned, 0 unchanged, 2 kept",
+                "rover-left: kept: wifi.pass = (set) (stored, null in the file)",
+                "rover-left: kept: wifi.ssid = \"bench\" (stored, not in the file)",
+            ]
+        );
+        all.extend(lines);
+        // replace un-stores it only when a file says null.
+        let (_, lines) = run(&mut lp, &null, true).unwrap();
+        assert_eq!(
+            lines,
+            [
+                "rover-left: 0 changed, 0 pinned, 0 unchanged, 2 un-stored",
+                "rover-left: wifi.pass: (set) -> (default)",
+                "rover-left: wifi.ssid: \"bench\" -> \"\" (default)",
+            ]
+        );
+        all.extend(lines);
+        assert_eq!(records(&mut lp)[&pass].status, CFG_DEFAULT);
+
+        // A value of the wrong type is refused without echoing it.
+        let wrong = files(&[("w.json", json!({ "wifi": { "pass": 12345678 } }))]);
+        let msgs: Vec<&str> = wrong.problems.iter().map(|p| p.msg.as_str()).collect();
+        assert_eq!(msgs, ["w.json: wifi.pass: a string, not a number"]);
+        all.extend(msgs.iter().map(|m| m.to_string()));
+        // One longer than a CONFIG_WRITE carries is refused by the file check, before any read.
+        let max = net::walk::CONFIG_WRITE_VALUE_MAX;
+        let long = "p".repeat(max + 1);
+        let f = files(&[("w.json", json!({ "wifi": { "pass": long } }))]);
+        let msgs: Vec<&str> = f.problems.iter().map(|p| p.msg.as_str()).collect();
+        assert_eq!(
+            msgs,
+            [format!(
+                "w.json: wifi.pass: {} bytes, more than the {max} one CONFIG_WRITE carries",
+                max + 1
+            )]
+        );
+        assert!(!msgs[0].contains(&long));
+
+        for l in &all {
+            assert!(!l.contains(PASS) && !l.contains("12345678"), "{l}");
+        }
     }
 
     #[test]

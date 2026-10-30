@@ -58,6 +58,7 @@ pub fn status_name(status: u8) -> String {
         CFG_NO_SPACE => "no space".into(),
         CFG_COMMIT_FAILED => "commit failed".into(),
         CFG_DEFAULT => "default".into(),
+        CFG_SECRET => "secret, not readable".into(),
         s => format!("status {s}"),
     }
 }

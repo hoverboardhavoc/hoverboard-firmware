@@ -5,21 +5,19 @@ it, installing it the first time, and updating it afterwards.
 
 ## Building
 
-The Wi-Fi network is a build-time setting: the build reads `ESP_WIFI_SSID` and `ESP_WIFI_PASS`
-from its environment and stops with an error naming both when either is unset. The bench's
-credentials are in `.wifi.env` here (gitignored, never committed); source it into the environment
-of the build without printing it:
+One image for every network: the image holds no Wi-Fi credentials. The bridge reads the network
+from its store, `wifi.ssid` and `wifi.pass` (`specs/bridge-onboarding.md` section 2), once at boot,
+and with none stored it does not start its Wi-Fi station (`info` shows `wifi not configured`).
 
 ```
 cd apps/hoverboard-bridge
-set -a; . ./.wifi.env; set +a
 cargo build --release
 ```
 
-A build for anything but a board (clippy, a size check) can use any values, e.g.
-`ESP_WIFI_SSID=x ESP_WIFI_PASS=x cargo clippy --release -- -D warnings`. The host tests of the
-hardware-free half need neither: `cargo test -p hoverboard-bridge-core --target aarch64-apple-darwin` (or
-the host's own triple).
+The host tests of the hardware-free half: `cargo test -p hoverboard-bridge-core --target
+aarch64-apple-darwin` (or the host's own triple), and its lint `cargo clippy -p
+hoverboard-bridge-core --target <host> --all-targets -- -D warnings`. CI's `bridge` job runs both,
+then this release build and the two images below.
 
 ## The RAM loader
 
@@ -47,26 +45,39 @@ driven by the bridge's own driver: `cargo test --manifest-path crates/emulator-r
 | --- | --- | --- | --- |
 | (bootloader) | `0x0` | | ESP-IDF's second-stage bootloader, built with rollback (`bootloader/`) |
 | (partition table) | `0x8000` | | this table |
-| `keys` | `0x9000` | 16 KiB | the bridge's own keys (`node_address`, `device.name`), kept across updates: the `store` crate's two pages in its first two sectors |
+| `keys` | `0x9000` | 16 KiB | the bridge's own keys (`node.address`, `device.name`, `wifi.ssid`, `wifi.pass`), kept across updates: the `store` crate's two pages in its first two sectors |
 | `otadata` | `0xd000` | 8 KiB | which app slot boots, and its rollback state |
 | `ota_0` | `0x10000` | 1,984 KiB | app slot |
 | `ota_1` | `0x200000` | 1,984 KiB | app slot |
 
 ## First install
 
-Over the C3's own USB port with `espflash`: one merged image holding the bootloader, the partition
-table and the app in `ota_0`, with `otadata` blank (the bootloader then runs `ota_0`).
+Over the C3's own USB port with `hoverboard-cli install-esp` (`specs/bridge-onboarding.md` section
+3), from one merged image holding the bootloader, the partition table and the app in `ota_0`, with
+`otadata` blank (the bootloader then runs `ota_0`). CI builds it as `hoverboard-bridge-install.bin`;
+locally:
 
 ```
 espflash save-image --chip esp32c3 --merge --flash-size 4mb \
   --bootloader bootloader/bootloader.bin --partition-table partitions.csv \
   --target-app-partition ota_0 \
   target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/hoverboard-bridge-install.bin
-espflash write-bin 0x0 target/img/hoverboard-bridge-install.bin
+hoverboard-cli install-esp target/img/hoverboard-bridge-install.bin bridge.json
 ```
 
+`bridge.json` names the new bridge and its network, in the file format of `cli-config.md`:
+
+```
+{ "device": { "name": "offroad-slave" }, "wifi": { "ssid": "<network>", "pass": "<password>" } }
+```
+
+`install-esp` finds the port by the C3's USB ids (`303a:1001`), or takes `--serial PORT`. If a
+bridge answers there it names it and asks before erasing it (`--yes` skips the question). It writes
+the image, waits for the first boot, applies the file, resets the bridge and waits for it to join.
+The password is never printed and never read back (`config` shows `(set)`).
+
 The merged image is padded to the whole 4 MB, so it also erases `keys` and `otadata`: the bridge
-boots unassigned with its default name, and the next walk addresses it again.
+boots unassigned with its default name and no Wi-Fi, and the next walk addresses it again.
 
 The bootloader must be `bootloader/bootloader.bin`, not `espflash`'s bundled one: that one is built
 without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, so it never marks a new slot pending and never
@@ -94,8 +105,8 @@ hoverboard-cli --tcp <name>.local:5333 update-esp target/img/hoverboard-bridge.b
 `ESP_UPDATE_CONFIRM`. With `--no-confirm` it stops after the reconnect; the next reset then returns
 to the previous slot.
 
-`cargo run --release` (with the credentials sourced) flashes the same layout as the first install
-from the ELF, leaving `keys` alone and erasing `otadata` so the bootloader runs `ota_0`.
+`cargo run --release` flashes the same layout as the first install from the ELF, leaving `keys`
+alone and erasing `otadata` so the bootloader runs `ota_0`.
 
 ## A silent boot
 
@@ -107,7 +118,6 @@ The text shares the port with the L2 stream (the host's stream decoder skips it)
 reading a boot on the bench, not for an image in use:
 
 ```
-set -a; . ./.wifi.env; set +a
 cargo build --release --features boot-log
 ```
 
