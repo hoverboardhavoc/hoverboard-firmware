@@ -15,7 +15,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -23,16 +22,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -41,7 +37,6 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.ble.ScanCandidate
 import com.hoverboard.remote.ble.SelectedBoard
 import com.hoverboard.remote.model.ConnectionState
-import com.hoverboard.remote.ui.theme.BgCode
 import com.hoverboard.remote.ui.theme.BgElevated
 import com.hoverboard.remote.ui.theme.Border
 import com.hoverboard.remote.ui.theme.Fg
@@ -147,59 +142,11 @@ fun ConnectScreen(
             Spacer(modifier = Modifier.height(8.dp))
             DeviceNameField(deviceName = deviceName, onDeviceNameChange = onDeviceNameChange)
         }
-        Spacer(modifier = Modifier.height(32.dp))
-        FontLicence()
     }
 }
-
-/**
- * The font's notice (`specs/rider-ui.md` 3.10). The SIL Open Font License lets the fonts ship in the
- * app provided each copy carries the copyright notice and the licence; the app has no about screen,
- * so the line sits here, on the screen every session passes through, and opens the licence itself.
- */
-@Composable
-private fun FontLicence() {
-    var open by rememberSaveable { mutableStateOf(false) }
-    Text(
-        text = stringResource(R.string.font_licence_line),
-        // bodySmall is Material's 12 sp style, on its own 16 sp lines.
-        style = MaterialTheme.typography.bodySmall,
-
-        color = FgMuted,
-        textAlign = TextAlign.Center,
-        modifier = Modifier
-            .clickable { open = true }
-            .testTag(FONT_LICENCE_TAG),
-    )
-    if (open) {
-        val context = LocalContext.current
-        val text = remember { context.assets.open(OFL_ASSET).bufferedReader().use { it.readText() } }
-        AlertDialog(
-            onDismissRequest = { open = false },
-            confirmButton = {
-                TextButton(onClick = { open = false }) { Text(stringResource(R.string.font_licence_close)) }
-            },
-            title = { Text(stringResource(R.string.font_licence_title)) },
-            text = {
-                Text(
-                    text = text,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.verticalScroll(rememberScrollState()),
-                )
-            },
-            containerColor = BgCode,
-        )
-    }
-}
-
-/** Test tag on the font licence line at the foot of the Connect screen. */
-const val FONT_LICENCE_TAG = "font_licence"
 
 /** Test tag on the warning glyph that stands for a failed connect or attach. */
 const val CONNECT_FAILED_GLYPH_TAG = "connect_failed_glyph"
-
-/** The licence text, shipped with the fonts it covers. */
-private const val OFL_ASSET = "fonts/OFL.txt"
 
 
 /**

@@ -37,10 +37,6 @@
     <!-- %1$d is the advertisement's signal strength, which is negative. -->
     <string name="connect_rssi">%1$d dBm</string>
     <string name="connect_by_name_caption">Not in the list? Reach a board by name.</string>
-    <!-- The font's notice and licence (`specs/rider-ui.md` 3.10). -->
-    <string name="font_licence_line">Font: Atkinson Hyperlegible, © 2020 Braille Institute of America. SIL Open Font License 1.1.</string>
-    <string name="font_licence_title">Font licence</string>
-    <string name="font_licence_close">Close</string>
 
     <!-- Ride screen, Setup's machine status section -->
 
