@@ -70,8 +70,9 @@ pub use dispatch::{
     BLE_PEER_CYCLIC_TICKS, CYCLIC_EMIT_TICKS,
 };
 pub use events::{
-    EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT, EV_MOTOR_FAULT,
-    EV_POWER_REQUEST, EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
+    counted, COUNTED_MOTOR, EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT,
+    EV_MOTOR_ARM, EV_MOTOR_BITS, EV_MOTOR_CAL, EV_MOTOR_HALL, EV_MOTOR_PERIOD, EV_POWER_REQUEST,
+    EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
 };
 
 /// The per-motor breadth of the orchestrator state: the control block's dual-motor shape
@@ -671,14 +672,15 @@ pub struct OrchestratorState {
     pub block: BlockWords,
     /// The motor-side fault level (`specs/motor-integration.md`, "the motor-side fault
     /// producers"): the hall dwell fault, period-liveness loss, and a refused offset calibration,
-    /// folded by the firmware into one level and written here BEFORE each pass. It joins
+    /// and a held arm refusal, as the set of their `events::EV_MOTOR_*` bits
+    /// (`motor::motor_fault_level`, the one owner) written here BEFORE each pass. Any set bit joins
     /// `fault_a`, so it drives SHUTDOWN and therefore disarm.
     ///
     /// A level, not a latch, at this boundary: the producers own their own stickiness (the ISR's
     /// fault bits are boot-sticky, the liveness level has its own hysteresis), and duplicating
     /// that here would make two places responsible for one fact. A board with no motor brought up
-    /// leaves it false, so the pre-motor boot posture is byte-for-byte what it was.
-    pub motor_fault: bool,
+    /// leaves it 0, so the pre-motor boot posture is byte-for-byte what it was.
+    pub motor_fault: u16,
     /// The OFF-inhibit level (`specs/motor-integration.md`, "MOE enactment": `off_inhibit` gets its
     /// real producer at slice 5). True while the wheel is turning, derived by the firmware from the
     /// period ISR's `SPEED` word and written here BEFORE each pass, the [`Self::motor_fault`]
@@ -704,13 +706,13 @@ pub struct OrchestratorState {
     /// tick is still attributed.
     pub events: FaultEvents,
     /// This board's OWN gating-producer levels as of the last pass
-    /// ([`events::Levels::own_mask`]): the `CYCLIC_STATE.fault` byte
+    /// ([`events::Levels::own_mask`]): the `CYCLIC_STATE.fault` word
     /// (`specs/rover-one-imu.md` section 4). Sole writer: the pipeline's level fold; sole reader:
     /// the cyclic builder. It is a word of its own rather than
     /// [`FaultEvents::levels`](events::FaultEvents::levels), because that is the GATING mask,
     /// which carries `peer_down` on `EV_COMMS_LOSS`'s bit, and a `peer_down` echoed back onto the
     /// wire latches both boards (`events::Levels::own_mask`).
-    pub own_levels: u8,
+    pub own_levels: u16,
     /// The RUN tilt cutout's LATCH (`specs/control.md` (l)): set on any tick the fused attitude
     /// says the machine is past `control::config::fsm::TILT_LIMIT` on either tilt axis, held, and
     /// released only on an OFF pass whose POWER REQUEST HAS DROPPED
@@ -878,7 +880,7 @@ impl OrchestratorState {
             enact_shutdowns: 0,
             ctl,
             block,
-            motor_fault: false,
+            motor_fault: 0,
             motor_moving: false,
             vbatt: vbatt_cal.map(battery::LocalSense::new),
             vbatt_raw: 0,
@@ -956,10 +958,10 @@ impl OrchestratorState {
             sub_state: self.ctl.fsm.sub_state as u8,
             control_mode: self.ctl.dispatch.mode() as u8,
             mode_fault: dispatch::mode_fault_level(self),
-            motor_fault: self.motor_fault,
+            motor_fault: self.motor_fault != 0,
             gating_field: self.block.gating_field,
             pre_env_torque: self.ctl.pre_env_ref,
-            event_levels: self.events.levels(),
+            event_levels: events::counted(self.events.levels()),
             event_counts: self.events.counts(),
             battery: self.block.battery,
             pad_field: self.pad_field,
@@ -1041,7 +1043,8 @@ pub struct Obs {
     /// (pivoting Balance without an IMU), or a rigid leader hearing a second leader.
     pub mode_fault: bool,
     /// The motor-side fault level this pass (hall dwell fault, period-liveness loss, or a refused
-    /// offset calibration), as folded into `fault_a`. OBS only: the producers are the firmware's
+    /// offset calibration, a held arm refusal): the union of the four causes, as folded into
+    /// `fault_a`. OBS only: the producers are the firmware's
     /// motor module and the level arrives through [`OrchestratorState::motor_fault`].
     pub motor_fault: bool,
     /// The engagement machine's gating/pickup row: the CONDITIONED UP-AXIS ACCEL COUNT
@@ -1065,7 +1068,8 @@ pub struct Obs {
     /// were engaged?". This word can: it is live every tick regardless of sub-state, which is what
     /// makes the disarmed tilt torque-shadow possible.
     pub pre_env_torque: i16,
-    /// The live gating-producer level mask (`events::EV_*`), the O1 attribution instrument's
+    /// The live gating-producer level mask in the counter domain (`events::counted`: bits 0..=7
+    /// of the `EV_*` mask, the motor causes folded onto bit 3), the O1 attribution instrument's
     /// level half.
     pub event_levels: u8,
     /// The per-producer saturating transition counts (`events::EV_*` bit order), the O1
@@ -1350,7 +1354,7 @@ pub fn control_task(
     let levels = events::Levels {
         comms_loss,
         imu_loss,
-        motor_fault: state.motor_fault,
+        motor: state.motor_fault,
         latch_a,
         latch_b,
         mode_fault: dispatch::mode_fault_level(state),

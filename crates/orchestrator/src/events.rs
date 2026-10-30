@@ -18,7 +18,7 @@
 //!
 //! O1 hunts a RARE transient (three occurrences across a whole session). An instrument that only
 //! exists in a diagnostic build cannot catch it: the soaks that would catch it run the real image.
-//! So this is in the shipping image, and it is sized to be: eight bytes of counters, one byte of
+//! So this is in the shipping image, and it is sized to be: eight bytes of counters, two bytes of
 //! previous levels, and a per-tick cost of an XOR against the previous mask plus a branch that is
 //! not taken on any tick where nothing changed (which is every tick but the interesting ones).
 //!
@@ -37,9 +37,14 @@
 //! `off_inhibit` (the wheel-motion level) is deliberately NOT here: it gates OFF -> INIT only and
 //! is never consulted in RUN, so it can delay a re-arm but cannot produce the cycle O1 is.
 //!
-//! A ninth level, the rigid frame's `peer_down` ([`Levels::peer_down`]), SHARES
-//! [`EV_COMMS_LOSS`]'s bit rather than widening the mask, because the eight are all allocated and
-//! the two levels mean the same thing to the mode machine. The peer's own `fault` word in the
+//! The motor-side level is four causes on bits 8 to 11 of the `u16` level mask ([`EV_MOTOR_HALL`]
+//! .. [`EV_MOTOR_ARM`]); bit 3, which carried their union as `EV_MOTOR_FAULT`, is retired and not
+//! reused (`specs/link-control.md`, "`fault` widens to u16"). The counters stay eight: counter 3
+//! counts transitions of the motor union ([`counted`]), so `CTRL_OBS`'s level byte and its eight
+//! counts keep their layout, and the four-way split is read off the cyclic `fault` word.
+//!
+//! A further level, the rigid frame's `peer_down` ([`Levels::peer_down`]), SHARES
+//! [`EV_COMMS_LOSS`]'s bit, because the two levels mean the same thing to the mode machine. The peer's own `fault` word in the
 //! telemetry says which of the two it was.
 //!
 //! # Reading them
@@ -51,34 +56,60 @@
 //! "at least 255", never as a small number.
 
 /// `comms_loss`: peer staleness past `CYCLIC_TIMEOUT_TICKS` (`fault_a`).
-pub const EV_COMMS_LOSS: u8 = 1 << 0;
+pub const EV_COMMS_LOSS: u16 = 1 << 0;
 /// This board is latched STOPPED (`fault_a`). One producer: the run-time tilt cutout
 /// ([`Levels::tilt`], `specs/control.md` (l)).
-pub const EV_STOP_ALL: u8 = 1 << 1;
+pub const EV_STOP_ALL: u16 = 1 << 1;
 /// `imu_loss`: `IMU_LOSS_THRESHOLD` consecutive failed reads on a configured IMU (`fault_a`).
-pub const EV_IMU_LOSS: u8 = 1 << 2;
-/// The motor-side fault level: hall dwell, period-liveness loss, refused calibration (`fault_a`).
-pub const EV_MOTOR_FAULT: u8 = 1 << 3;
+pub const EV_IMU_LOSS: u16 = 1 << 2;
 /// Motor 0's fault latch (`fault_a`).
-pub const EV_LATCH_A: u8 = 1 << 4;
+pub const EV_LATCH_A: u16 = 1 << 4;
 /// Motor 1's fault latch (the sole `fault_b` input).
-pub const EV_LATCH_B: u8 = 1 << 5;
+pub const EV_LATCH_B: u16 = 1 << 5;
 /// `mode_fault`: the control dispatch demoted the requested mode at the validation seam.
-pub const EV_MODE_FAULT: u8 = 1 << 6;
+pub const EV_MODE_FAULT: u16 = 1 << 6;
 /// The power-request level (button OR the remote mirror). Its FALL drives RUN -> SHUTDOWN.
-pub const EV_POWER_REQUEST: u8 = 1 << 7;
+pub const EV_POWER_REQUEST: u16 = 1 << 7;
+/// Motor-side cause: hall dwell (`motor::FAULT_HALL` in the motor FAULT word) (`fault_a`).
+pub const EV_MOTOR_HALL: u16 = 1 << 8;
+/// Motor-side cause: the current-sense calibration was refused at init (`motor::FAULT_INIT_CAL`)
+/// (`fault_a`).
+pub const EV_MOTOR_CAL: u16 = 1 << 9;
+/// Motor-side cause: period-liveness loss (`motor::PeriodHealth`) (`fault_a`).
+pub const EV_MOTOR_PERIOD: u16 = 1 << 10;
+/// Motor-side cause: an arm attempt aborted before MOE and is held (`crate::arm` in the firmware)
+/// (`fault_a`).
+pub const EV_MOTOR_ARM: u16 = 1 << 11;
+/// The four motor-side causes: the set `motor::motor_fault_level` returns.
+pub const EV_MOTOR_BITS: u16 = EV_MOTOR_HALL | EV_MOTOR_CAL | EV_MOTOR_PERIOD | EV_MOTOR_ARM;
 
-/// The number of counted producers (one per bit of the level mask).
+/// The number of transition counters. Counters 0..=7 count bits 0..=7 of the level mask, except
+/// counter 3, which counts the motor union ([`counted`]).
 pub const N_EVENT_PRODUCERS: usize = 8;
 
-/// The `fault_a` group as a mask over [`Levels::mask`]: the five producers whose level the mode
+/// The counter slot the motor union is counted in: bit 3, the retired `EV_MOTOR_FAULT` bit. Only
+/// the `CTRL_OBS` byte and the counters use it; the wire keeps bit 3 zero.
+pub const COUNTED_MOTOR: u8 = 1 << 3;
+
+/// The level mask folded into the eight-counter domain `CTRL_OBS` publishes: bits 0..=7 as they
+/// are (bit 3 is always clear in a level mask), and the motor causes onto [`COUNTED_MOTOR`].
+pub const fn counted(mask: u16) -> u8 {
+    let low = (mask & 0xFF) as u8;
+    if mask & EV_MOTOR_BITS != 0 {
+        low | COUNTED_MOTOR
+    } else {
+        low
+    }
+}
+
+/// The `fault_a` group as a mask over [`Levels::mask`]: the producers whose level the mode
 /// machine folds into Fault A (`specs/sensing-and-safety.md`). [`Levels::fault_a`] is this mask
 /// applied, so the aggregate the machine consumes and the mask a peer reads out of
 /// `CYCLIC_STATE.fault` (`specs/rover-one-imu.md` section 4) cannot name different groups.
 /// [`EV_MODE_FAULT`] and [`EV_POWER_REQUEST`] are in the level mask and are not faults, which
 /// this constant states by leaving them out rather than by a comment at each consumer.
-pub const FAULT_A_BITS: u8 =
-    EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_MOTOR_FAULT | EV_LATCH_A;
+pub const FAULT_A_BITS: u16 =
+    EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_LATCH_A | EV_MOTOR_BITS;
 
 /// One tick's gating-producer levels, named.
 ///
@@ -93,8 +124,8 @@ pub struct Levels {
     pub comms_loss: bool,
     /// [`EV_IMU_LOSS`].
     pub imu_loss: bool,
-    /// [`EV_MOTOR_FAULT`].
-    pub motor_fault: bool,
+    /// The motor-side causes, a subset of [`EV_MOTOR_BITS`] (`motor::motor_fault_level`).
+    pub motor: u16,
     /// [`EV_LATCH_A`].
     pub latch_a: bool,
     /// [`EV_LATCH_B`].
@@ -105,7 +136,7 @@ pub struct Levels {
     pub power_request: bool,
     /// `peer_down`, the rigid frame's one-wheel-fault interlock (`specs/rover-one-imu.md`
     /// section 6): a fresh peer cyclic whose own level mask carries a [`FAULT_A_BITS`] producer.
-    /// It has NO bit of its own, because all eight are allocated; it rides [`EV_COMMS_LOSS`] in
+    /// It has NO bit of its own; it rides [`EV_COMMS_LOSS`] in
     /// [`mask`](Self::mask), which already means "the peer is not available to me" for the other
     /// reason that can be true. It is deliberately absent from [`own_mask`](Self::own_mask), and
     /// that is the whole difference between the two.
@@ -133,11 +164,11 @@ impl Levels {
     /// forever, `fault_a` would stay asserted on both, and `fault_a` gates OFF -> INIT, so the
     /// machine would refuse to arm until it was power-cycled. The byte therefore states what
     /// THIS board's own producers say, which is the only thing a peer can act on.
-    pub fn own_mask(&self) -> u8 {
-        let bit = |set: bool, ev: u8| if set { ev } else { 0 };
+    pub fn own_mask(&self) -> u16 {
+        let bit = |set: bool, ev: u16| if set { ev } else { 0 };
         bit(self.comms_loss, EV_COMMS_LOSS)
             | bit(self.imu_loss, EV_IMU_LOSS)
-            | bit(self.motor_fault, EV_MOTOR_FAULT)
+            | (self.motor & EV_MOTOR_BITS)
             | bit(self.latch_a, EV_LATCH_A)
             | bit(self.latch_b, EV_LATCH_B)
             | bit(self.mode_fault, EV_MODE_FAULT)
@@ -147,9 +178,9 @@ impl Levels {
 
     /// The GATING mask this tick: [`own_mask`](Self::own_mask) with [`peer_down`](Self::peer_down)
     /// folded onto [`EV_COMMS_LOSS`]. What the mode machine's aggregates are taken from, what the
-    /// counters count, and what `CTRL_OBS` publishes as the live level word, so the decision, its
-    /// attribution and the bench's reading of it are one byte.
-    pub fn mask(&self) -> u8 {
+    /// counters count (through [`counted`]), and what `CTRL_OBS` publishes as the live level byte,
+    /// so the decision, its attribution and the bench's reading of it are one word.
+    pub fn mask(&self) -> u16 {
         self.own_mask() | if self.peer_down { EV_COMMS_LOSS } else { 0 }
     }
 
@@ -173,7 +204,7 @@ impl Levels {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FaultEvents {
     counts: [u8; N_EVENT_PRODUCERS],
-    prev: u8,
+    prev: u16,
 }
 
 impl FaultEvents {
@@ -189,8 +220,8 @@ impl FaultEvents {
     /// in `comms_loss`: the never-seen-a-peer exemption holds it clear until a peer has been
     /// seen once; the audit corrected this doc's original example, and the bench's zero counts
     /// at boot confirm.)
-    pub fn tick(&mut self, levels: u8) {
-        let changed = levels ^ self.prev;
+    pub fn tick(&mut self, levels: u16) {
+        let changed = counted(levels) ^ counted(self.prev);
         self.prev = levels;
         if changed != 0 {
             for (i, c) in self.counts.iter_mut().enumerate() {
@@ -202,19 +233,20 @@ impl FaultEvents {
     }
 
     /// The live level mask as of the last [`tick`](Self::tick) (the `EV_*` bits).
-    pub fn levels(&self) -> u8 {
+    pub fn levels(&self) -> u16 {
         self.prev
     }
 
-    /// The eight saturating transition counts, indexed by producer bit position.
+    /// The eight saturating transition counts, indexed by counter slot ([`counted`]).
     pub fn counts(&self) -> [u8; N_EVENT_PRODUCERS] {
         self.counts
     }
 
-    /// One producer's transition count, selected by its `EV_*` bit. Returns 0 for a mask with no
-    /// bit set; a mask with several set selects the lowest.
-    pub fn count(&self, ev: u8) -> u8 {
-        match ev.trailing_zeros() as usize {
+    /// One producer's transition count, selected by its `EV_*` bit (a motor cause selects the
+    /// motor union's counter). Returns 0 for a mask with no bit set; a mask with several set
+    /// selects the lowest slot.
+    pub fn count(&self, ev: u16) -> u8 {
+        match counted(ev).trailing_zeros() as usize {
             i if i < N_EVENT_PRODUCERS => self.counts[i],
             _ => 0,
         }

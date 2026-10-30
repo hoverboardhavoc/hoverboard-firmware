@@ -298,7 +298,7 @@ fn motor_fault_folds_into_fault_a_and_forces_shutdown() {
     assert!(!s.obs().motor_fault);
 
     // The motor faults: RUN -> SHUTDOWN, then OFF with MOE withdrawn from every motor.
-    s.motor_fault = true;
+    s.motor_fault = EV_MOTOR_HALL;
     let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
     assert!(s.obs().motor_fault, "the level is published");
@@ -308,7 +308,7 @@ fn motor_fault_folds_into_fault_a_and_forces_shutdown() {
 
     // A LEVEL, not a latch at this boundary: the producers own their own stickiness, so clearing
     // it here lets the held power request walk the machine back up on its own gates.
-    s.motor_fault = false;
+    s.motor_fault = 0;
     let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Init.as_byte());
 }
@@ -362,7 +362,7 @@ fn off_inhibit_can_never_block_a_shutdown() {
     assert_eq!(t.mode_byte, Mode::Run.as_byte());
 
     s.motor_moving = true;
-    s.motor_fault = true;
+    s.motor_fault = EV_MOTOR_HALL;
     let t = control_task(&mut s, None, 1);
     assert_eq!(t.mode_byte, Mode::Shutdown.as_byte());
     let t = control_task(&mut s, None, 1);
@@ -818,7 +818,7 @@ fn the_stale_release_is_attributed_to_power_request() {
         "the stale release is the second edge"
     );
     assert_eq!(
-        s.obs().event_levels & EV_POWER_REQUEST,
+        u16::from(s.obs().event_levels) & EV_POWER_REQUEST,
         0,
         "and the live level reads clear"
     );
@@ -1650,12 +1650,12 @@ fn an_over_current_trip_latches_motor_0_and_clears_on_the_off_pass() {
     assert_eq!(t.sub_state, 0);
     assert_eq!(t.mode_byte, Mode::Shutdown.as_byte(), "fault_a -> SHUTDOWN");
     assert_ne!(
-        s.obs().event_levels & EV_LATCH_A,
+        u16::from(s.obs().event_levels) & EV_LATCH_A,
         0,
         "attributed to latch_a"
     );
     // Not the motor-side level: the trip reaches fault_a through the latch alone.
-    assert!(!s.motor_fault);
+    assert_eq!(s.motor_fault, 0);
     assert!(!s.obs().motor_fault);
 
     // SHUTDOWN lands in OFF: every latch clears on that pass, with MOE withdrawn.
@@ -2620,7 +2620,7 @@ fn a_held_request_against_a_refusing_arm_settles_in_off_instead_of_cycling() {
     let mut inits = 0;
     for _ in 0..40 {
         // The firmware's fold, before the pass that consumes it.
-        s.motor_fault = refused;
+        s.motor_fault = if refused { EV_MOTOR_ARM } else { 0 };
         let level = refused;
         let out = control_task(&mut s, None, 1);
         // The firmware's `arm::hw::enact`, after it.
@@ -2671,7 +2671,7 @@ fn dropping_the_request_releases_the_refusal_and_the_next_engage_re_reads() {
                 refused: &mut bool,
                 attempts: &mut usize,
                 released: &mut usize| {
-        s.motor_fault = *refused;
+        s.motor_fault = if *refused { EV_MOTOR_ARM } else { 0 };
         let level = *refused;
         let out = control_task(s, None, 1);
         if out.moe[0] && !level {
@@ -3068,7 +3068,7 @@ fn transition_counters_are_per_producer_and_do_not_bleed() {
     for e in [
         EV_COMMS_LOSS,
         EV_STOP_ALL,
-        EV_MOTOR_FAULT,
+        EV_MOTOR_HALL,
         EV_LATCH_A,
         EV_LATCH_B,
         EV_MODE_FAULT,
@@ -3103,16 +3103,24 @@ fn comms_loss_is_attributed_to_its_own_counter_through_the_pipeline() {
     run_ticks(&mut s, 3);
     let base = s.obs().event_counts;
     assert_eq!(
-        s.obs().event_levels & EV_COMMS_LOSS,
+        u16::from(s.obs().event_levels) & EV_COMMS_LOSS,
         0,
         "fresh peer, no loss"
     );
 
     run_ticks(&mut s, 40); // past CYCLIC_TIMEOUT_TICKS
-    assert_ne!(s.obs().event_levels & EV_COMMS_LOSS, 0, "loss asserted");
+    assert_ne!(
+        u16::from(s.obs().event_levels) & EV_COMMS_LOSS,
+        0,
+        "loss asserted"
+    );
     s.inbox.accept(CTRL, cyclic(0));
     run_ticks(&mut s, 2);
-    assert_eq!(s.obs().event_levels & EV_COMMS_LOSS, 0, "and cleared");
+    assert_eq!(
+        u16::from(s.obs().event_levels) & EV_COMMS_LOSS,
+        0,
+        "and cleared"
+    );
 
     let after = s.obs().event_counts;
     let idx = EV_COMMS_LOSS.trailing_zeros() as usize;
@@ -3150,7 +3158,7 @@ fn a_power_request_fall_is_counted_because_it_is_the_other_way_run_reaches_shutd
         2,
         "the fall is counted: this is what a dropped request looks like"
     );
-    assert_eq!(s.obs().event_levels & EV_POWER_REQUEST, 0);
+    assert_eq!(u16::from(s.obs().event_levels) & EV_POWER_REQUEST, 0);
     assert_eq!(s.mode.mode(), Mode::Off, "and it did shut down");
 }
 
@@ -3161,12 +3169,12 @@ fn the_motor_level_and_the_tilt_cutout_are_attributed_separately() {
     let mut s = fresh();
     hold_power(&mut s);
     run_ticks(&mut s, 3);
-    let m = EV_MOTOR_FAULT.trailing_zeros() as usize;
+    let m = COUNTED_MOTOR.trailing_zeros() as usize;
     let a = EV_STOP_ALL.trailing_zeros() as usize;
 
-    s.motor_fault = true;
+    s.motor_fault = EV_MOTOR_HALL;
     run_ticks(&mut s, 1);
-    s.motor_fault = false;
+    s.motor_fault = 0;
     run_ticks(&mut s, 1);
     assert_eq!(s.obs().event_counts[m], 2, "motor level blipped");
     assert_eq!(s.obs().event_counts[a], 0, "the tilt cutout did not");
@@ -3223,14 +3231,18 @@ fn the_cyclic_fault_byte_is_this_passes_level_mask() {
 fn fault_a_bits_is_exactly_the_fault_a_group() {
     assert_eq!(
         FAULT_A_BITS,
-        EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_MOTOR_FAULT | EV_LATCH_A
+        EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_LATCH_A | EV_MOTOR_BITS
     );
-    for bit in 0..N_EVENT_PRODUCERS {
-        let ev = 1u8 << bit;
+    assert_eq!(
+        EV_MOTOR_BITS, 0x0F00,
+        "the four motor causes are bits 8 to 11 and bit 3 is retired"
+    );
+    for bit in 0..16 {
+        let ev = 1u16 << bit;
         let levels = events::Levels {
             comms_loss: ev == EV_COMMS_LOSS,
             imu_loss: ev == EV_IMU_LOSS,
-            motor_fault: ev == EV_MOTOR_FAULT,
+            motor: ev & EV_MOTOR_BITS,
             latch_a: ev == EV_LATCH_A,
             latch_b: ev == EV_LATCH_B,
             mode_fault: ev == EV_MODE_FAULT,
@@ -3239,11 +3251,14 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
             // `EV_STOP_ALL`'s one producer (`specs/control.md` (l)).
             tilt: ev == EV_STOP_ALL,
         };
-        assert_eq!(levels.mask(), ev, "one producer, one bit");
-        assert_eq!(levels.own_mask(), ev, "and the wire byte says the same");
+        // Bit 3 and bits 12..15 have no producer: nothing can set them.
+        let producer = bit != 3 && bit < 12;
+        let want = if producer { ev } else { 0 };
+        assert_eq!(levels.mask(), want, "bit {bit}: one producer, one bit");
+        assert_eq!(levels.own_mask(), want, "and the wire word says the same");
         assert_eq!(
             levels.fault_a(),
-            FAULT_A_BITS & ev != 0,
+            FAULT_A_BITS & want != 0,
             "bit {bit}: the aggregate and the mask agree"
         );
     }
@@ -3271,10 +3286,10 @@ fn obs_publishes_the_levels_beside_the_counts() {
     let mut s = fresh();
     hold_power(&mut s);
     run_ticks(&mut s, 3);
-    assert_eq!(s.obs().event_levels, s.events.levels());
+    assert_eq!(s.obs().event_levels, counted(s.events.levels()));
     assert_eq!(s.obs().event_counts, s.events.counts());
     assert_ne!(
-        s.obs().event_levels & EV_POWER_REQUEST,
+        u16::from(s.obs().event_levels) & EV_POWER_REQUEST,
         0,
         "the held request shows as a LEVEL, and its count is odd"
     );
@@ -3294,18 +3309,18 @@ fn a_transient_that_never_survives_a_tick_boundary_is_still_the_only_thing_that_
     run_ticks(&mut s, 3);
     let inits_before = s.obs().enact_inits;
 
-    s.motor_fault = true; // one tick of fault: RUN -> SHUTDOWN
+    s.motor_fault = EV_MOTOR_HALL; // one tick of fault: RUN -> SHUTDOWN
     run_ticks(&mut s, 1);
-    s.motor_fault = false;
+    s.motor_fault = 0;
     run_ticks(&mut s, 6); // OFF, then re-arm on the still-held request
 
     assert!(
         s.obs().enact_inits > inits_before,
         "the re-arm happened (the O1 signature)"
     );
-    assert_eq!(s.obs().event_levels & EV_MOTOR_FAULT, 0, "level long gone");
+    assert_eq!(s.obs().event_levels & COUNTED_MOTOR, 0, "level long gone");
     assert_eq!(
-        s.obs().event_counts[EV_MOTOR_FAULT.trailing_zeros() as usize],
+        s.obs().event_counts[COUNTED_MOTOR.trailing_zeros() as usize],
         2,
         "and the counter is the only witness"
     );
@@ -3430,7 +3445,7 @@ fn ble_peer_tx_forwards_nothing_before_a_peer_is_seen() {
 #[test]
 fn ble_peer_tx_carries_the_inbox_state_and_its_source_unchanged() {
     // The forward is the inbox's decoded copy under the address it arrived with, and the codec is
-    // a bijection on the 31 B layout: re-encoding it gives the bytes the peer put on the wire.
+    // a bijection on the 32 B layout: re-encoding it gives the bytes the peer put on the wire.
     // The rigid words ride through it like the rest: a leader's commanded torque and its leader
     // flag are the peer's to state, and the forward restates them rather than this board's.
     let frame = CyclicState {
@@ -4943,7 +4958,7 @@ fn a_leader_whose_peer_is_not_a_rigid_follower_does_not_engage() {
 /// **Two leaders is a staging error and stops the machine** (section 2): a leader hearing a fresh
 /// peer cyclic with the leader flag raises the mode fault AND feeds the shell a cleared gate. The
 /// second half is the load-bearing one: `mode_fault` is not a Fault A, so the level alone would
-/// publish a complaint and keep balancing. The level reaches the cyclic `fault` byte, so the app
+/// publish a complaint and keep balancing. The level reaches the cyclic `fault` word, so the app
 /// sees why neither board arms, and it releases when the peer stops claiming the role.
 #[test]
 fn two_leaders_refuse_each_other_with_the_mode_fault() {
@@ -5018,9 +5033,9 @@ fn a_pivoting_board_ignores_the_rigid_roles_and_gates_nothing() {
 // for, and a disarmed wheel freewheels. So a board whose fresh peer reports any Fault-A producer
 // folds that into its OWN `fault_a` and stops too.
 
-/// The same peer payload with its `fault` byte set: the peer's own producer levels, which is what
+/// The same peer payload with its `fault` word set: the peer's own producer levels, which is what
 /// `CYCLIC_STATE.fault` carries (section 4).
-fn with_fault(p: Payload, fault: u8) -> Payload {
+fn with_fault(p: Payload, fault: u16) -> Payload {
     match p {
         Payload::CyclicState(mut c) => {
             c.fault = fault;
@@ -5045,7 +5060,7 @@ fn a_rigid_board_stops_when_its_peer_reports_a_fault_a_and_re_arms_when_it_clear
     let running = leader_cyclic(Mode::Run, 5000);
     run_with_peer(&mut f, 60, &running, None);
     assert_eq!(f.mode.mode(), Mode::Run);
-    run_with_peer(&mut f, 2, &with_fault(running, EV_MOTOR_FAULT), None);
+    run_with_peer(&mut f, 2, &with_fault(running, EV_MOTOR_HALL), None);
     assert_ne!(f.mode.mode(), Mode::Run, "peer_down is a Fault A");
     assert_ne!(
         f.events.levels() & EV_COMMS_LOSS,
@@ -5079,7 +5094,7 @@ fn a_rigid_board_stops_when_its_peer_reports_a_fault_a_and_re_arms_when_it_clear
 /// **A peer's one-way comms loss stops this board too** (section 6, and the reason `peer_down`
 /// tests the whole Fault-A group rather than skipping `EV_COMMS_LOSS`). If A can hear B but B
 /// cannot hear A, B's supervision disarms B at 100 ms while A's own cyclic age never grows: A
-/// would otherwise balance on one wheel against a freewheeling one. B says so in its fault byte,
+/// would otherwise balance on one wheel against a freewheeling one. B says so in its fault word,
 /// which is the only evidence A has.
 #[test]
 fn a_peers_own_comms_loss_is_a_peer_down_here() {
@@ -5103,14 +5118,14 @@ fn a_peers_own_comms_loss_is_a_peer_down_here() {
 }
 
 /// **`peer_down` is never echoed onto the wire** (section 4, `events::Levels::own_mask`): the
-/// `fault` byte carries this board's OWN producers. Were the level echoed, one board's motor
+/// `fault` word carries this board's OWN producers. Were the level echoed, one board's motor
 /// fault would set the other's `peer_down`, whose bit would set the first board's, and neither
 /// could clear: `fault_a` gates OFF -> INIT, so the pair would refuse to arm until power-cycled.
 #[test]
 fn peer_down_is_never_echoed_onto_the_wire() {
     let mut f = rigid_board(false);
     hold_power(&mut f);
-    let faulted = with_fault(leader_cyclic(Mode::Run, 5000), EV_MOTOR_FAULT);
+    let faulted = with_fault(leader_cyclic(Mode::Run, 5000), EV_MOTOR_PERIOD);
     run_with_peer(&mut f, 60, &faulted, None);
     assert_ne!(f.events.levels() & EV_COMMS_LOSS, 0, "asserted locally");
     f.inbox.accept(OTHER, faulted);
@@ -5161,7 +5176,7 @@ fn a_stale_peers_fault_is_not_peer_down() {
     let mut f = rigid_board(false);
     f.inbox.accept(
         OTHER,
-        with_fault(leader_cyclic(Mode::Run, 5000), EV_MOTOR_FAULT),
+        with_fault(leader_cyclic(Mode::Run, 5000), EV_MOTOR_PERIOD),
     );
     control_task(&mut f, None, 1);
     assert_ne!(f.events.levels() & EV_COMMS_LOSS, 0, "fresh: asserted");
@@ -5182,7 +5197,7 @@ fn a_pivoting_board_ignores_its_peers_fault_mask() {
     run_with_peer(
         &mut s,
         100,
-        &with_fault(cyclic(0), EV_MOTOR_FAULT | EV_IMU_LOSS | EV_LATCH_A),
+        &with_fault(cyclic(0), EV_MOTOR_CAL | EV_IMU_LOSS | EV_LATCH_A),
         Some(&tilted),
     );
     assert_eq!(s.mode.mode(), Mode::Run);
@@ -5768,16 +5783,16 @@ fn the_cyclic_carries_the_low_half_of_the_position_unmirrored() {
             let mut wire = [0u8; CyclicState::ENCODED_LEN];
             c.encode(&mut wire);
             assert_eq!(
-                i16::from_le_bytes([wire[13], wire[14]]),
+                i16::from_le_bytes([wire[14], wire[15]]),
                 pos as i16,
-                "at offset 13"
+                "at offset 14"
             );
         }
     }
 }
 
 /// The cyclic carries the block's `wheel_rate_q12` whole and unscaled, unmirrored whichever side
-/// the board drives, as the `i32` at offset 27 (`specs/link-control.md`, `CYCLIC_STATE`), and a
+/// the board drives, as the `i32` at offset 28 (`specs/link-control.md`, `CYCLIC_STATE`), and a
 /// peer that accepts the frame holds the same word.
 #[test]
 fn the_cyclic_carries_the_wheel_rate_unscaled_and_the_peer_decodes_it() {
@@ -5791,9 +5806,9 @@ fn the_cyclic_carries_the_wheel_rate_unscaled_and_the_peer_decodes_it() {
             let mut wire = [0u8; CyclicState::ENCODED_LEN];
             c.encode(&mut wire);
             assert_eq!(
-                i32::from_le_bytes([wire[27], wire[28], wire[29], wire[30]]),
+                i32::from_le_bytes([wire[28], wire[29], wire[30], wire[31]]),
                 rate,
-                "at offset 27"
+                "at offset 28"
             );
             let mut b = fresh();
             b.inbox.accept(PEER, Payload::CyclicState(c));

@@ -119,7 +119,7 @@ private fun wrU32(b: ByteArray, at: Int, v: Long) {
 /** A wire `i32`: the `u32` read narrowed back to its signed bits. */
 private fun rdI32(b: ByteArray, at: Int): Int = rdU32(b, at).toInt()
 
-// --- CYCLIC_STATE (31 B: 15 B committed + a 12 B appended block + the i32 wheelRate) ----------
+// --- CYCLIC_STATE (32 B: 16 B committed + a 12 B appended block + the i32 wheelRate) ----------
 
 /**
  * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
@@ -248,7 +248,7 @@ data class CyclicObs(
 /**
  * Board state, emitted cyclically. Mirror of `crates/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 31 bytes and only 31 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`): the 15
+ * Wire layout, 32 bytes and only 32 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`): the 16
  * committed words, the 12-byte appended [CyclicObs] block and the `i32` [wheelRate]:
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
@@ -256,12 +256,12 @@ data class CyclicObs(
  * off 4..6   i16 LE  wheelSpeed   raw hall edge count per window, see below
  * off 6..8   u16 LE  battery      CENTIVOLTS, 0 = unknown (crates/orchestrator/src/battery.rs, battery_source)
  * off 8      u8      mode
- * off 9      u8      fault        the gating-producer level mask, 0 = every producer clear
- * off 10     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit7 lockdown
- * off 11..13 i16 LE  peerDemand   the torque a rigid LEADER commands its peer to apply, else 0
- * off 13..15 i16 LE  wheelPos     the low 16 bits of the wheel's signed hall-edge position
- * off 15..27         the CyclicObs block
- * off 27..31 i32 LE  wheelRate    the period-measured wheel rate, Q12 of wheelSpeed's unit
+ * off 9..11  u16 LE  fault        the gating-producer level mask, 0 = every producer clear
+ * off 11     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit7 lockdown
+ * off 12..14 i16 LE  peerDemand   the torque a rigid LEADER commands its peer to apply, else 0
+ * off 14..16 i16 LE  wheelPos     the low 16 bits of the wheel's signed hall-edge position
+ * off 16..28         the CyclicObs block
+ * off 28..32 i32 LE  wheelRate    the period-measured wheel rate, Q12 of wheelSpeed's unit
  * ```
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
@@ -340,10 +340,10 @@ data class CyclicState(
         wrU16(out, 4, wheelSpeed)
         wrU16(out, 6, battery)
         out[8] = mode.toByte()
-        out[9] = fault.toByte()
-        out[10] = flags.toByte()
-        wrU16(out, 11, peerDemand)
-        wrU16(out, 13, wheelPos)
+        wrU16(out, 9, fault)
+        out[11] = flags.toByte()
+        wrU16(out, 12, peerDemand)
+        wrU16(out, 14, wheelPos)
         obs.encode().copyInto(out, LEN)
         wrU32(out, WHEEL_RATE_OFF, wheelRate.toLong())
         return out
@@ -354,7 +354,7 @@ data class CyclicState(
          * Length of the committed words, which is the offset the appended block sits at.
          * `crates/linkctl/src/lib.rs`, `CyclicState::LEN`.
          */
-        const val LEN = 15
+        const val LEN = 16
 
         /**
          * The ONE on-wire length of a `CYCLIC_STATE` payload: what the firmware emits and the only
@@ -374,12 +374,47 @@ data class CyclicState(
         /** `flags` bit2: rigid-frame follower. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
         const val FLAG_FOLLOWER = 1 shl 2
 
+        /** [fault] bit 0: comms loss. `crates/orchestrator/src/events.rs`, `EV_COMMS_LOSS`. */
+        const val EV_COMMS_LOSS = 1 shl 0
+
+        /** [fault] bit 1: latched stopped by the tilt cutout. `events.rs`, `EV_STOP_ALL`. */
+        const val EV_STOP_ALL = 1 shl 1
+
+        /** [fault] bit 2: IMU loss. `events.rs`, `EV_IMU_LOSS`. */
+        const val EV_IMU_LOSS = 1 shl 2
+
+        /** [fault] bit 4: motor 0's fault latch. `events.rs`, `EV_LATCH_A`. */
+        const val EV_LATCH_A = 1 shl 4
+
+        /** [fault] bit 5: motor 1's fault latch. `events.rs`, `EV_LATCH_B`. */
+        const val EV_LATCH_B = 1 shl 5
+
+        /** [fault] bit 6: the mode fault; not a fault-A producer. `events.rs`, `EV_MODE_FAULT`. */
+        const val EV_MODE_FAULT = 1 shl 6
+
+        /** [fault] bit 7: the power request; not a fault. `events.rs`, `EV_POWER_REQUEST`. */
+        const val EV_POWER_REQUEST = 1 shl 7
+
+        /** [fault] bit 8: motor-side hall dwell. `events.rs`, `EV_MOTOR_HALL`. */
+        const val EV_MOTOR_HALL = 1 shl 8
+
+        /** [fault] bit 9: calibration refused at init. `events.rs`, `EV_MOTOR_CAL`. */
+        const val EV_MOTOR_CAL = 1 shl 9
+
+        /** [fault] bit 10: period-liveness loss. `events.rs`, `EV_MOTOR_PERIOD`. */
+        const val EV_MOTOR_PERIOD = 1 shl 10
+
+        /** [fault] bit 11: an arm attempt aborted before MOE. `events.rs`, `EV_MOTOR_ARM`. */
+        const val EV_MOTOR_ARM = 1 shl 11
+
         /**
-         * The FAULT-A group of the [fault] mask: comms loss, the tilt cutout, IMU loss, the
-         * motor-side fault level and motor 0's latch. `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`
-         * (bits 0, 1, 2, 3 and 4 of that file's `EV_*` allocation).
+         * The FAULT-A group of the [fault] mask: comms loss, the tilt cutout, IMU loss, motor 0's
+         * latch and the four motor-side causes. `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`
+         * (bits 0, 1, 2, 4 and 8 to 11; bit 3 is retired).
          */
-        const val FAULT_A_BITS = 0x1F
+        const val FAULT_A_BITS =
+            EV_COMMS_LOSS or EV_STOP_ALL or EV_IMU_LOSS or EV_LATCH_A or
+                EV_MOTOR_HALL or EV_MOTOR_CAL or EV_MOTOR_PERIOD or EV_MOTOR_ARM
 
         /** `flags` bit7: lockdown. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
         const val FLAG_LOCKDOWN = 1 shl 7
@@ -404,10 +439,10 @@ data class CyclicState(
                 wheelSpeed = rdI16(b, 4),
                 battery = rdU16(b, 6),
                 mode = rdU8(b, 8),
-                fault = rdU8(b, 9),
-                flags = rdU8(b, 10),
-                peerDemand = rdI16(b, 11),
-                wheelPos = rdI16(b, 13),
+                fault = rdU16(b, 9),
+                flags = rdU8(b, 11),
+                peerDemand = rdI16(b, 12),
+                wheelPos = rdI16(b, 14),
                 obs = CyclicObs.decode(b, LEN),
                 wheelRate = rdI32(b, WHEEL_RATE_OFF),
             )

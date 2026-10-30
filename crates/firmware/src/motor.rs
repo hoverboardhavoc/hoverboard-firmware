@@ -43,6 +43,7 @@
 #![cfg_attr(not(target_os = "none"), allow(dead_code))]
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use orchestrator::{EV_MOTOR_ARM, EV_MOTOR_CAL, EV_MOTOR_HALL, EV_MOTOR_PERIOD};
 
 // -------------------------------------------------------------------------------------------
 // The handoff words (motor 0). One writer each; `Relaxed` throughout.
@@ -381,17 +382,30 @@ impl PeriodHealth {
 /// reach this level while HELD, so either one shuts the board down; how long each is held belongs
 /// to the producer, exactly as it does for the hall dwell fault and the liveness hysteresis.
 ///
-/// The three [`FAULT`]-word producers are read from the WORD; the other two levels arrive as levels.
+/// The two [`FAULT`]-word producers are read from the WORD; the other two levels arrive as levels.
 /// Nothing downstream ever reads the word again: this function is the level's single owner, and the
 /// arming gate consumes only what it returns.
+///
+/// It returns the CAUSES, one `orchestrator::events::EV_MOTOR_*` bit each
+/// (`specs/link-control.md`, "`fault` widens to u16"): [`EV_MOTOR_HALL`] for [`FAULT_HALL`],
+/// [`EV_MOTOR_CAL`] for [`FAULT_INIT_CAL`], [`EV_MOTOR_PERIOD`] for `period_loss` and
+/// [`EV_MOTOR_ARM`] for `arm_refused`. A consumer that needs the old level reads the union
+/// (`!= 0`); the cyclic `fault` word carries the four apart.
 #[inline]
 pub fn motor_fault_level(
     configured: bool,
     faults: u32,
     period_loss: bool,
     arm_refused: bool,
-) -> bool {
-    configured && (period_loss || arm_refused || (faults & (FAULT_HALL | FAULT_INIT_CAL)) != 0)
+) -> u16 {
+    if !configured {
+        return 0;
+    }
+    let bit = |set: bool, ev: u16| if set { ev } else { 0 };
+    bit(faults & FAULT_HALL != 0, EV_MOTOR_HALL)
+        | bit(faults & FAULT_INIT_CAL != 0, EV_MOTOR_CAL)
+        | bit(period_loss, EV_MOTOR_PERIOD)
+        | bit(arm_refused, EV_MOTOR_ARM)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -3210,7 +3224,7 @@ mod tests {
         assert_eq!(running_method(M::Foc, boot_accepted()), M::Foc);
         assert_eq!(method_fault_bits(M::Foc, boot_accepted()), 0);
         // The demotion is a READBACK, not a shutdown: six-step is what a six-step board runs.
-        assert!(!motor_fault_level(true, FAULT_METHOD, false, false));
+        assert_eq!(motor_fault_level(true, FAULT_METHOD, false, false), 0);
     }
 
     /// A quiet-bridge offset pair inside `commutation::foc::PhaseOffsets`' acceptance window: the
@@ -3698,7 +3712,10 @@ mod tests {
         );
         // The init fault is a fault_a producer on a configured motor, so such a board does not
         // arm, which is also why an arm-time `Foc` cannot reach a running motor uncalibrated.
-        assert!(motor_fault_level(true, FAULT_INIT_CAL, false, false));
+        assert_eq!(
+            motor_fault_level(true, FAULT_INIT_CAL, false, false),
+            EV_MOTOR_CAL
+        );
     }
 
     /// The acceptance window is the commutation crate's, not a copy: the bench's stage-3 band and
@@ -3730,7 +3747,7 @@ mod tests {
         assert_eq!((w >> 24) & 0xFF, OBS_SKIP_NO_SENSE);
         // ...and with nothing configured, no motor fault is produced from its dead counters, so
         // the FOC request neither runs FOC nor faults the board: it is recorded and ignored.
-        assert!(!motor_fault_level(false, 0, true, false));
+        assert_eq!(motor_fault_level(false, 0, true, false), 0);
         assert_eq!(requested_method(2), commutation::CommutationMethod::Foc);
         // The gate covers it a second way, structurally: no bring-up means no calibration, so no
         // accepted zeros, so a `Foc` request has nothing to build a current loop on.
@@ -3777,31 +3794,41 @@ mod tests {
     /// Which fault bits reach `fault_a`, and which deliberately do not.
     #[test]
     fn the_motor_fault_producers_are_exactly_the_four_named() {
-        // The three producers.
-        assert!(
+        // The four producers, each on its own cause bit.
+        assert_eq!(
             motor_fault_level(true, FAULT_HALL, false, false),
+            EV_MOTOR_HALL,
             "hall dwell"
         );
-        assert!(
+        assert_eq!(
             motor_fault_level(true, FAULT_INIT_CAL, false, false),
+            EV_MOTOR_CAL,
             "refused cal"
         );
-        assert!(
+        assert_eq!(
             motor_fault_level(true, 0, true, false),
+            EV_MOTOR_PERIOD,
             "period-liveness loss"
         );
-        assert!(motor_fault_level(true, 0, false, true), "a refused arm");
+        assert_eq!(
+            motor_fault_level(true, 0, false, true),
+            EV_MOTOR_ARM,
+            "a refused arm"
+        );
+        // Several at once are reported together, not collapsed.
+        assert_eq!(
+            motor_fault_level(true, FAULT_HALL | FAULT_INIT_CAL, true, true),
+            orchestrator::EV_MOTOR_BITS
+        );
         // Not producers: the freshness guard has already floated every phase itself, and a refused
         // duty left the outputs untouched. Both stay observable in the motor block.
-        assert!(!motor_fault_level(true, FAULT_DEMAND_STALE, false, false));
-        assert!(!motor_fault_level(true, FAULT_DUTY_RANGE, false, false));
+        assert_eq!(motor_fault_level(true, FAULT_DEMAND_STALE, false, false), 0);
+        assert_eq!(motor_fault_level(true, FAULT_DUTY_RANGE, false, false), 0);
         // Nothing configured: nothing produced, whatever the words say.
-        assert!(!motor_fault_level(
-            false,
-            FAULT_HALL | FAULT_INIT_CAL,
-            true,
-            false
-        ));
+        assert_eq!(
+            motor_fault_level(false, FAULT_HALL | FAULT_INIT_CAL, true, true),
+            0
+        );
     }
 
     /// The balance law's torque-mode flag is the published method byte of a CONFIGURED motor:
@@ -4709,12 +4736,12 @@ mod tests {
         for bit in 0..32 {
             let w = 1u32 << bit;
             assert_eq!(
-                motor_fault_level(true, w, false, false),
+                motor_fault_level(true, w, false, false) != 0,
                 w & producers != 0,
                 "fault bit {bit}"
             );
         }
-        assert!(!motor_fault_level(true, 0, false, false));
+        assert_eq!(motor_fault_level(true, 0, false, false), 0);
     }
 
     /// The packed observation word round-trips the fields the bench reads back over SWD.
