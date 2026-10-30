@@ -15,10 +15,6 @@ import com.hoverboard.remote.LayoutNotice
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.LayoutRows
 
-/** How a packed pin byte reads on its own: a pin name, "not set", or the byte that is neither. */
-@Composable
-internal fun pinText(raw: Int): String = layoutValueText(Layout.LATCH, raw)
-
 /** How one layout field's raw value reads: a pin name, "not set", or the byte that is neither. */
 @Composable
 internal fun layoutValueText(slot: LayoutSlot, raw: Int): String {
