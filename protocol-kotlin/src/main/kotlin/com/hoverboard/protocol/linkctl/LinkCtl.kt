@@ -416,6 +416,17 @@ data class CyclicState(
             EV_COMMS_LOSS or EV_STOP_ALL or EV_IMU_LOSS or EV_LATCH_A or
                 EV_MOTOR_HALL or EV_MOTOR_CAL or EV_MOTOR_PERIOD or EV_MOTOR_ARM
 
+        /**
+         * The bits of a board's own [fault] word that stop that board arming: Fault A and motor 1's
+         * latch, which is Fault B alone. The mode machine holds a board in OFF while either is
+         * asserted (`crates/state/src/mode.rs`, `ModeMachine::tick`; `crates/orchestrator/src/events.rs`,
+         * `Levels::fault_a` and `Levels::fault_b`), so this is [FAULT_A_BITS] or [EV_LATCH_B]: bits
+         * 0, 1, 2, 4, 5 and 8 to 11. The rider app's fault lamps and its fault disarm read this and
+         * no literal (`specs/rider-ui.md` 3.1b).
+         */
+        const val ARM_BLOCKING_BITS = FAULT_A_BITS or EV_LATCH_B
+
+
         /** `flags` bit7: lockdown. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
         const val FLAG_LOCKDOWN = 1 shl 7
 

@@ -351,6 +351,9 @@ class WireDriftTest {
         assertEquals(0x02, CyclicState.FLAG_LEADER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_LEADER")
         assertEquals(0x04, CyclicState.FLAG_FOLLOWER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_FOLLOWER")
         assertEquals(0x0F17, CyclicState.FAULT_A_BITS, "crates/orchestrator/src/events.rs, FAULT_A_BITS")
+        // FAULT_A_BITS | EV_LATCH_B: Fault A and Fault B, what holds a board in OFF.
+        assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS, "crates/orchestrator/src/events.rs, EV_LATCH_B")
+
         val ev = "crates/orchestrator/src/events.rs"
         assertEquals(0x001, CyclicState.EV_COMMS_LOSS, "$ev, EV_COMMS_LOSS")
         assertEquals(0x002, CyclicState.EV_STOP_ALL, "$ev, EV_STOP_ALL")
