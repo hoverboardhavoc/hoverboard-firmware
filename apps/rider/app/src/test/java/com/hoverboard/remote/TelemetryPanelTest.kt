@@ -1,8 +1,10 @@
 package com.hoverboard.remote
 
 import android.app.Application
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -100,8 +102,6 @@ class TelemetryPanelTest {
         // exactly the claim this test exists to forbid. The chips are the only uppercase text here,
         // so this does not collide with the lower-case note below.
         compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
-
-        compose.onNodeWithText(FAULT_LEVEL_PREFIX, substring = true).assertDoesNotExist()
     }
 
     /**
@@ -130,16 +130,53 @@ class TelemetryPanelTest {
     }
 
     /**
-     * The cyclic fault byte is the board's producer level mask, and a fault-A bit in it (here
-     * bit 1, `EV_STOP_ALL`) lights the chip with the masked level.
+     * The cyclic fault word is the board's producer level mask, and a fault bit in it (here
+     * bit 1, `EV_STOP_ALL`) is one line naming the board and the cause.
      */
     @Test
-    fun aNonZeroCyclicFaultLevelIsRendered() {
-        show(TelemetryUi().merge(cyclic(flags = 0, fault = 2)))
+    fun aSetFaultBitIsALineNamingTheBoardAndTheCause() {
+        show(TelemetryUi().merge(cyclic(flags = 0, fault = CyclicState.EV_STOP_ALL)))
 
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_chip_fault_level, 2))
-            .assertIsDisplayed()
+        compose.onNodeWithText(faultLine(R.string.fault_cause_tilt_stop)).assertIsDisplayed()
+    }
+
+    /**
+     * Every shown bit gets its own line: bits 0 to 2, 4, 5 and 8 to 11, the four motor causes
+     * among them, so a motor fault says which of the four it is.
+     */
+    @Test
+    fun eachSetCauseIsItsOwnLine() {
+        show(TelemetryUi().merge(cyclic(flags = 0, fault = 0x0F37)))
+
+        for (cause in listOf(
+            R.string.fault_cause_comms_loss,
+            R.string.fault_cause_tilt_stop,
+            R.string.fault_cause_imu_loss,
+            R.string.fault_cause_latch_a,
+            R.string.fault_cause_latch_b,
+            R.string.fault_cause_motor_hall,
+            R.string.fault_cause_motor_cal,
+            R.string.fault_cause_motor_period,
+            R.string.fault_cause_motor_arm,
+        )) {
+            compose.onNodeWithText(faultLine(cause)).assertIsDisplayed()
+        }
+    }
+
+    /** Motor 1's latch is fault B, not fault A, and is still named. */
+    @Test
+    fun motorOnesLatchIsNamed() {
+        show(TelemetryUi().merge(cyclic(flags = 0, fault = CyclicState.EV_LATCH_B)))
+
+        compose.onNodeWithText(faultLine(R.string.fault_cause_latch_b)).assertIsDisplayed()
+    }
+
+    /** The retired bit 3 and the unallocated bits 12 to 15 name nothing. */
+    @Test
+    fun theRetiredAndUnallocatedBitsNameNothing() {
+        show(TelemetryUi().merge(cyclic(flags = 0, fault = 0xF008)))
+
+        compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
     }
 
     /**
@@ -155,15 +192,17 @@ class TelemetryPanelTest {
         compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
     }
 
-    /** And a fault-A bit beside them is rendered with the non-fault bits stripped. */
+    /** And a fault bit beside them is its one line, with no line for the non-fault bits. */
     @Test
-    fun theFaultLevelIsRenderedWithTheNonFaultBitsStripped() {
-        show(TelemetryUi().merge(cyclic(flags = 0, fault = 0x81)))
+    fun aFaultBesideTheNonFaultBitsIsTheOnlyLine() {
+        show(TelemetryUi().merge(cyclic(flags = 0, fault = 0xC0 or CyclicState.EV_COMMS_LOSS)))
 
-        compose
-            .onNodeWithText(context.getString(R.string.telemetry_chip_fault_level, 1))
-            .assertIsDisplayed()
+        compose.onNodeWithText(faultLine(R.string.fault_cause_comms_loss)).assertIsDisplayed()
+        compose.onAllNodesWithText(FAULT_WORD, substring = true).assertCountEquals(1)
     }
+
+    private fun faultLine(cause: Int): String =
+        context.getString(R.string.telemetry_fault_cause, BOARD, context.getString(cause))
 
     /**
      * A board that sends `battery = 0` is a board reporting UNKNOWN, and the panel says exactly
@@ -476,6 +515,7 @@ class TelemetryPanelTest {
                 battery = batteryReading(telemetry, packCells, chemistry),
                 currents = listOfNotNull(BOARD to current, peerCurrent?.let { PEER to it }),
                 speed = speed,
+                board = BOARD,
             )
         }
     }
@@ -493,9 +533,6 @@ class TelemetryPanelTest {
 
         /** Every fault chip this panel has ever had, or could grow, is built around this word. */
         const val FAULT_WORD = "FAULT"
-
-        /** Enough of the level chip's text to spot it; the full string takes a format argument. */
-        const val FAULT_LEVEL_PREFIX = "FAULT LEVEL"
 
         /** What each amp figure is worded with, so a test can pin that neither was drawn. */
         const val MOTOR_FIGURE = "A motor"

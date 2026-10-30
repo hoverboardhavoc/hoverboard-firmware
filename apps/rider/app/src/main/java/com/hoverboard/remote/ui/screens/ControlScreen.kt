@@ -116,6 +116,8 @@ fun ControlScreen(
             // has gone quiet is a thing to show, not to hide.
             currents = state.motorControllers.map { nodeLabel(it) to state.currentOf(it.address) },
             speed = state.speed,
+            // The board the panel's telemetry is from, which every fault line names.
+            board = state.selected?.let { a -> state.nodeAt(a)?.let { nodeLabel(it) } ?: boardHex(a) } ?: "",
         )
 
         if (showSimulateRider) {

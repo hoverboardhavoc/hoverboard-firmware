@@ -51,7 +51,10 @@ class TelemetryInboxTest {
         inbox.cyclic(slave, state(fault = 2), nowMs = 0)
 
         assertTrue(inbox.boards.value.getValue(slave).anyFault)
-        assertEquals(2, inbox.boards.value.getValue(slave).faultLevel)
+        assertEquals(
+            listOf(com.hoverboard.remote.model.FaultCause.TILT_STOP),
+            inbox.boards.value.getValue(slave).faultCauses,
+        )
         assertEquals(false, inbox.boards.value.getValue(master).anyFault)
     }
 
