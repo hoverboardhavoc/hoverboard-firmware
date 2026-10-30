@@ -115,6 +115,7 @@ fun ControlScreen(
             // every board the session FOUND, whether or not it is currently reporting: a board that
             // has gone quiet is a thing to show, not to hide.
             currents = state.motorControllers.map { nodeLabel(it) to state.currentOf(it.address) },
+            speed = state.speed,
         )
 
         if (showSimulateRider) {

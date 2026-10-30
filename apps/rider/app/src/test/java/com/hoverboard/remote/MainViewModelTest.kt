@@ -526,7 +526,7 @@ class MainViewModelTest : RiderVmTest() {
                     flags = CyclicState.FLAG_RIDER,
                     peerDemand = 0,
                     wheelPos = 0,
-                    wheelRate = 0,
+                    wheelRate = 8_192,
                     obs = CyclicObs(
                         phasePeak = 980,
                         phaseMean = 410,
@@ -545,7 +545,7 @@ class MainViewModelTest : RiderVmTest() {
             assertTrue(state.isConnected)
             val telem = state.telemetry!!
             assertEquals(35.55f, telem.batteryVolts!!, 0.01f)
-            assertEquals(600, telem.hallEdgesPerWindow)
+            assertEquals(8_192, telem.wheelRateQ12)
             assertEquals(-2.5f, telem.pitchDegrees, 0.001f)
             assertEquals(1.25f, telem.rollDegrees, 0.001f)
             assertTrue(telem.riderPresent)
@@ -600,7 +600,7 @@ class MainViewModelTest : RiderVmTest() {
                         chip = ChipTag.F130C8,
                         odometer = 1_284_310L,
                     ),
-                    0,
+                    -4_096,
                 ),
             )
 
@@ -609,7 +609,7 @@ class MainViewModelTest : RiderVmTest() {
                 state = awaitItem()
             }
             val telem = state.telemetry!!
-            assertEquals(250, telem.hallEdgesPerWindow)
+            assertEquals(-4_096, telem.wheelRateQ12)
             assertEquals(35.5f, telem.batteryVolts!!, 0.01f)
             assertTrue(telem.riderPresent)
             // The appended block is latest-wins with the rest of the payload: the newest state's
