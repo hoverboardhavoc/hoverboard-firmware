@@ -466,7 +466,7 @@ fn install_esp(given: Given, image_path: &str, files: &[&str], yes: bool) -> Res
         name,
     };
     let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
-    let plan = config::plan(&files, &reads, &unknown, false, false).map_err(|p| {
+    let plan = config::plan(&files, &reads, &unknown, false).map_err(|p| {
         let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
         msgs.join("\nerror: ")
     })?;
@@ -648,13 +648,10 @@ fn file_command(
         name: node_name(&f),
     };
     let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
-    let plan = config::plan(&files, &reads, &unknown, replace, flags.force).map_err(|p| {
+    let plan = config::plan(&files, &reads, &unknown, replace).map_err(|p| {
         let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
         msgs.join("\nerror: ")
     })?;
-    for w in &plan.warnings {
-        eprintln!("{w}");
-    }
     let none = BTreeMap::new();
     if dry {
         for l in config::report(&b.name, &plan, &reads, &none) {
@@ -969,7 +966,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         Some(Via::Ble(_)) => Given::Device,
     };
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>... [--force]|apply <node> <file>... [--force]|replace <node> <file>... [--yes] [--force]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
     let cmd = match word {
         Some(_) if COMMANDS.contains(&rest[0]) => rest[0],
         _ => return Err(usage.into()),
