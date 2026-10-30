@@ -43,8 +43,8 @@ data class TelemetryUi(
      * which case it is. A sensing board's word is 0 until a real conversion PRIMES its filter
      * (`orchestrator::battery`, `LocalSense::step`; a zero count after priming leaves the word
      * where it was, rather than returning it to 0), and only a converting injected ADC group ever
-     * writes that count, so a master whose `board.vbatt` IS staged publishes UNKNOWN until its
-     * motor is brought up. With `board.vbatt` defaulting to absent, that is the ordinary state of
+     * writes that count, so a master whose `board.battery.pin` IS staged publishes UNKNOWN until its
+     * motor is brought up. With `board.battery.pin` defaulting to absent, that is the ordinary state of
      * a part-configured master (`specs/sensing-and-safety.md`, "The battery word"). A consumer may
      * therefore say there is no reading; it may not say why.
      *

@@ -103,7 +103,10 @@ class SetupFieldsTest {
         // the drive mode for the app and never acts on either, so there is no board-side event to
         // wait for.
         val appOnly = SetupFields.ALL.filter { it.takesEffect == TakesEffect.APP_ONLY }.map { it.key }.toSet()
-        assertEquals(setOf(SetupFields.PACK_CELLS.key, SetupFields.DRIVE_MODE.key), appOnly)
+        assertEquals(
+            setOf(SetupFields.PACK_CELLS.key, SetupFields.BATTERY_CHEMISTRY.key, SetupFields.DRIVE_MODE.key),
+            appOnly,
+        )
     }
 
     /** A row the screen can write states when the board takes it up; a read-only row has nothing to say. */

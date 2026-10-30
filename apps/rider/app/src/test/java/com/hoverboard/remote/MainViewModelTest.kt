@@ -477,13 +477,14 @@ class MainViewModelTest : RiderVmTest() {
      * The gauge follows the pack the board stores (`specs/rider-ui.md` 3.6b): the cell count is
      * read with the ride facts, so a state of charge is shown without Setup ever being opened.
      *
-     * 33.0 V on eight cells is 24.0 V empty and 33.6 V full, so 94%. The curve this replaced was
+     * 33.0 V on eight Li-ion cells (the default chemistry) is 4.125 V a cell, between the table's 90%
+     * (4.07 V) and 100% (4.20 V) points, so 94%. The curve this replaced was
      * a seven-cell one compiled into the app, which read the same voltage as a full pack: every
      * reading at or above 29.4 V clamped to 100% on both machines here.
      */
     @Test
     fun `the battery gauge is scored against the pack the board stores`() = runTest(dispatcher) {
-        transport.store[0x01 to Fields.BOARD_PACK_CELLS.key()] = Value.U8(8)
+        transport.store[0x01 to Fields.BOARD_BATTERY_CELLS.key()] = Value.U8(8)
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01)
         transport.emitCyclicState(CyclicState(0, 0, 0, 3_300, 1, 0, 0, 0, 0, QUIET_OBS))
@@ -560,7 +561,10 @@ class MainViewModelTest : RiderVmTest() {
             assertEquals(1_284_310L, telem.odometerEdges)
             // 35.55 V with no pack read from this board: the voltage stands and no charge figure
             // is derived from it (`specs/rider-ui.md` 3.6b).
-            assertEquals(BatteryReading.Unjudged(telem.batteryVolts!!), state.batteryOf(0x01))
+            assertEquals(
+                BatteryReading.Unjudged(telem.batteryVolts!!, BatteryReading.Unjudged.Why.NO_CELLS),
+                state.batteryOf(0x01),
+            )
             cancelAndIgnoreRemainingEvents()
         }
     }

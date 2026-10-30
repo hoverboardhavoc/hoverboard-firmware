@@ -109,14 +109,15 @@ class FakeHoverboardTransport(
      * caller's [defaults] entry, the way a real board answers a registered field's default.
      *
      * Every node starts out answering what every board running this firmware answers unwritten:
-     * `node.class` motor controller, its default `device.name`, and `machine.drive_mode` SINGLE. A
-     * test about a bridge or a stored mode says so in [store].
+     * `node.class` motor controller, its default `device.name`, `machine.drive_mode` SINGLE and
+     * `board.battery.chemistry` li_ion. A test about a bridge or a stored mode says so in [store].
      */
     val store: MutableMap<Pair<Int, Key>, Value> = mutableMapOf()
     val defaults: MutableMap<Key, Value> = mutableMapOf(
         Fields.NODE_CLASS.key() to Fields.NODE_CLASS.default,
         Fields.DEVICE_NAME.key() to Fields.DEVICE_NAME.default,
         Fields.MACHINE_DRIVE_MODE.key() to Fields.MACHINE_DRIVE_MODE.default,
+        Fields.BOARD_BATTERY_CHEMISTRY.key() to Fields.BOARD_BATTERY_CHEMISTRY.default,
     )
 
     /** Whether the fake board refuses writes with `CFG_ARMED`, as a real one does while armed. */
@@ -408,7 +409,7 @@ internal val DRIVING_OBS = QUIET_OBS.copy(
 internal const val DRIVING_CAL = 455
 
 /**
- * The pack the screens' voltages are quoted against (`board.pack_cells`): ten cells in series, a
+ * The pack the screens' voltages are quoted against (`board.battery.cells`): ten cells in series, a
  * stock 36 V hoverboard pack, which runs 30.0 V empty to 42.0 V full.
  */
 internal const val PACK_CELLS = 10

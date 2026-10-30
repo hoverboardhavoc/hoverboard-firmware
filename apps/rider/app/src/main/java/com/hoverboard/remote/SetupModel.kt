@@ -18,6 +18,7 @@ import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.Editor
+import com.hoverboard.remote.model.FloorOutside
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
@@ -25,6 +26,7 @@ import com.hoverboard.remote.model.TakesEffect
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.asLong
+import com.hoverboard.remote.model.floorOutsidePack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -414,13 +416,34 @@ data class SetupState(
     fun countsPerAmpOf(address: Int): Int? = setupOf(address).countsPerAmp
 
     /**
-     * The board at [address]'s stored pack cell count (`board.pack_cells`), or null while this
+     * The board at [address]'s stored pack cell count (`board.battery.cells`), or null while this
      * session has not read it from that board. A stored 0 is passed through as the 0 it is: it means
      * nobody has said what pack this machine runs, and the Ride screen's gauge treats that as a pack
      * it cannot judge rather than as an eight-cell one.
      */
     fun packCellsOf(address: Int): Int? =
         setupOf(address).values[SetupFields.PACK_CELLS.key]?.asLong()?.toInt()
+
+    /**
+     * The board at [address]'s stored pack chemistry (`board.battery.chemistry`), or null while
+     * this session has not read it from that board. A byte the app has no table for is passed
+     * through, and the gauge reads it as a pack it cannot judge.
+     */
+    fun packChemistryOf(address: Int): Int? =
+        setupOf(address).values[SetupFields.BATTERY_CHEMISTRY.key]?.asLong()?.toInt()
+
+    /**
+     * Whether the target node's stored low-battery floor sits outside its own stated pack
+     * ([floorOutsidePack], `specs/rider-ui.md` 3.6d), which the floor row warns about.
+     */
+    val floorOutside: FloorOutside?
+        get() = current.values.let { v ->
+            floorOutsidePack(
+                floor = v[SetupFields.BATTERY_FLOOR.key]?.asLong()?.toInt(),
+                cells = v[SetupFields.PACK_CELLS.key]?.asLong()?.toInt(),
+                chemistry = v[SetupFields.BATTERY_CHEMISTRY.key]?.asLong()?.toInt(),
+            )
+        }
 
     /**
      * The board at [address]'s wheel geometry, or null while it cannot convert: a board this session

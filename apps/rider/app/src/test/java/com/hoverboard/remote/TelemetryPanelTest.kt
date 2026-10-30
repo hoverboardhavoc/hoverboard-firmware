@@ -8,6 +8,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.CurrentReading
@@ -36,7 +37,7 @@ import org.robolectric.annotation.Config
  *    is not in front of the rider, so a quiet green indicator would tell a rider their machine is
  *    healthy on the strength of one board's word.
  *  - `battery` is 0 for UNKNOWN, which is the firmware declining to report rather than a
- *    measurement, and which is broader than "cannot sense the rail": a master whose `board.vbatt`
+ *    measurement, and which is broader than "cannot sense the rail": a master whose `board.battery.pin`
  *    is staged reports it too until its motor is brought up. Rendered as a number it was 0.00 V,
  *    which on a rider's screen is a flat pack.
  *
@@ -203,31 +204,32 @@ class TelemetryPanelTest {
     fun anUnknownReadingHasNoVoltageAndNoChargeInTheModel() {
         val unknown = TelemetryUi().merge(cyclic(battery = 0))
         assertNull(unknown.batteryVolts)
-        assertEquals(BatteryReading.NoReading, batteryReading(unknown, PACK_CELLS))
+        assertEquals(BatteryReading.NoReading, batteryReading(unknown, PACK_CELLS, LI_ION))
 
         val sensed = TelemetryUi().merge(cyclic(battery = 2_900))
         assertEquals(29.0f, sensed.batteryVolts!!, 0.001f)
-        val charge = batteryReading(sensed, PACK_CELLS) as BatteryReading.Charge
-        assertEquals(BatteryCurve.fraction(29.0f, PACK_CELLS), charge.fraction, 0.001f)
+        val charge = batteryReading(sensed, PACK_CELLS, LI_ION) as BatteryReading.Charge
+        assertEquals(BatteryCurve.fraction(29.0f, PACK_CELLS, LI_ION)!!, charge.fraction, 0.001f)
     }
 
     /** Nothing has arrived yet is the same absence, and must not read as zero volts either. */
     @Test
     fun aRecordWithNoStateYetHasNoVoltageEither() {
         assertNull(TelemetryUi().batteryVolts)
-        assertEquals(BatteryReading.NoReading, batteryReading(TelemetryUi(), PACK_CELLS))
+        assertEquals(BatteryReading.NoReading, batteryReading(TelemetryUi(), PACK_CELLS, LI_ION))
     }
 
     @Test
     fun aSensedVoltageIsShownAndScoredAgainstTheStatedPack() {
-        // 29.0 V on eight cells: 24.0 V empty, 33.6 V full, so 52%.
+        // 29.0 V on eight Li-ion cells is 3.625 V a cell, a twelfth of the way from the table's
+        // 30% (3.62 V) to its 40% (3.68 V), so 31%.
         show(TelemetryUi().merge(cyclic(battery = 2_900)), packCells = PACK_CELLS)
 
         compose
             .onNodeWithText(context.getString(R.string.telemetry_battery_value, 29.0f))
             .assertIsDisplayed()
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 52))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 31))
             .assertIsDisplayed()
         compose
             .onNodeWithText(context.getString(R.string.telemetry_battery_unknown))
@@ -242,6 +244,22 @@ class TelemetryPanelTest {
      * a seven-cell one compiled into the app, which read 29.0 V as a full pack on both machines
      * here (`specs/todo.md`, the `BatteryCurve` entry).
      */
+    /** A chemistry byte this app has no table for: the number stands and the line names the chemistry. */
+    @Test
+    fun aSensedVoltageWithAnUnknownChemistryIsShownWithNoPercentage() {
+        show(TelemetryUi().merge(cyclic(battery = 2_900)), chemistry = 9)
+
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_value, 29.0f))
+            .assertIsDisplayed()
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_unknown_chemistry))
+            .assertIsDisplayed()
+        compose
+            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 31))
+            .assertDoesNotExist()
+    }
+
     @Test
     fun aSensedVoltageWithNoStatedPackIsShownWithNoPercentage() {
         show(TelemetryUi().merge(cyclic(battery = 2_900)), packCells = null)
@@ -253,7 +271,7 @@ class TelemetryPanelTest {
             .onNodeWithText(context.getString(R.string.telemetry_battery_no_pack))
             .assertExists()
         compose
-            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 52))
+            .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 31))
             .assertDoesNotExist()
         compose
             .onNodeWithText(context.getString(R.string.telemetry_battery_percent, 100))
@@ -437,6 +455,7 @@ class TelemetryPanelTest {
         telemetry: TelemetryUi,
         throttlePercent: Int = 0,
         packCells: Int? = PACK_CELLS,
+        chemistry: Int? = LI_ION,
         current: CurrentReading = CurrentReading.Silent,
         peerCurrent: CurrentReading? = null,
     ) = compose.setContent {
@@ -445,7 +464,7 @@ class TelemetryPanelTest {
                 telemetry = telemetry,
                 throttlePercent = throttlePercent,
                 armed = false,
-                battery = batteryReading(telemetry, packCells),
+                battery = batteryReading(telemetry, packCells, chemistry),
                 currents = listOfNotNull(BOARD to current, peerCurrent?.let { PEER to it }),
             )
         }
@@ -458,6 +477,9 @@ class TelemetryPanelTest {
 
         /** The rover's pack: eight cells in series, which is what the gauge is scored against. */
         const val PACK_CELLS = 8
+
+        /** The chemistry the gauge is scored against: the default. */
+        const val LI_ION = Fields.BatteryChemistry.LI_ION
 
         /** Every fault chip this panel has ever had, or could grow, is built around this word. */
         const val FAULT_WORD = "FAULT"

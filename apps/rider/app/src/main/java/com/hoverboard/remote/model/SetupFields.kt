@@ -28,7 +28,7 @@ enum class SetupGroup(@StringRes val title: Int) {
  * Two cases, where that decision names three groups. The arm path re-reads exactly one row of
  * fields (`crates/firmware/src/arm.rs`, `read_arm_values`); everything else is derived once in the
  * boot sequence, whether it configures a peripheral (the pins, the timer, `motor.dead_time`) or is
- * a value the boot path simply owns (`attitude.level_trim`, `board.vbatt_cal`, `imu.gyro_bias`,
+ * a value the boot path simply owns (`attitude.level_trim`, `board.battery.cal`, `imu.gyro_bias`,
  * `imu.model`, `link.link_set`). Those two groups differ in why they wait for a boot, not in what
  * the operator has to do about it, so the screen asks one question and gets two answers.
  *
@@ -46,7 +46,7 @@ enum class TakesEffect {
     /**
      * Nothing on the board reads it, so there is no board-side event to wait for: the app uses it
      * as soon as the write is verified. The store carries facts about the machine as well as
-     * settings the firmware acts on, and `board.pack_cells` is the first of the former with a row.
+     * settings the firmware acts on, and `board.battery.cells` is the first of the former with a row.
      */
     APP_ONLY,
 }
@@ -296,26 +296,44 @@ object SetupFields {
     )
 
     /**
-     * `BOARD_PACK_CELLS`, the series cell count of the pack this machine runs: what turns a pack
+     * `BOARD_BATTERY_CELLS`, the series cell count of the pack this machine runs: what turns a pack
      * voltage into a state of charge ([batteryReading]), and the one place the pack is stated.
-     * Offered over [Fields.PACK_CELLS], with 0 as the unset value the field defaults to.
+     * Offered over [Fields.BATTERY_CELLS], with 0 as the unset value the field defaults to.
      *
      * Read on BOTH boards with the ride facts, like [MACHINE], because the Ride screen's gauge
      * needs it whether or not Setup is ever opened, and written to both: one pack feeds both
      * boards.
      */
     val PACK_CELLS = SetupField(
-        Fields.BOARD_PACK_CELLS, 0, R.string.setup_field_pack_cells, SetupGroup.DRIVE,
-        Editor.Range(Fields.PACK_CELLS, unset = 0L), note = R.string.setup_note_pack_cells,
+        Fields.BOARD_BATTERY_CELLS, 0, R.string.setup_field_pack_cells, SetupGroup.DRIVE,
+        Editor.Range(Fields.BATTERY_CELLS, unset = 0L), note = R.string.setup_note_pack_cells,
         appOnly = true,
     )
 
     /**
-     * `CONTROL_BATTERY_FLOOR`, centivolts: any i16 (the firmware takes it as written; `<= 0` = no
+     * `BOARD_BATTERY_CHEMISTRY`, what kind of cell the pack is: which resting-voltage table turns a
+     * pack voltage into a state of charge ([BatteryCurve]). Read and written like [PACK_CELLS], the
+     * other half of the pack.
+     */
+    val BATTERY_CHEMISTRY = SetupField(
+        Fields.BOARD_BATTERY_CHEMISTRY, 0, R.string.setup_field_battery_chemistry, SetupGroup.DRIVE,
+        Editor.Chips(
+            listOf(
+                Choice(Fields.BatteryChemistry.LI_ION, R.string.setup_choice_li_ion),
+                Choice(Fields.BatteryChemistry.LEV50, R.string.setup_choice_lev50),
+                Choice(Fields.BatteryChemistry.LTO, R.string.setup_choice_lto),
+            ),
+        ),
+        note = R.string.setup_note_battery_chemistry,
+        appOnly = true,
+    )
+
+    /**
+     * `BOARD_BATTERY_FLOOR`, centivolts: any i16 (the firmware takes it as written; `<= 0` = no
      * floor), so the generic editor over the type's natural range.
      */
     val BATTERY_FLOOR = SetupField(
-        Fields.CONTROL_BATTERY_FLOOR, 0, R.string.setup_field_battery_floor, SetupGroup.DRIVE,
+        Fields.BOARD_BATTERY_FLOOR, 0, R.string.setup_field_battery_floor, SetupGroup.DRIVE,
         Editor.Generic, note = R.string.setup_note_battery_floor,
     )
     val MOTOR_METHOD = SetupField(
@@ -468,7 +486,7 @@ object SetupFields {
     }
 
     /**
-     * `BOARD_VBATT_CAL` index 0 (slope) and 1 (offset), raw, behind ADVANCED, each offered over the
+     * `BOARD_BATTERY_CAL` index 0 (slope) and 1 (offset), raw, behind ADVANCED, each offered over the
      * range the firmware clamps it into at boot.
      */
     val VBATT_CAL: List<SetupField> = listOf(
@@ -476,7 +494,7 @@ object SetupFields {
         Triple(R.string.setup_field_vbatt_offset, Fields.VBATT_OFFSET, null),
     ).mapIndexed { i, (label, range, note) ->
         SetupField(
-            Fields.BOARD_VBATT_CAL.at(i), i, label, SetupGroup.CALIBRATION, Editor.Range(range),
+            Fields.BOARD_BATTERY_CAL.at(i), i, label, SetupGroup.CALIBRATION, Editor.Range(range),
             note = note, advanced = true,
         )
     }
@@ -546,10 +564,12 @@ object SetupFields {
 
     /**
      * The rows the attach-time ride-facts read takes from EVERY motor controller: [MACHINE]'s three,
-     * the pack, and the rider requirement. Each is a fact a screen states before Setup has ever been
-     * opened, so every copy is read and a machine that disagrees is visible.
+     * the pack's cell count and chemistry, and the rider requirement. Each is a fact a screen
+     * states before Setup has ever been opened, so every copy is read and a machine that disagrees
+     * is visible.
      */
-    val MOTOR_FACTS: List<SetupField> = MACHINE + PACK_CELLS + RIDER_REQUIRED
+    val MOTOR_FACTS: List<SetupField> =
+        MACHINE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED
 
     /**
      * The rows the attach-time read takes from EVERY node, before anything else: what each node is
@@ -578,7 +598,7 @@ object SetupFields {
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_CLASS, NODE_ADDRESS, LINK_SET,
-        CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
+        CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_CHEMISTRY, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
         MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, DRIVE_MODE, CONTROL_FRAME, CONTROL_SIDE,
         IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX

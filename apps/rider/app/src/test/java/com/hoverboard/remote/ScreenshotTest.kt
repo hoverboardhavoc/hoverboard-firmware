@@ -152,6 +152,7 @@ class ScreenshotTest {
             ControlScreen(
                 state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
                     packCells = mapOf(0x01 to PACK_CELLS),
+                    packChemistry = mapOf(0x01 to Fields.BatteryChemistry.LI_ION),
                     armed = true,
                     throttleSpeed = 4_000,
                     engaged = true,
@@ -185,6 +186,10 @@ class ScreenshotTest {
                 state = connected(DriveMode.BOUND, mapOf(0x01 to telemetry, 0x02 to slave)).copy(
                     riderWaiver = RiderWaiver.WAIVED,
                     packCells = mapOf(0x01 to PACK_CELLS, 0x02 to PACK_CELLS),
+                    packChemistry = mapOf(
+                        0x01 to Fields.BatteryChemistry.LI_ION,
+                        0x02 to Fields.BatteryChemistry.LI_ION,
+                    ),
                     countsPerAmp = mapOf(0x01 to DRIVING_CAL, 0x02 to DRIVING_CAL),
                     armed = true,
                     throttleSpeed = 6_000,
@@ -255,6 +260,10 @@ class ScreenshotTest {
             ControlScreen(
                 state = connected(DriveMode.DIFFERENTIAL, mapOf(0x01 to telemetry, 0x02 to slave)).copy(
                     packCells = mapOf(0x01 to PACK_CELLS, 0x02 to PACK_CELLS),
+                    packChemistry = mapOf(
+                        0x01 to Fields.BatteryChemistry.LI_ION,
+                        0x02 to Fields.BatteryChemistry.LI_ION,
+                    ),
                     armed = true,
                     throttleSpeed = 9_000,
                     steer = 14_000,
@@ -280,6 +289,7 @@ class ScreenshotTest {
             ControlScreen(
                 state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
                     packCells = mapOf(0x01 to PACK_CELLS),
+                    packChemistry = mapOf(0x01 to Fields.BatteryChemistry.LI_ION),
                     armed = false,
                     throttleSpeed = 0,
                     engaged = false,
@@ -297,7 +307,7 @@ class ScreenshotTest {
 
     /**
      * What a board reporting UNKNOWN for its pack looks like, which is any board without
-     * `board.vbatt`, and any board whose motor has not been brought up: the battery row
+     * `board.battery.pin`, and any board whose motor has not been brought up: the battery row
      * says there is no reading and draws no number and no bar. The lockdown and fault chips are
      * forced on here because the firmware cannot raise either of them yet, and a rendering nothing
      * can exercise is a rendering nobody has looked at.
@@ -323,6 +333,7 @@ class ScreenshotTest {
             ControlScreen(
                 state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
                     packCells = mapOf(0x01 to PACK_CELLS),
+                    packChemistry = mapOf(0x01 to Fields.BatteryChemistry.LI_ION),
                     armed = false,
                     simulateRider = true,
                 ),
@@ -349,6 +360,7 @@ class ScreenshotTest {
             ControlScreen(
                 state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
                     packCells = mapOf(0x01 to PACK_CELLS),
+                    packChemistry = mapOf(0x01 to Fields.BatteryChemistry.LI_ION),
                     armed = false,
                     throttleSpeed = 0,
                     engaged = false,

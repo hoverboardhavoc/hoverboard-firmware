@@ -40,7 +40,9 @@ import com.hoverboard.remote.SetupActions
 import com.hoverboard.remote.SetupState
 import com.hoverboard.remote.WriteState
 import com.hoverboard.remote.model.Editor
+import com.hoverboard.remote.model.FloorOutside
 import com.hoverboard.remote.model.SetupField
+import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TakesEffect
 import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.display
@@ -83,6 +85,7 @@ internal fun FieldRow(
             },
             color = TextSecondary,
         )
+        FloorWarning(field, state)
         if (field.showDefault) {
             Text(stringResource(R.string.setup_default, field.def.default.display()), color = TextSecondary)
         }
@@ -102,6 +105,24 @@ internal fun FieldRow(
             is Editor.Range, Editor.Generic -> Entry(field, shown, editable) { actions.edit(field.key, it) }
         }
     }
+}
+
+/** Test tag on the floor row's warning that the floor sits outside the stated pack. */
+const val SETUP_FLOOR_OUTSIDE_TAG = "setup_floor_outside"
+
+/**
+ * The low-battery floor row's warning (`specs/rider-ui.md` 3.6d): the floor stays absolute and
+ * operator-set, so a floor outside the stated pack is shown rather than corrected. Nothing on any
+ * other row.
+ */
+@Composable
+private fun FloorWarning(field: SetupField, state: SetupState) {
+    if (field != SetupFields.BATTERY_FLOOR) return
+    val text = when (state.floorOutside ?: return) {
+        FloorOutside.AT_OR_ABOVE_FULL -> R.string.setup_floor_above_full
+        FloorOutside.BELOW_EMPTY -> R.string.setup_floor_below_empty
+    }
+    Text(stringResource(text), color = AccentYellow, modifier = Modifier.testTag(SETUP_FLOOR_OUTSIDE_TAG))
 }
 
 /** What came of this row's write ([writeStatus]), and a retry for the ones that can be sent again. */

@@ -43,7 +43,7 @@ import com.hoverboard.remote.ui.theme.TextSecondary
 internal fun BatterySection(battery: BatteryReading) {
     when (battery) {
         BatteryReading.NoReading -> UnknownBattery()
-        is BatteryReading.Unjudged -> UnjudgedBattery(battery.volts)
+        is BatteryReading.Unjudged -> UnjudgedBattery(battery)
         is BatteryReading.Charge -> ChargedBattery(battery)
     }
 }
@@ -94,15 +94,15 @@ private fun ChargedBattery(battery: BatteryReading.Charge) {
 }
 
 /**
- * The battery row of a machine whose pack has not been stated: the measured voltage, and a line
- * saying what is missing and where it is set.
+ * The battery row of a machine whose pack has not been stated, or stated as a chemistry this app
+ * has no table for: the measured voltage, and a line saying what is missing and where it is set.
  *
  * No percent and no bar, for the reason the unknown row has none: both are judgements about how
  * full the pack is, and nothing here knows how full a pack this voltage makes. The voltage itself
  * is a measurement the board made and is shown.
  */
 @Composable
-private fun UnjudgedBattery(volts: Float) {
+private fun UnjudgedBattery(battery: BatteryReading.Unjudged) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -114,14 +114,19 @@ private fun UnjudgedBattery(volts: Float) {
             color = TextSecondary,
         )
         Text(
-            text = stringResource(R.string.telemetry_battery_value, volts),
+            text = stringResource(R.string.telemetry_battery_value, battery.volts),
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface,
         )
     }
     Spacer(modifier = Modifier.height(8.dp))
     Text(
-        text = stringResource(R.string.telemetry_battery_no_pack),
+        text = stringResource(
+            when (battery.why) {
+                BatteryReading.Unjudged.Why.NO_CELLS -> R.string.telemetry_battery_no_pack
+                BatteryReading.Unjudged.Why.UNKNOWN_CHEMISTRY -> R.string.telemetry_battery_unknown_chemistry
+            },
+        ),
         style = MaterialTheme.typography.bodySmall,
         color = TextSecondary,
     )
@@ -134,7 +139,7 @@ private fun UnjudgedBattery(volts: Float) {
  *
  * The note names both causes as alternatives rather than picking one. The word on the wire does not
  * say which, and asserting "it does not sense the rail" at a part-configured master whose
- * `board.vbatt` is already staged sends its operator to re-stage a field that was right.
+ * `board.battery.pin` is already staged sends its operator to re-stage a field that was right.
  */
 @Composable
 private fun UnknownBattery() {

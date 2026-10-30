@@ -86,7 +86,7 @@ import kotlinx.coroutines.launch
  * @param countsPerAmp each board's `motor.current_cal`, as the attach-time ride-facts read got it
  *   ([SetupState.countsPerAmpOf]), by address: the scale belongs to the sense chain fitted to that
  *   board.
- * @param packCells each board's `board.pack_cells`, from the same read ([SetupState.packCellsOf]).
+ * @param packCells each board's `board.battery.cells`, from the same read ([SetupState.packCellsOf]).
  * @param wheelGeometry each board's pole-pair count and wheel diameter, from the same read
  *   ([SetupState.wheelGeometryOf]): what turns that wheel's counted hall edges into a distance.
  */
@@ -115,6 +115,7 @@ data class UiState(
     val boardsSeen: List<ScanCandidate> = emptyList(),
     val countsPerAmp: Map<Int, Int> = emptyMap(),
     val packCells: Map<Int, Int> = emptyMap(),
+    val packChemistry: Map<Int, Int> = emptyMap(),
     val wheelGeometry: Map<Int, WheelGeometry> = emptyMap(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
@@ -162,7 +163,8 @@ data class UiState(
      * What the board at [address]'s battery display shows (`specs/rider-ui.md` 3.6b): its reported
      * pack voltage against the pack it stores, or the reason there is no state of charge.
      */
-    fun batteryOf(address: Int): BatteryReading = batteryReading(telemetryOf(address), packCells[address])
+    fun batteryOf(address: Int): BatteryReading =
+        batteryReading(telemetryOf(address), packCells[address], packChemistry[address])
 
     /**
      * What the board at [address]'s odometer shows (`specs/rider-ui.md` 3.6c): that wheel's lifetime
@@ -404,6 +406,7 @@ class MainViewModel(
                 telemetryByBoard = b.telemetry,
                 countsPerAmp = mcs.mapNotNull { a -> b.setup.countsPerAmpOf(a)?.let { a to it } }.toMap(),
                 packCells = mcs.mapNotNull { a -> b.setup.packCellsOf(a)?.let { a to it } }.toMap(),
+                packChemistry = mcs.mapNotNull { a -> b.setup.packChemistryOf(a)?.let { a to it } }.toMap(),
                 wheelGeometry = mcs.mapNotNull { a -> b.setup.wheelGeometryOf(a)?.let { a to it } }.toMap(),
             )
         }.combine(picker) { ui, p ->
