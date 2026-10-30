@@ -8,7 +8,7 @@
 //!   reads not configured ([`set_state`]). The bridge joins as a station, takes an address by DHCP,
 //!   and joins again whenever the association drops.
 //!   BLE runs beside it on the same radio (`esp-radio`'s coexistence). Its transmit power is
-//!   capped after every start, before it joins, at the store's `wifi.tx_power`, read once at boot
+//!   capped before every join, at the store's `wifi.tx_power`, read once at boot
 //!   with the network (`hoverboard_bridge_core::node::tx_power`, `specs/bridge-onboarding.md`
 //!   section 2.4).
 //! - **Console.** TCP port [`CONSOLE_PORT`] carries the same L2 stream as the USB console, the
@@ -155,10 +155,11 @@ pub static GDB_OUT: Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, 4> = Chann
 pub static GDB_CLOSE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Join the network `config` names ([`config`]) and join it again whenever the association drops,
-/// forever. The transmit power is capped at `power` quarter-dBm after every start and before the
-/// join (`esp_wifi_set_max_tx_power`, as `wireless-esp32-dap`'s `feat/tx-power-cap` does): at full
-/// power, SuperMinis from one batch stop acknowledging the access point's authentication response
-/// and never join, and at the store's default, 8.5 dBm, they join in 2 s at -38 dBm.
+/// forever. The transmit power is capped at `power` quarter-dBm before every join
+/// (`esp_wifi_set_max_tx_power`, as `wireless-esp32-dap`'s `feat/tx-power-cap` does), and a
+/// station that cannot be capped does not join: at full power, SuperMinis from one batch stop
+/// acknowledging the access point's authentication response and never join, and at the store's
+/// default, 34 (8 dBm on the C3), they join in 2 s at -38 dBm.
 #[embassy_executor::task]
 pub async fn station(mut controller: WifiController<'static>, config: Config, power: u8) {
     // `wifi.tx_power`'s range, 8 to 84, is inside `i8`'s.
@@ -182,12 +183,19 @@ pub async fn station(mut controller: WifiController<'static>, config: Config, po
                     continue;
                 }
             }
-            match controller.set_max_tx_power(power) {
-                Ok(()) => boot!("Wi-Fi: transmit power capped at {} quarter-dBm", power),
-                Err(_e) => boot!("Wi-Fi: transmit power cap failed: {:?}", _e),
-            }
         }
-        boot!("Wi-Fi: joining");
+        // The cap before every join, not only after a start: a start that failed after the driver
+        // started leaves the station started, and the next pass would join uncapped. A station
+        // that cannot be capped does not join.
+        if let Err(_e) = controller.set_max_tx_power(power) {
+            boot!("Wi-Fi: transmit power cap failed: {:?}", _e);
+            Timer::after(REJOIN).await;
+            continue;
+        }
+        boot!(
+            "Wi-Fi: transmit power capped at {} quarter-dBm, joining",
+            power
+        );
         match controller.connect_async().await {
             Ok(_) => boot!("Wi-Fi: joined, waiting for an address"),
             Err(_e) => {
