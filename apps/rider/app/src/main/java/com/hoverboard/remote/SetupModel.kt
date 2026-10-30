@@ -30,12 +30,16 @@ import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.floorOutsidePack
 import kotlin.math.abs
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -469,7 +473,13 @@ data class SetupState(
      * while this session has not read it.
      */
     fun speedFactsOf(address: Int, wheelRateQ12: Int): SpeedFacts = setupOf(address).let {
-        SpeedFacts(wheelRateQ12, it.polePairs, it.diameterMm, storedByte(address, SetupFields.CONTROL_SIDE.key))
+        SpeedFacts(
+            address,
+            wheelRateQ12,
+            it.polePairs,
+            it.diameterMm,
+            storedByte(address, SetupFields.CONTROL_SIDE.key),
+        )
     }
 
     val values: Map<Key, Value> get() = current.values
@@ -658,11 +668,51 @@ class SetupModel(
      */
     private val bootTag = mutableMapOf<Int, Int>()
 
+    /** The sources the last telemetry came from: whom a re-walk probes from ([rewalk]). */
+    private var heard: Set<Int> = emptySet()
+
+    /** A re-walk for a source the node list does not hold, and the 3 s it holds off the next one. */
+    private var unknownSourceWalk: Job? = null
+
     init {
         combine(transport.attachedBoard, transport.nodes, ::Pair)
             .onEach { (attached, nodes) -> onNodes(attached, nodes) }
             .launchIn(scope)
         transport.telemetry.onEach(::onTelemetry).launchIn(scope)
+        // Boards switched on after the connect (`specs/rider-ui.md` 3.1, "Boards that come up after
+        // the connect"): the walk runs once, so while the identity read has found no node that is,
+        // or may be, a motor controller (a class not read is not taken for a bridge), the model
+        // walks again every [REWALK_INTERVAL_MS].
+        scope.launch {
+            _state.map { s ->
+                s.attached != null && s.rideFactsRead && s.nodes.none { it.isMotorController || it.nodeClass == null }
+            }
+                .distinctUntilChanged()
+                .collectLatest { looking ->
+                    while (looking) {
+                        delay(REWALK_INTERVAL_MS)
+                        rewalk()
+                    }
+                }
+        }
+    }
+
+    /**
+     * Walk again behind the attached node, from it and every motor controller that is reporting,
+     * under the one-operation lock as the ride-facts read is; a node list that grows comes back
+     * through [onNodes]. Never while armed, and not while another operation holds the lock: the
+     * next cadence, or the next unknown source, tries again.
+     */
+    private suspend fun rewalk() {
+        val s = _state.value
+        val attached = s.attached ?: return
+        if (isArmed() || !op.tryLock()) return
+        try {
+            transport.rewalk(listOf(attached) + s.motorControllers.filter { it in heard })
+        } finally {
+            op.unlock()
+            next()
+        }
     }
 
     /**
@@ -693,7 +743,9 @@ class SetupModel(
         }
         loaded.retainAll(session.toSet())
         rideFactsDue = true
-        _state.update { it.copy(addresses = session, attached = attached) }
+        // A grown list (a re-walk found a board) is read again from the start: its facts are not in
+        // until that read finishes, and the lamp test waits for them (`specs/rider-ui.md` 3.1b).
+        _state.update { it.copy(addresses = session, attached = attached, rideFactsRead = false) }
         next()
     }
 
@@ -713,6 +765,15 @@ class SetupModel(
      */
     private fun onTelemetry(reported: Map<Int, TelemetryUi>) {
         val s = _state.value
+        heard = reported.keys
+        // A frame from a source the walk did not find: a board that came up since, already holding
+        // an address. Walk again, at most once in [REWALK_INTERVAL_MS].
+        if (s.attached != null && reported.keys.any { it !in s.addresses } && unknownSourceWalk?.isActive != true) {
+            unknownSourceWalk = scope.launch {
+                rewalk()
+                delay(REWALK_INTERVAL_MS)
+            }
+        }
         val restarted = s.addresses.count { node -> observeBoot(node, reported[node]?.bootTag) }
         if (restarted > 0) next()
     }
@@ -1318,5 +1379,11 @@ class SetupModel(
          * clearly a lean, and a mirrored or wrong frame reads it with the opposite sign or not at all.
          */
         const val LEAN_MIN_CENTIDEG = 1_000
+
+        /**
+         * How often the model walks again while no motor controller is known, and the least time
+         * between two re-walks for an unknown source (`specs/rider-ui.md` 3.1).
+         */
+        const val REWALK_INTERVAL_MS = 3_000L
     }
 }

@@ -254,6 +254,20 @@ class BleWalkEngine(
     }
 
     /**
+     * Walk again from [addrs] ([Controller.rewalk]) on a link whose walk finished or was abandoned:
+     * the walk is driven again by [pump] until it completes or is abandoned once more. The caller
+     * holds the engine's one outstanding request for the whole re-walk (`ConfigExchange.withSlot`),
+     * because a walk request and a `CONFIG_*` request cannot both be outstanding.
+     */
+    fun rewalk(addrs: List<Int>) {
+        if (walking && !controller.isComplete()) return
+        if (!walking) controller.dropUnfinished()
+        if (pendingIsWalk) clearPending()
+        walking = true
+        controller.rewalk(addrs)
+    }
+
+    /**
      * Re-send the outstanding (unacked) request if it has now gone unanswered for [replyTimeoutMs]
      * ([probeTimeoutMs] for a `PROBE_PORTS`),
      * against an idempotent responder. Call it once per poll: it decides for itself whether the

@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -52,6 +53,8 @@ import com.hoverboard.remote.model.SpeedReading
 import com.hoverboard.remote.model.angleText
 import com.hoverboard.remote.model.litSegments
 import com.hoverboard.remote.model.phaseFill
+import com.hoverboard.remote.model.ringScale
+import com.hoverboard.remote.model.speedText
 import com.hoverboard.remote.ui.theme.Atkinson
 import com.hoverboard.remote.ui.theme.BgCode
 import com.hoverboard.remote.ui.theme.BgElevated
@@ -67,9 +70,14 @@ import kotlin.math.abs
 
 /*
  * The Ride screen's instruments slot (`specs/rider-ui.md` 3.1): the battery ring with the speed in
- * it, the pack line, two attitude corners and the phase bars, at fixed positions in a 276 dp box.
- * Every figure is what a board sent in its own `CYCLIC_STATE`, or a stored field read with the ride
+ * it, the pack line, two attitude corners and the phase bars, in a box at most 276 dp tall. Every
+ * figure is what a board sent in its own `CYCLIC_STATE`, or a stored field read with the ride
  * facts, and a figure with no value shows its own words, never a stale or a default number.
+ *
+ * The box is as tall as the screen leaves it, and nothing scrolls: the ring and the speed scale by
+ * k = (h - 64) / 212, at most 1, while the pack line, the corners and the phase bars keep their size
+ * and are placed from the box's bottom, so their text stays readable on the short phone. At 276 dp
+ * every position is 8a's.
  */
 
 /** Test tag on the speed figure. */
@@ -81,22 +89,33 @@ const val RIDE_PACK_TAG = "ride_pack"
 /** Test tag on the phase bar figure of the board in [side]'s slot. */
 fun ridePhaseTag(side: SlotSide): String = "ride_phase_${side.name.lowercase()}"
 
-/** The instruments slot, [INSTRUMENTS_HEIGHT] tall, full width. */
+/**
+ * The instruments slot: full width, and as tall as the room it is given up to
+ * [INSTRUMENTS_HEIGHT], centred vertically in that room.
+ */
 @Composable
 internal fun RideInstruments(state: UiState, modifier: Modifier = Modifier) {
     val (_, battery) = state.ring
     val low = state.batteryIsLow
-    Box(modifier = modifier.fillMaxWidth().height(INSTRUMENTS_HEIGHT)) {
-        BatteryRing(battery, low)
-        Speed(state.speed)
-        PackLine(battery, low)
-        state.slots.left?.let { AttitudeCorner(state, it, Modifier.offset(x = CORNER_INSET, y = CORNER_TOP)) }
-        state.slots.right?.let {
-            AttitudeCorner(state, it, Modifier.align(Alignment.TopEnd).offset(x = -CORNER_INSET, y = CORNER_TOP))
+    BoxWithConstraints(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        val h = minOf(maxHeight, INSTRUMENTS_HEIGHT)
+        val k = ringScale(h.value)
+        Box(modifier = Modifier.fillMaxWidth().height(h).testTag(RIDE_INSTRUMENTS_TAG)) {
+            BatteryRing(battery, low, k)
+            Speed(state.speed, k)
+            PackLine(battery, low, k)
+            val cornerTop = h - CORNER_BOTTOM - CORNER_HEIGHT
+            state.slots.left?.let { AttitudeCorner(state, it, Modifier.offset(x = CORNER_INSET, y = cornerTop)) }
+            state.slots.right?.let {
+                AttitudeCorner(state, it, Modifier.align(Alignment.TopEnd).offset(x = -CORNER_INSET, y = cornerTop))
+            }
+            PhaseBars(state, top = h - PHASE_FROM_BOTTOM)
         }
-        PhaseBars(state)
     }
 }
+
+/** Test tag on the instruments box. */
+const val RIDE_INSTRUMENTS_TAG = "ride_instruments"
 
 /**
  * Ten segments over 240 degrees from 150 degrees (Compose `drawArc` angles: 0 is three o'clock,
@@ -104,13 +123,13 @@ internal fun RideInstruments(state: UiState, modifier: Modifier = Modifier) {
  * [Caution] while the pack is low, the rest [BgCode]. A reading with no state of charge lights none.
  */
 @Composable
-private fun BatteryRing(battery: BatteryReading, low: Boolean) {
+private fun BatteryRing(battery: BatteryReading, low: Boolean, k: Float) {
     val lit = (battery as? BatteryReading.Charge)?.let { litSegments(it.percent) } ?: 0
     val on = if (low) Caution else Primary
-    Canvas(Modifier.fillMaxWidth().height(INSTRUMENTS_HEIGHT)) {
-        val c = Offset(size.width / 2f, RING_CENTRE_Y.toPx())
-        val r = RING_RADIUS.toPx()
-        val stroke = Stroke(RING_STROKE.toPx(), cap = StrokeCap.Butt)
+    Canvas(Modifier.fillMaxWidth().height(INSTRUMENTS_HEIGHT * k)) {
+        val c = Offset(size.width / 2f, (RING_CENTRE_Y * k).toPx())
+        val r = (RING_RADIUS * k).toPx()
+        val stroke = Stroke((RING_STROKE * k).toPx(), cap = StrokeCap.Butt)
         val seg = RING_SWEEP / RING_SEGMENTS
         for (i in 0 until RING_SEGMENTS) {
             drawArc(
@@ -127,70 +146,67 @@ private fun BatteryRing(battery: BatteryReading, low: Boolean) {
 }
 
 /**
- * The speed and its unit, in a 132 dp tall box centred on the ring's centre; the words that stand
- * for a missing speed are kept inside the ring.
+ * The speed's magnitude and its unit, with "R" after the unit while the speed is below zero, in a
+ * box 132k dp tall centred on the ring's centre; the words that stand for no speed wrap inside the
+ * ring. A missing setting is said in the statements, not here.
  */
 @Composable
-private fun BoxScope.Speed(speed: SpeedReading) {
+private fun BoxScope.Speed(speed: SpeedReading, k: Float) {
     Column(
         modifier = Modifier
             .align(Alignment.TopCenter)
-            .offset(y = RING_CENTRE_Y - SPEED_BOX / 2)
+            .offset(y = (RING_CENTRE_Y - SPEED_BOX / 2) * k)
             .fillMaxWidth()
-            .height(SPEED_BOX),
+            .height(SPEED_BOX * k),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         val figure = when (speed) {
-            is SpeedReading.Kmh -> when (val shown = speed.shown) {
-                is SpeedReading.Shown.Tenths -> "%.1f".format(shown.kmh)
-                is SpeedReading.Shown.Whole -> shown.kmh.toString()
-            }
+            is SpeedReading.Kmh -> speedText(speed.shown)
             SpeedReading.Silent, is SpeedReading.NoSpeed -> stringResource(R.string.ride_figure_none)
         }
         Text(
             figure,
-            style = SPEED_STYLE,
+            style = speedStyle(k),
             color = if (speed is SpeedReading.Kmh) Fg else FgFaint,
             modifier = Modifier.testTag(RIDE_SPEED_TAG),
         )
-        val unit = when (speed) {
-            is SpeedReading.Kmh -> stringResource(R.string.ride_kmh)
-            SpeedReading.Silent -> stringResource(R.string.ride_no_board_reporting)
-            is SpeedReading.NoSpeed -> if (speed.unread.isNotEmpty()) {
-                stringResource(R.string.ride_speed_unread, speed.unread.joinToString(", "))
-            } else {
-                stringResource(R.string.ride_speed_unset, speed.unset.joinToString(", "))
+        when (speed) {
+            is SpeedReading.Kmh -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.ride_kmh), style = ride(14.sp), color = FgMuted)
+                if (speed.kmh < 0) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        stringResource(R.string.ride_reverse),
+                        style = ride(14.sp, FontWeight.Bold),
+                        color = Fg,
+                        modifier = Modifier.testTag(RIDE_REVERSE_TAG),
+                    )
+                }
             }
+            is SpeedReading.NoSpeed -> Text(stringResource(R.string.ride_kmh), style = ride(14.sp), color = FgFaint)
+            SpeedReading.Silent -> Text(
+                stringResource(R.string.ride_no_board_reporting),
+                style = ride(12.sp),
+                color = FgMuted,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = minOf(SPEED_WORDS_WIDTH, RING_INNER * k)),
+            )
         }
-        Text(
-            unit,
-            style = ride(if (speed is SpeedReading.Kmh) 14.sp else 12.sp),
-            color = FgMuted,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = SPEED_WORDS_WIDTH),
-        )
     }
 }
 
-/** "31.2 V   72 %", or what the reading lacks, centred under the ring's centre. */
+/** Test tag on the "R" beside the unit. */
+const val RIDE_REVERSE_TAG = "ride_reverse"
+
+/** "31.2 V   72 %", or the voltage alone, or no pack voltage, centred under the ring's centre. */
 @Composable
-private fun BoxScope.PackLine(battery: BatteryReading, low: Boolean) {
+private fun BoxScope.PackLine(battery: BatteryReading, low: Boolean, k: Float) {
     val text = when (battery) {
         BatteryReading.NoReading -> stringResource(R.string.ride_no_pack_voltage)
-        is BatteryReading.Unjudged -> stringResource(
-            R.string.ride_pack_unjudged,
-            battery.volts,
-            stringResource(
-                when (battery.why) {
-                    BatteryReading.Unjudged.Why.NO_CELLS -> R.string.ride_cells_not_set
-                    BatteryReading.Unjudged.Why.NO_CHEMISTRY -> R.string.ride_chemistry_not_read
-                    BatteryReading.Unjudged.Why.UNKNOWN_CHEMISTRY -> R.string.ride_chemistry_unknown
-                },
-            ),
-        )
+        is BatteryReading.Unjudged -> stringResource(R.string.ride_pack_volts, battery.volts)
         is BatteryReading.Charge -> stringResource(R.string.ride_pack, battery.volts, battery.percent)
     }
     Text(
@@ -204,7 +220,7 @@ private fun BoxScope.PackLine(battery: BatteryReading, low: Boolean) {
         textAlign = TextAlign.Center,
         modifier = Modifier
             .align(Alignment.TopCenter)
-            .offset(y = PACK_TOP)
+            .offset(y = PACK_TOP * k)
             .testTag(RIDE_PACK_TAG),
     )
 }
@@ -294,11 +310,11 @@ private fun MiniHorizon(attitude: Pair<Float, Float>?, size: Dp) {
 
 /** One phase bar per slot, the row inset 40 dp from each edge, the two 32 dp apart. */
 @Composable
-private fun BoxScope.PhaseBars(state: UiState) {
+private fun BoxScope.PhaseBars(state: UiState, top: Dp) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .offset(y = PHASE_TOP)
+            .offset(y = top)
             .padding(horizontal = PHASE_INSET),
         horizontalArrangement = Arrangement.spacedBy(32.dp),
     ) {
@@ -362,11 +378,14 @@ private fun PhaseBar(state: UiState, slot: RideSlot) {
     }
 }
 
-/** The speed's own style: 88 sp bold on a line just tall enough for the figures. */
-private val SPEED_STYLE = ride(88.sp, FontWeight.Bold).copy(
-    lineHeight = 96.sp,
+/** The speed's own style: 88k sp bold on a line just tall enough for the figures. */
+private fun speedStyle(k: Float) = ride((SPEED_SP * k).sp, FontWeight.Bold).copy(
+    lineHeight = (SPEED_LINE_SP * k).sp,
     lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.Both),
 )
+
+private const val SPEED_SP = 88f
+private const val SPEED_LINE_SP = 96f
 
 /** The slot's height, from the top of the content area. */
 internal val INSTRUMENTS_HEIGHT = 276.dp
@@ -380,8 +399,13 @@ private const val RING_GAP = 1.2f
 private val SPEED_BOX = 132.dp
 private val SPEED_WORDS_WIDTH = 168.dp
 
+/** The ring's inner diameter at k = 1: twice the radius less the stroke. */
+private val RING_INNER = 196.dp
+
 private val PACK_TOP = 198.dp
-private val CORNER_TOP = 150.dp
+/** A corner's height (label, horizon, two lines), and its bottom's distance above the slot's bottom. */
+private val CORNER_HEIGHT = 86.dp
+private val CORNER_BOTTOM = 40.dp
 private val CORNER_WIDTH = 72.dp
 private val CORNER_INSET = 20.dp
 private val HORIZON_SIZE = 40.dp
@@ -393,6 +417,7 @@ private const val LADDER_ALPHA = 0.6f
 private const val SYMBOL_OUTER = 0.55f
 private const val SYMBOL_INNER = 0.15f
 private const val CENTI = 100f
-private val PHASE_TOP = 244.dp
+/** The phase row's top, above the slot's bottom. */
+private val PHASE_FROM_BOTTOM = 32.dp
 private val PHASE_INSET = 40.dp
 

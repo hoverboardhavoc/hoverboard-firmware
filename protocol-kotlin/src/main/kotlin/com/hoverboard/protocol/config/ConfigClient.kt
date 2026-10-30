@@ -186,6 +186,20 @@ class ConfigExchange(
         }
     }
 
+    /**
+     * Run [block] holding the engine's one outstanding request, as a request does, or return null
+     * without running it while another operation holds it. The rider app's re-walk
+     * ([BleWalkEngine.rewalk]) runs here, so a walk request never interleaves with a config one.
+     */
+    suspend fun <T> withSlot(block: suspend () -> T): T? {
+        if (!inFlight.tryLock()) return null
+        try {
+            return block()
+        } finally {
+            inFlight.unlock()
+        }
+    }
+
     /** Wait out [id]'s settle window, if one is open. The drain before the send discards what came in it. */
     private suspend fun settle(id: Pair<Int, Key>) {
         while (true) {

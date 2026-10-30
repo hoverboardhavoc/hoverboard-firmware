@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Test
 class SpeedReadingTest {
 
     private fun board(rate: Int, side: Int? = LEFT, polePairs: Int? = 15, diameterMm: Int? = 165) =
-        SpeedFacts(rate, polePairs, diameterMm, side)
+        SpeedFacts(0x01, rate, polePairs, diameterMm, side)
 
     private fun kmh(reading: SpeedReading): Double = assertInstanceOf(SpeedReading.Kmh::class.java, reading).kmh
 

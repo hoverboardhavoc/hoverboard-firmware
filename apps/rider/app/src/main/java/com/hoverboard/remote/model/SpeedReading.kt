@@ -9,13 +9,20 @@ import kotlin.math.roundToInt
  * What one board brings to the machine's speed (`specs/rider-ui.md` 3.1a): its period-measured
  * wheel rate off `CYCLIC_STATE` and the three stored facts that turn it into a road speed.
  *
+ * @param address the board's L3 address: whom a missing fact is missing on (3.1, "Missing settings").
  * @param wheelRateQ12 `CYCLIC_STATE.wheel_rate`: Q12 of one hall edge per 320-period window, in
  *   the board's own counter sense.
  * @param polePairs `motors.0.pole_pairs`, null while unread and 0 while unset.
  * @param diameterMm `motors.0.wheel_diameter_mm`, null while unread and 0 while unset.
  * @param side `control.side`, null while unread; [Fields.ControlSide.RIGHT] mirrors the rate.
  */
-data class SpeedFacts(val wheelRateQ12: Int, val polePairs: Int?, val diameterMm: Int?, val side: Int?)
+data class SpeedFacts(
+    val address: Int,
+    val wheelRateQ12: Int,
+    val polePairs: Int?,
+    val diameterMm: Int?,
+    val side: Int?,
+)
 
 /** What the Ride panel's speed says. */
 sealed interface SpeedReading {
@@ -131,3 +138,9 @@ private const val EDGES_PER_ELECTRICAL_REV = 6
 
 /** Millimetres per second to km/h: 3600 / 1,000,000. */
 private const val MM_PER_S_TO_KMH = 0.0036
+
+/** A speed's magnitude as Ride prints it: never a minus sign (`specs/rider-ui.md` 3.1). */
+fun speedText(shown: SpeedReading.Shown): String = when (shown) {
+    is SpeedReading.Shown.Tenths -> "%.1f".format(abs(shown.kmh))
+    is SpeedReading.Shown.Whole -> abs(shown.kmh).toString()
+}

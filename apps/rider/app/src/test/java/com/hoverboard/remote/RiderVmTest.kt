@@ -42,6 +42,15 @@ abstract class RiderVmTest {
         Dispatchers.resetMain()
     }
 
+    /**
+     * Each of [boards] sends a quiet frame, as a powered board does: a session in which no motor
+     * controller reports is the boards switched off, and the app drops the arm level 1 s in
+     * (`specs/rider-ui.md` 3.1, "Motor controller off"). The fake never ages a board out.
+     */
+    protected fun reporting(vararg boards: Int) {
+        for (b in boards) transport.emitCyclicState(QUIET_STATE, from = b)
+    }
+
     /** The throttle pad's height; its y axis is the demand. */
     protected val h = 1000f
 

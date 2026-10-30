@@ -50,6 +50,7 @@ class SelfDisarmReportTest {
     /** Connect, and arm. */
     private fun connectAndArm() {
         transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.emitCyclicState(QUIET_STATE)
         viewModel.onArmToggle()
     }
 

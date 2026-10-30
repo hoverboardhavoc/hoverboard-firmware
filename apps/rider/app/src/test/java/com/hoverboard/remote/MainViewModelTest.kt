@@ -32,6 +32,8 @@ class MainViewModelTest : RiderVmTest() {
     /** Connect, and arm by pressing and holding the arm control. */
     private fun connectAndArm() {
         transport.setConnectionState(ConnectionState.CONNECTED)
+        reporting(ONE_BOARD)
+        dispatcher.scheduler.runCurrent()
         viewModel.onArmToggle()
     }
 
@@ -81,6 +83,7 @@ class MainViewModelTest : RiderVmTest() {
         }
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01, 0x02)
+        reporting(0x01, 0x02)
 
         val state = currentState()
         assertEquals(MachineArm.SideNotOneRight(SidePair.NoneRight), state.machineArm)
@@ -142,6 +145,7 @@ class MainViewModelTest : RiderVmTest() {
     fun `the bench toggle is the one way the app asserts rider, and it outlives a disarm`() =
         runTest(dispatcher) {
             transport.setConnectionState(ConnectionState.CONNECTED)
+            reporting(ONE_BOARD)
             viewModel.setSimulateRider(true)
             // Staged, not stated: a disarmed frame claims nothing whatever the toggle says.
             assertFalse(checkNotNull(transport.last).rider)
@@ -207,6 +211,7 @@ class MainViewModelTest : RiderVmTest() {
     @Test
     fun `arming is refused while the throttle is held`() = runTest(dispatcher) {
         transport.setConnectionState(ConnectionState.CONNECTED)
+        reporting(ONE_BOARD)
         viewModel.onThrottleMove(y = 0f, height = h) // finger down on a deflected throttle
         assertFalse(currentState().canArm)
 

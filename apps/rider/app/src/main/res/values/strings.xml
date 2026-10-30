@@ -690,14 +690,10 @@
     <string name="ride_kmh">km/h</string>
     <string name="ride_figure_none">--</string>
     <string name="ride_no_board_reporting">no board reporting</string>
-    <string name="ride_speed_unread">not read from the board: %1$s</string>
-    <string name="ride_speed_unset">not set: %1$s</string>
+    <string name="ride_reverse">R</string>
     <string name="ride_pack">"%1$.1f V   %2$d %%"</string>
-    <string name="ride_pack_unjudged">"%1$.1f V   %2$s"</string>
+    <string name="ride_pack_volts">%1$.1f V</string>
     <string name="ride_no_pack_voltage">no pack voltage</string>
-    <string name="ride_cells_not_set">cells not set</string>
-    <string name="ride_chemistry_not_read">chemistry not read</string>
-    <string name="ride_chemistry_unknown">chemistry unknown</string>
     <string name="ride_pitch">pitch %1$s°</string>
     <string name="ride_roll">roll %1$s°</string>
     <string name="ride_pitch_none">pitch --</string>
@@ -722,6 +718,21 @@
     <string name="ride_side_none_right">Neither board is set as the right wheel.</string>
     <string name="ride_side_both_right">Both boards are set as the right wheel.</string>
     <string name="ride_side_unknown">Right wheel not read from both boards yet.</string>
+    <string name="ride_not_turning">%1$s is not turning.</string>
+    <string name="ride_lamp_lit_armed">%1$s on %2$s.</string>
+    <!-- The missing-settings statements (`specs/rider-ui.md` 3.1, "Missing settings, in plain words"). -->
+    <string name="ride_need_wheel_size">Speed needs the wheel size.</string>
+    <string name="ride_reading_wheel">Reading the wheel settings for speed.</string>
+    <string name="ride_need_cells" formatted="false">Battery % needs the cell count.</string>
+    <string name="ride_reading_chemistry" formatted="false">Reading the pack chemistry for battery %.</string>
+    <string name="ride_need_chemistry" formatted="false">Battery % needs a chemistry this app knows.</string>
+    <string name="ride_need_current_cal">Phase current needs the current calibration, set by the host config tool.</string>
+    <string name="ride_reading_current_cal">Reading the current calibration for phase current.</string>
+    <string name="ride_set_it">Set it ›</string>
+    <!-- The motor-controller-off card (`specs/rider-ui.md` 3.1). -->
+    <string name="ride_off_title">Motor controller off</string>
+    <string name="ride_off_action">Switch it on.</string>
+    <string name="ride_off_waiting">Connected to %1$s, waiting for the boards…</string>
     <!-- The drive refusal (`specs/rider-ui.md` 3.1c): the Ride statement, then Setup's line. -->
     <string name="drive_refusal_unread">Reading the drive mode from every board.</string>
     <string name="drive_refusal_disagree">Cannot arm: the boards store different drive modes.</string>
@@ -754,5 +765,6 @@
     <string name="status_rider">Rider</string>
     <string name="status_no_rider">No rider</string>
     <string name="status_lockdown">LOCKDOWN</string>
+    <string name="status_not_turning">Not turning: the app has asked for drive for 1 s and the wheel reports no rotation.</string>
     <string name="board_mode_demoted">MODE %1$s: the board is not running the control mode it stores (Balance with no working IMU runs Throttle), or both boards claim the rigid lead.</string>
 </resources>

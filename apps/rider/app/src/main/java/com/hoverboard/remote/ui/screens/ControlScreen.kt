@@ -1,5 +1,8 @@
 package com.hoverboard.remote.ui.screens
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -9,25 +12,34 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.background
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
 import com.hoverboard.remote.model.FaultLamp
@@ -35,8 +47,11 @@ import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.MachineTravel
 import com.hoverboard.remote.model.totalKmText
 import com.hoverboard.remote.model.tripKmText
+import com.hoverboard.remote.ui.theme.BgCode
+import com.hoverboard.remote.ui.theme.Border
 import com.hoverboard.remote.ui.theme.CautionGlyph
 import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.Fg
 import com.hoverboard.remote.ui.theme.FgFaint
 import com.hoverboard.remote.ui.theme.FgMuted
 import java.util.Locale
@@ -45,12 +60,13 @@ import java.util.Locale
  * The Ride screen, the 8a "Dial" design (`specs/rider-ui.md` 3.1): riding information and the
  * controls that move and stop the machine, with as little text as the facts allow.
  *
- * **The drive pad does not move.** The screen is a column of fixed-height slots from the top of the
- * content area: the instruments (276 dp), the pad (280 dp), the ARM control (52 dp), 12 dp apart.
- * Nothing above the pad changes height with state, and everything that changes with state sits
- * below it (the statements, the fault grid, the trip line, the debug line), so a thumb on the pad
- * means the same demand whatever the screen is saying. The column scrolls, so a phone shorter than
- * the layout scrolls the bottom away rather than squeezing the pad, whose HEIGHT is its resolution.
+ * **The drive pad does not move, and nothing scrolls.** From the bottom of the content area up: the
+ * debug line (debug builds), the trip line, the statements' two-line slot, the ARM control and the
+ * pad (280 dp), each of fixed height; the instruments take what is left above, at most 276 dp, and
+ * shrink to fit it ([RideInstruments]). So on a given phone the pad has one place, whatever the
+ * screen is saying, and a thumb on it means the same demand. While the fault grid shows (disarmed)
+ * it is drawn in the pad's bounds, and while no motor controller reports, the motor-controller-off
+ * card ([BoardsOffCard]) takes the instruments' and the pad's place.
  *
  * Laid out for ONE thumb: the pad is the control being modulated and the only one that is held; the
  * arm toggle is a tap under it. See [com.hoverboard.remote.MainViewModel] for the safety argument.
@@ -58,6 +74,8 @@ import java.util.Locale
  * Per-board state, the drive mode and the machine's configuration statements are on Setup's
  * machine status section (3.1c); the board link dots and the BATTERY LOW and LAMP TEST chips are in
  * the top bar ([RideTopBarStatus]).
+ *
+ * @param onOpenSetup open Setup on a board, scrolled to a row: a missing setting's statement.
  */
 @Composable
 fun ControlScreen(
@@ -68,42 +86,61 @@ fun ControlScreen(
     onThrottleRelease: () -> Unit,
     modifier: Modifier = Modifier,
     showFrameStats: Boolean = false,
+    onOpenSetup: (board: Int, row: Key) -> Unit = { _, _ -> },
 ) {
     var sheet by rememberSaveable { mutableStateOf<FaultLamp?>(null) }
     val open = { lamp: FaultLamp ->
         onThrottleRelease()
         sheet = lamp
     }
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-    ) {
-        RideInstruments(state)
-        Spacer(modifier = Modifier.height(SLOT_GAP))
+    // A pad that leaves composition under a finger never sees its finger-up, so the demand is
+    // released when the grid or the card takes its place, as on a destination change (2a).
+    val padGone = state.boardsOff || (state.gridShows && !state.armed)
+    val release by rememberUpdatedState(onThrottleRelease)
+    LaunchedEffect(padGone) { if (padGone) release() }
+    Column(modifier = modifier.fillMaxSize()) {
+        if (state.boardsOff) {
+            BoardsOffCard(
+                state,
+                Modifier.padding(horizontal = GUTTER).fillMaxWidth().weight(1f),
+            )
+            Spacer(modifier = Modifier.height(SLOT_GAP))
+        } else {
+            RideInstruments(state, Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(SLOT_GAP))
+        }
+        // The grid takes the pad's bounds only while disarmed: while armed the pad keeps its place
+        // (`specs/rider-ui.md` 3.1b).
+        val grid: (@Composable () -> Unit)? = if (state.gridShows && !state.armed) {
+            { FaultGrid(state, onOpen = open) }
+        } else {
+            null
+        }
         RideControls(
             state = state,
             onArmToggle = onArmToggle,
             onThrottleMove = onThrottleMove,
             onJoystickMove = onJoystickMove,
             onThrottleRelease = onThrottleRelease,
-            gridShowing = state.gridShows,
+            grid = grid,
+            padShown = !state.boardsOff,
+            statementsHeight = STATEMENTS_HEIGHT,
             onOpenLamp = open,
+            onOpenSetup = { board, row ->
+                onThrottleRelease()
+                onOpenSetup(board, row)
+            },
             modifier = Modifier.padding(horizontal = GUTTER),
         )
-        Column(modifier = Modifier.padding(horizontal = GUTTER).padding(bottom = 16.dp)) {
-            if (state.gridShows) {
-                Spacer(modifier = Modifier.height(SLOT_GAP))
-                FaultGrid(state, onOpen = open)
-            }
-            Spacer(modifier = Modifier.height(SLOT_GAP))
-            TripLine(state)
-            if (showFrameStats && state.frameStats.isNotEmpty()) {
+        Column(modifier = Modifier.padding(horizontal = GUTTER).padding(bottom = BOTTOM_MARGIN)) {
+            TripLine(state, blank = state.boardsOff)
+            if (showFrameStats) {
                 Text(
                     text = frameStatsLine(state.frameStats),
                     style = ride(10.sp),
                     color = FgFaint,
-                    modifier = Modifier.testTag(FRAME_STATS_TAG),
+                    maxLines = 1,
+                    modifier = Modifier.height(DEBUG_LINE_HEIGHT).testTag(FRAME_STATS_TAG),
                 )
             }
         }
@@ -112,14 +149,69 @@ fun ControlScreen(
 }
 
 /**
+ * The motor-controller-off card (`specs/rider-ui.md` 3.1): the link is up and no motor controller
+ * has reported for 1 s, which is the boards unpowered behind a bridge that runs from USB. It takes
+ * the instruments' and the pad's place, down to the pad's bottom.
+ */
+@Composable
+private fun BoardsOffCard(state: UiState, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(24.dp)
+    Column(
+        modifier = modifier
+            .testTag(RIDE_BOARDS_OFF_TAG)
+            .clip(shape)
+            .background(BgCode)
+            .border(1.dp, Border, shape)
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        PowerGlyph(40.dp)
+        Spacer(Modifier.height(16.dp))
+        Text(stringResource(R.string.ride_off_title), style = ride(22.sp, FontWeight.Bold), color = Fg)
+        Spacer(Modifier.height(6.dp))
+        Text(stringResource(R.string.ride_off_action), style = ride(16.sp), color = Fg)
+        Spacer(Modifier.height(16.dp))
+        Text(
+            stringResource(R.string.ride_off_waiting, state.linkName),
+            style = ride(14.sp),
+            color = FgMuted,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** A power glyph: a 300 degree arc open at the top, and a bar down through the gap, in [FgMuted]. */
+@Composable
+private fun PowerGlyph(size: Dp) {
+    Canvas(Modifier.size(size)) {
+        val w = 3.dp.toPx()
+        val r = this.size.minDimension / 2f - w
+        val c = Offset(this.size.width / 2f, this.size.height / 2f + w / 2)
+        drawArc(
+            color = FgMuted,
+            startAngle = POWER_ARC_START,
+            sweepAngle = POWER_ARC_SWEEP,
+            useCenter = false,
+            topLeft = Offset(c.x - r, c.y - r),
+            size = Size(r * 2, r * 2),
+            style = Stroke(w, cap = StrokeCap.Round),
+        )
+        drawLine(FgMuted, Offset(c.x, c.y - r - w / 2), Offset(c.x, c.y - r * POWER_BAR_END), w, cap = StrokeCap.Round)
+    }
+}
+
+/**
  * "Trip 3.1 km     Total 413 km": the machine's travel and that less the trip's baseline, blank
  * and keeping its height while there is no machine distance.
  */
 @Composable
-private fun TripLine(state: UiState) {
+private fun TripLine(state: UiState, blank: Boolean) {
     val total = state.machineTravel as? MachineTravel.Distance
     val trip = state.trip.trip(total)
-    val text = if (total == null || trip == null) {
+    val text = if (blank || total == null || trip == null) {
         ""
     } else {
         stringResource(R.string.ride_trip, tripKmText(trip), totalKmText(total.millimetres))
@@ -129,7 +221,8 @@ private fun TripLine(state: UiState) {
         style = ride(14.sp),
         color = FgMuted,
         textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth().testTag(RIDE_TRIP_TAG),
+        maxLines = 1,
+        modifier = Modifier.fillMaxWidth().height(TRIP_LINE_HEIGHT).testTag(RIDE_TRIP_TAG),
     )
 }
 
@@ -194,6 +287,20 @@ private const val MS_PER_S = 1000.0
 
 /** 8a's side gutter. */
 private val GUTTER = 24.dp
+
+/** The fixed slots under the ARM control (`specs/rider-ui.md` 3.1): statements, trip line, debug line, margin. */
+private val STATEMENTS_HEIGHT = 32.dp
+private val TRIP_LINE_HEIGHT = 20.dp
+private val DEBUG_LINE_HEIGHT = 14.dp
+private val BOTTOM_MARGIN = 8.dp
+
+/** The power glyph's arc: 300 degrees from the top's right side, and the bar's end, as a part of the radius. */
+private const val POWER_ARC_START = -60f
+private const val POWER_ARC_SWEEP = 300f
+private const val POWER_BAR_END = 0.1f
+
+/** Test tag on the motor-controller-off card. */
+const val RIDE_BOARDS_OFF_TAG = "ride_boards_off"
 
 /** The link dot's box: the 10 dp caution glyph, or the 8 dp dot centred in it. */
 private val DOT_BOX = 10.dp

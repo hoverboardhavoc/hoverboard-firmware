@@ -257,6 +257,27 @@ class Controller {
     /** The walk is finished: nothing queued and nothing outstanding. */
     fun isComplete(): Boolean = queue.isEmpty() && outstanding == null
 
+    /**
+     * Walk again from [addrs], after the walk has finished, to find nodes that came up since
+     * (`specs/rider-ui.md` 3.1, "Boards that come up after the connect"): each of [addrs] this walk
+     * has placed is probed again. A neighbour already known at the port it answers on is passed over
+     * ([onPorts]: "already known here"), and a new or unaddressed one is adopted or assigned and
+     * descended into as on the first walk. Does nothing while a walk is still running.
+     */
+    fun rewalk(addrs: List<Int>) {
+        if (!isComplete()) return
+        for (a in addrs.distinct()) if (positionOf(a) != null) enqueue(Task.Probe(a))
+    }
+
+    /**
+     * Drop what an abandoned walk left queued and outstanding, so [rewalk] can start: the driver
+     * gave up on that request, and its late reply is then no reply ([onReply] answers false).
+     */
+    fun dropUnfinished() {
+        queue.clear()
+        outstanding = null
+    }
+
     /** The next request to send out the attach port, or null while a reply is outstanding / complete. */
     fun nextRequest(): ByteArray? {
         if (outstanding != null) return null
