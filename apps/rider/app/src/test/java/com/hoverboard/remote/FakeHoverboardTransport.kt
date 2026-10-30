@@ -316,6 +316,19 @@ class FakeHoverboardTransport(
         scheduler.runCurrent()
     }
 
+    /** Every re-walk asked for, in order, as the addresses it probed from. */
+    val rewalks: MutableList<List<Int>> = mutableListOf()
+
+    /** The node list the next re-walks come to (the walk found boards switched on), or null for no change. */
+    var rewalkFinds: List<Int>? = null
+
+    override suspend fun rewalk(probe: List<Int>): List<Int>? {
+        if (_attachedBoard.value == null) return null
+        rewalks.add(probe)
+        rewalkFinds?.let { _nodes.value = it }
+        return _nodes.value
+    }
+
     /** Make the node at [address] a hoverboard bridge: its `node.class` reads `0x02`. */
     fun makeBridge(address: Int) {
         store[address to Fields.NODE_CLASS.key()] = Value.U8(Fields.NodeClass.BRIDGE)
@@ -403,6 +416,21 @@ internal val DRIVING_OBS = QUIET_OBS.copy(
     phasePeak = 2_100,
     phaseMean = 1_365,
     dutyOn = CyclicObs.DUTY_FULL * 2 / 3,
+)
+
+/** A board at rest in OFF, level, with no fault and a 37.8 V pack: what a powered board sends. */
+internal val QUIET_STATE = CyclicState(
+    pitch = 0,
+    roll = 0,
+    wheelSpeed = 0,
+    battery = 3_780,
+    mode = 0,
+    fault = 0,
+    flags = 0,
+    peerDemand = 0,
+    wheelPos = 0,
+    wheelRate = 0,
+    obs = QUIET_OBS,
 )
 
 /** The counts per amp [DRIVING_OBS]'s figures are quoted at: the registry default. */

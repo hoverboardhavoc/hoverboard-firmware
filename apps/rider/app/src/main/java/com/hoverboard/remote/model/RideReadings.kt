@@ -183,3 +183,13 @@ private const val CENTI_PER_TENTH = 10
 private const val TENTHS = 10
 private const val WHOLE_FROM_TENTHS = 100L
 private const val MM_PER_TENTH_KM = 100_000L
+
+/**
+ * The ring's and the speed's scale in an instruments slot [hDp] dp tall (`specs/rider-ui.md` 3.1):
+ * (h - 64) / 212, at most 1, where 64 dp is what the slot needs beside the ring (the phase row, and
+ * the pack line under it) and 212 dp the ring's share at full size.
+ */
+fun ringScale(hDp: Float): Float = ((hDp - SCALE_FIXED_DP) / SCALE_SPAN_DP).coerceAtMost(1f)
+
+private const val SCALE_FIXED_DP = 64f
+private const val SCALE_SPAN_DP = 212f

@@ -30,6 +30,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectScreen
@@ -232,11 +233,22 @@ private fun Connected(
     onDestination: (AppDestination) -> Unit,
 ) {
     val setupState by viewModel.setup.state.collectAsStateWithLifecycle()
+    // The row a missing-setting statement opened Setup at (`specs/rider-ui.md` 3.1).
+    var setupRow by remember { mutableStateOf<Key?>(null) }
+    val openSetup = { board: Int, row: Key ->
+        viewModel.onThrottleRelease()
+        viewModel.setup.selectTarget(board)
+        setupRow = row
+        onDestination(AppDestination.SETUP)
+    }
     val tuneState by viewModel.tune.state.collectAsStateWithLifecycle()
     val layoutState by viewModel.layout.state.collectAsStateWithLifecycle()
     ConnectedScreen(
         destination = destination,
-        onDestination = onDestination,
+        onDestination = {
+            setupRow = null
+            onDestination(it)
+        },
         onLeaveDrive = viewModel::onThrottleRelease,
         armed = state.armed,
         onDisconnect = viewModel::disconnect,
@@ -251,6 +263,7 @@ private fun Connected(
                 // Debug builds only (`specs/rider-ui.md` 3.1): the per-source frame count and
                 // longest gap, a bench instrument with nothing to tell a rider.
                 showFrameStats = BuildConfig.DEBUG,
+                onOpenSetup = openSetup,
             )
         },
         tune = {
@@ -268,11 +281,12 @@ private fun Connected(
                         onThrottleMove = viewModel::onThrottleMove,
                         onJoystickMove = viewModel::onJoystickMove,
                         onThrottleRelease = viewModel::onThrottleRelease,
+                        onOpenSetup = openSetup,
                     )
                 },
             )
         },
-        setup = { Setup(state, setupState, viewModel.setup, viewModel::setSimulateRider) },
+        setup = { Setup(state, setupState, viewModel.setup, viewModel::setSimulateRider, setupRow) },
         layout = {
             LayoutScreen(
                 state = layoutState,
@@ -293,6 +307,7 @@ private fun Setup(
     setupState: SetupState,
     actions: SetupActions,
     onSimulateRider: (Boolean) -> Unit,
+    scrollTo: Key?,
 ) {
     SetupScreen(
         state = setupState,
@@ -304,6 +319,7 @@ private fun Setup(
         // figure is the mean of the wheels, so it needs them all whichever node is edited.
         odometers = state.motorControllers.map { nodeLabel(it) to state.odometerOf(it.address) },
         actions = actions,
+        scrollTo = scrollTo,
         status = {
             MachineStatusSection(
                 state = state,

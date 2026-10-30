@@ -158,72 +158,164 @@ class ScreenshotTest {
     }
 
     // --- Ride, 8a (`specs/rider-ui.md` 3.1 and 3.1d) -------------------------------------------
+    //
+    // Every Ride capture is taken at the class qualifier and again at the ASUS ROG's 1080 x 1920 px
+    // (ASUS), named with the suffix `_asus`.
 
     /** Two boards, sides left and right, BOUND, armed, throttle forward, 7.4 km/h, a trip and a total. */
     @Test
-    fun ride_riding() {
-        capture("ride_riding") { Ride(riding()) }
-    }
+    fun ride_riding() = capture("ride_riding") { Ride(riding()) }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_riding_asus() = capture("ride_riding_asus") { Ride(riding()) }
 
     /** As riding, with the pack under 15 percent: the ring in caution and the BATTERY LOW chip. */
     @Test
-    fun ride_lowBattery() {
-        val riding = riding()
-        val low = riding.telemetryByBoard.mapValues { (_, t) -> t.withBattery(LOW_CV) }
-        val state = riding.copy(telemetryByBoard = low)
-        check(state.batteryIsLow)
-        capture("ride_low_battery") { Ride(state) }
-    }
+    fun ride_lowBattery() = capture("ride_low_battery") { Ride(lowBattery()) }
 
-    /** Disarmed, HALL on the left board and IMU on the right: the grid, the ARM label faint, the pad dimmed. */
     @Test
-    fun ride_fault() {
-        capture("ride_fault") { Ride(fault()) }
-    }
+    @Config(qualifiers = ASUS)
+    fun ride_lowBattery_asus() = capture("ride_low_battery_asus") { Ride(lowBattery()) }
+
+    /** Disarmed, HALL on the left board and IMU on the right: the grid in the pad's bounds, the ARM label faint. */
+    @Test
+    fun ride_fault() = capture("ride_fault") { Ride(fault()) }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_fault_asus() = capture("ride_fault_asus") { Ride(fault()) }
 
     /** The fault with HALL's sheet open: the sheet is its own window, so the whole screen is captured. */
     @Test
-    fun ride_faultSheet() {
+    fun ride_faultSheet() = faultSheet("ride_fault_sheet")
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_faultSheet_asus() = faultSheet("ride_fault_sheet_asus")
+
+    private fun faultSheet(name: String) {
         setRide(fault())
         compose.onNodeWithTag(lampTag(FaultLamp.HALL)).performClick()
         compose.waitForIdle()
-        captureScreenRoboImage("src/test/screenshots/ride_fault_sheet.png")
+        captureScreenRoboImage("src/test/screenshots/$name.png")
     }
 
-    /** One second into the lamp test, on the test clock. */
+    /** One second into the lamp test, on the test clock: the grid in the pad's bounds. */
     @Test
-    fun ride_lampTest() {
-        capture("ride_lamp_test", advanceMs = LAMP_TEST_PHASE_MS) {
-            Ride(sided(armed = false).copy(lampTest = true))
-        }
+    fun ride_lampTest() = capture("ride_lamp_test", advanceMs = LAMP_TEST_PHASE_MS) {
+        Ride(sided(armed = false).copy(lampTest = true))
+    }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_lampTest_asus() = capture("ride_lamp_test_asus", advanceMs = LAMP_TEST_PHASE_MS) {
+        Ride(sided(armed = false).copy(lampTest = true))
     }
 
     /**
      * One board silent, the other with no wheel diameter, no pack voltage, its current calibration
-     * unread and no IMU fitted: every figure that has no value says so.
+     * unread and no IMU fitted: every figure that has no value says so, and the statements say why.
      */
     @Test
-    fun ride_unknown() {
-        val state = sided(armed = false).copy(
-            telemetryByBoard = mapOf(0x01 to board(battery = 0, pitch = 120, roll = -40)),
-            countsPerAmp = mapOf(0x02 to DRIVING_CAL),
-            imuModel = mapOf(0x01 to 0, 0x02 to IMU_FITTED),
-            speedFacts = listOf(SpeedFacts(0, polePairs = POLE_PAIRS, diameterMm = 0, side = Fields.ControlSide.LEFT)),
-        )
-        capture("ride_unknown") { Ride(state) }
-    }
+    fun ride_unknown() = capture("ride_unknown") { Ride(unknown()) }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_unknown_asus() = capture("ride_unknown_asus") { Ride(unknown()) }
+
+    /** Both boards reporting, no cell count and no pole pairs: the voltage alone and two "Set it ›" lines. */
+    @Test
+    fun ride_unset() = capture("ride_unset") { Ride(unset()) }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_unset_asus() = capture("ride_unset_asus") { Ride(unset()) }
+
+    /** Riding backwards at 3.2 km/h: the magnitude and "km/h R". */
+    @Test
+    fun ride_reverse() = capture("ride_reverse") { Ride(reverse()) }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_reverse_asus() = capture("ride_reverse_asus") { Ride(reverse()) }
+
+    /** Riding, with the right wheel judged not turning. */
+    @Test
+    fun ride_notTurning() = capture("ride_not_turning") { Ride(notTurning()) }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_notTurning_asus() = capture("ride_not_turning_asus") { Ride(notTurning()) }
+
+    /** Connected to `offroad-master`, the walk having found only the bridge: the card. */
+    @Test
+    fun ride_boardsOff() = capture("ride_boards_off") { Ride(boardsOff()) }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_boardsOff_asus() = capture("ride_boards_off_asus") { Ride(boardsOff()) }
 
     /** DIFFERENTIAL, armed, the joystick deflected on both axes. */
     @Test
-    fun ride_joystickArmed() {
+    fun ride_joystickArmed() = capture("ride_joystick_armed") { Ride(joystick()) }
+
+    @Test
+    @Config(qualifiers = ASUS)
+    fun ride_joystickArmed_asus() = capture("ride_joystick_armed_asus") { Ride(joystick()) }
+
+    private fun lowBattery(): UiState {
+        val riding = riding()
+        val low = riding.telemetryByBoard.mapValues { (_, t) -> t.withBattery(LOW_CV) }
+        return riding.copy(telemetryByBoard = low).also { check(it.batteryIsLow) }
+    }
+
+    private fun unknown(): UiState = sided(armed = false).copy(
+        telemetryByBoard = mapOf(0x01 to board(battery = 0, pitch = 120, roll = -40)),
+        countsPerAmp = mapOf(0x02 to DRIVING_CAL),
+        imuModel = mapOf(0x01 to 0, 0x02 to IMU_FITTED),
+        speedFacts = listOf(
+            SpeedFacts(0x01, 0, polePairs = POLE_PAIRS, diameterMm = 0, side = Fields.ControlSide.LEFT),
+        ),
+    )
+
+    private fun unset(): UiState = sided(armed = false).copy(
+        packCells = mapOf(0x01 to 0, 0x02 to 0),
+        speedFacts = listOf(
+            SpeedFacts(0x01, 0, polePairs = 0, diameterMm = DIAMETER_MM, side = Fields.ControlSide.LEFT),
+            SpeedFacts(0x02, 0, polePairs = 0, diameterMm = DIAMETER_MM, side = Fields.ControlSide.RIGHT),
+        ),
+    )
+
+    private fun reverse(): UiState {
+        val rate = (REVERSE_KMH / KMH_PER_RATE).roundToInt()
+        return riding().copy(
+            throttleSpeed = -Throttle.MAX_SPEED / 4,
+            speedFacts = listOf(
+                SpeedFacts(0x01, -rate, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.LEFT),
+                SpeedFacts(0x02, rate, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.RIGHT),
+            ),
+        )
+    }
+
+    private fun notTurning(): UiState = riding().copy(notTurning = setOf(0x02))
+
+    private fun boardsOff(): UiState = UiState(
+        connectionState = ConnectionState.CONNECTED,
+        nodes = listOf(NodeInfo(0x01, Fields.NodeClass.BRIDGE, "offroad-master")),
+        attachedNode = 0x01,
+        deviceName = "offroad-master",
+        boardsOff = true,
+    )
+
+    private fun joystick(): UiState {
         val targets = DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02), right = 0x02)
-        val state = riding().copy(
+        return riding().copy(
             drive = DriveInForce(targets, DriveMode.DIFFERENTIAL, refusal = null),
             driving = targets,
             throttleSpeed = Throttle.MAX_SPEED * 2 / 5,
             steer = Throttle.MAX_SPEED / 3,
         )
-        capture("ride_joystick_armed") { Ride(state) }
     }
 
     // --- the other screens, in the theme -------------------------------------------------------
@@ -402,8 +494,8 @@ class ScreenshotTest {
             batteryFloor = boards.associateWith { 0 },
             wheelGeometry = boards.associateWith { WheelGeometry(POLE_PAIRS, DIAMETER_MM) },
             speedFacts = listOf(
-                SpeedFacts(0, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.LEFT),
-                SpeedFacts(0, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.RIGHT),
+                SpeedFacts(0x01, 0, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.LEFT),
+                SpeedFacts(0x02, 0, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.RIGHT),
             ),
         )
     }
@@ -428,8 +520,8 @@ class ScreenshotTest {
             ),
             wheelGeometry = mapOf(0x01 to wheel, 0x02 to wheel),
             speedFacts = listOf(
-                SpeedFacts(rate, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.LEFT),
-                SpeedFacts(-rate, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.RIGHT),
+                SpeedFacts(0x01, rate, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.LEFT),
+                SpeedFacts(0x02, -rate, POLE_PAIRS, DIAMETER_MM, Fields.ControlSide.RIGHT),
             ),
         )
         val total = (state.machineTravel as MachineTravel.Distance).millimetres
@@ -513,6 +605,10 @@ class ScreenshotTest {
         const val POLE_PAIRS = 15
         const val DIAMETER_MM = 165
         const val RIDING_KMH = 7.4
+        const val REVERSE_KMH = 3.2
+
+        /** The ASUS ROG's 1080 x 1920 px at its density of 3.0. */
+        const val ASUS = "w360dp-h640dp-xxhdpi"
 
         /** km/h per unit of `wheel_rate` on this wheel (`specs/rider-ui.md` 3.1a). */
         const val KMH_PER_RATE = 50.0 / 4096 / (6 * POLE_PAIRS) * PI * DIAMETER_MM * 0.0036

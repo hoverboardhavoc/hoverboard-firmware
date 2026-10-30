@@ -22,6 +22,7 @@ import com.hoverboard.remote.model.FaultLamp
 import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.LampFacts
 import com.hoverboard.remote.model.MachineTravel
+import com.hoverboard.remote.model.Missing
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.RideSlots
@@ -39,12 +40,15 @@ import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
 import com.hoverboard.remote.model.machineOdometer
 import com.hoverboard.remote.model.machineSpeed
+import com.hoverboard.remote.model.missingSettings
 import com.hoverboard.remote.model.odometerReading
 import com.hoverboard.remote.model.rideSlots
 import com.hoverboard.remote.model.rigidLeader
 import com.hoverboard.remote.model.ringReading
 import com.hoverboard.remote.model.shownLamps
+import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -56,6 +60,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -121,6 +126,11 @@ import kotlinx.coroutines.launch
  *   ARM tap (`specs/rider-ui.md` 3.1b): a board clears its latch about 8 ms after the trip.
  * @param lampTest whether the once-per-connection lamp test is on (`specs/rider-ui.md` 3.1b).
  * @param trip the trip's baseline ([TripBaseline]).
+ * @param boardsOff whether the link has been up for 1 s with no motor controller in the inbox: the
+ *   boards are unpowered behind a bridge, and Ride shows its motor-controller-off card in place of
+ *   the instruments and the pad (`specs/rider-ui.md` 3.1).
+ * @param notTurning the boards the app has asked for drive for 1 s whose wheel has reported no
+ *   rotation all that time (`specs/rider-ui.md` 3.1, "A wheel that does not turn").
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -158,6 +168,8 @@ data class UiState(
     val latchHeld: Map<Int, Int> = emptyMap(),
     val lampTest: Boolean = false,
     val trip: TripBaseline = TripBaseline.NONE,
+    val boardsOff: Boolean = false,
+    val notTurning: Set<Int> = emptySet(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -273,12 +285,30 @@ data class UiState(
      * False too while the boards are known to hold different frames ([MachineArm.FramesDiffer]),
      * while the drive mode in force addresses no motor controller at all (no node has answered that
      * it is one, or the app refuses the stored mode, [DriveInForce.refusal]), and while a board the
-     * arm would arm reports an arm-blocking bit ([armBlocked]).
+     * arm would arm reports an arm-blocking bit ([armBlocked]), and while no motor controller is
+     * reporting at all ([boardsOff]).
      */
     val canArm: Boolean
         get() = isConnected && !engaged && !disconnecting && !machineArm.refuses &&
-            drive.targets.boards.isNotEmpty() && !armBlocked
+            drive.targets.boards.isNotEmpty() && !armBlocked && !boardsOff
 
+    /**
+     * The name of what the phone is connected to, for the motor-controller-off card: the picked
+     * board's advertised name, else the device name the app connects by.
+     */
+    val linkName: String get() = selectedBoard?.name ?: deviceName
+
+
+    /** The settings the Ride figures lack, for the statements ([missingSettings], `specs/rider-ui.md` 3.1). */
+    val missing: List<Missing>
+        get() = missingSettings(
+            speed = speed,
+            speedFacts = speedFacts,
+            ringBoard = ring.first,
+            battery = ring.second,
+            slotBoards = slots.all.map { it.address }.filter { it in telemetryByBoard }.map { it to currentOf(it) },
+            countsPerAmp = countsPerAmp,
+        )
 
     /** Commanded throttle as a percent of MAX_SPEED, signed (-100..100). */
     val throttlePercent: Int get() = (throttleSpeed * PERCENT) / Throttle.MAX_SPEED
@@ -363,6 +393,7 @@ data class UiState(
  *     restated. On top of all that the app refuses to come back armed: [connectionState] leaving
  *     CONNECTED forces the local state disarmed, so a reconnect requires a fresh, deliberate press.
  */
+@OptIn(ExperimentalCoroutinesApi::class) // transformLatest, for the motor-controller-off card's 1 s
 @Suppress("TooManyFunctions") // one entry point per thing the screens offer, plus the two private send steps
 class MainViewModel(
     private val transport: HoverboardTransport,
@@ -437,6 +468,21 @@ class MainViewModel(
 
     /** The trip's baseline ([TripBaseline]): it outlives a link, and is the process's. */
     private val trip = MutableStateFlow(TripBaseline.NONE)
+
+    /**
+     * Whether no motor controller has been in the inbox for [BOARDS_OFF_MS] while the link is up
+     * (`specs/rider-ui.md` 3.1, "Motor controller off"). A node whose class is not read yet, and a
+     * source the walk did not find, count as possible motor controllers.
+     */
+    private val boardsOff = MutableStateFlow(false)
+
+    /**
+     * The boards judged not turning ([UiState.notTurning]), and per board the 1 s wait that judges
+     * one: started when its demand reaches [NOT_TURNING_DEMAND] with its wheel reading no rate, and
+     * cancelled the moment either stops being so.
+     */
+    private val notTurning = MutableStateFlow<Set<Int>>(emptySet())
+    private val turningWaits = mutableMapOf<Int, Job>()
 
     /**
      * What the session knows about its nodes, gathered for [uiState]: the node list, the machine
@@ -530,6 +576,10 @@ class MainViewModel(
             ui.copy(lampTest = on)
         }.combine(trip) { ui, t ->
             ui.copy(trip = t)
+        }.combine(boardsOff) { ui, off ->
+            ui.copy(boardsOff = off)
+        }.combine(notTurning) { ui, still ->
+            ui.copy(notTurning = still)
         }
 
             .stateIn(
@@ -554,12 +604,34 @@ class MainViewModel(
                     local.value = LocalState()
                     endLampTest()
                     lampTestDone = false
+                    stopTurningWatch()
                 }
             }
             .launchIn(viewModelScope)
-        // The lamp test starts when this connection's ride facts are first all in.
+        // The lamp test starts when this connection's ride facts are first all in, with a motor
+        // controller among the nodes: a walk that found only a bridge has no lamp to test.
         setup.state
-            .onEach { if (it.rideFactsRead) maybeStartLampTest() }
+            .onEach { if (it.rideFactsRead && it.motorControllers.isNotEmpty()) maybeStartLampTest() }
+            .launchIn(viewModelScope)
+        // The motor-controller-off card (`specs/rider-ui.md` 3.1): the inbox has held no motor
+        // controller for [BOARDS_OFF_MS] with the link up. An app still holding the arm level then
+        // drops it, so a board powered up again does not arm at once on a level nobody restated.
+        combine(transport.connectionState, setup.state, transport.telemetry) { conn, st, byBoard ->
+            conn == ConnectionState.CONNECTED && st.attached != null &&
+                byBoard.keys.none { a -> st.nodeAt(a)?.let { it.isMotorController || it.nodeClass == null } ?: true }
+        }
+            .distinctUntilChanged()
+            .transformLatest { silent ->
+                emit(false)
+                if (silent) {
+                    delay(BOARDS_OFF_MS)
+                    emit(true)
+                }
+            }
+            .onEach { off ->
+                boardsOff.value = off
+                if (off && local.value.armed) forceDisarm(selfDisarm = false)
+            }
             .launchIn(viewModelScope)
         // The trip's baseline follows the machine's travel and the board picked.
         combine(setup.state, transport.telemetry, settings.selectedBoard) { st, byBoard, pick ->
@@ -776,6 +848,7 @@ class MainViewModel(
         // A fresh arm answers the "the app disarmed this" lines, so it goes with the press that
         // makes them stale rather than lingering over a machine that is armed again; the same tap
         // clears the latch lamps the app was holding lit.
+        if (boardsOff.value) return
         local.update {
             it.copy(
                 armed = true,
@@ -785,6 +858,8 @@ class MainViewModel(
                 armedTargets = targets,
             )
         }
+        // The pad is back in its place as the machine arms (`specs/rider-ui.md` 3.1b).
+        endLampTest()
         sendCurrent()
     }
 
@@ -913,7 +988,40 @@ class MainViewModel(
         val telemetry = transport.telemetry.value
         val targets = l.armedTargets ?: setup.state.value.driveInForce(telemetry).targets
         val leader = rigidLeader(targets.boards, telemetry)
-        transport.sendCommand(DriveFrame.of(targets, command, steer = l.steer, leader = leader))
+        val frame = DriveFrame.of(targets, command, steer = l.steer, leader = leader)
+        transport.sendCommand(frame)
+        watchTurning(frame, telemetry)
+    }
+
+    /**
+     * Judge each board the frame drives against what its wheel reports (`specs/rider-ui.md` 3.1, "A
+     * wheel that does not turn"): armed, a demand of at least [NOT_TURNING_DEMAND] in that board's
+     * own command and a `wheel_rate` of 0 start a [NOT_TURNING_MS] wait, and the board is not turning
+     * once it ends. Any of the three stopping being so cancels the wait and clears the board. The
+     * app does not disarm for it.
+     */
+    private fun watchTurning(frame: DriveFrame, telemetry: Map<Int, TelemetryUi>) {
+        val suspects = if (!local.value.armed) {
+            emptySet()
+        } else {
+            frame.commands.filter { (board, c) ->
+                abs(c.demand) >= NOT_TURNING_DEMAND && telemetry[board]?.wheelRateQ12 == 0
+            }.keys
+        }
+        for (board in turningWaits.keys - suspects) turningWaits.remove(board)?.cancel()
+        notTurning.update { it intersect suspects }
+        for (board in suspects - turningWaits.keys) {
+            turningWaits[board] = viewModelScope.launch {
+                delay(NOT_TURNING_MS)
+                notTurning.update { it + board }
+            }
+        }
+    }
+
+    private fun stopTurningWatch() {
+        turningWaits.values.forEach { it.cancel() }
+        turningWaits.clear()
+        notTurning.value = emptySet()
     }
 
     /**
@@ -972,6 +1080,18 @@ class MainViewModel(
 
         /** How long the lamp test lights every shown lamp (`specs/rider-ui.md` 3.1b). */
         const val LAMP_TEST_MS: Long = 2_000L
+
+        /** How long the inbox holds no motor controller before Ride shows the card (`specs/rider-ui.md` 3.1). */
+        const val BOARDS_OFF_MS: Long = 1_000L
+
+        /**
+         * The demand at and above which a wheel is expected to turn: a quarter of
+         * [com.hoverboard.protocol.linkctl.DriveCmd.FULL_SCALE] (`specs/rider-ui.md` 3.1).
+         */
+        const val NOT_TURNING_DEMAND: Int = 8_192
+
+        /** How long a demanded wheel may read no rate before it is not turning. */
+        const val NOT_TURNING_MS: Long = 1_000L
 
 
         private const val STATE_TIMEOUT_MS = 5_000L

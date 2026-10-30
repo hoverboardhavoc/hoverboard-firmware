@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithText
@@ -32,12 +33,14 @@ import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.ui.screens.MachineStatusSection
+import com.hoverboard.remote.ui.screens.statusBoardTag
 import com.hoverboard.remote.ui.screens.RIGID_NOT_LEADING_TAG
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.RuleChain
@@ -97,6 +100,19 @@ class MachineStatusTest {
 
         compose.onNodeWithText(context.getString(R.string.status_lockdown)).assertIsDisplayed()
         compose.onNodeWithText(boardRow(R.string.board_state_lockdown)).assertIsDisplayed()
+    }
+
+    /** The app's reading of a driven wheel that does not turn: one line, under that board (`specs/rider-ui.md` 3.1). */
+    @Test
+    fun aWheelThatDoesNotTurnHasItsLineUnderItsBoard() {
+        showState(pair(DriveInForce.NONE).copy(notTurning = setOf(0x02)))
+
+        compose.onAllNodesWithText(context.getString(R.string.status_not_turning)).assertCountEquals(1)
+        val line = compose.onNodeWithText(context.getString(R.string.status_not_turning))
+            .fetchSemanticsNode().boundsInRoot
+        val left = compose.onNodeWithTag(statusBoardTag(0x01)).fetchSemanticsNode().boundsInRoot
+        val right = compose.onNodeWithTag(statusBoardTag(0x02)).fetchSemanticsNode().boundsInRoot
+        assertTrue("under the second board's row", line.top > right.top && right.top > left.top)
     }
 
     /** A board nothing has arrived from is SILENT, with no line under it that would be a reading. */

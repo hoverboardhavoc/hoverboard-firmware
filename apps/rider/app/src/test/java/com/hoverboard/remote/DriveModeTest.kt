@@ -38,6 +38,7 @@ class DriveModeTest : RiderVmTest() {
     private fun connectPair() {
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01, 0x02)
+        reporting(0x01, 0x02)
     }
 
     @Test
@@ -425,6 +426,7 @@ class DriveModeTest : RiderVmTest() {
         }
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01, 0x02, 0x03)
+        reporting(0x02, 0x03)
         viewModel.onArmToggle()
         viewModel.onThrottleMove(y = 0.25f * h, height = h)
 
@@ -442,6 +444,7 @@ class DriveModeTest : RiderVmTest() {
         transport.makeBridge(0x01)
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01, 0x02, 0x03)
+        reporting(0x02, 0x03)
         viewModel.onArmToggle()
 
         assertEquals(0x02, currentState().selected)

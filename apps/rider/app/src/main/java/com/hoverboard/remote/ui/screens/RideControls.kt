@@ -1,16 +1,24 @@
 package com.hoverboard.remote.ui.screens
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.MachineArm
 import com.hoverboard.remote.R
 import com.hoverboard.remote.RiderWaiver
@@ -18,9 +26,11 @@ import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.UiState
 import com.hoverboard.remote.model.DriveRefusal
 import com.hoverboard.remote.model.FaultLamp
+import com.hoverboard.remote.model.MissingSetting
 import com.hoverboard.remote.ui.components.ArmToggle
 import com.hoverboard.remote.ui.components.JoystickPad
 import com.hoverboard.remote.ui.components.ThrottlePad
+import com.hoverboard.remote.ui.theme.Primary
 import com.hoverboard.remote.ui.theme.Tone
 import com.hoverboard.remote.ui.theme.ToneText
 
@@ -36,10 +46,17 @@ import com.hoverboard.remote.ui.theme.ToneText
  * Nothing here is per screen: the state, the arming and the demand are the one session's, so a pad
  * on either screen drives the same board through the same callbacks.
  *
- * @param gridShowing whether the screen is showing the fault grid, which says why the arm is
- *   refused, so no statement is drawn under the control while it does.
+ * @param grid what the screen draws in the pad's bounds in place of the pad, the fault grid while it
+ *   shows (`specs/rider-ui.md` 3.1b), or null for the pad. The grid says why the arm is refused, so
+ *   no statement is drawn under the control while it is there.
+ * @param padShown false while the screen draws something else in the pad's place and above it (the
+ *   motor-controller-off card, 3.1): no pad, no grid and no statements.
+ * @param statementsHeight the fixed height of the statements' slot on Ride (3.1), so the slots under
+ *   it never move; null on Tune, where the statements take what they need.
  * @param onOpenLamp open a lamp's sheet, which the fault-disarm statement does when tapped. The
  *   caller releases the drive first: the sheet's scrim covers the pad.
+ * @param onOpenSetup open Setup on a board, scrolled to a row, which a missing setting's statement
+ *   does when tapped (3.1, "Missing settings, in plain words").
  */
 @Composable
 internal fun RideControls(
@@ -49,43 +66,88 @@ internal fun RideControls(
     onJoystickMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
     onThrottleRelease: () -> Unit,
     modifier: Modifier = Modifier,
-    gridShowing: Boolean = false,
+    grid: (@Composable () -> Unit)? = null,
+    padShown: Boolean = true,
+    statementsHeight: Dp? = null,
     onOpenLamp: (FaultLamp) -> Unit = {},
+    onOpenSetup: (board: Int, row: Key) -> Unit = { _, _ -> },
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
-        DriveControl(
-            state = state,
-            onThrottleMove = onThrottleMove,
-            onJoystickMove = onJoystickMove,
-            onThrottleRelease = onThrottleRelease,
-        )
-        Spacer(modifier = Modifier.height(SLOT_GAP))
-        ArmToggle(armed = state.armed, enabled = state.canArm, onToggle = onArmToggle)
-        if (!gridShowing) {
-            val shown = statements(state).take(MAX_STATEMENTS)
-            if (shown.isNotEmpty()) Spacer(modifier = Modifier.height(SLOT_GAP))
-            for (s in shown) {
-                ToneText(
-                    s.text,
-                    s.tone,
-                    style = ride(12.sp),
-                    maxLines = 1,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(RIDE_STATEMENT_TAG)
-                        .then(
-                            s.lamp?.let { lamp ->
-                                Modifier.clickable { onOpenLamp(lamp) }
-                            } ?: Modifier,
-                        ),
+        if (padShown) {
+            if (grid != null) {
+                Box(Modifier.fillMaxWidth().height(PAD_HEIGHT).testTag(RIDE_PAD_SLOT_TAG)) { grid() }
+            } else {
+                DriveControl(
+                    state = state,
+                    onThrottleMove = onThrottleMove,
+                    onJoystickMove = onJoystickMove,
+                    onThrottleRelease = onThrottleRelease,
                 )
             }
+            Spacer(modifier = Modifier.height(SLOT_GAP))
+        }
+        ArmToggle(armed = state.armed, enabled = state.canArm, onToggle = onArmToggle)
+        val shown = if (grid != null || !padShown) emptyList() else statements(state).take(MAX_STATEMENTS)
+        if (statementsHeight != null) {
+            Spacer(modifier = Modifier.height(STATEMENTS_GAP))
+            Column(Modifier.fillMaxWidth().height(statementsHeight)) {
+                for (s in shown) StatementLine(s, onOpenLamp, onOpenSetup)
+            }
+        } else {
+            if (shown.isNotEmpty()) Spacer(modifier = Modifier.height(SLOT_GAP))
+            for (s in shown) StatementLine(s, onOpenLamp, onOpenSetup)
         }
     }
 }
 
-/** One statement under the ARM control: its text, its tone, and the lamp a tap opens, if any. */
-private data class Statement(val text: String, val tone: Tone, val lamp: FaultLamp? = null)
+/**
+ * One statement line, 12 sp, one line, ellipsised: tapping it opens its lamp's sheet, or Setup at
+ * its missing setting's row, whose "Set it ›" ends the line in [Primary].
+ */
+@Composable
+private fun StatementLine(
+    s: Statement,
+    onOpenLamp: (FaultLamp) -> Unit,
+    onOpenSetup: (board: Int, row: Key) -> Unit,
+) {
+    val click = when {
+        s.lamp != null -> Modifier.clickable { onOpenLamp(s.lamp) }
+        s.setup != null -> Modifier.clickable { onOpenSetup(s.setup.first, s.setup.second) }
+        else -> Modifier
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().then(click).testTag(RIDE_STATEMENT_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ToneText(
+            s.text,
+            s.tone,
+            style = ride(12.sp),
+            maxLines = 1,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (s.setup != null) {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                stringResource(R.string.ride_set_it),
+                style = ride(12.sp, FontWeight.Bold),
+                color = Primary,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/**
+ * One statement under the ARM control: its text, its tone, and what a tap opens, if anything: a
+ * lamp's sheet, or Setup on a board at a row.
+ */
+private data class Statement(
+    val text: String,
+    val tone: Tone,
+    val lamp: FaultLamp? = null,
+    val setup: Pair<Int, Key>? = null,
+)
 
 /**
  * Every statement that applies to [state], in the order the Ride screen shows them
@@ -94,7 +156,48 @@ private data class Statement(val text: String, val tone: Tone, val lamp: FaultLa
  */
 @Composable
 private fun statements(state: UiState): List<Statement> =
-    disarmStatements(state) + armStatements(state) + machineStatements(state)
+    ridingStatements(state) + disarmStatements(state) + armStatements(state) + machineStatements(state) +
+        missingStatements(state)
+
+/**
+ * What is wrong while riding: a driven wheel that does not turn, and a lamp lit on a board the arm
+ * does not drive, which the grid does not show while armed (`specs/rider-ui.md` 3.1b).
+ */
+@Composable
+private fun ridingStatements(state: UiState): List<Statement> = buildList {
+    for (board in state.notTurning.sorted()) {
+        add(Statement(stringResource(R.string.ride_not_turning, boardName(state, board, inline = false)), Tone.WARNING))
+    }
+    if (state.armed) {
+        for ((board, word) in state.lampWords.toSortedMap()) {
+            val lamp = FaultLamp.lit(word).firstOrNull() ?: continue
+            val text = stringResource(
+                R.string.ride_lamp_lit_armed,
+                stringResource(lamp.title),
+                boardName(state, board, inline = true),
+            )
+            add(Statement(text, Tone.WARNING, lamp))
+        }
+    }
+}
+
+/** The settings a figure lacks, in plain words (`specs/rider-ui.md` 3.1, "Missing settings"). */
+@Composable
+private fun missingStatements(state: UiState): List<Statement> = state.missing.map { m ->
+    val text = stringResource(
+        when (m.setting) {
+            MissingSetting.WHEEL_SIZE -> R.string.ride_need_wheel_size
+            MissingSetting.WHEEL_READING -> R.string.ride_reading_wheel
+            MissingSetting.CELLS -> R.string.ride_need_cells
+            MissingSetting.CHEMISTRY_READING -> R.string.ride_reading_chemistry
+            MissingSetting.CHEMISTRY_UNKNOWN -> R.string.ride_need_chemistry
+            MissingSetting.CURRENT_CAL -> R.string.ride_need_current_cal
+            MissingSetting.CURRENT_CAL_READING -> R.string.ride_reading_current_cal
+        },
+    )
+    val row = m.setting.row
+    Statement(text, Tone.MUTED, setup = if (row != null && m.board != null) m.board to row.key else null)
+}
 
 /** Why the machine is not armed when the app took the level away: a fault, or leaving the screen. */
 @Composable
@@ -212,6 +315,12 @@ private fun DriveControl(
 
 /** Test tag on each statement line under the ARM control. */
 const val RIDE_STATEMENT_TAG = "ride_statement"
+
+/** Test tag on the pad's bounds while something else is drawn in them (the fault grid). */
+const val RIDE_PAD_SLOT_TAG = "ride_pad_slot"
+
+/** The gap between the ARM control and the statements' fixed slot on Ride. */
+private val STATEMENTS_GAP = 8.dp
 
 /**
  * The drive pad's height: its y range is the demand's resolution, and it is taller than the 260 dp

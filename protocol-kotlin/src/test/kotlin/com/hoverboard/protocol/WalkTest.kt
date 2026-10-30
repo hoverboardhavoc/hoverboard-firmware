@@ -8,6 +8,7 @@ import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.l3.isBoard
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
@@ -223,6 +224,43 @@ class WalkTest {
         assertEquals(0x03, m.persistedAddr(esp))
         assertEquals(0x01, m.liveAddr(master))
         assertEquals(0x02, m.liveAddr(slave))
+        assertEquals(listOf(0x01, 0x02, 0x03), m.controller.assignedAddrs().sorted())
+    }
+
+    /**
+     * A board switched on after the walk (`specs/rider-ui.md` 3.1, "Boards that come up after the
+     * connect"): the same controller re-walks from the gateway, assigns the new board and its peer,
+     * and passes over nothing it already knew.
+     */
+    @Test
+    fun aReWalkFromTheGatewayFindsABoardThatCameUpAfterTheWalk() {
+        val m = Mesh()
+        val bridge = m.addBoard(2, nodeClass = Fields.NodeClass.BRIDGE, name = "offroad-master")
+        m.attachController(bridge, 0)
+        m.runWalk()
+        assertEquals(listOf(0x01), m.controller.assignedAddrs())
+
+        // The boards were unpowered; now the master behind the bridge's port 1, and its slave, are up.
+        val master = m.addBoard(2)
+        val slave = m.addBoard(1)
+        m.wire(bridge, 1, master, 0)
+        m.wire(master, 1, slave, 0)
+        val before = m.sentRequests.size
+        m.controller.rewalk(listOf(0x01, 0x7E))
+        m.runWalk()
+
+        assertEquals(listOf(0x01, 0x02, 0x03), m.controller.assignedAddrs().sorted())
+        assertEquals(0x02, m.liveAddr(master))
+        assertEquals(0x03, m.liveAddr(slave))
+        // One probe of the bridge, an ASSIGN and a probe per new board; an unplaced address is not probed.
+        val again = m.sentRequests.drop(before)
+        assertEquals(listOf(0x01, 0x02, 0x03), again.filter { it.known() == Opcode.ProbePorts }.map { it.dst }.sorted())
+
+        // A second re-walk with nothing new sends probes and assigns nothing.
+        val settled = m.sentRequests.size
+        m.controller.rewalk(listOf(0x01))
+        m.runWalk()
+        assertEquals(listOf(Opcode.ProbePorts), m.sentRequests.drop(settled).map { it.known() })
         assertEquals(listOf(0x01, 0x02, 0x03), m.controller.assignedAddrs().sorted())
     }
 

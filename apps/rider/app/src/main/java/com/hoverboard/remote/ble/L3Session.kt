@@ -132,6 +132,26 @@ class L3Session(
         return abandon()
     }
 
+    /**
+     * Walk again from [addrs] on a link already in use (`specs/rider-ui.md` 3.1, "Boards that come
+     * up after the connect"; [BleWalkEngine.rewalk]), to find nodes that came up after [discover].
+     * The session loop keeps turning the engine and is still the link's only writer, so this only
+     * watches the walk and services its retransmit; the caller holds the config slot throughout. A
+     * walk that does not finish is abandoned with what it reached, as in [discover].
+     */
+    suspend fun rewalk(addrs: List<Int>): DiscoverOutcome {
+        synchronized(lock) { engine.rewalk(addrs) }
+        val deadline = nowMs() + DISCOVER_DEADLINE_MS
+        while (nowMs() < deadline) {
+            synchronized(lock) {
+                if (engine.walkComplete) return DiscoverOutcome.Complete(engine.addressedBoards())
+                if (engine.serviceRetransmit() == Retransmit.EXHAUSTED) return abandon()
+            }
+            delay(pollIdleMs)
+        }
+        return abandon()
+    }
+
     private fun abandon(): DiscoverOutcome = synchronized(lock) {
         engine.abandonWalk()
         DiscoverOutcome.Abandoned(engine.addressedBoards())

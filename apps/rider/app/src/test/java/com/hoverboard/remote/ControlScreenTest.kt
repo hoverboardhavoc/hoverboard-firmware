@@ -9,6 +9,7 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.down
+import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -22,6 +23,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
@@ -44,7 +47,10 @@ import com.hoverboard.remote.ui.components.THROTTLE_TAG
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.FAULT_GRID_TAG
 import com.hoverboard.remote.ui.screens.FRAME_STATS_TAG
+import com.hoverboard.remote.ui.screens.RIDE_BOARDS_OFF_TAG
 import com.hoverboard.remote.ui.screens.RIDE_PACK_TAG
+import com.hoverboard.remote.ui.screens.RIDE_PAD_SLOT_TAG
+import com.hoverboard.remote.ui.screens.RIDE_REVERSE_TAG
 import com.hoverboard.remote.ui.screens.RIDE_SPEED_TAG
 import com.hoverboard.remote.ui.screens.RIDE_STATEMENT_TAG
 import com.hoverboard.remote.ui.screens.RIDE_TRIP_TAG
@@ -73,7 +79,8 @@ class ControlScreenTest {
     val rules: RuleChain = composeHost(compose)
 
     private val context: Application = ApplicationProvider.getApplicationContext()
-    private fun s(id: Int, vararg args: Any) = context.getString(id, *args)
+    private fun s(id: Int, vararg args: Any): String =
+        if (args.isEmpty()) context.getString(id) else context.getString(id, *args)
 
     // --- the arm control -----------------------------------------------------------------------
 
@@ -268,6 +275,8 @@ class ControlScreenTest {
             sided(armed = false).reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL)),
             onThrottleRelease = { releases++ },
         )
+        assertEquals("the grid took the pad's place, which releases the drive", 1, releases)
+        releases = 0
 
         compose.onNodeWithTag(lampTag(FaultLamp.HALL)).performClick()
         assertEquals("the scrim covers the pad, so the drive is released first", 1, releases)
@@ -302,24 +311,32 @@ class ControlScreenTest {
     // --- the pad does not move -----------------------------------------------------------------
 
     /**
-     * The pad's bounds in root coordinates are equal across every state the screen can be in, and
-     * the whole pad is on screen without scrolling at the test qualifier (`specs/rider-ui.md` 3.1d).
+     * The pad's bounds in root coordinates are equal across every state the screen can be in; the
+     * fault grid and the lamp test are drawn in those bounds with no pad; the motor-controller-off
+     * card ends at the pad's bottom; and the whole screen fits with nothing scrolling
+     * (`specs/rider-ui.md` 3.1 and 3.1d).
      */
     @Test
-    fun thePadDoesNotMove() {
+    fun thePadDoesNotMove() = assertTheScreenFits()
+
+    /** The same at the ASUS ROG's 1080 x 1920 px, where the instruments shrink and the pad does not. */
+    @Test
+    @Config(qualifiers = "w360dp-h640dp-xxhdpi")
+    fun thePadDoesNotMoveAndNothingScrollsOnTheAsus() = assertTheScreenFits()
+
+    private fun assertTheScreenFits() {
         val riding = sided(armed = true).copy(throttleSpeed = 3_000, engaged = true)
         val states = listOf(
             riding,
             sided(armed = true).copy(packCells = mapOf(0x01 to 10, 0x02 to 10)).reporting(0x01, board(battery = 3_050)),
-            sided(armed = false)
-                .reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL))
-                .reporting(0x02, board(fault = CyclicState.EV_IMU_LOSS)),
-            sided(armed = false).copy(lampTest = true),
             sided(armed = false).copy(
                 telemetryByBoard = mapOf(0x02 to board()),
                 imuModel = mapOf(0x01 to 0, 0x02 to 0),
             ),
             sided(armed = false).copy(selfDisarmed = true, riderWaiver = RiderWaiver.WAIVED),
+            sided(armed = false).copy(
+                speedFacts = listOf(SpeedFacts(0x01, 0, polePairs = 0, diameterMm = 165, side = 0)),
+            ),
             riding.copy(frameStats = mapOf(0x01 to FrameStats(412, 410), 0x02 to FrameStats(206, 1_310))),
         )
         show(states.first(), showFrameStats = true)
@@ -328,12 +345,34 @@ class ControlScreenTest {
             update(state)
             assertEquals("the pad moved in $state", first, padBounds())
         }
+        val gridStates = listOf(
+            sided(armed = false)
+                .reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL))
+                .reporting(0x02, board(fault = CyclicState.EV_IMU_LOSS)),
+            sided(armed = false).copy(lampTest = true),
+        )
+        for (state in gridStates) {
+            update(state)
+            compose.onNodeWithTag(THROTTLE_TAG).assertDoesNotExist()
+            compose.onNodeWithTag(FAULT_GRID_TAG).assertIsDisplayed()
+            assertEquals("the grid is in the pad's bounds", first, bounds(RIDE_PAD_SLOT_TAG))
+        }
+        update(sided(armed = false).copy(boardsOff = true))
+        compose.onNodeWithTag(THROTTLE_TAG).assertDoesNotExist()
+        assertEquals("the card ends at the pad's bottom", first.bottom, bounds(RIDE_BOARDS_OFF_TAG).bottom)
+
         val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
         assertTrue("the pad starts below the instruments", first.top > 0f)
-        assertTrue("the whole pad is on screen without scrolling: $first in $root", first.bottom <= root.bottom)
+        for (tag in listOf(ARM_TAG, RIDE_TRIP_TAG, FRAME_STATS_TAG)) {
+            val b = bounds(tag)
+            assertTrue("$tag is on screen: $b in $root", b.bottom <= root.bottom)
+        }
+        compose.onAllNodes(hasScrollAction()).assertCountEquals(0)
     }
 
-    private fun padBounds(): Rect = compose.onNodeWithTag(THROTTLE_TAG).fetchSemanticsNode().boundsInRoot
+    private fun padBounds(): Rect = bounds(THROTTLE_TAG)
+
+    private fun bounds(tag: String): Rect = compose.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
 
     // --- the drive control, per mode (`specs/rider-ui.md` 3.2) ---------------------------------
 
@@ -374,33 +413,123 @@ class ControlScreenTest {
     // --- what a figure shows with no value -----------------------------------------------------
 
     @Test
-    fun aMissingSpeedIsDashesAndSaysWhy() {
-        show(sided(armed = false).copy(telemetryByBoard = emptyMap()))
+    fun aMissingSpeedIsDashesAndSaysWhyInPlainWords() {
+        var opened: Pair<Int, Key>? = null
+        show(
+            sided(armed = false).copy(telemetryByBoard = emptyMap()),
+            onOpenSetup = { board, row -> opened = board to row },
+        )
         compose.onNodeWithTag(RIDE_SPEED_TAG).assertTextEquals(s(R.string.ride_figure_none))
         compose.onNodeWithText(s(R.string.ride_no_board_reporting)).assertIsDisplayed()
 
-        // Reporting, and the board holds no wheel diameter: the field is named as the CLI spells it.
+        // Reporting, and the second board holds no wheel diameter: no field name, a statement that
+        // opens Setup on that board at the top of its motor rows.
         update(
             sided(armed = false).copy(
                 speedFacts = listOf(
-                    SpeedFacts(0, polePairs = 15, diameterMm = 0, side = 0),
+                    SpeedFacts(0x01, 0, polePairs = 15, diameterMm = 165, side = 0),
+                    SpeedFacts(0x02, 0, polePairs = 15, diameterMm = 0, side = 1),
                 ),
+                packCells = mapOf(0x01 to 10, 0x02 to 10),
             ),
         )
         compose.onNodeWithTag(RIDE_SPEED_TAG).assertTextEquals(s(R.string.ride_figure_none))
-        compose.onNodeWithText(s(R.string.ride_speed_unset, "motors.0.wheel_diameter_mm")).assertIsDisplayed()
-        compose.onNodeWithText(s(R.string.ride_kmh)).assertDoesNotExist()
+        compose.onAllNodes(hasText("motors.0", substring = true)).assertCountEquals(0)
+        compose.onNodeWithText(s(R.string.ride_need_wheel_size)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_set_it)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_need_wheel_size)).performClick()
+        assertEquals(0x02 to SetupFields.MOTOR_METHOD.key, opened)
+
+        // Not read yet: plain words and no link.
+        update(
+            sided(armed = false).copy(
+                speedFacts = listOf(SpeedFacts(0x01, 0, polePairs = null, diameterMm = 165, side = 0)),
+                packCells = mapOf(0x01 to 10, 0x02 to 10),
+            ),
+        )
+        compose.onNodeWithText(s(R.string.ride_reading_wheel)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_set_it)).assertDoesNotExist()
     }
 
-    /** No pack voltage is words, never 0.0 V; a voltage with no pack stated says what is missing. */
+    /** No pack voltage is words, never 0.0 V; a voltage with no cell count is the voltage and a statement. */
     @Test
     fun theWordsAPackLineHasForNoReading() {
-        show(sided(armed = false).reporting(0x01, board(battery = 0)).reporting(0x02, board(battery = 0)))
+        var opened: Pair<Int, Key>? = null
+        show(
+            sided(armed = false).reporting(0x01, board(battery = 0)).reporting(0x02, board(battery = 0)),
+            onOpenSetup = { board, row -> opened = board to row },
+        )
         compose.onNodeWithTag(RIDE_PACK_TAG).assertTextEquals(s(R.string.ride_no_pack_voltage))
 
         update(sided(armed = false))
-        compose.onNodeWithTag(RIDE_PACK_TAG)
-            .assertTextEquals(s(R.string.ride_pack_unjudged, 37.8f, s(R.string.ride_cells_not_set)))
+        compose.onNodeWithTag(RIDE_PACK_TAG).assertTextEquals(s(R.string.ride_pack_volts, 37.8f))
+        compose.onNodeWithText(s(R.string.ride_need_cells)).assertIsDisplayed().performClick()
+        assertEquals(0x01 to SetupFields.PACK_CELLS.key, opened)
+    }
+
+    /** The speed is a magnitude: "R" beside the unit while it is below zero, and only then. */
+    @Test
+    fun theSpeedIsNeverNegativeAndReverseIsR() {
+        fun at(rate: Int) = sided(armed = false).copy(
+            speedFacts = listOf(
+                SpeedFacts(0x01, rate, polePairs = 15, diameterMm = 165, side = Fields.ControlSide.LEFT),
+                SpeedFacts(0x02, -rate, polePairs = 15, diameterMm = 165, side = Fields.ControlSide.RIGHT),
+            ),
+        )
+        show(at(-40_000))
+        val shown = compose.onNodeWithTag(RIDE_SPEED_TAG).fetchSemanticsNode()
+            .config[androidx.compose.ui.semantics.SemanticsProperties.Text].joinToString()
+        assertTrue("no minus sign: $shown", !shown.contains("-"))
+        compose.onNodeWithTag(RIDE_REVERSE_TAG).assertIsDisplayed()
+
+        update(at(40_000))
+        compose.onNodeWithTag(RIDE_REVERSE_TAG).assertDoesNotExist()
+    }
+
+    /**
+     * No motor controller reporting with the link up: one card in place of the instruments and the
+     * pad, naming what the phone is connected to; no statements; ARM refuses a tap.
+     */
+    @Test
+    fun theMotorControllerOffCardTakesThePadsPlace() {
+        var toggles = 0
+        val off = UiState(
+            connectionState = ConnectionState.CONNECTED,
+            nodes = listOf(NodeInfo(0x01, Fields.NodeClass.BRIDGE, "offroad-master")),
+            attachedNode = 0x01,
+            deviceName = "offroad-master",
+            boardsOff = true,
+        )
+        assertTrue(!off.canArm)
+        show(off, onArmToggle = { toggles++ })
+        compose.onNodeWithTag(RIDE_BOARDS_OFF_TAG).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_off_title)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.ride_off_waiting, "offroad-master")).assertIsDisplayed()
+        compose.onNodeWithTag(THROTTLE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(RIDE_SPEED_TAG).assertDoesNotExist()
+        compose.onAllNodesWithTag(RIDE_STATEMENT_TAG).assertCountEquals(0)
+        compose.onNodeWithTag(ARM_TAG).performClick()
+        assertEquals(0, toggles)
+    }
+
+    /** While armed the grid does not take the pad; a lamp lit on a board the arm does not drive is a statement. */
+    @Test
+    fun armedThePadStaysAndALitLampIsAStatement() {
+        val single = ride(armed = true, mode = DriveMode.SINGLE, other = 0x02)
+            .copy(sides = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.RIGHT))
+            .reporting(0x02, board(fault = CyclicState.EV_IMU_LOSS))
+        show(single)
+        compose.onNodeWithTag(THROTTLE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FAULT_GRID_TAG).assertDoesNotExist()
+        val line = s(R.string.ride_lamp_lit_armed, s(R.string.lamp_imu_title), s(R.string.ride_board_right_inline))
+        compose.onNodeWithText(line).assertIsDisplayed()
+    }
+
+    /** A driven wheel that does not turn is a warning statement naming the board. */
+    @Test
+    fun aWheelThatDoesNotTurnIsSaid() {
+        show(sided(armed = true).copy(notTurning = setOf(0x02)))
+        compose.onNodeWithText(s(R.string.ride_not_turning, s(R.string.lamp_board_right))).assertIsDisplayed()
     }
 
     /** The trip line is blank while there is no machine distance, and reads both figures when there is. */
@@ -520,6 +649,7 @@ class ControlScreenTest {
         onJoystickMove: (Float, Float, Float, Float) -> Unit = { _, _, _, _ -> },
         onThrottleRelease: () -> Unit = {},
         showFrameStats: Boolean = false,
+        onOpenSetup: (Int, Key) -> Unit = { _, _ -> },
     ) {
         rideState.value = state
         compose.setContent {
@@ -531,6 +661,7 @@ class ControlScreenTest {
                     onJoystickMove = onJoystickMove,
                     onThrottleRelease = onThrottleRelease,
                     showFrameStats = showFrameStats,
+                    onOpenSetup = onOpenSetup,
                 )
             }
         }

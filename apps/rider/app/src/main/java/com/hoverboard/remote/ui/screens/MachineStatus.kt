@@ -163,8 +163,9 @@ private fun rigidIsConfiguredButNotRunning(state: UiState): Boolean {
 
 /**
  * One motor controller's row: its label and the state word its own frames give, then its own
- * lines: the rider flag, LOCKDOWN, one line per set fault cause, and the bit-6 mode readback, which
- * is not a fault. A silent board has its word and nothing under it.
+ * lines: the rider flag, LOCKDOWN, one line per set fault cause, the bit-6 mode readback, which
+ * is not a fault, and the app's own reading of a driven wheel that does not turn
+ * (`specs/rider-ui.md` 3.1). A silent board has its word and nothing under it.
  */
 @Composable
 private fun BoardRow(state: UiState, address: Int, label: String) {
@@ -189,6 +190,9 @@ private fun BoardRow(state: UiState, address: Int, label: String) {
     }
     if ((telemetry.cyclic?.fault ?: 0) and CyclicState.EV_MODE_FAULT != 0) {
         CautionText(stringResource(R.string.board_mode_demoted, label), style = small)
+    }
+    if (address in state.notTurning) {
+        WarningText(stringResource(R.string.status_not_turning), style = small)
     }
 }
 

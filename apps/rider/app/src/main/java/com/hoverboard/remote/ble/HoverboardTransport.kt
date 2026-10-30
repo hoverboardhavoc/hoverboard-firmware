@@ -84,6 +84,14 @@ interface HoverboardTransport {
     val nodes: StateFlow<List<Int>>
 
     /**
+     * Walk again behind the attached node from [probe] (`specs/rider-ui.md` 3.1, "Boards that come
+     * up after the connect"), so nodes switched on after the connect join [nodes], which this
+     * publishes before it returns. The node list it came to, or null when no session is attached or
+     * the config slot is taken, in which case nothing was sent.
+     */
+    suspend fun rewalk(probe: List<Int>): List<Int>?
+
+    /**
      * Read [key] from the board at [target] over the session's config client
      * ([com.hoverboard.protocol.config.ConfigClient]). Null when no session is attached, in which
      * case nothing was sent.

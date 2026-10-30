@@ -4,6 +4,15 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.MachineTravel
+import com.hoverboard.remote.model.Missing
+import com.hoverboard.remote.model.MissingSetting
+import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.SpeedFacts
+import com.hoverboard.remote.model.SpeedReading
+import com.hoverboard.remote.model.machineSpeed
+import com.hoverboard.remote.model.missingSettings
+import com.hoverboard.remote.model.ringScale
+import com.hoverboard.remote.model.speedText
 import com.hoverboard.remote.model.RideSlot
 import com.hoverboard.remote.model.RideSlots
 import com.hoverboard.remote.model.SlotSide
@@ -16,6 +25,12 @@ import com.hoverboard.remote.model.ringReading
 import com.hoverboard.remote.model.rideSlots
 import com.hoverboard.remote.model.totalKmText
 import com.hoverboard.remote.model.tripKmText
+import com.hoverboard.remote.ui.components.armLook
+import com.hoverboard.remote.ui.theme.Border
+import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.OnPrimary
+import com.hoverboard.remote.ui.theme.Primary
+import androidx.compose.ui.unit.dp
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -151,4 +166,100 @@ class RideReadingsTest {
         assertEquals("413", totalKmText(412_700_000))
         assertEquals("412.7", tripKmText(412_700_000))
     }
+    // --- after the first drive (`specs/rider-ui.md` 3.1) ----------------------------------------
+
+    private fun facts(address: Int, polePairs: Int?, diameterMm: Int?) =
+        SpeedFacts(address, 0, polePairs, diameterMm, side = Fields.ControlSide.LEFT)
+
+    /** Every missing-settings case, in the statements' order, with the board a tap opens. */
+    @Test
+    fun `missing settings name the setting and the board`() {
+        fun missing(
+            speed: List<SpeedFacts>,
+            battery: BatteryReading = charge(50),
+            phase: List<Pair<Int, CurrentReading>> = emptyList(),
+            cal: Map<Int, Int> = emptyMap(),
+        ) = missingSettings(
+            machineSpeed(speed),
+            speed,
+            ringBoard = 0x01,
+            battery = battery,
+            slotBoards = phase,
+            countsPerAmp = cal,
+        )
+
+        val unset = listOf(facts(0x01, 15, 165), facts(0x02, 0, 165))
+        assertEquals(listOf(Missing(MissingSetting.WHEEL_SIZE, 0x02)), missing(unset))
+        assertEquals(SetupFields.MOTOR_METHOD, MissingSetting.WHEEL_SIZE.row)
+        // An unset fact wins over an unread one.
+        assertEquals(
+            listOf(Missing(MissingSetting.WHEEL_SIZE, 0x02)),
+            missing(listOf(facts(0x01, null, 165), facts(0x02, 15, 0))),
+        )
+        assertEquals(listOf(Missing(MissingSetting.WHEEL_READING, null)), missing(listOf(facts(0x01, null, 165))))
+        val whole = listOf(facts(0x01, 15, 165))
+        assertTrue(missing(whole).isEmpty())
+
+        val why = BatteryReading.Unjudged.Why.entries.associateWith { BatteryReading.Unjudged(37.8f, it) }
+        assertEquals(
+            listOf(Missing(MissingSetting.CELLS, 0x01)),
+            missing(whole, why.getValue(BatteryReading.Unjudged.Why.NO_CELLS)),
+        )
+        assertEquals(
+            listOf(Missing(MissingSetting.CHEMISTRY_READING, 0x01)),
+            missing(whole, why.getValue(BatteryReading.Unjudged.Why.NO_CHEMISTRY)),
+        )
+        assertEquals(
+            listOf(Missing(MissingSetting.CHEMISTRY_UNKNOWN, 0x01)),
+            missing(whole, why.getValue(BatteryReading.Unjudged.Why.UNKNOWN_CHEMISTRY)),
+        )
+        assertEquals(SetupFields.PACK_CELLS, MissingSetting.CELLS.row)
+        assertEquals(SetupFields.BATTERY_CHEMISTRY, MissingSetting.CHEMISTRY_UNKNOWN.row)
+        assertNull(MissingSetting.CHEMISTRY_READING.row)
+
+        val phase = listOf(0x01 to CurrentReading.MotorsOff, 0x02 to CurrentReading.Unscaled)
+        assertEquals(listOf(Missing(MissingSetting.CURRENT_CAL_READING, 0x02)), missing(whole, phase = phase))
+        assertEquals(
+            listOf(Missing(MissingSetting.CURRENT_CAL, 0x02)),
+            missing(whole, phase = phase, cal = mapOf(0x02 to 0)),
+        )
+        assertNull(MissingSetting.CURRENT_CAL.row, "no screen edits the calibration")
+
+        // All at once, in order.
+        assertEquals(
+            listOf(MissingSetting.WHEEL_SIZE, MissingSetting.CELLS, MissingSetting.CURRENT_CAL_READING),
+            missing(unset, why.getValue(BatteryReading.Unjudged.Why.NO_CELLS), phase).map { it.setting },
+        )
+    }
+
+    @Test
+    fun `the speed prints its magnitude`() {
+        assertEquals("7.4", speedText(SpeedReading.Shown.Tenths(-7.4)))
+        assertEquals("12", speedText(SpeedReading.Shown.Whole(-12)))
+        assertEquals("0.0", speedText(SpeedReading.Shown.Tenths(0.0)))
+    }
+
+    @Test
+    fun `the ring scales by h less 64 over 212, at most 1`() {
+        assertEquals(1f, ringScale(276f))
+        assertEquals(1f, ringScale(400f))
+        assertEquals(0.5f, ringScale(170f), 1e-6f)
+    }
+
+    /** Can-arm is outlined in Primary with a Primary label; cannot-arm a Border outline and a faint label. */
+    @Test
+    fun `the ARM control's three states`() {
+        val armed = armLook(armed = true, enabled = false)
+        assertEquals(Primary, armed.fill)
+        assertEquals(OnPrimary, armed.label)
+        val can = armLook(armed = false, enabled = true)
+        assertEquals(Primary, can.outline)
+        assertEquals(2.dp, can.outlineWidth)
+        assertEquals(Primary, can.label)
+        val cannot = armLook(armed = false, enabled = false)
+        assertEquals(Border, cannot.outline)
+        assertEquals(1.dp, cannot.outlineWidth)
+        assertEquals(FgFaint, cannot.label)
+    }
 }
+

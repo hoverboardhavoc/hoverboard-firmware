@@ -178,6 +178,10 @@ class BleHoverboardTransport(
      */
     private var attachment: Attachment? = null
 
+    /** The current session's engine driver, for [rewalk]; null outside an attached session. */
+    @Volatile
+    private var session: L3Session? = null
+
     /**
      * The current session's config and tune clients, or null outside an attached session. Built per
      * session over that session's engine and [linkLock], so they are driven by the same service loop
@@ -188,7 +192,7 @@ class BleHoverboardTransport(
     @Volatile
     private var clients: SessionClients? = null
 
-    private class SessionClients(exchange: ConfigExchange) {
+    private class SessionClients(val exchange: ConfigExchange) {
         val config = ConfigClient(exchange)
         val tune = TuneClient(exchange)
     }
@@ -403,6 +407,7 @@ class BleHoverboardTransport(
             // The session loop: pump the engine (reassemble, answer a probe of our own port),
             // dispatch telemetry, and flush every outgoing byte. Sole writer of the GATT char.
             serviceJob = scope.launch { serviceLoop(session) }
+            this.session = session
 
             _connectionState.value = ConnectionState.CONNECTED
 
@@ -462,6 +467,7 @@ class BleHoverboardTransport(
             attachment = null
         }
         clients = null
+        session = null
         _attachedBoard.value = null
         _nodes.value = emptyList()
         inbox.clear()
@@ -636,6 +642,23 @@ class BleHoverboardTransport(
 
     override fun sendCommand(frame: DriveFrame) {
         pump?.set(frame)
+    }
+
+    /**
+     * Walk again from [probe] on this session's link ([L3Session.rewalk]), holding the config lane's
+     * one-request slot for the whole of it, and publish the node list it comes to. Null, and nothing
+     * sent, outside an attached session or while a config or tune request holds the slot.
+     */
+    override suspend fun rewalk(probe: List<Int>): List<Int>? {
+        val s = session
+        val exchange = clients?.exchange
+        val attached = attachment
+        if (s == null || exchange == null || attached == null) return null
+        val found = exchange.withSlot { s.rewalk(probe) }
+        Log.d(TAG, "re-walk: $found")
+        // A session that ended during the walk publishes nothing: its nodes went with it.
+        if (found == null || session !== s) return null
+        return (found.boards + attached.boardAddr).distinct().sorted().also { _nodes.value = it }
     }
 
     override suspend fun readConfig(key: Key, target: Int): ConfigReadResult? =
