@@ -14,16 +14,16 @@
 
 use linkctl::CyclicState;
 
-/// The calibration's slope seam, microvolts of rail per 12-bit count (`board.vbatt_cal` index 0).
+/// The calibration's slope seam, microvolts of rail per 12-bit count (`board.battery.cal` index 0).
 pub const SLOPE_MIN: i16 = 10_000;
 /// See [`SLOPE_MIN`].
 pub const SLOPE_MAX: i16 = 32_000;
-/// The calibration's offset seam, centivolts (`board.vbatt_cal` index 1).
+/// The calibration's offset seam, centivolts (`board.battery.cal` index 1).
 pub const OFFSET_MIN: i16 = -500;
 /// See [`OFFSET_MIN`].
 pub const OFFSET_MAX: i16 = 500;
 
-/// The validated battery-sense calibration (`store::BOARD_VBATT_CAL`), clamped at its one seam.
+/// The validated battery-sense calibration (`store::BOARD_BATTERY_CAL`), clamped at its one seam.
 /// Read at boot; a `CONFIG_WRITE` applies at the next boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VbattCal {
@@ -62,7 +62,7 @@ impl VbattCal {
     }
 }
 
-/// The local sense of a board whose plan carries `board.vbatt`: its calibration and the 250 Hz
+/// The local sense of a board whose plan carries `board.battery.pin`: its calibration and the 250 Hz
 /// one-pole filter `filt += (cv - filt) >> 4` (16 ticks = 64 ms), primed to the first sample.
 #[derive(Clone, Copy, Debug)]
 pub struct LocalSense {
@@ -104,7 +104,7 @@ impl LocalSense {
 
 /// The source rule: exactly one battery source per tick, in order.
 ///
-/// 1. `local` is `Some` when the plan carries `board.vbatt`: its filtered word, whatever it is
+/// 1. `local` is `Some` when the plan carries `board.battery.pin`: its filtered word, whatever it is
 ///    (0 while no conversion has arrived). A sensing board never takes its peer's word, so a
 ///    master ignores its slave's, whose PA4 is not a battery sense.
 /// 2. Otherwise the peer's cyclic word, if a peer mirror is present and fresh and the word is

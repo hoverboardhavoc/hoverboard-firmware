@@ -1123,7 +1123,7 @@ mod plumbing_tests {
         let s = Store::mount(&mut flash).unwrap();
         let f = read_fields(&s);
         assert_eq!(f.self_hold, 0x1C); // PB12
-        assert_eq!(f.vbatt, ABSENT); // board.vbatt: absent until a master is configured
+        assert_eq!(f.vbatt, ABSENT); // board.battery.pin: absent until a master is configured
         assert_eq!(f.buzzer, 0x19); // PB9
         assert_eq!((f.led_green, f.led_orange, f.led_red), (0x13, 0x0F, 0x14));
         assert_eq!((f.pad_a, f.pad_b), (ABSENT, ABSENT)); // pad.a / pad.b: a pad is configured
@@ -1336,7 +1336,7 @@ mod plumbing_tests {
         assert_eq!(obs, BoardObs::success(latch));
 
         // One bad write: vbatt moved to a non-ADC pin. The failure record names it.
-        s.set(store::BOARD_VBATT, 0x2D).unwrap(); // PC13
+        s.set(store::BOARD_BATTERY_PIN, 0x2D).unwrap(); // PC13
         let fields = read_fields(&s);
         let v = validate(&fields, &MockChip::F130C8, reserved.as_slice());
         let latch = v.self_hold.map_or(ABSENT, |p| p.packed());
@@ -1349,7 +1349,7 @@ mod plumbing_tests {
             "vbatt's failure is unrelated: the latch is still up"
         );
         assert_eq!(obs.result, 9, "NotAdcCapable");
-        assert_eq!(obs.field_id, store::BOARD_VBATT.id());
+        assert_eq!(obs.field_id, store::BOARD_BATTERY_PIN.id());
         assert_eq!(obs.detail, 0x2D);
     }
 }

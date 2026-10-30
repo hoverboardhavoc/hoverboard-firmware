@@ -66,7 +66,7 @@ pub struct FsmInputs {
     /// The battery permits an engage (`specs/sensing-and-safety.md`, "The battery word" and "The
     /// low-battery floor"): the word is known (`battery != 0`, so a board whose balance law would
     /// divide by an UNKNOWN word, and therefore output 0, cannot engage) AND at or above the
-    /// `CONTROL_BATTERY_FLOOR` (`<= 0` = no floor). Joins the engage conjunction ONLY, so a word
+    /// `BOARD_BATTERY_FLOOR` (`<= 0` = no floor). Joins the engage conjunction ONLY, so a word
     /// falling under the floor mid-run never disengages. The balance arm passes
     /// `ControlDispatch::battery_ok`; the throttle arm passes `true` (throttle mode never divides
     /// by the battery). A source going UNKNOWN mid-run is `comms_loss`'s, not this gate's.

@@ -129,7 +129,7 @@ pub struct ControlDispatch {
     /// value written while disarmed takes effect at the next arm rather than the next boot. Those
     /// two sites are the only writers.
     rider_required: bool,
-    /// The low-battery floor in centivolts (`CONTROL_BATTERY_FLOOR`,
+    /// The low-battery floor in centivolts (`BOARD_BATTERY_FLOOR`,
     /// `specs/sensing-and-safety.md`, "The low-battery floor"); `<= 0` = no floor. Set by the boot
     /// seam beside the rider decision and re-read at every arm with it, the same discipline.
     battery_floor: i16,
@@ -152,7 +152,7 @@ impl ControlDispatch {
     /// The boot seam: resolve the registered `CONTROL_MODE` and `CONTROL_FRAME` bytes against the
     /// board's IMU fact ([`select_mode`]), decode the `CONTROL_RIDER_REQUIRED` byte (spec (i): `0`
     /// waives the rider requirement, any other value keeps it, so the default `1` and a corrupt
-    /// byte both read as required), take the `CONTROL_BATTERY_FLOOR` word as written (no clamp
+    /// byte both read as required), take the `BOARD_BATTERY_FLOOR` word as written (no clamp
     /// beyond the type: `<= 0` is no floor, a floor above any reachable word refuses every balance
     /// engage), with fresh producer records.
     pub fn new(

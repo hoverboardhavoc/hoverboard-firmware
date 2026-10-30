@@ -322,11 +322,11 @@ pub const CONTROL_RIDER_REQUIRED: Field<u8> = Field::new(0x23, 1);
 ///
 /// An ABSOLUTE threshold the operator sets, not a per-cell one the board works out: it carries a
 /// disabled state no cell count can express, and a machine may want its engages refused well above
-/// a cell's floor. What the pack IS lives in [`BOARD_PACK_CELLS`], which is what a client reads to
+/// a cell's floor. What the pack IS lives in [`BOARD_BATTERY_CELLS`], which is what a client reads to
 /// say how full it is; the two are separate facts and neither derives the other. A
 /// machine-type setting beside [`CONTROL_RIDER_REQUIRED`] and in the same arm-time value row, read
 /// into the control dispatch at boot and again at every arm; NOT on the tune lane.
-pub const CONTROL_BATTERY_FLOOR: Field<i16> = Field::new(0x24, 2400);
+pub const BOARD_BATTERY_FLOOR: Field<i16> = Field::new(0x24, 2400);
 /// The machine's frame (`specs/control.md` (k), `specs/rover-one-imu.md`): `0 = pivoting`
 /// platforms (the default, byte-identical to the image before the field: each board balances its
 /// own platform on its own IMU), `1 = rigid` body (one balance loop for the machine; the board with
@@ -405,14 +405,14 @@ pub const BOARD_SELF_HOLD: Field<u8> = Field::new(0x40, 0x1C);
 /// which through the divider is a fictitious 62 V. The firmware has no role fact to tell the two
 /// apart, so a defaulted pin would make every slave sense garbage; the master is CONFIGURED to
 /// sense (stage `0x04`), a non-sensing board relays its peer's word.
-pub const BOARD_VBATT: Field<u8> = Field::new(0x41, PIN_ABSENT);
+pub const BOARD_BATTERY_PIN: Field<u8> = Field::new(0x41, PIN_ABSENT);
 /// Buzzer pin (fleet default PB9).
 pub const BOARD_BUZZER: Field<u8> = Field::new(0x42, 0x19);
 /// Indicator LEDs (fleet defaults PB3 / PA15 / PB4).
 pub const LED_GREEN: Field<u8> = Field::new(0x43, 0x13);
 pub const LED_ORANGE: Field<u8> = Field::new(0x44, 0x0F);
 pub const LED_RED: Field<u8> = Field::new(0x45, 0x14);
-/// Foot-pad rider-detection inputs. Default ABSENT, for [`BOARD_VBATT`]'s reason one step further
+/// Foot-pad rider-detection inputs. Default ABSENT, for [`BOARD_BATTERY_PIN`]'s reason one step further
 /// on: the pins are fleet-uniform (PA11 / PC15) but the PADS are not, and no board in this fleet
 /// has pad hardware fitted. A defaulted pin leaves the line a floating input (the `InputGroup`
 /// reader configures no pull and the reset state of both families is a floating input), and the
@@ -443,7 +443,7 @@ pub const MOTOR_GATE_LO_C: Field<u8> = Field::new(0x52, PIN_ABSENT);
 /// two pins' ADC channels as its two ranks, so the CHANNELS are per-board data and cannot be a
 /// compiled constant (the bench pair proves it: the F103 master senses on PB0/PA0 and the F130
 /// slave on PB0/PB1). The boot validator derives each pin's ADC channel through the same
-/// `Capabilities::adc_channel` query `board.vbatt` uses. Ordered A then B, matching the injected
+/// `Capabilities::adc_channel` query `board.battery.pin` uses. Ordered A then B, matching the injected
 /// rank order (rank 0 = phase A, rank 1 = phase B) and the gate channel order (CH0 = phase A).
 ///
 /// Group rule (the `motor.dead_time` precedent): the pair is all-or-none, and it is present
@@ -545,7 +545,7 @@ pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
 /// id of the motor-facts block 0x60..0x67.
 ///
 /// **Why a field.** It is a property of the shunt and amplifier chain fitted to a particular board,
-/// the [`BOARD_VBATT_CAL`] class, and it was the only analog scale left in a `const`:
+/// the [`BOARD_BATTERY_CAL`] class, and it was the only analog scale left in a `const`:
 /// `COUNTS_PER_AMP = 800` in `crates/firmware/src/motor.rs`, EFeru's `A2BIT_CONV = 50` ADC LSB per
 /// amp times 16 counts per LSB, written for a class of mainboard and measured on none of ours.
 ///
@@ -655,7 +655,7 @@ pub const MOTOR_POLE_PAIRS: Field<u8> = Field::new(0x6E, 0);
 pub const WHEEL_DIAMETER_MM: Field<u16> = Field::new(0x6F, 0);
 
 /// The battery-sense calibration, counts to centivolts (`specs/sensing-and-safety.md`, "The field:
-/// `board.vbatt_cal`"), indexed `0 = slope` (microvolts of rail per 12-bit count) and `1 = offset`
+/// `board.battery.cal`"), indexed `0 = slope` (microvolts of rail per 12-bit count) and `1 = offset`
 /// (centivolts, added): `centivolts = raw12 * slope / 10_000 + offset`.
 ///
 /// The defaults ARE the 2026-10-08 four-point bench fit (`tools/vbatt-calibrate.py`: 25.200085 mV
@@ -666,14 +666,14 @@ pub const WHEEL_DIAMETER_MM: Field<u16> = Field::new(0x6F, 0);
 ///
 /// Range enforcement is NOT here (the store validates type only): the boot seam
 /// (`orchestrator::battery::VbattCal::new`) clamps slope to 10000..32000 and offset to -500..500.
-/// Consumer: the battery word's local sense, on boards whose plan carries `board.vbatt`.
-pub const BOARD_VBATT_CAL: IndexedField<i16, 2> = IndexedField::new(0x69, [25200, -5]);
+/// Consumer: the battery word's local sense, on boards whose plan carries `board.battery.pin`.
+pub const BOARD_BATTERY_CAL: IndexedField<i16, 2> = IndexedField::new(0x69, [25200, -5]);
 
 /// What the pack IS: the number of cells in series (`specs/sensing-and-safety.md`, "The pack").
 /// **0 = not stated**, which is the default and is not a guess at eight.
 ///
 /// The machine's battery is one object, and before this field it was described twice and named
-/// nowhere: [`CONTROL_BATTERY_FLOOR`]'s 2400 cV default is 3.0 V across eight cells, and the rider
+/// nowhere: [`BOARD_BATTERY_FLOOR`]'s 2400 cV default is 3.0 V across eight cells, and the rider
 /// app's charge curve carried two more voltages of its own. Neither states the pack, and neither
 /// can be derived from the other, so a client that wants to say how full a pack is had to assume
 /// one. This is where the pack is stated, and a consumer that needs a per-cell voltage multiplies
@@ -683,10 +683,21 @@ pub const BOARD_VBATT_CAL: IndexedField<i16, 2> = IndexedField::new(0x69, [25200
 /// both, and each board answers for itself over the link.
 ///
 /// The firmware does not read it. The low-battery floor stays an absolute threshold the operator
-/// sets ([`CONTROL_BATTERY_FLOOR`], which also has a disabled state this cannot express), so the
+/// sets ([`BOARD_BATTERY_FLOOR`], which also has a disabled state this cannot express), so the
 /// one consumer is a client turning a pack voltage into a state of charge: 0 means it has nothing
 /// to turn it into and says so instead of drawing a gauge at an assumed pack.
-pub const BOARD_PACK_CELLS: Field<u8> = Field::new(0x6A, 0);
+pub const BOARD_BATTERY_CELLS: Field<u8> = Field::new(0x6A, 0);
+
+/// What KIND of cell the pack is (`specs/rider-ui.md` 3.6d): `0` = li_ion (Li-ion NMC, the
+/// hoverboard 18650; the default), `1` = lev50 (Lithium Energy Japan LEV50), `2` = lto (lithium
+/// titanate). It picks the resting-voltage table a client reads a state of charge from, per cell,
+/// and [`BOARD_BATTERY_CELLS`] multiplies it.
+///
+/// The default is a chemistry and not "not stated": the cell count already carries the not-stated
+/// case, and a stated count with the default draws the gauge a hoverboard pack expects. Written the
+/// same to both boards, the cell count's rule. The firmware does not read it; an unknown byte is
+/// the client's to refuse.
+pub const BOARD_BATTERY_CHEMISTRY: Field<u8> = Field::new(0x7F, 0);
 
 /// Which electrical level means ASSERTED on each of the board's three discrete input lines, one
 /// bit per line: `b0` button, `b1` pad A, `b2` pad B, a SET bit meaning active high
@@ -928,12 +939,12 @@ field_ids! {
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
     0x23, // CONTROL_RIDER_REQUIRED
-    0x24, // CONTROL_BATTERY_FLOOR
+    0x24, // BOARD_BATTERY_FLOOR
     0x25, // CONTROL_FRAME
     0x26, // CONTROL_SIDE
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
-    0x41, // BOARD_VBATT
+    0x41, // BOARD_BATTERY_PIN
     0x42, // BOARD_BUZZER
     0x43, // LED_GREEN
     0x44, // LED_ORANGE
@@ -967,8 +978,8 @@ field_ids! {
     0x6D, // MOTOR_ODOMETER
     0x6E, // MOTOR_POLE_PAIRS
     0x6F, // WHEEL_DIAMETER_MM
-    0x69, // BOARD_VBATT_CAL
-    0x6A, // BOARD_PACK_CELLS
+    0x69, // BOARD_BATTERY_CAL
+    0x6A, // BOARD_BATTERY_CELLS
     0x6C, // BOARD_INPUT_POLARITY
     0x70, // ATTITUDE_LEVEL_TRIM
     0x75, // CONTROL_DRIVE_TURN
@@ -977,6 +988,7 @@ field_ids! {
     0x7A, // CONTROL_GAIN_MAX
     0x7B, // CONTROL_REFERENCE
     0x7C, // CONTROL_POS_CLAMP
+    0x7F, // BOARD_BATTERY_CHEMISTRY
 }
 
 #[cfg(feature = "test-fields")]
@@ -989,12 +1001,12 @@ field_ids! {
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
     0x23, // CONTROL_RIDER_REQUIRED
-    0x24, // CONTROL_BATTERY_FLOOR
+    0x24, // BOARD_BATTERY_FLOOR
     0x25, // CONTROL_FRAME
     0x26, // CONTROL_SIDE
     0x30, // SOME_BLOB
     0x40, // BOARD_SELF_HOLD
-    0x41, // BOARD_VBATT
+    0x41, // BOARD_BATTERY_PIN
     0x42, // BOARD_BUZZER
     0x43, // LED_GREEN
     0x44, // LED_ORANGE
@@ -1028,8 +1040,8 @@ field_ids! {
     0x6D, // MOTOR_ODOMETER
     0x6E, // MOTOR_POLE_PAIRS
     0x6F, // WHEEL_DIAMETER_MM
-    0x69, // BOARD_VBATT_CAL
-    0x6A, // BOARD_PACK_CELLS
+    0x69, // BOARD_BATTERY_CAL
+    0x6A, // BOARD_BATTERY_CELLS
     0x6C, // BOARD_INPUT_POLARITY
     0x70, // ATTITUDE_LEVEL_TRIM
     0x75, // CONTROL_DRIVE_TURN
@@ -1038,6 +1050,7 @@ field_ids! {
     0x7A, // CONTROL_GAIN_MAX
     0x7B, // CONTROL_REFERENCE
     0x7C, // CONTROL_POS_CLAMP
+    0x7F, // BOARD_BATTERY_CHEMISTRY
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1074,13 +1087,13 @@ pub struct FieldDef {
 /// The number of ENTRIES in the registry, which is the declared field count plus the extra
 /// per-index entries the [`IndexedField`] families contribute ([`CONTROL_SF_GAINS`] and
 /// [`CONTROL_GAIN_MAX`]: one id, four defaults each, so three extra entries each;
-/// [`BOARD_VBATT_CAL`], [`CONTROL_DRIVE_TURN`] and [`CONTROL_REFERENCE`]: one id, two defaults, so
+/// [`BOARD_BATTERY_CAL`], [`CONTROL_DRIVE_TURN`] and [`CONTROL_REFERENCE`]: one id, two defaults, so
 /// one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 57 + 9;
+pub const REGISTRY_LEN: usize = 58 + 9;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 59 + 9;
+pub const REGISTRY_LEN: usize = 60 + 9;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1196,12 +1209,12 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_METHOD.entry(),
     CONTROL_MODE.entry(),
     CONTROL_RIDER_REQUIRED.entry(),
-    CONTROL_BATTERY_FLOOR.entry(),
+    BOARD_BATTERY_FLOOR.entry(),
     CONTROL_FRAME.entry(),
     CONTROL_SIDE.entry(),
     SOME_BLOB.entry(BYTES_EMPTY),
     BOARD_SELF_HOLD.entry(),
-    BOARD_VBATT.entry(),
+    BOARD_BATTERY_PIN.entry(),
     BOARD_BUZZER.entry(),
     LED_GREEN.entry(),
     LED_ORANGE.entry(),
@@ -1235,13 +1248,14 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_ODOMETER.entry(),
     MOTOR_POLE_PAIRS.entry(),
     WHEEL_DIAMETER_MM.entry(),
-    BOARD_PACK_CELLS.entry(),
+    BOARD_BATTERY_CELLS.entry(),
+    BOARD_BATTERY_CHEMISTRY.entry(),
     BOARD_INPUT_POLARITY.entry(),
     ATTITUDE_LEVEL_TRIM.entry(),
     // The index families whose default differs per index (`IndexedField`): one entry each, so an
     // absent key reads ITS index's default on the dynamic path as well as the typed one.
-    BOARD_VBATT_CAL.at(0).entry(),
-    BOARD_VBATT_CAL.at(1).entry(),
+    BOARD_BATTERY_CAL.at(0).entry(),
+    BOARD_BATTERY_CAL.at(1).entry(),
     CONTROL_DRIVE_TURN.at(0).entry(),
     CONTROL_DRIVE_TURN.at(1).entry(),
     MACHINE_DRIVE_MODE.entry(),
@@ -1361,7 +1375,7 @@ pub mod names {
         pub id: u8,
         /// The field's storage type.
         pub storage: Type,
-        /// The dotted name (`hall.a`, `board.vbatt_cal`).
+        /// The dotted name (`hall.a`, `board.battery.cal`).
         pub path: &'static str,
         /// How many values, and what the index means.
         pub index: Index,
@@ -1456,6 +1470,7 @@ pub mod names {
         (2, "differential"),
         (3, "rigid"),
     ]);
+    const CHEMISTRY: Kind = Kind::Enum(&[(0, "li_ion"), (1, "lev50"), (2, "lto")]);
     const POLARITY: Kind = Kind::Bits(&[(0, "button"), (1, "pad_a"), (2, "pad_b")]);
 
     /// Every registered field's name (`specs/cli-config.md` section 3.1).
@@ -1468,12 +1483,12 @@ pub mod names {
         FieldName::motor(MOTOR_METHOD, "method", METHOD),
         FieldName::single(CONTROL_MODE, "control.mode", MODE),
         FieldName::single(CONTROL_RIDER_REQUIRED, "control.rider_required", Kind::Bool),
-        FieldName::single(CONTROL_BATTERY_FLOOR, "control.battery_floor", Kind::Int),
+        FieldName::single(BOARD_BATTERY_FLOOR, "board.battery.floor", Kind::Int),
         FieldName::single(CONTROL_FRAME, "control.frame", FRAME),
         FieldName::single(CONTROL_SIDE, "control.side", SIDE),
         FieldName::blob(SOME_BLOB, "scaffold.blob"),
         FieldName::single(BOARD_SELF_HOLD, "board.self_hold", Kind::Pin),
-        FieldName::single(BOARD_VBATT, "board.vbatt", Kind::Pin),
+        FieldName::single(BOARD_BATTERY_PIN, "board.battery.pin", Kind::Pin),
         FieldName::single(BOARD_BUZZER, "board.buzzer", Kind::Pin),
         FieldName::single(LED_GREEN, "led.green", Kind::Pin),
         FieldName::single(LED_ORANGE, "led.orange", Kind::Pin),
@@ -1503,8 +1518,13 @@ pub mod names {
         FieldName::motor(MOTOR_CURRENT_SENSE, "current.sense", Kind::Bool),
         FieldName::motor(MOTOR_CURRENT_CAL, "current.cal", Kind::Int),
         FieldName::family(IMU_AXIS_ROLE, 2, "imu.axis_role", AXIS),
-        FieldName::array(BOARD_VBATT_CAL, "board.vbatt_cal", Kind::Int),
-        FieldName::single(BOARD_PACK_CELLS, "board.pack_cells", Kind::Int),
+        FieldName::array(BOARD_BATTERY_CAL, "board.battery.cal", Kind::Int),
+        FieldName::single(BOARD_BATTERY_CELLS, "board.battery.cells", Kind::Int),
+        FieldName::single(
+            BOARD_BATTERY_CHEMISTRY,
+            "board.battery.chemistry",
+            CHEMISTRY,
+        ),
         FieldName::motor(MOTOR_NOISE_FLOOR, "current.noise_floor", Kind::Int),
         FieldName::single(BOARD_INPUT_POLARITY, "board.input_polarity", POLARITY),
         FieldName::motor(MOTOR_ODOMETER, "odometer", Kind::Int),
@@ -1607,7 +1627,7 @@ pub mod names {
         #[test]
         fn an_indexed_handles_count_is_its_rows_count() {
             for (handle_len, id) in [
-                (BOARD_VBATT_CAL.len(), BOARD_VBATT_CAL.id()),
+                (BOARD_BATTERY_CAL.len(), BOARD_BATTERY_CAL.id()),
                 (CONTROL_DRIVE_TURN.len(), CONTROL_DRIVE_TURN.id()),
                 (CONTROL_SF_GAINS.len(), CONTROL_SF_GAINS.id()),
                 (CONTROL_GAIN_MAX.len(), CONTROL_GAIN_MAX.id()),
@@ -1650,7 +1670,7 @@ mod registry_tests {
         let reg = &REGISTRY;
         assert_eq!(reg.len(), REGISTRY_LEN);
         // One entry per declared id, plus the extra per-index entries the `indexed` families add.
-        let extra = (BOARD_VBATT_CAL.len() - 1)
+        let extra = (BOARD_BATTERY_CAL.len() - 1)
             + (CONTROL_DRIVE_TURN.len() - 1)
             + (CONTROL_SF_GAINS.len() - 1)
             + (CONTROL_GAIN_MAX.len() - 1)
@@ -1709,8 +1729,8 @@ mod registry_tests {
         assert_eq!(wd.kind, Type::U16);
         assert_eq!(wd.default, Value::U16(0));
         // The low-battery floor: an i16 beside it, default 2400 cV.
-        let f = lookup(CONTROL_BATTERY_FLOOR.id()).unwrap();
-        assert_eq!(CONTROL_BATTERY_FLOOR.id(), 0x24);
+        let f = lookup(BOARD_BATTERY_FLOOR.id()).unwrap();
+        assert_eq!(BOARD_BATTERY_FLOOR.id(), 0x24);
         assert_eq!(f.kind, Type::I16);
         assert_eq!(f.default, Value::I16(2400));
         // The frame: a u8 beside them, default 0 = pivoting, so an unstaged board is unchanged.
@@ -1724,6 +1744,22 @@ mod registry_tests {
         assert_eq!(CONTROL_SIDE.id(), 0x26);
         assert_eq!(sd.kind, Type::U8);
         assert_eq!(sd.default, Value::U8(0));
+    }
+
+    #[test]
+    fn battery_chemistry_is_a_u8_enum_defaulting_to_li_ion() {
+        // `specs/rider-ui.md` 3.6d: stored, never read by the firmware, `li_ion` by default.
+        let c = lookup(BOARD_BATTERY_CHEMISTRY.id()).unwrap();
+        assert_eq!(BOARD_BATTERY_CHEMISTRY.id(), 0x7F);
+        assert_eq!(c.kind, Type::U8);
+        assert_eq!(c.default, Value::U8(0));
+        assert!(!c.read_only);
+        let row = names::by_id(0x7F).unwrap();
+        assert_eq!(row.path, "board.battery.chemistry");
+        assert_eq!(
+            row.kind,
+            names::Kind::Enum(&[(0, "li_ion"), (1, "lev50"), (2, "lto")])
+        );
     }
 
     #[test]
@@ -1801,8 +1837,8 @@ mod registry_tests {
         assert_eq!(d(0x7B, 1), Value::I16(41));
         assert_eq!(d(0x7C, 0), Value::I16(45));
         // The battery-sense calibration: slope then offset, the bench fit's defaults.
-        assert_eq!(BOARD_VBATT_CAL.at(0).default(), 25200);
-        assert_eq!(BOARD_VBATT_CAL.at(1).default(), -5);
+        assert_eq!(BOARD_BATTERY_CAL.at(0).default(), 25200);
+        assert_eq!(BOARD_BATTERY_CAL.at(1).default(), -5);
         assert_eq!(d(0x69, 0), Value::I16(25200));
         assert_eq!(d(0x69, 1), Value::I16(-5));
         // The turn bound: turn_max 0 (disabled, so the machine drives straight), turn_slew 24.

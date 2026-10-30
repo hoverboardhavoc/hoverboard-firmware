@@ -1147,7 +1147,7 @@ mod dynamic {
                 0,
                 true,
                 s.get(CONTROL_RIDER_REQUIRED),
-                s.get(crate::field::CONTROL_BATTERY_FLOOR),
+                s.get(crate::field::BOARD_BATTERY_FLOOR),
             );
             assert!(
                 d.rider_required(),
@@ -1166,7 +1166,7 @@ mod dynamic {
             0,
             true,
             s.get(CONTROL_RIDER_REQUIRED),
-            s.get(crate::field::CONTROL_BATTERY_FLOOR),
+            s.get(crate::field::BOARD_BATTERY_FLOOR),
         );
         assert!(!d.rider_required(), "the next boot waives it");
 
@@ -1188,7 +1188,7 @@ mod dynamic {
     /// on the tune lane.
     #[test]
     fn the_frame_round_trips_from_the_store_into_the_control_dispatch() {
-        use crate::field::{CONTROL_BATTERY_FLOOR, CONTROL_FRAME, CONTROL_RIDER_REQUIRED};
+        use crate::field::{BOARD_BATTERY_FLOOR, CONTROL_FRAME, CONTROL_RIDER_REQUIRED};
         assert_eq!(CONTROL_FRAME.id(), 0x25);
         let mut f = MockFlash::erased(PS);
         {
@@ -1199,7 +1199,7 @@ mod dynamic {
                 s.get(CONTROL_FRAME),
                 false,
                 s.get(CONTROL_RIDER_REQUIRED),
-                s.get(CONTROL_BATTERY_FLOOR),
+                s.get(BOARD_BATTERY_FLOOR),
             );
             assert_eq!(
                 d.mode(),
@@ -1223,7 +1223,7 @@ mod dynamic {
                 s.get(CONTROL_FRAME),
                 imu,
                 s.get(CONTROL_RIDER_REQUIRED),
-                s.get(CONTROL_BATTERY_FLOOR),
+                s.get(BOARD_BATTERY_FLOOR),
             );
             assert_eq!(d.mode(), producer, "imu_configured = {imu}");
             assert!(!d.mode_fault(), "a rigid resolution is never a demotion");
@@ -1286,48 +1286,48 @@ mod dynamic {
         }
     }
 
-    /// The `CONTROL_BATTERY_FLOOR` seam end to end (`specs/sensing-and-safety.md`, "The low-battery
+    /// The `BOARD_BATTERY_FLOOR` seam end to end (`specs/sensing-and-safety.md`, "The low-battery
     /// floor"): an erased board reads 2400 cV and the dispatch refuses 2399; a `CONFIG_WRITE` of 0
     /// survives a cold remount and the next boot engages at any known word. Boot-read, NOT on the
     /// tune lane.
     #[test]
     fn the_battery_floor_round_trips_from_the_store_into_the_control_dispatch() {
-        use crate::field::{CONTROL_BATTERY_FLOOR, CONTROL_RIDER_REQUIRED};
-        assert_eq!(CONTROL_BATTERY_FLOOR.id(), 0x24);
+        use crate::field::{BOARD_BATTERY_FLOOR, CONTROL_RIDER_REQUIRED};
+        assert_eq!(BOARD_BATTERY_FLOOR.id(), 0x24);
         let mut f = MockFlash::erased(PS);
         {
             let s = Store::mount(&mut f).unwrap();
-            assert_eq!(s.get(CONTROL_BATTERY_FLOOR), 2400, "default");
+            assert_eq!(s.get(BOARD_BATTERY_FLOOR), 2400, "default");
             let d = control::ControlDispatch::new(
                 1,
                 0,
                 true,
                 s.get(CONTROL_RIDER_REQUIRED),
-                s.get(CONTROL_BATTERY_FLOOR),
+                s.get(BOARD_BATTERY_FLOOR),
             );
             assert!(!d.battery_ok(2399));
             assert!(d.battery_ok(2400));
         }
         {
             let mut s = Store::mount(&mut f).unwrap();
-            s.set_value(CONTROL_BATTERY_FLOOR.key(), Value::I16(0))
+            s.set_value(BOARD_BATTERY_FLOOR.key(), Value::I16(0))
                 .unwrap();
         }
         let s = Store::mount(&mut f).unwrap();
-        assert_eq!(s.get(CONTROL_BATTERY_FLOOR), 0);
+        assert_eq!(s.get(BOARD_BATTERY_FLOOR), 0);
         let d = control::ControlDispatch::new(
             1,
             0,
             true,
             s.get(CONTROL_RIDER_REQUIRED),
-            s.get(CONTROL_BATTERY_FLOOR),
+            s.get(BOARD_BATTERY_FLOOR),
         );
         assert!(d.battery_ok(1), "no floor: any known word");
         assert!(!d.battery_ok(0), "UNKNOWN still refuses");
 
         let mut g = control::GainShadow::default();
         assert_eq!(
-            g.set(CONTROL_BATTERY_FLOOR.id(), 0, 0),
+            g.set(BOARD_BATTERY_FLOOR.id(), 0, 0),
             Err(control::TuneError::UnknownKey)
         );
     }

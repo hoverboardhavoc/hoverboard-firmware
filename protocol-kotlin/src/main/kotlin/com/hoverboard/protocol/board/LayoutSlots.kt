@@ -77,7 +77,7 @@ object Layout {
             add(LayoutSlot(def, null, f, isPin = true, read = read, write = write))
 
         pin(Fields.BOARD_SELF_HOLD, BoardField.SELF_HOLD, { it.selfHold }, { b, v -> b.copy(selfHold = v) })
-        pin(Fields.BOARD_VBATT, BoardField.VBATT, { it.vbatt }, { b, v -> b.copy(vbatt = v) })
+        pin(Fields.BOARD_BATTERY_PIN, BoardField.VBATT, { it.vbatt }, { b, v -> b.copy(vbatt = v) })
         pin(Fields.BOARD_BUZZER, BoardField.BUZZER, { it.buzzer }, { b, v -> b.copy(buzzer = v) })
         pin(Fields.LED_GREEN, BoardField.LED_GREEN, { it.ledGreen }, { b, v -> b.copy(ledGreen = v) })
         pin(Fields.LED_ORANGE, BoardField.LED_ORANGE, { it.ledOrange }, { b, v -> b.copy(ledOrange = v) })

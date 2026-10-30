@@ -690,7 +690,7 @@ pub struct OrchestratorState {
     /// board with no motor brought up leaves it false, so the pre-motor boot posture is unchanged.
     pub motor_moving: bool,
     /// The local battery sense (`specs/sensing-and-safety.md`, "The battery word", source rule
-    /// 1): `Some` exactly when the plan carries `board.vbatt`, with the boot-read calibration and
+    /// 1): `Some` exactly when the plan carries `board.battery.pin`, with the boot-read calibration and
     /// the 250 Hz filter. `None` = this board does not sense; its word comes from its peer or is
     /// UNKNOWN.
     pub vbatt: Option<battery::LocalSense>,
@@ -796,7 +796,7 @@ pub struct BoardIdentity {
 impl OrchestratorState {
     /// A fresh orchestrator: mode OFF, empty inbox, idle inputs, identity attitude, and the
     /// control dispatch through its boot seam (`ControlDispatch::new(CONTROL_MODE byte,
-    /// CONTROL_FRAME byte, imu_configured, CONTROL_RIDER_REQUIRED byte, CONTROL_BATTERY_FLOOR)`:
+    /// CONTROL_FRAME byte, imu_configured, CONTROL_RIDER_REQUIRED byte, BOARD_BATTERY_FLOOR)`:
     /// the resolution table of `specs/rover-one-imu.md` section 2, where pivoting Balance
     /// demotes to Throttle with the mode fault when the IMU is absent and rigid Balance leads
     /// with one and follows without). `imu_configured` comes from the boot path (plan-present AND probe-ok);
@@ -804,12 +804,12 @@ impl OrchestratorState {
     /// and is published only, so the observation block can tell an unstaged board from a failed bring-up;
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
     /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
-    /// `board.vbatt` (`None` = the board does not sense). `pos_clamp` is the stored
+    /// `board.battery.pin` (`None` = the board does not sense). `pos_clamp` is the stored
     /// `CONTROL_POS_CLAMP` word (`specs/state-feedback.md` section 4), clamped by
     /// `control::sf::pos_clamp` into the control section.
     /// `rider_required_byte` is the `CONTROL_RIDER_REQUIRED` byte (`specs/control.md` (i); the
     /// default 1 keeps the balance rider gate, 0 waives it), decoded by the same boot seam.
-    /// `battery_floor` is the `CONTROL_BATTERY_FLOOR` word (`specs/sensing-and-safety.md`, "The
+    /// `battery_floor` is the `BOARD_BATTERY_FLOOR` word (`specs/sensing-and-safety.md`, "The
     /// low-battery floor": centivolts, `<= 0` = none), carried into the same dispatch.
     /// `identity` is what this board says about itself for the life of the boot
     /// ([`BoardIdentity`]: the boot tag and the detected part), a constructor input because both

@@ -87,7 +87,7 @@ mod firmware {
     };
     use scheduler::{systick_load, Scheduler};
     use store::{
-        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_VBATT_CAL, CONTROL_BATTERY_FLOOR,
+        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_BATTERY_CAL, BOARD_BATTERY_FLOOR,
         CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_POS_CLAMP,
         CONTROL_REFERENCE, CONTROL_RIDER_REQUIRED, CONTROL_SF_GAINS, CONTROL_SIDE, IMU_AXIS_ROLE,
         IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, NODE_CLASS,
@@ -2576,13 +2576,13 @@ mod firmware {
                     store.get(CONTROL_GAIN_MAX.at(3)),
                 ],
             ),
-            // The battery-sense calibration (BOARD_VBATT_CAL, 0 = slope / 1 = offset), boot-read
-            // and seam-clamped by `VbattCal::new`, on a board whose plan carries `board.vbatt`
+            // The battery-sense calibration (BOARD_BATTERY_CAL, 0 = slope / 1 = offset), boot-read
+            // and seam-clamped by `VbattCal::new`, on a board whose plan carries `board.battery.pin`
             // only: a board that does not sense has no calibration to read.
             plan.as_ref().and_then(|p| p.vbatt).map(|_| {
                 orchestrator::battery::VbattCal::new(
-                    store.get(BOARD_VBATT_CAL.at(0)),
-                    store.get(BOARD_VBATT_CAL.at(1)),
+                    store.get(BOARD_BATTERY_CAL.at(0)),
+                    store.get(BOARD_BATTERY_CAL.at(1)),
                 )
             }),
             // The state-feedback law's position clamp (CONTROL_POS_CLAMP, edges), boot-read and
@@ -2598,9 +2598,9 @@ mod firmware {
             // Whether balance mode requires a rider (CONTROL_RIDER_REQUIRED, `specs/control.md`
             // (i)): default 1 = required, so an unstaged board engages exactly as before.
             store.get(CONTROL_RIDER_REQUIRED),
-            // The low-battery floor (CONTROL_BATTERY_FLOOR, centivolts, `<= 0` = none,
+            // The low-battery floor (BOARD_BATTERY_FLOOR, centivolts, `<= 0` = none,
             // `specs/sensing-and-safety.md`): refuses a balance engage below it, never a disengage.
-            store.get(CONTROL_BATTERY_FLOOR),
+            store.get(BOARD_BATTERY_FLOOR),
             imu_bus,
             imu_dev,
             // Whether the staging asked for an IMU at all, from the validator above: published as

@@ -564,7 +564,7 @@ pub static VBATT_RAW: AtomicU32 = AtomicU32::new(0);
 
 /// The injected group's channel list, in rank order (`specs/motor-integration.md` bring-up step
 /// 5): the two phase-current ranks from the plan (rank 0 = phase A, rank 1 = phase B, the ranks
-/// the current limit reads), plus the battery rank as rank 2 when the plan carries `board.vbatt`.
+/// the current limit reads), plus the battery rank as rank 2 when the plan carries `board.battery.pin`.
 /// Two slots or three, never the stock four: the aux consumer does not exist here.
 pub fn injected_ranks(phase: [u8; 2], vbatt: Option<u8>) -> heapless::Vec<u8, 4> {
     let mut ranks = heapless::Vec::new();
@@ -1357,7 +1357,7 @@ pub enum BringUpStep {
     /// analog mode (the digital input buffer would otherwise clamp the sample).
     ConfigurePhasePins,
     /// Program + calibrate the injected group: the two phase-current ranks plus the battery rank
-    /// when the plan carries `board.vbatt` ([`injected_ranks`]), 7.5-cycle sampling,
+    /// when the plan carries `board.battery.pin` ([`injected_ranks`]), 7.5-cycle sampling,
     /// left-aligned, the gate timer's CH3 trigger, scan mode, EOIC interrupt enabled.
     ConfigureInjectedGroup,
     /// Start the counter. Safe while disarmed: outputs do not reach the pins until MOE is set.
@@ -2744,7 +2744,7 @@ mod tests {
     /// quoted below is the one the image enforced when the floor was compiled in.
     const FLOOR: u16 = store::MOTOR_NOISE_FLOOR.default();
 
-    /// The injected group's rank list (bring-up step 5): the two-slot group where `board.vbatt` is
+    /// The injected group's rank list (bring-up step 5): the two-slot group where `board.battery.pin` is
     /// absent (the current-limit slice's expectation, unchanged), and the three-slot group where it
     /// is present, the battery channel as rank 2 behind the two phase ranks the current limit
     /// reads. The bench pairs' channels: F103 master PB0/PA0 = 8/0 with PA4 = 4; F130 slave

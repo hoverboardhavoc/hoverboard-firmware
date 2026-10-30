@@ -86,7 +86,7 @@ object Fields {
      * word is below it, never a disengage (`specs/sensing-and-safety.md`, the battery floor). `<= 0` = no floor; no
      * clamp beyond the type.
      */
-    val CONTROL_BATTERY_FLOOR = FieldDef(0x24, Type.I16, Value.I16(2400))
+    val BOARD_BATTERY_FLOOR = FieldDef(0x24, Type.I16, Value.I16(2400))
 
     /**
      * The machine's frame ([ControlFrame]): pivoting platforms, or one rigid body balanced from the
@@ -120,13 +120,13 @@ object Fields {
     val BOARD_SELF_HOLD = FieldDef(0x40, Type.U8, Value.U8(0x1C))
 
     /** Battery sense. ABSENT by default: the pin is fleet-uniform but the SENSE is master-only. */
-    val BOARD_VBATT = FieldDef(0x41, Type.U8, Value.U8(PIN_ABSENT))
+    val BOARD_BATTERY_PIN = FieldDef(0x41, Type.U8, Value.U8(PIN_ABSENT))
     val BOARD_BUZZER = FieldDef(0x42, Type.U8, Value.U8(0x19))
     val LED_GREEN = FieldDef(0x43, Type.U8, Value.U8(0x13))
     val LED_ORANGE = FieldDef(0x44, Type.U8, Value.U8(0x0F))
     val LED_RED = FieldDef(0x45, Type.U8, Value.U8(0x14))
     /**
-     * The foot pads. ABSENT by default, for [BOARD_VBATT]'s reason one step further on: the pins are
+     * The foot pads. ABSENT by default, for [BOARD_BATTERY_PIN]'s reason one step further on: the pins are
      * fleet-uniform (PA11 / PC15) but the PADS are not, and no board in this fleet has pad hardware
      * fitted. A defaulted pin leaves a floating line that the active-high debouncer reads as a foot,
      * which selects the RUN gain set and holds an engagement.
@@ -162,17 +162,24 @@ object Fields {
 
     /**
      * What the pack IS: the number of cells in series (`crates/store/src/field.rs`,
-     * `BOARD_PACK_CELLS`). 0 = not stated, which is the default and is not a guess at eight.
+     * `BOARD_BATTERY_CELLS`). 0 = not stated, which is the default and is not a guess at eight.
      *
      * Written the SAME to both boards of a machine, the [CONTROL_FRAME] rule: one pack feeds both.
      *
-     * The firmware does not read it. [CONTROL_BATTERY_FLOOR] stays an absolute threshold the
+     * The firmware does not read it. [BOARD_BATTERY_FLOOR] stays an absolute threshold the
      * operator sets, so the one consumer is a client turning a pack voltage into a state of
      * charge, which multiplies the count by a per-cell voltage rather than carrying a pack-shaped
      * constant of its own. 0 is a client with nothing to turn a voltage into, which says so
      * instead of drawing a gauge at an assumed pack.
      */
-    val BOARD_PACK_CELLS = FieldDef(0x6A, Type.U8, Value.U8(0))
+    val BOARD_BATTERY_CELLS = FieldDef(0x6A, Type.U8, Value.U8(0))
+
+    /**
+     * What kind of cell the pack is (`crates/store/src/field.rs`, `BOARD_BATTERY_CHEMISTRY`), in
+     * [BatteryChemistry]'s vocabulary; default [BatteryChemistry.LI_ION]. Written the same to both
+     * boards, the [BOARD_BATTERY_CELLS] rule, and not read by the firmware.
+     */
+    val BOARD_BATTERY_CHEMISTRY = FieldDef(0x7F, Type.U8, Value.U8(0))
 
     /**
      * Which electrical level means ASSERTED on the board's three discrete input lines
@@ -314,7 +321,7 @@ object Fields {
      * 1 = offset (centivolts): `centivolts = raw12 * slope / 10_000 + offset`. The firmware clamps
      * each at boot ([VBATT_SLOPE], [VBATT_OFFSET]).
      */
-    val BOARD_VBATT_CAL = IndexedFieldDef(0x69, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)))
+    val BOARD_BATTERY_CAL = IndexedFieldDef(0x69, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)))
 
     /**
      * The rigid frame's turn input bound and rate (`crates/store/src/field.rs`,
@@ -384,11 +391,11 @@ object Fields {
         "MOTOR_METHOD" to MOTOR_METHOD,
         "CONTROL_MODE" to CONTROL_MODE,
         "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
-        "CONTROL_BATTERY_FLOOR" to CONTROL_BATTERY_FLOOR,
+        "BOARD_BATTERY_FLOOR" to BOARD_BATTERY_FLOOR,
         "CONTROL_FRAME" to CONTROL_FRAME,
         "CONTROL_SIDE" to CONTROL_SIDE,
         "BOARD_SELF_HOLD" to BOARD_SELF_HOLD,
-        "BOARD_VBATT" to BOARD_VBATT,
+        "BOARD_BATTERY_PIN" to BOARD_BATTERY_PIN,
         "BOARD_BUZZER" to BOARD_BUZZER,
         "LED_GREEN" to LED_GREEN,
         "LED_ORANGE" to LED_ORANGE,
@@ -423,7 +430,8 @@ object Fields {
         "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
-        "BOARD_PACK_CELLS" to BOARD_PACK_CELLS,
+        "BOARD_BATTERY_CELLS" to BOARD_BATTERY_CELLS,
+        "BOARD_BATTERY_CHEMISTRY" to BOARD_BATTERY_CHEMISTRY,
         "BOARD_INPUT_POLARITY" to BOARD_INPUT_POLARITY,
         "MACHINE_DRIVE_MODE" to MACHINE_DRIVE_MODE,
         "CONTROL_POS_CLAMP" to CONTROL_POS_CLAMP,
@@ -431,7 +439,7 @@ object Fields {
 
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
     val INDEXED: Map<String, IndexedFieldDef> = mapOf(
-        "BOARD_VBATT_CAL" to BOARD_VBATT_CAL,
+        "BOARD_BATTERY_CAL" to BOARD_BATTERY_CAL,
         "CONTROL_DRIVE_TURN" to CONTROL_DRIVE_TURN,
         "CONTROL_SF_GAINS" to CONTROL_SF_GAINS,
         "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
@@ -459,7 +467,7 @@ object Fields {
         MOTOR_METHOD.id,
         CONTROL_MODE.id,
         CONTROL_RIDER_REQUIRED.id,
-        CONTROL_BATTERY_FLOOR.id,
+        BOARD_BATTERY_FLOOR.id,
         CONTROL_FRAME.id,
         CONTROL_SIDE.id,
         MOTOR_DIRECTION.id,
@@ -473,7 +481,7 @@ object Fields {
     )
 
     /**
-     * The inclusive range the firmware clamps a staged [BOARD_VBATT_CAL] slope into at boot
+     * The inclusive range the firmware clamps a staged [BOARD_BATTERY_CAL] slope into at boot
      * (`orchestrator::battery::SLOPE_MIN` / `SLOPE_MAX`).
      */
     val VBATT_SLOPE = 10_000L..32_000L
@@ -511,7 +519,7 @@ object Fields {
     val CURRENT_LIMIT_MA = 1_000L..40_000L
 
     /**
-     * The inclusive range a settings client offers for a staged [BOARD_PACK_CELLS], series cells,
+     * The inclusive range a settings client offers for a staged [BOARD_BATTERY_CELLS], series cells,
      * plus the 0 that means not stated.
      *
      * This client's own, like [CURRENT_LIMIT_MA] and for the same reason: the firmware never reads
@@ -519,7 +527,7 @@ object Fields {
      * runs on, and sixteen is 67 V fully charged, above the rating of every part here, so the
      * offer is what a plausible machine states rather than what the byte holds.
      */
-    val PACK_CELLS = 2L..16L
+    val BATTERY_CELLS = 2L..16L
 
     /**
      * The inclusive range the firmware clamps a staged [CONTROL_POS_CLAMP] into, hall edges: 0 (the
@@ -564,6 +572,16 @@ object Fields {
         const val BOUND = 1
         const val DIFFERENTIAL = 2
         const val RIGID = 3
+    }
+
+    /**
+     * [BOARD_BATTERY_CHEMISTRY]'s vocabulary, written down in the field's own doc comment in
+     * `crates/store/src/field.rs` (the firmware never reads the field).
+     */
+    object BatteryChemistry {
+        const val LI_ION = 0
+        const val LEV50 = 1
+        const val LTO = 2
     }
 
     /** [CONTROL_FRAME]'s vocabulary (`control::Frame`); unknown bytes run as [PIVOTING]. */

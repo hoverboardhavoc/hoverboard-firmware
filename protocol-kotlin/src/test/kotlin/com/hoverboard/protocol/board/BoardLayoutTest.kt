@@ -627,6 +627,6 @@ class BoardLayoutTest {
         val err = error(blankBoard().copy(vbatt = 0x2D))
         assertEquals(9, err.kind.obsResult, "NotAdcCapable")
         assertEquals(0x2D, err.kind.obsDetail)
-        assertEquals(Fields.BOARD_VBATT.id, err.field.field.id)
+        assertEquals(Fields.BOARD_BATTERY_PIN.id, err.field.field.id)
     }
 }

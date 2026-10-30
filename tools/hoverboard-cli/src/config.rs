@@ -859,7 +859,7 @@ mod tests {
             json!({
                 "device": { "name": "rover-left" },
                 "control": { "mode": "balance", "sf_gains": [3491, null, 197] },
-                "board": { "vbatt_cal": [null, -3] },
+                "board": { "battery": { "cal": [null, -3] } },
                 "motors": [
                     { "hall": { "a": "PC13" }, "gate": { "dead_time": 25 }, "current": { "cal": 470 } },
                     {},
@@ -880,7 +880,7 @@ mod tests {
         assert_eq!(
             dumped,
             json!({
-                "board": { "vbatt_cal": [null, -3] },
+                "board": { "battery": { "cal": [null, -3] } },
                 "control": { "mode": "balance", "sf_gains": [3491, null, 197, null] },
                 "device": { "name": "rover-left" },
                 "motors": [
@@ -910,7 +910,7 @@ mod tests {
             "old.json",
             json!({
                 "motors": [{}, { "hall": { "a": "PB5" } }],
-                "board": { "vbatt_cal": [25000] },
+                "board": { "battery": { "cal": [25000] } },
                 "control": { "frame": "rigid" },
             }),
         )]);
@@ -939,7 +939,7 @@ mod tests {
             lines,
             [
                 "rover-left: 0 changed, 0 pinned, 10 unchanged, 3 un-stored",
-                "rover-left: board.vbatt_cal[0]: 25000 -> 25200 (default)",
+                "rover-left: board.battery.cal[0]: 25000 -> 25200 (default)",
                 "rover-left: control.frame: rigid -> pivoting (default)",
                 "rover-left: motors[1].hall.a: PB5 -> none (default)",
                 PIN_NOTE,
@@ -978,7 +978,7 @@ mod tests {
                 "rover-left: kept: device.name = \"rover-left\" (stored, not in the file)",
                 "rover-left: kept: control.mode = balance (stored, not in the file)",
                 "rover-left: kept: motors[0].current.cal = 470 (stored, not in the file)",
-                "rover-left: kept: board.vbatt_cal[1] = -3 (stored, not in the file)",
+                "rover-left: kept: board.battery.cal[1] = -3 (stored, not in the file)",
                 "rover-left: kept: control.sf_gains[2] = 197 (stored, not in the file)",
             ]
         );
@@ -1138,7 +1138,7 @@ mod tests {
             json!({
                 "control": { "mod": "balance", "frame": "bent", "side": 5 },
                 "motors": [{ "align_offset": 6 }, {}, { "hall": { "a": "PA1" } }],
-                "board": { "vbatt_cal": [1, 2, 3], "pack_cells": "ten" },
+                "board": { "battery": { "cal": [1, 2, 3], "cells": "ten" } },
                 "node": { "address": 4 },
                 "hall": { "b": "PA2" },
                 "0x99.0": 5,
@@ -1158,8 +1158,8 @@ mod tests {
                 (true, "a.json: control.side takes left, right, not 5 (--force writes it anyway)"),
                 (true, "a.json: motors[0].align_offset takes 0..5, not 6 (--force writes it anyway)"),
                 (true, "a.json: hall.a has 2 motors (--force writes motors[2] anyway)"),
-                (true, "a.json: board.vbatt_cal has 2 indices (--force writes index 2 anyway)"),
-                (false, "a.json: board.pack_cells: an integer, not \"ten\""),
+                (true, "a.json: board.battery.cal has 2 indices (--force writes index 2 anyway)"),
+                (false, "a.json: board.battery.cells: an integer, not \"ten\""),
                 (true, "a.json: node.address is board-owned (--force writes it anyway)"),
                 (false, "a.json: hall is per motor (motors[<n>].hall)"),
                 (
@@ -1257,7 +1257,7 @@ mod tests {
         );
         assert_eq!(
             lines(&mut b, k(0x69, 1), "-5"),
-            ["rover-left: board.vbatt_cal[1]: -5 (default) -> -5"]
+            ["rover-left: board.battery.cal[1]: -5 (default) -> -5"]
         );
         assert_eq!(
             config_write(&mut b, k(0x22, 1), "balance", false).unwrap_err(),

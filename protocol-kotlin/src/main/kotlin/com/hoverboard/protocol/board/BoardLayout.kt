@@ -159,7 +159,7 @@ interface Capabilities {
  */
 enum class BoardField(val def: FieldDef, val perMotor: Boolean = false) {
     SELF_HOLD(Fields.BOARD_SELF_HOLD),
-    VBATT(Fields.BOARD_VBATT),
+    VBATT(Fields.BOARD_BATTERY_PIN),
     BUZZER(Fields.BOARD_BUZZER),
     LED_GREEN(Fields.LED_GREEN),
     LED_ORANGE(Fields.LED_ORANGE),

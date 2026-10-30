@@ -136,7 +136,7 @@ class GateColourOrder(unittest.TestCase):
         "led.green": "PB3",
         "led.orange": "PA15",
         "led.red": "PB4",
-        "board.vbatt": "PA4",
+        "board.battery.pin": "PA4",
     }
 
     def test_the_colour_to_phase_map_is_the_one_his_channel_convention_fixes(self):
@@ -196,7 +196,7 @@ class GateColourOrder(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------------------------------
-# Decision 2: ADC_BATTERY_VOLT to board.vbatt_cal
+# Decision 2: ADC_BATTERY_VOLT to board.battery.cal
 # --------------------------------------------------------------------------------------------------
 
 
@@ -218,7 +218,7 @@ class BatteryCalibration(unittest.TestCase):
         doc = json.load(open(PRESETS))
         for p in doc["presets"]:
             for f in p["fields"]:
-                if f["key"] == "board.vbatt_cal":
+                if f["key"] == "board.battery.cal":
                     self.assertLessEqual(abs(f["value"]), rp.I16_MAX, p["id"])
 
     def test_the_offset_index_is_zero_because_his_model_is_a_pure_gain(self):
@@ -226,7 +226,7 @@ class BatteryCalibration(unittest.TestCase):
             self.skipTest("the committed presets are not here")
         doc = json.load(open(PRESETS))
         for p in doc["presets"]:
-            cal = {f["index"]: f["value"] for f in p["fields"] if f["key"] == "board.vbatt_cal"}
+            cal = {f["index"]: f["value"] for f in p["fields"] if f["key"] == "board.battery.cal"}
             if not cal:
                 continue
             self.assertEqual(sorted(cal), [0, 1], p["id"])
@@ -240,13 +240,13 @@ class BatteryCalibration(unittest.TestCase):
             self.skipTest("the committed presets are not here")
         doc = json.load(open(PRESETS))
         by_id = {p["id"]: p for p in doc["presets"]}
-        stated = {f["value"] for f in by_id["robo-2-1-20"]["fields"] if f["key"] == "board.vbatt_cal"}
+        stated = {f["value"] for f in by_id["robo-2-1-20"]["fields"] if f["key"] == "board.battery.cal"}
         self.assertEqual(stated, {25070, 0})
-        unstated = [a for a in by_id["robo-2-1-1"]["absent"] if a["key"] == "board.vbatt_cal"]
+        unstated = [a for a in by_id["robo-2-1-1"]["absent"] if a["key"] == "board.battery.cal"]
         self.assertEqual(len(unstated), 2)
         self.assertIn("global default in defines.h", unstated[0]["reason"])
         self.assertFalse(
-            [f for f in by_id["robo-2-1-1"]["fields"] if f["key"] == "board.vbatt_cal"]
+            [f for f in by_id["robo-2-1-1"]["fields"] if f["key"] == "board.battery.cal"]
         )
 
     def test_every_preset_says_the_battery_sense_is_master_only(self):
@@ -403,7 +403,7 @@ class KeyList(unittest.TestCase):
     def test_the_mapped_fields_are_in_registry_id_order(self):
         ids = [f["id"] for f in rp.FIELDS]
         self.assertEqual(ids, sorted(ids))
-        # One row per field, whatever its indices: board.vbatt_cal's two indices come from one row.
+        # One row per field, whatever its indices: board.battery.cal's two indices come from one row.
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_every_field_has_a_handler_and_a_source(self):

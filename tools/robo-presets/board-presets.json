@@ -8,8 +8,8 @@
     },
     {
       "consequence": "the offset is zero because his model is a pure gain, not because it is unknown, and the calibration is MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset carrying it is noise",
-      "decision": "ADC_BATTERY_VOLT to board.vbatt_cal",
-      "oracle": "his figure is volts per ADC count; index 0 of board.vbatt_cal is microvolts per count and the formula's /10_000 returns centivolts. 0.02507 becomes 25070 against the registry default 25200 from the bench four-point fit, 0.5% apart",
+      "decision": "ADC_BATTERY_VOLT to board.battery.cal",
+      "oracle": "his figure is volts per ADC count; index 0 of board.battery.cal is microvolts per count and the formula's /10_000 returns centivolts. 0.02507 becomes 25070 against the registry default 25200 from the bench four-point fit, 0.5% apart",
       "settled": "slope_uV_per_count = round(ADC_BATTERY_VOLT * 1e6); offset = 0"
     },
     {
@@ -99,13 +99,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -130,7 +130,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -266,7 +266,7 @@
       ],
       "name": "RoboDurden 2.1.1",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
@@ -409,13 +409,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -440,7 +440,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -569,7 +569,7 @@
       ],
       "name": "RoboDurden 2.1.2",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-2.h",
@@ -743,7 +743,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA1"
         },
         {
@@ -843,15 +843,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.02500961912134820371101460718516 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.02500961912134820371101460718516 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 25010
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -862,7 +862,7 @@
       "link_set_basis": [],
       "name": "RoboDurden 2.1.3",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-3.h",
@@ -978,7 +978,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA5"
         },
         {
@@ -1113,15 +1113,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.025392524927 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.025392524927 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 25393
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -1132,7 +1132,7 @@
       "link_set_basis": [],
       "name": "RoboDurden 2.1.4",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-4.h",
@@ -1261,13 +1261,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -1292,7 +1292,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA0"
         },
         {
@@ -1421,7 +1421,7 @@
       ],
       "name": "RoboDurden 2.1.5",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-5.h",
@@ -1558,7 +1558,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -1679,15 +1679,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.02488682634 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.02488682634 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 24887
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -1710,7 +1710,7 @@
       ],
       "name": "RoboDurden 2.1.6",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-6.h",
@@ -1841,7 +1841,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -1962,15 +1962,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.02488682634 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.02488682634 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 24887
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -1993,7 +1993,7 @@
       ],
       "name": "RoboDurden 2.1.7.0",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
@@ -2139,7 +2139,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -2253,15 +2253,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.02488682634 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.02488682634 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 24887
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -2284,7 +2284,7 @@
       ],
       "name": "RoboDurden 2.1.7.1",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
@@ -2420,7 +2420,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -2541,15 +2541,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.0171862875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.0171862875 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 17186
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -2572,7 +2572,7 @@
       ],
       "name": "RoboDurden 2.1.8",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER, LED_GREEN, LED_ORANGE, LED_RED."
       ],
@@ -2688,13 +2688,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -2719,7 +2719,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -2873,7 +2873,7 @@
       ],
       "name": "RoboDurden 2.1.9",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "pad.a is UNKNOWN (his file marks this pin TODO_PIN: he does not know it). It is staged ABSENT, never guessed at, so the verdict below is the verdict on this layout with that function absent.",
         "pad.b is UNKNOWN (his file marks this pin TODO_PIN: he does not know it). It is staged ABSENT, never guessed at, so the verdict below is the verdict on this layout with that function absent.",
@@ -2976,13 +2976,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -3007,7 +3007,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -3157,7 +3157,7 @@
       ],
       "name": "RoboDurden 2.1.10",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-10.h",
@@ -3276,7 +3276,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -3411,15 +3411,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.0258320368 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.0258320368 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 25832
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -3442,7 +3442,7 @@
       ],
       "name": "RoboDurden 2.1.11",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-11.h",
@@ -3568,13 +3568,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -3599,7 +3599,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -3735,7 +3735,7 @@
       ],
       "name": "RoboDurden 2.1.12",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
@@ -3858,13 +3858,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -3889,7 +3889,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -4025,7 +4025,7 @@
       ],
       "name": "RoboDurden 2.1.13",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
@@ -4168,13 +4168,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -4199,7 +4199,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -4335,7 +4335,7 @@
       ],
       "name": "RoboDurden 2.1.14",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
@@ -4471,13 +4471,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -4502,7 +4502,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PB1"
         },
         {
@@ -4617,7 +4617,7 @@
       ],
       "name": "RoboDurden 2.1.15",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
@@ -4715,13 +4715,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -4746,7 +4746,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -4882,7 +4882,7 @@
       ],
       "name": "RoboDurden 2.1.16",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
@@ -5010,13 +5010,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -5041,7 +5041,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -5177,7 +5177,7 @@
       ],
       "name": "RoboDurden 2.1.18",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-18.h",
@@ -5289,7 +5289,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -5438,15 +5438,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.02507 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.02507 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 25070
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -5469,7 +5469,7 @@
       ],
       "name": "RoboDurden 2.1.20",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "His layout DOES state an IMU bus, as a solderable pair flag. It is still carried as absent: the flag is a claim about an option, and PB6/PB7 is also where USART0 can live."
       ],
@@ -5587,13 +5587,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -5618,7 +5618,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA0"
         },
         {
@@ -5747,7 +5747,7 @@
       ],
       "name": "RoboDurden 2.1.22",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-22.h",
@@ -5892,13 +5892,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -5916,7 +5916,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA0"
         },
         {
@@ -6045,7 +6045,7 @@
       ],
       "name": "RoboDurden 2.1.28",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-28.h",
@@ -6167,7 +6167,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA5"
         },
         {
@@ -6288,15 +6288,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.0121565132741 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.0121565132741 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 12157
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -6307,7 +6307,7 @@
       "link_set_basis": [],
       "name": "RoboDurden 2.2.1",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-1.h",
@@ -6586,7 +6586,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA5"
         },
         {
@@ -6686,15 +6686,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.012824507539 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.012824507539 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 12825
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -6705,7 +6705,7 @@
       "link_set_basis": [],
       "name": "RoboDurden 2.2.3",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "His layout DOES state an IMU bus, as a solderable pair flag. It is still carried as absent: the flag is a claim about an option, and PB6/PB7 is also where USART0 can live.",
         "His layout says this board may carry an STM32F103 rather than a GD32F103."
@@ -6846,13 +6846,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -6877,7 +6877,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -7013,7 +7013,7 @@
       ],
       "name": "RoboDurden 2.2.6",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-6.h",
@@ -7127,13 +7127,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -7158,7 +7158,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA1"
         },
         {
@@ -7294,7 +7294,7 @@
       ],
       "name": "RoboDurden 2.2.7-left",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "This is a DUAL-MOTOR board, and his file expresses its two motors as ALTERNATIVES under one MOTOR_LEFT switch rather than as a second named gate set, so each of the two presets carries one motor as motor 0 and neither populates our motor-1 field set. Merging them would be our invention rather than his record: the two halves also differ in facts we do not model (his DC-bus shunt and break input per side), and nothing on the bench exercises a two-motor preset."
       ],
@@ -7425,13 +7425,13 @@
         {
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "his layout file states no ADC_BATTERY_VOLT of its own, so it carries no calibration: his firmware falls back to a global default in defines.h, which is not a fact about this board"
         },
         {
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "reason": "no calibration to take an offset from"
         }
       ],
@@ -7456,7 +7456,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA1"
         },
         {
@@ -7592,7 +7592,7 @@
       ],
       "name": "RoboDurden 2.2.7-right",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
         "This is a DUAL-MOTOR board, and his file expresses its two motors as ALTERNATIVES under one MOTOR_LEFT switch rather than as a second named gate set, so each of the two presets carries one motor as motor 0 and neither populates our motor-1 field set. Merging them would be our invention rather than his record: the two halves also differ in facts we do not model (his DC-bus shunt and break input per side), and nothing on the bench exercises a two-motor preset."
       ],
@@ -7718,7 +7718,7 @@
           "from": "VBATT",
           "id": "0x41",
           "index": 0,
-          "key": "board.vbatt",
+          "key": "board.battery.pin",
           "value": "PA4"
         },
         {
@@ -7867,15 +7867,15 @@
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 0,
-          "key": "board.vbatt_cal",
-          "note": "his 0.02507 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.vbatt and this calibration both.",
+          "key": "board.battery.cal",
+          "note": "his 0.02507 volts per ADC count x 1e6 = microvolts per count, the unit index 0 holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave preset drops board.battery.pin and this calibration both.",
           "value": 25070
         },
         {
           "from": "ADC_BATTERY_VOLT",
           "id": "0x69",
           "index": 1,
-          "key": "board.vbatt_cal",
+          "key": "board.battery.cal",
           "note": "his conversion is a pure gain with no offset term, so the offset is zero rather than unstated. Our own -5 cV default came from a measured fit and is deliberately not mixed with his slope.",
           "value": 0
         }
@@ -7898,7 +7898,7 @@
       ],
       "name": "RoboDurden 2.2.20",
       "notes": [
-        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
+        "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-20.h",
