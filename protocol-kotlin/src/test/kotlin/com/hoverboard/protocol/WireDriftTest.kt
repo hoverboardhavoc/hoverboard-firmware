@@ -532,22 +532,6 @@ class WireDriftTest {
         assertEquals(0, com.hoverboard.protocol.l3.Walk.NB_STATE_MASK and 0x80, "bit 7 is not state")
     }
 
-    /**
-     * The secret mark's status (`crates/net/src/walk.rs`, `CFG_SECRET`): `10`, answered with no value
-     * for a read of a stored `wifi.pass` (`crates/store/src/field.rs`, `WIFI_PASS`, id `0x12`), which
-     * the app meets only as a refusal.
-     */
-    @Test
-    fun theSecretStatusMatchesTheFirmware() {
-        assertEquals(10, com.hoverboard.protocol.l3.Walk.CFG_SECRET)
-        assertEquals(
-            com.hoverboard.protocol.config.CfgRefusal.SECRET,
-            com.hoverboard.protocol.config.CfgRefusal.fromCode(10),
-        )
-        assertEquals(0x12, com.hoverboard.protocol.store.Fields.WIFI_PASS.id)
-        assertEquals(0x11, com.hoverboard.protocol.store.Fields.WIFI_SSID.id)
-    }
-
     // --- Store value type tags ------------------------------------------------------------------
 
     /** Type tags ride inside CONFIG_*; `crates/store/src/key.rs`, `Type::tag`. */

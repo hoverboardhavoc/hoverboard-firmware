@@ -738,6 +738,15 @@ jobs:
           --manifest-path tools/hoverboard-cli/Cargo.toml
           --target ${{ matrix.target }}
 
+      # The refusals of a CLI without `ble` (tests/no_ble.rs, which the default build compiles out).
+      - name: Tests (without ble, as the bench Pi builds it)
+        if: runner.os == 'Linux'
+        run: >
+          cargo test
+          --manifest-path tools/hoverboard-cli/Cargo.toml
+          --target ${{ matrix.target }}
+          --no-default-features
+
       - name: Build release
         run: >
           cargo build --release

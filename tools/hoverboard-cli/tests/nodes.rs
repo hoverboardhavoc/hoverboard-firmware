@@ -405,6 +405,52 @@ fn a_boards_store_as_a_file_through_the_binary() {
     server.join().unwrap();
 }
 
+/// `specs/bridge-onboarding.md` section 2.2 through the binary: `diff` of a file carrying the
+/// password counts it as changed every time, prints it as `(set) -> (set)`, exits 1, and the value
+/// is in no output.
+#[test]
+fn a_secret_through_the_binary_is_never_printed_and_diff_always_counts_it() {
+    const PASS: &str = "hunter2hunter2";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 3));
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+    let creds = scratch("wifi.json");
+    std::fs::write(
+        &creds,
+        format!(r#"{{ "wifi": {{ "ssid": "bench", "pass": "{PASS}" }} }}"#),
+    )
+    .unwrap();
+
+    let (code, out, err) = run(&["apply", "0x01", &creds]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "Hoverboard: 2 changed, 0 pinned, 0 unchanged\n\
+         Hoverboard: wifi.ssid: \"\" (default) -> \"bench\"\n\
+         Hoverboard: wifi.pass: (default) -> (set)\n"
+    );
+    assert!(!out.contains(PASS) && !err.contains(PASS), "{out}{err}");
+
+    let (code, out, err) = run(&["diff", "0x01", &creds]);
+    assert_eq!(code, Some(1), "{err}");
+    assert_eq!(
+        out,
+        "Hoverboard: 1 changed, 0 pinned, 1 unchanged\n\
+         Hoverboard: wifi.pass: (set) -> (set)\n"
+    );
+    assert!(!out.contains(PASS) && !err.contains(PASS), "{out}{err}");
+
+    let (code, out, err) = run(&["config", "0x01", "wifi.pass"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "Hoverboard: wifi.pass = (set)");
+    server.join().unwrap();
+}
+
 /// `specs/bridge-onboarding.md` section 3: a value longer than one `CONFIG_WRITE` carries is
 /// refused by the file check, before `apply` opens a link and before `install-esp` touches the port.
 #[test]
