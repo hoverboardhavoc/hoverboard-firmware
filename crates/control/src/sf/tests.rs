@@ -57,7 +57,7 @@ fn the_pass_records_each_term_as_a_word_on_its_own() {
     let inp = SfInputs {
         pitch_word: 250,
         pitch_rate: -3000,
-        wheel_rate_q: 4096,
+        wheel_rate_q12: 4096,
         ..run_input()
     };
     let cfg = SfConfig {
@@ -165,7 +165,7 @@ fn a_forward_push_gives_negative_position_and_speed_terms() {
     let pushed = SfInputs {
         wheel_pos: -1,
         peer_pos: 1,
-        wheel_rate_q: -Q,
+        wheel_rate_q12: -Q,
         ..run_input()
     };
     sf_step(&cfg, &pushed, &mut st);
@@ -426,7 +426,7 @@ fn the_speed_error_clamps() {
             ..SfConfig::default()
         },
         &SfInputs {
-            wheel_rate_q: -100 * Q,
+            wheel_rate_q12: -100 * Q,
             scale: 3900,
             // Outside RUN the live gains are the shadow's, so gv is 10 on this pass.
             in_run: false,
@@ -447,7 +447,7 @@ fn the_filter_steps_by_a_quarter_of_the_difference() {
         sf_step(
             &cfg,
             &SfInputs {
-                wheel_rate_q: -1000,
+                wheel_rate_q12: -1000,
                 in_run: false,
                 ..run_input()
             },
@@ -604,7 +604,7 @@ impl Rover {
         SfInputs {
             pitch_word: (-(m[0].to_degrees() * 100.0)) as i16 + self.pitch_err,
             pitch_rate: (-(m[1] * 1e4)) as i32,
-            wheel_rate_q: (-(m[3] / count() * Q as f64)) as i32,
+            wheel_rate_q12: (-(m[3] / count() * Q as f64)) as i32,
             wheel_pos: -x_edges,
             peer_pos: peer,
             role_right: true,

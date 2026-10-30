@@ -169,6 +169,7 @@ class CurrentReadingTest {
             flags = 0,
             peerDemand = 0,
             wheelPos = 0,
+            wheelRate = 0,
             obs = CyclicObs(
                 phasePeak = peak,
                 phaseMean = mean,

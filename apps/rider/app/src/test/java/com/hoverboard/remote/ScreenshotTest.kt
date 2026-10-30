@@ -145,6 +145,7 @@ class ScreenshotTest {
                     flags = CyclicState.FLAG_RIDER,
                     peerDemand = 0,
                     wheelPos = 0,
+                    wheelRate = 0,
                     obs = DRIVING_OBS,
                 ),
             )
@@ -179,8 +180,8 @@ class ScreenshotTest {
         // The pair pulling unevenly, which is the thing a per-board current display is for: 0x01 at
         // the full [DRIVING_OBS] window, 0x02 at three quarters of it.
         val slaveObs = DRIVING_OBS.copy(phaseMean = DRIVING_OBS.phaseMean * 3 / 4)
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, 0, DRIVING_OBS))
-        val slave = TelemetryUi().merge(CyclicState(-38, 12, 290, 3_765, 3, 0, 0, 0, 0, slaveObs))
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, 0, DRIVING_OBS, 0))
+        val slave = TelemetryUi().merge(CyclicState(-38, 12, 290, 3_765, 3, 0, 0, 0, 0, slaveObs, 0))
         capture("control_bound_armed") {
             ControlScreen(
                 state = connected(DriveMode.BOUND, mapOf(0x01 to telemetry, 0x02 to slave)).copy(
@@ -215,10 +216,10 @@ class ScreenshotTest {
     @Test
     fun controlScreen_rigidArmed() {
         val leader = TelemetryUi().merge(
-            CyclicState(-40, 10, 300, 3_780, 3, 0, CyclicState.FLAG_LEADER, 0, 0, QUIET_OBS),
+            CyclicState(-40, 10, 300, 3_780, 3, 0, CyclicState.FLAG_LEADER, 0, 0, QUIET_OBS, 0),
         )
         val follower = TelemetryUi().merge(
-            CyclicState(0, 0, 295, 3_770, 3, 0, CyclicState.FLAG_FOLLOWER, -2_100, 0, QUIET_OBS),
+            CyclicState(0, 0, 295, 3_770, 3, 0, CyclicState.FLAG_FOLLOWER, -2_100, 0, QUIET_OBS, 0),
         )
         capture("control_rigid_armed") {
             ControlScreen(
@@ -254,8 +255,8 @@ class ScreenshotTest {
      */
     @Test
     fun controlScreen_differentialArmed() {
-        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, 0, QUIET_OBS))
-        val slave = TelemetryUi().merge(CyclicState(-38, 12, 0, 3_760, 4, 0x01, 0, 0, 0, QUIET_OBS))
+        val telemetry = TelemetryUi().merge(CyclicState(-40, 10, 300, 3_780, 3, 0, 0, 0, 0, QUIET_OBS, 0))
+        val slave = TelemetryUi().merge(CyclicState(-38, 12, 0, 3_760, 4, 0x01, 0, 0, 0, QUIET_OBS, 0))
         capture("control_differential_armed") {
             ControlScreen(
                 state = connected(DriveMode.DIFFERENTIAL, mapOf(0x01 to telemetry, 0x02 to slave)).copy(
@@ -284,7 +285,7 @@ class ScreenshotTest {
     @Test
     fun controlScreen_connectedDisarmed() {
         val telemetry = TelemetryUi()
-            .merge(CyclicState(-180, 95, 0, 3_780, 0, 0, 0, 0, 0, QUIET_OBS))
+            .merge(CyclicState(-180, 95, 0, 3_780, 0, 0, 0, 0, 0, QUIET_OBS, 0))
         capture("control_disarmed") {
             ControlScreen(
                 state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(
@@ -326,6 +327,7 @@ class ScreenshotTest {
                     flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
                     peerDemand = 0,
                     wheelPos = 0,
+                    wheelRate = 0,
                     obs = QUIET_OBS,
                 ),
             )
@@ -355,7 +357,7 @@ class ScreenshotTest {
     fun controlScreen_lowBattery() {
         // 30.5 V on the ten-cell pack below: 0.5 V above its 30.0 V empty, so 4% and LOW.
         val telemetry = TelemetryUi()
-            .merge(CyclicState(0, 0, 0, 3_050, 0, 0, 0, 0, 0, QUIET_OBS))
+            .merge(CyclicState(0, 0, 0, 3_050, 0, 0, 0, 0, 0, QUIET_OBS, 0))
         capture("control_low_battery") {
             ControlScreen(
                 state = connected(DriveMode.SINGLE, mapOf(0x01 to telemetry)).copy(

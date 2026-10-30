@@ -18,8 +18,8 @@
 //!   payload shorter than the committed prefix is rejected; the delivery class is best-effort /
 //!   latest-wins, so the caller drops the PDU and no error propagates ([`decode`] returns
 //!   `None`).
-//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 27 bytes: the
-//!   fifteen committed bytes plus the appended [`CyclicObs`] block). Any other length is a
+//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 31 bytes: the
+//!   fifteen committed bytes, the appended [`CyclicObs`] block and the trailing `wheel_rate`). Any other length is a
 //!   protocol error. It once accepted eleven bytes with the block absent, for a peer on an image
 //!   from before the block; nothing in this project owes an older image compatibility until a
 //!   version is released, and boards and phones are updated together (owner policy, 2026-10-10).
@@ -158,7 +158,12 @@ fn rd_u32(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
-// --- CYCLIC_STATE (27 B: 15 B committed + a 12 B appended block) ------------------------------
+#[inline]
+fn rd_i32(b: &[u8], off: usize) -> i32 {
+    rd_u32(b, off) as i32
+}
+
+// --- CYCLIC_STATE (31 B: 15 B committed + a 12 B appended block + the i32 wheel_rate) ----------
 
 /// The part a board reports in [`CyclicObs::chip`]: what `detect_chip` identified at boot
 /// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 20). A controller needs it to
@@ -357,18 +362,28 @@ pub struct CyclicState {
     /// accepted payload has it, which is the guarantee the exact-length decode buys: a consumer
     /// reads the current window and the board's identity without a present/absent arm.
     pub obs: CyclicObs,
+    /// This board's period-measured wheel rate, at offset 27 after the block
+    /// (`specs/link-control.md`, `CYCLIC_STATE`): `motor::WHEEL_RATE_Q12` as the block carries
+    /// it, unscaled, in Q12 of [`Self::wheel_speed`]'s unit (4096 = one hall edge per 320-period
+    /// window), in the counter's own sense, decaying as `1/t` between edges and 0 across a
+    /// reversal. Consumer: the rider app's speed readout; the peer decodes it and nothing on it
+    /// reads it.
+    pub wheel_rate: i32,
 }
 
 impl CyclicState {
     /// Length of the committed words, which is also the offset the appended [`CyclicObs`] block
-    /// sits at (`specs/link-control.md` gives the layout in those two parts). A length the wire
-    /// never carries on its own: see [`Self::ENCODED_LEN`].
+    /// sits at (`specs/link-control.md` gives the layout in those parts). A length the wire never
+    /// carries on its own: see [`Self::ENCODED_LEN`].
     pub const LEN: usize = 15;
 
-    /// The ONE on-wire length of a `CYCLIC_STATE` payload: the committed words plus the appended
-    /// [`CyclicObs`] block. [`Self::encode`] writes exactly this, [`Self::decode`] accepts
+    /// The offset of [`Self::wheel_rate`], the word after the [`CyclicObs`] block.
+    pub const WHEEL_RATE_OFF: usize = Self::LEN + CyclicObs::LEN;
+
+    /// The ONE on-wire length of a `CYCLIC_STATE` payload: the committed words, the appended
+    /// [`CyclicObs`] block and the `i32` [`Self::wheel_rate`]. [`Self::encode`] writes exactly this, [`Self::decode`] accepts
     /// exactly this, and a buffer handed to either has to be this long.
-    pub const ENCODED_LEN: usize = 27;
+    pub const ENCODED_LEN: usize = 31;
 
     /// `flags` bit0: rider present. Peer consumer: rider mirror (profile select).
     pub const FLAG_RIDER: u8 = 1 << 0;
@@ -423,14 +438,17 @@ impl CyclicState {
         out[10] = self.flags;
         out[11..13].copy_from_slice(&self.peer_demand.to_le_bytes());
         out[13..15].copy_from_slice(&self.wheel_pos.to_le_bytes());
-        Self::LEN + self.obs.encode(&mut out[Self::LEN..])
+        self.obs.encode(&mut out[Self::LEN..]);
+        out[Self::WHEEL_RATE_OFF..Self::ENCODED_LEN]
+            .copy_from_slice(&self.wheel_rate.to_le_bytes());
+        Self::ENCODED_LEN
     }
 
     /// Decode a payload of exactly [`Self::ENCODED_LEN`]; **any other length is
     /// [`DecodeError::WrongLen`]**, short or long.
     ///
     /// The exception to the crate's committed-prefix rule, and the module doc carries the whole
-    /// argument: a sender in this tree writes twenty-seven bytes, L2 never delivers a truncated
+    /// argument: a sender in this tree writes thirty-one bytes, L2 never delivers a truncated
     /// frame, and no older image is owed compatibility, so every other length is a peer that is
     /// not speaking this protocol.
     pub fn decode(b: &[u8]) -> Result<CyclicState, DecodeError> {
@@ -448,13 +466,14 @@ impl CyclicState {
             peer_demand: rd_i16(b, 11),
             wheel_pos: rd_i16(b, 13),
             obs: CyclicObs::decode(&b[Self::LEN..]),
+            wheel_rate: rd_i32(b, Self::WHEEL_RATE_OFF),
         })
     }
 }
 
-// The emitted length is the prefix plus the block, held by the compiler rather than by whoever
-// edits either number next.
-const _: () = assert!(CyclicState::ENCODED_LEN == CyclicState::LEN + CyclicObs::LEN);
+// The emitted length is the prefix plus the block plus the i32 rate, held by the compiler rather
+// than by whoever edits either number next.
+const _: () = assert!(CyclicState::ENCODED_LEN == CyclicState::LEN + CyclicObs::LEN + 4);
 
 // --- DRIVE_CMD (5 B): a controller's drive reference -------------------------------------------
 
@@ -637,13 +656,17 @@ mod tests {
     }
 
     /// The appended block's length and the `CYCLIC_STATE` payload's one on-wire length, against
-    /// the committed words it is built from: 15 is where the block starts, 27 is what the wire
-    /// carries and what a decoder requires.
+    /// the committed words it is built from: 15 is where the block starts, 27 is where
+    /// `wheel_rate` starts, 31 is what the wire carries and what a decoder requires.
     #[test]
     fn appended_block_lengths_pinned() {
         assert_eq!(CyclicObs::LEN, 12, "i16 + i16 + u16 + u8 + u8 + u32");
-        assert_eq!(CyclicState::ENCODED_LEN, 27);
-        assert_eq!(CyclicState::ENCODED_LEN, CyclicState::LEN + CyclicObs::LEN);
+        assert_eq!(CyclicState::WHEEL_RATE_OFF, 27);
+        assert_eq!(CyclicState::ENCODED_LEN, 31);
+        assert_eq!(
+            CyclicState::ENCODED_LEN,
+            CyclicState::LEN + CyclicObs::LEN + 4
+        );
     }
 
     // -- Wire layout (byte-exact, little-endian) ------------------------------------------------
@@ -667,6 +690,7 @@ mod tests {
                 chip: ChipTag::F130C8,
                 odometer: 0x0A0B_0C0D,
             },
+            wheel_rate: -0x0102_0304, // 0xFEFDFCFC
         }
     }
 
@@ -693,6 +717,7 @@ mod tests {
                 0x7B, // boot_tag
                 0x02, // chip: F130C8
                 0x0D, 0x0C, 0x0B, 0x0A, // odometer 0x0A0B0C0D
+                0xFC, 0xFC, 0xFD, 0xFE, // wheel_rate -0x01020304, from offset 27
             ]
         );
     }
@@ -762,7 +787,7 @@ mod tests {
 
     /// An OVER-LONG payload is refused too, where the other three families would read their
     /// prefix and ignore the rest: this family's length is exact in both directions, so a
-    /// twenty-seven-byte reading of a twenty-eight-byte payload is a disagreement about the layout,
+    /// thirty-one-byte reading of a thirty-two-byte payload is a disagreement about the layout,
     /// not a field this build has yet to learn.
     #[test]
     fn an_over_long_cyclic_payload_is_refused() {

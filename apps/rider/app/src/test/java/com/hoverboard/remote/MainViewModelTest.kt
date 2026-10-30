@@ -487,7 +487,7 @@ class MainViewModelTest : RiderVmTest() {
         transport.store[0x01 to Fields.BOARD_BATTERY_CELLS.key()] = Value.U8(8)
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01)
-        transport.emitCyclicState(CyclicState(0, 0, 0, 3_300, 1, 0, 0, 0, 0, QUIET_OBS))
+        transport.emitCyclicState(CyclicState(0, 0, 0, 3_300, 1, 0, 0, 0, 0, QUIET_OBS, 0))
         advanceUntilIdle()
 
         val charge = currentState().batteryOf(0x01) as BatteryReading.Charge
@@ -526,6 +526,7 @@ class MainViewModelTest : RiderVmTest() {
                     flags = CyclicState.FLAG_RIDER,
                     peerDemand = 0,
                     wheelPos = 0,
+                    wheelRate = 0,
                     obs = CyclicObs(
                         phasePeak = 980,
                         phaseMean = 410,
@@ -586,7 +587,7 @@ class MainViewModelTest : RiderVmTest() {
             transport.setAttachedBoard(0x01)
 
             transport.emitCyclicState(
-                CyclicState(0, 0, 100, 3_600, 1, 0, 0, 0, 0, QUIET_OBS),
+                CyclicState(0, 0, 100, 3_600, 1, 0, 0, 0, 0, QUIET_OBS, 0),
             )
             transport.emitCyclicState(
                 CyclicState(
@@ -599,6 +600,7 @@ class MainViewModelTest : RiderVmTest() {
                         chip = ChipTag.F130C8,
                         odometer = 1_284_310L,
                     ),
+                    0,
                 ),
             )
 

@@ -155,14 +155,16 @@ class WireDriftTest {
 
     /**
      * The appended block's length, and the `CYCLIC_STATE` payload's one on-wire length: 15 is
-     * where the block starts, 27 is what the wire carries and the only length a decoder takes.
+     * where the block starts, 27 is where `wheelRate` starts, 31 is what the wire carries and the
+     * only length a decoder takes.
      *
      * Pinned on the Rust side by `appended_block_lengths_pinned` in `crates/linkctl/src/lib.rs`.
      */
     @Test
     fun theAppendedBlockLengthsMatchTheFirmware() {
         assertEquals(12, CyclicObs.LEN, "crates/linkctl/src/lib.rs, CyclicObs::LEN")
-        assertEquals(27, CyclicState.ENCODED_LEN, "crates/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
+        assertEquals(27, CyclicState.WHEEL_RATE_OFF, "crates/linkctl/src/lib.rs, CyclicState::WHEEL_RATE_OFF")
+        assertEquals(31, CyclicState.ENCODED_LEN, "crates/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
     }
 
     /**
@@ -193,6 +195,7 @@ class WireDriftTest {
             flags = CyclicState.FLAG_RIDER or CyclicState.FLAG_LOCKDOWN,
             peerDemand = -28500,
             wheelPos = -0x1235,
+            wheelRate = -0x0102_0304,
             obs = CyclicObs(
                 phasePeak = 0x0304,
                 phaseMean = -3,
@@ -219,6 +222,7 @@ class WireDriftTest {
             0x7B, // bootTag
             0x02, // chip: F130C8
             0x0D, 0x0C, 0x0B, 0x0A, // odometer 0x0A0B0C0D
+            0xFC.toByte(), 0xFC.toByte(), 0xFD.toByte(), 0xFE.toByte(), // wheelRate, from offset 27
         )
         assertArrayEquals(expected, sample.encode())
         assertEquals(CyclicState.ENCODED_LEN, sample.encode().size)
@@ -247,6 +251,7 @@ class WireDriftTest {
                 flags = 0,
                 peerDemand = 0,
                 wheelPos = 0,
+                wheelRate = 0,
                 obs = CyclicObs(
                     phasePeak = 0,
                     phaseMean = 0,
@@ -280,7 +285,7 @@ class WireDriftTest {
             0xFE.toByte(), 0xFF.toByte(), 0x02, 0x01, 0xFF.toByte(), 0xFF.toByte(),
             0xB2.toByte(), 0xA1.toByte(), 0x03, 0x11, 0x81.toByte(), 0xAC.toByte(), 0x90.toByte(),
             0xCB.toByte(), 0xED.toByte(), 0x04, 0x03, 0xFD.toByte(), 0xFF.toByte(), 0xC1.toByte(), 0x08, 0x7B, 0x02,
-            0x0D, 0x0C, 0x0B, 0x0A,
+            0x0D, 0x0C, 0x0B, 0x0A, 0xFC.toByte(), 0xFC.toByte(), 0xFD.toByte(), 0xFE.toByte(),
         )
         assertEquals(CyclicState.ENCODED_LEN, whole.size)
         assertNotNull(CyclicState.decode(whole), "the one length decodes")
@@ -590,42 +595,26 @@ class WireDriftTest {
     // --- The BLE transport budget ---------------------------------------------------------------
 
     /**
-     * A CYCLIC_STATE PDU is TWO BLE stream frames, each inside one ATT notification.
+     * A CYCLIC_STATE PDU from the bridge is ONE stream frame, carried in TWO BLE notifications.
      *
      * ```
-     * CYCLIC_STATE payload            27 B   crates/linkctl, CyclicState::ENCODED_LEN
+     * CYCLIC_STATE payload            31 B   crates/linkctl, CyclicState::ENCODED_LEN
      * + L3 header                      3 B   crates/net, HEADER_LEN
-     *                                = 30 B PDU
-     * BLE frame_capacity 16 -> usable chunk 15 < 30, so TWO fragments, 15 B + 15 B
-     * L2 frames = frag-hdr 1 + 15 = 16 B, twice
-     * wire = SOF 1 + len 1 + body + CRC 2 = 20 B + 20 B = 40 B, each frame <= 20
+     *                                = 34 B PDU
+     * bridge frame capacity 128 -> one fragment, L2 frame = frag-hdr 1 + 34 = 35 B
+     * stream = SOF 1 + len 1 + 35 + CRC 2 = 39 B, notified as 20 B + 19 B
      * ```
      *
-     * 40 B is 41.7 ms at 9600 8N1. At the 5 Hz sample rate it is 200 B/s, 20.8% of the module's
-     * 960 B/s in that direction, and the peer forward at 2.5 Hz adds 100 B/s on top.
+     * The bridge's controller links frame at 128 and notify at most 20 B
+     * (`apps/hoverboard-bridge/core/src/router.rs` (FRAME, NOTIFY_MAX)), so a frame spans
+     * notifications and the rider reassembles it from the byte stream. The Rust side asserts the 39 B by
+     * `stage_of_a_cyclic_state_pdu_is_one_frame_on_a_128_byte_link` in `crates/link/src/link.rs`.
      *
-     * It was 14 B, one fragment and 19 B of wire until the payload grew its appended block, then
-     * 22 B and 32 B until `peerDemand`, then 24 B and 34 B until the odometer, then 28 B and 38 B
-     * until `wheelPos`: crossing the 15 B chunk is what made eight payload bytes cost thirteen
-     * here, and every byte after them costs one. 30 B is the last PDU two fragments hold. The 5 Hz
-     * rate's budget is re-derived from the 40 against the module's ~960 B/s
-     * (`crates/orchestrator/src/dispatch.rs`, `BLE_CYCLIC_DIVISOR`).
-     *
-     * BLE frame capacity 16 is the largest L2 frame whose stream frame (SOF + len + 16 + CRC) fits
-     * one 20 B notification, `NOTIFY_MAX` in `apps/hoverboard-bridge/core/src/router.rs`: the
-     * CC2541-shaped GATT payload the bridge keeps so the app's transport needs no change. It was
-     * the board's own `BLE_FRAME_CAP` until the firmware stopped driving the onboard CC2541
-     * (2026-10-27); the phone's BLE peer is now always a bridge. The same
-     * arithmetic is asserted on the Rust side by
-     * `stage_of_a_cyclic_state_pdu_is_two_frames_of_forty_bytes_on_the_ble_wire` in
-     * `crates/link/src/link.rs`.
-     *
-     * What this pins is the receiving end: the rider reassembles such a payload from TWO
-     * notifications, which is the reason the receive path is a continuous stream rather than one
-     * frame per ATT transaction.
+     * The app's own outgoing frame capacity stays 16, so each frame it writes is one 20 B ATT
+     * write; that is pinned here beside the inbound arithmetic.
      */
     @Test
-    fun aCyclicStatePduIsTwoBleFramesOfFortyBytes() {
+    fun aCyclicStatePduIsOneBridgeFrameInTwoNotifications() {
         assertEquals(
             16,
             BleStreamTransport.DEFAULT_FRAME_CAPACITY,
@@ -642,6 +631,7 @@ class WireDriftTest {
             flags = CyclicState.FLAG_RIDER,
             peerDemand = 0,
             wheelPos = 0,
+            wheelRate = 0,
             obs = CyclicObs(
                 phasePeak = 980,
                 phaseMean = 410,
@@ -658,26 +648,19 @@ class WireDriftTest {
             payload = cyclic.encode(),
         )
         val pduBytes = pdu.encode()
-        assertEquals(30, pduBytes.size, "3 B L3 header + 27 B CYCLIC_STATE")
+        assertEquals(34, pduBytes.size, "3 B L3 header + 31 B CYCLIC_STATE")
 
-        val transport = BleStreamTransport()
-        Link(transport).send(pduBytes)
-        val wire = transport.drainOutgoing()!!
+        val bridge = BleStreamTransport(frameCapacity = BRIDGE_FRAME)
+        Link(bridge).send(pduBytes)
+        val wire = bridge.drainOutgoing()!!
+        assertEquals(39, wire.size, "one stream frame")
+        assertEquals(35, wire[1].toInt() and 0xFF, "frag-hdr + the whole 34 B PDU")
 
-        assertEquals(40, wire.size, "two stream frames, 20 B + 20 B")
-        // Frame boundaries: SOF, length byte, body, CRC16. The first frame's length byte says 16
-        // (frag-hdr + a 15 B chunk), so the second starts at 20.
-        assertEquals(16, wire[1].toInt() and 0xFF, "the first frame's body is a full chunk")
-        assertEquals(16, wire[21].toInt() and 0xFF, "the second frame carries the 15 B remainder")
-        assertTrue(
-            20 <= 20 && wire.size - 20 <= 20,
-            "each frame must fit one 20-byte ATT notification",
-        )
-
-        // And it round-trips back through the receive path, which is exactly what the rider does
-        // with an inbound notification.
+        // The rider receives it as the bridge notifies it, in 20 B pieces.
         val rxTransport = BleStreamTransport()
-        rxTransport.onReceive(wire)
+        val notifications = wire.toList().chunked(NOTIFY_MAX)
+        assertEquals(listOf(20, 19), notifications.map { it.size })
+        for (n in notifications) rxTransport.onReceive(n.toByteArray())
         val recovered = Pdu.decode(Link(rxTransport).pollRecv()!!)
         assertEquals(OP_CYCLIC_STATE, recovered.opcode)
         assertEquals(cyclic, CyclicState.decode(recovered.payload))
@@ -686,5 +669,11 @@ class WireDriftTest {
     private companion object {
         /** The chip byte's offset inside the appended block (`crates/linkctl/src/lib.rs`, `CyclicObs::decode`). */
         const val CHIP_IN_BLOCK = 7
+
+        /** The bridge's controller-link L2 frame capacity, `FRAME` in `apps/hoverboard-bridge/core/src/router.rs`. */
+        const val BRIDGE_FRAME = 128
+
+        /** The bridge's largest notification, `NOTIFY_MAX` in `apps/hoverboard-bridge/core/src/router.rs`. */
+        const val NOTIFY_MAX = 20
     }
 }
