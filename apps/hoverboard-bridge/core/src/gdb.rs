@@ -156,8 +156,8 @@ impl Registers for Regs {
         if bytes.len() != 4 * CORE_REGS + SPECIAL_REGS {
             return Err(());
         }
-        for (r, b) in self.core.iter_mut().zip(bytes.chunks_exact(4)) {
-            *r = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        for (r, b) in self.core.iter_mut().zip(bytes.as_chunks::<4>().0) {
+            *r = u32::from_le_bytes(*b);
         }
         self.special.copy_from_slice(&bytes[4 * CORE_REGS..]);
         Ok(())

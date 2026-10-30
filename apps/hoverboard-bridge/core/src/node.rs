@@ -25,15 +25,16 @@
 //! while ingesting a frame from port 2 is always the bridge's own reply; the `PORTS` reply to a
 //! `PROBE_PORTS`, which leaves after the probe window, goes where the probe came from.
 
-use heapless::Vec;
+use espsvc::WifiState;
+use heapless::{String, Vec};
 use linkctl::OP_CYCLIC_STATE;
 use net::pdu::{Pdu, NO_ADDRESS};
 pub use net::walk::BRIDGE_NAME_MAX;
 use net::walk::{
-    bridge_name_usable, Emits, Responder, CLASS_BRIDGE, MAX_PORTS, MCU_ESP32C3, PORT_BLE, PORT_SWD,
-    PORT_UART,
+    bridge_name_usable, bridge_value_usable, Emits, Responder, CLASS_BRIDGE, MAX_PORTS,
+    MCU_ESP32C3, PORT_BLE, PORT_SWD, PORT_UART, WIFI_PASS_MAX, WIFI_SSID_MAX,
 };
-use store::{Flash, Store, Type, DEVICE_NAME};
+use store::{Flash, Store, StrField, Type, Value, DEVICE_NAME, WIFI_PASS, WIFI_SSID};
 
 use crate::mailbox::{MailboxPort, MAX_PACKET};
 use crate::router::{Port, Router, PORTS};
@@ -93,6 +94,81 @@ pub fn advertised_name<F: Flash>(
         buf[..default.len()].copy_from_slice(default);
         default.len()
     })
+}
+
+/// The bridge's Wi-Fi station as its store sets it up at boot (`specs/bridge-onboarding.md` section
+/// 2.1): the network in `wifi.ssid` and `wifi.pass`, or none. Its `Debug` prints the SSID and
+/// whether a password is set, never the password.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Station {
+    /// No network: the station is not started, and `ESP_INFO` reads [`WifiState::NotConfigured`].
+    Off,
+    /// Join this network.
+    Join {
+        /// The network's name, 1 to [`WIFI_SSID_MAX`] bytes.
+        ssid: String<WIFI_SSID_MAX>,
+        /// Its password, empty for an open network.
+        pass: String<WIFI_PASS_MAX>,
+    },
+}
+
+impl core::fmt::Debug for Station {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Station::Off => f.write_str("Off"),
+            Station::Join { ssid, pass } => f
+                .debug_struct("Join")
+                .field("ssid", &ssid.as_str())
+                .field(
+                    "pass",
+                    &format_args!("{}", if pass.is_empty() { "(empty)" } else { "(set)" }),
+                )
+                .finish(),
+        }
+    }
+}
+
+impl Station {
+    /// The network to join, as the text the radio's station configuration takes: `None` for
+    /// [`Station::Off`].
+    pub fn network(&self) -> Option<(&str, &str)> {
+        match self {
+            Station::Off => None,
+            Station::Join { ssid, pass } => Some((ssid.as_str(), pass.as_str())),
+        }
+    }
+
+    /// The station's state in `ESP_INFO` before it has run: not configured, or not joined yet.
+    pub fn state(&self) -> WifiState {
+        match self {
+            Station::Off => WifiState::NotConfigured,
+            Station::Join { .. } => WifiState::Down,
+        }
+    }
+}
+
+/// The station the store sets up, read once at boot: [`Station::Join`] when `wifi.ssid` holds a name
+/// and both fields hold values a bridge takes ([`bridge_value_usable`], which takes only UTF-8), else
+/// [`Station::Off`]. A value the bridge would refuse can be in a store written before the check
+/// existed; it leaves the station off, as an empty name does.
+pub fn station<F: Flash>(store: &Store<'_, F>) -> Station {
+    fn text<const N: usize>(field: StrField, v: &[u8]) -> Option<String<N>> {
+        if !bridge_value_usable(field.key(), &Value::Str(v)) {
+            return None;
+        }
+        String::try_from(core::str::from_utf8(v).ok()?).ok()
+    }
+    let ssid = store.get_text(WIFI_SSID);
+    if ssid.is_empty() {
+        return Station::Off;
+    }
+    match (
+        text(WIFI_SSID, ssid),
+        text(WIFI_PASS, store.get_text(WIFI_PASS)),
+    ) {
+        (Some(ssid), Some(pass)) => Station::Join { ssid, pass },
+        _ => Station::Off,
+    }
 }
 
 /// Where a frame arrived, and where a reply to it goes.

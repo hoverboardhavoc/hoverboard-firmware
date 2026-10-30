@@ -657,7 +657,9 @@ jobs:
   # BlueZ over D-Bus, WinRT), the USB console through serialport, the Wi-Fi console over TCP. Linux
   # needs the D-Bus headers for btleplug. The explicit --target keeps the root .cargo/config.toml's
   # thumbv7m default out of a host build, as every other host job here does. The binaries are uploaded
-  # per platform and attached to a release on a tag beside the firmware images.
+  # per platform and attached to a release on a tag beside the firmware images, each named for its
+  # target triple (`hoverboard-cli-<triple>`, `.exe` on Windows): softprops/action-gh-release
+  # replaces an asset of the same name, so one shared name would leave one platform's binary.
   hoverboard-cli:
     name: hoverboard-cli (${{ matrix.os }})
     strategy:
@@ -666,13 +668,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            bin: hoverboard-cli
+            ext: ""
           - os: macos-latest
             target: aarch64-apple-darwin
-            bin: hoverboard-cli
+            ext: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            bin: hoverboard-cli.exe
+            ext: .exe
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -719,11 +721,31 @@ jobs:
           --target ${{ matrix.target }}
           --all-targets -- -D warnings
 
+      # The bench Pi's build turns the `ble` feature off (job hoverboard-cli-pi); the code it leaves
+      # is linted here, once.
+      - name: clippy (without ble, as the bench Pi builds it)
+        if: runner.os == 'Linux'
+        run: >
+          cargo clippy
+          --manifest-path tools/hoverboard-cli/Cargo.toml
+          --target ${{ matrix.target }}
+          --no-default-features
+          --all-targets -- -D warnings
+
       - name: Tests
         run: >
           cargo test
           --manifest-path tools/hoverboard-cli/Cargo.toml
           --target ${{ matrix.target }}
+
+      # The refusals of a CLI without `ble` (tests/no_ble.rs, which the default build compiles out).
+      - name: Tests (without ble, as the bench Pi builds it)
+        if: runner.os == 'Linux'
+        run: >
+          cargo test
+          --manifest-path tools/hoverboard-cli/Cargo.toml
+          --target ${{ matrix.target }}
+          --no-default-features
 
       - name: Build release
         run: >
@@ -731,18 +753,217 @@ jobs:
           --manifest-path tools/hoverboard-cli/Cargo.toml
           --target ${{ matrix.target }}
 
+      - name: Name the binary for its target
+        run: |
+          mkdir -p tools/hoverboard-cli/target/dist
+          cp tools/hoverboard-cli/target/${{ matrix.target }}/release/hoverboard-cli${{ matrix.ext }} \
+            tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: hoverboard-cli-${{ matrix.target }}
-          path: hoverboard-firmware/tools/hoverboard-cli/target/${{ matrix.target }}/release/${{ matrix.bin }}
+          path: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
 
       - name: Attach to GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: hoverboard-firmware/tools/hoverboard-cli/target/${{ matrix.target }}/release/${{ matrix.bin }}
+          files: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
+          # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
+          # same text, so whichever job runs last leaves it.
+          body: |
+            The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
+            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
+            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
+
+            A release promises no compatibility with any other release: a CLI, app, bridge image and
+            board image from different releases may not work together.
+
+  # The CLI for the bench Pi (a Raspberry Pi Model B, armv6l: arm-unknown-linux-gnueabihf), so
+  # install-esp can reinstall a bench bridge on the Pi's USB (specs/bridge-onboarding.md section 4.2).
+  # Built with `cross`, whose image carries an armv6 C toolchain and glibc (Ubuntu's gnueabihf one
+  # is armv7). The `ble` feature is off: it drops btleplug and its D-Bus dependency, and the Pi has
+  # no Bluetooth adapter. cross mounts the manifest's path dependencies, the firmware crates and the
+  # sibling runtime-hal checkout among them. Nothing here runs the binary; the bench gate does.
+  hoverboard-cli-pi:
+    name: hoverboard-cli (bench Pi, arm-unknown-linux-gnueabihf, no BLE)
+    runs-on: ubuntu-latest
+    env:
+      PI_TARGET: arm-unknown-linux-gnueabihf
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling, main)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: main
+          path: runtime-hal
+
+      - name: Install Rust (pinned nightly) + the Pi's target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          targets: arm-unknown-linux-gnueabihf
+          components: rustfmt, clippy, rust-src
+
+      - name: Install cross (pinned binary release)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross@0.2.5
+
+      - name: Build release (no ble)
+        run: >
+          cross build --release
+          --manifest-path tools/hoverboard-cli/Cargo.toml
+          --target ${{ env.PI_TARGET }}
+          --no-default-features
+
+      # Named for its target triple beside the other platforms' (the hoverboard-cli job says why).
+      - name: Name the binary for its target
+        run: |
+          mkdir -p tools/hoverboard-cli/target/dist
+          cp tools/hoverboard-cli/target/${{ env.PI_TARGET }}/release/hoverboard-cli \
+            tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: hoverboard-cli-${{ env.PI_TARGET }}
+          path: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+          # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
+          # same text, so whichever job runs last leaves it.
+          body: |
+            The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
+            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
+            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
+
+            A release promises no compatibility with any other release: a CLI, app, bridge image and
+            board image from different releases may not work together.
+
+  # The hoverboard bridge (apps/hoverboard-bridge): its own workspace on its own toolchain, the
+  # 1.92 stable its rust-toolchain.toml pins with the riscv32imc target (the esp-hal fork it patches
+  # in is not built on the main workspace's nightly). The hardware-free core's host tests and clippy
+  # (all targets) first, then the firmware's release build with no Wi-Fi variables set (the network
+  # is a store field, specs/bridge-onboarding.md section 2), then the two images with a pinned
+  # espflash binary release: the merged install image for install-esp (bootloader/bootloader.bin,
+  # partitions.csv, the app in ota_0, padded to 4 MB) and the app image for update-esp. The core's
+  # path dependencies (store among them) declare a target-gated runtime-hal dependency that cargo
+  # still resolves, so the sibling checkout is needed here as in host-tests.
+  bridge:
+    name: Hoverboard bridge (core tests + clippy, release images)
+    runs-on: ubuntu-latest
+    env:
+      ESPFLASH_VERSION: 4.6.0
+    defaults:
+      run:
+        working-directory: hoverboard-firmware/apps/hoverboard-bridge
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Checkout runtime-hal (sibling, main)
+        uses: actions/checkout@v4
+        with:
+          repository: hoverboardhavoc/runtime-hal
+          ref: main
+          path: runtime-hal
+
+      - name: Install Rust (the bridge's 1.92) + riscv32imc and host targets
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92"
+          targets: riscv32imc-unknown-none-elf, x86_64-unknown-linux-gnu
+          components: rust-src, rustfmt, clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware/apps/hoverboard-bridge
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: Core host tests
+        run: cargo test -p hoverboard-bridge-core --target ${{ env.HOST_TARGET }}
+
+      - name: Core clippy (all targets)
+        run: >
+          cargo clippy -p hoverboard-bridge-core
+          --target ${{ env.HOST_TARGET }}
+          --all-targets -- -D warnings
+
+      - name: Release build (no Wi-Fi variables)
+        run: env -u ESP_WIFI_SSID -u ESP_WIFI_PASS cargo build --release
+
+      - name: Install espflash (pinned binary release)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/espflash.zip" \
+            "https://github.com/esp-rs/espflash/releases/download/v${ESPFLASH_VERSION}/espflash-x86_64-unknown-linux-gnu.zip"
+          unzip -o "$RUNNER_TEMP/espflash.zip" -d "$RUNNER_TEMP/espflash"
+          chmod +x "$RUNNER_TEMP/espflash/espflash"
+          echo "$RUNNER_TEMP/espflash" >> "$GITHUB_PATH"
+
+      - name: Images (install and update)
+        run: |
+          elf=target/riscv32imc-unknown-none-elf/release/hoverboard-bridge
+          mkdir -p target/img
+          espflash save-image --chip esp32c3 --merge --flash-size 4mb \
+            --bootloader bootloader/bootloader.bin --partition-table partitions.csv \
+            --target-app-partition ota_0 "$elf" target/img/hoverboard-bridge-install.bin
+          espflash save-image --chip esp32c3 "$elf" target/img/hoverboard-bridge.bin
+          # What install-esp checks before it writes: the whole 4 MB, starting with the ESP image
+          # magic 0xE9 (tools/hoverboard-cli/src/install.rs, check_image).
+          size=$(wc -c < target/img/hoverboard-bridge-install.bin)
+          magic=$(head -c 1 target/img/hoverboard-bridge-install.bin | od -An -tx1 | tr -d ' ')
+          if [ "$size" -ne 4194304 ] || [ "$magic" != "e9" ]; then
+            echo "FAIL: the install image is ${size} B starting 0x${magic}, not 4194304 B starting 0xe9" >&2
+            exit 1
+          fi
+          ls -l target/img/hoverboard-bridge-install.bin target/img/hoverboard-bridge.bin
+
+      - name: Upload images
+        uses: actions/upload-artifact@v4
+        with:
+          name: hoverboard-bridge
+          path: |
+            hoverboard-firmware/apps/hoverboard-bridge/target/img/hoverboard-bridge-install.bin
+            hoverboard-firmware/apps/hoverboard-bridge/target/img/hoverboard-bridge.bin
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            hoverboard-firmware/apps/hoverboard-bridge/target/img/hoverboard-bridge-install.bin
+            hoverboard-firmware/apps/hoverboard-bridge/target/img/hoverboard-bridge.bin
+          # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
+          # same text, so whichever job runs last leaves it.
+          body: |
+            The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
+            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
+            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
+
+            A release promises no compatibility with any other release: a CLI, app, bridge image and
+            board image from different releases may not work together.
 
   # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
   # flashes). emulator-runner is excluded from the workspace (it links Unicorn's cmake-built native lib,

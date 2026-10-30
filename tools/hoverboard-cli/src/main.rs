@@ -1,5 +1,6 @@
 //! `hoverboard-cli`: talk to a hoverboard bridge over BLE, its USB console, or that console through
-//! a TCP relay.
+//! a TCP relay. BLE is the `ble` cargo feature, on by default; a build without it (the bench Pi's)
+//! refuses `--device` and `scan`.
 //!
 //! ```text
 //! hoverboard-cli scan [--secs N]
@@ -17,6 +18,7 @@
 //! hoverboard-cli [LINK] [--node NODE] read <addr> <len> | write <addr> <hex>
 //! hoverboard-cli [LINK] [--node NODE] flash <elf>
 //! hoverboard-cli [LINK] [--node NODE] update-esp <bin> [--no-confirm]
+//! hoverboard-cli [--serial PORT] install-esp <image.bin> [<file>...] [--yes]
 //! hoverboard-cli [LINK] watch <secs> [<node>...]
 //! hoverboard-cli [LINK] drive <value> <secs> [<node>...]
 //!
@@ -38,6 +40,8 @@
 //! `control.mode`) or by its raw `<id>.<index>`, and a value takes the file's forms (`PC13`,
 //! `balance`, `null` to un-store). Every line about a board starts with its `device.name`. `diff`
 //! exits 0 with no changes, 1 with changes, 2 on an error. `fields --json` prints the name table.
+//! A secret (`wifi.pass`) is never printed: it shows as `(set)`, `dump` leaves it out and says so,
+//! and a file that gives one always writes it (`specs/bridge-onboarding.md` section 2.2).
 //!
 //! An ESP command goes to the bridge the link reaches (`0x00`, the one peer) unless `--node` names
 //! another, which is reached through the boards by its address. Over a board's own BLE module the
@@ -53,181 +57,65 @@
 //! `--no-confirm` it stops after the reconnect, and the bridge's next reset returns to the previous
 //! slot. It needs no `ESP_INFO` it can decode: one from a bridge built for another layout is
 //! skipped with a note.
+//!
+//! `install-esp` makes a SuperMini a bridge over its own USB port (`specs/bridge-onboarding.md`
+//! section 3): it asks before erasing a bridge that answers there, writes the merged 4 MB install
+//! image through the `espflash` library, waits for the first boot, applies the files given (a new
+//! bridge's `device.name`, `wifi.ssid` and `wifi.pass`), and with an SSID among them resets the
+//! bridge and waits for it to join.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write as _};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use btleplug::api::{
-    Central, CentralState, CharPropFlags, Characteristic, Manager as _, Peripheral as _,
-    ScanFilter, WriteType,
-};
-use btleplug::platform::{Adapter, Manager, Peripheral};
 use espsvc::{Ctrl, FAMILY_F1X0};
-use futures::StreamExt;
 use net::pdu::NO_ADDRESS;
-use tokio::runtime::Runtime;
 
 use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
+use hoverboard_cli::install::{self, Answered, Given, Guard};
 use hoverboard_cli::names;
 use hoverboard_cli::nodes::{self, class_name, Found, CLASS_MOTOR};
 use hoverboard_cli::transport::{Serial, Tcp};
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 
-/// The CC2541's notification and write size, which the bridge keeps.
-const BLE_CHUNK: usize = 20;
+#[cfg(feature = "ble")]
+mod ble;
 
-struct Ble {
-    rt: Runtime,
-    periph: Peripheral,
-    write_char: Characteristic,
-    rx: mpsc::Receiver<Vec<u8>>,
+/// What a build without the `ble` cargo feature (the bench Pi's) says for a BLE link or `scan`
+/// (`specs/bridge-onboarding.md` section 4.2).
+#[cfg(not(feature = "ble"))]
+const NO_BLE: &str = "this hoverboard-cli is built without the ble feature: no BLE link \
+                      (--device, or no link given) and no scan; reach the bridge with --serial \
+                      or --tcp";
+
+/// The BLE link to the advertiser `device` names, or the first `hb-bridge-` one.
+#[cfg(feature = "ble")]
+fn ble_link(device: Option<&str>) -> Result<Box<dyn ByteLink>, String> {
+    Ok(Box::new(ble::connect(device)?))
 }
 
-impl ByteLink for Ble {
-    fn write(&mut self, bytes: &[u8]) {
-        for c in bytes.chunks(BLE_CHUNK) {
-            let _ = self.rt.block_on(self.periph.write(
-                &self.write_char,
-                c,
-                WriteType::WithoutResponse,
-            ));
-        }
-    }
-
-    fn read(&mut self, timeout: Duration) -> Vec<u8> {
-        let mut out = match self.rx.recv_timeout(timeout) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
-        };
-        while let Ok(v) = self.rx.try_recv() {
-            out.extend(v);
-        }
-        out
-    }
-
-    fn window(&self) -> usize {
-        espsvc::WINDOW_BLE
-    }
+/// The BLE link: refused, naming the feature.
+#[cfg(not(feature = "ble"))]
+fn ble_link(_device: Option<&str>) -> Result<Box<dyn ByteLink>, String> {
+    Err(NO_BLE.into())
 }
 
-/// How long the Bluetooth stack may take to report an adapter and its state.
-const ADAPTER_WAIT: Duration = Duration::from_secs(5);
-/// How long finding, connecting to and subscribing to a bridge may take.
-const CONNECT_WAIT: Duration = Duration::from_secs(30);
-
-const NO_BLUETOOTH: &str =
-    "no powered-on Bluetooth adapter on this host; reach the ESP's USB console with --serial or --tcp";
-
-/// The first adapter, if it is powered on. A host with no Bluetooth either lists none or never
-/// answers (CoreBluetooth on a machine without the hardware), so both are bounded.
-async fn adapter() -> Result<Adapter, String> {
-    let found = tokio::time::timeout(ADAPTER_WAIT, async {
-        let manager = Manager::new().await.map_err(|e| e.to_string())?;
-        let a = manager
-            .adapters()
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .next()
-            .ok_or(NO_BLUETOOTH)?;
-        match a.adapter_state().await.map_err(|e| e.to_string())? {
-            CentralState::PoweredOn => Ok(a),
-            _ => Err(NO_BLUETOOTH.to_string()),
-        }
-    })
-    .await;
-    found.unwrap_or_else(|_| Err(NO_BLUETOOTH.to_string()))
+/// `scan`'s advertisers, as (name, address).
+#[cfg(feature = "ble")]
+fn scan_names(secs: u64) -> Result<Vec<(String, String)>, String> {
+    ble::scan_names(secs)
 }
 
-/// Advertisers seen in `secs`: (name, address, peripheral).
-async fn scan(secs: u64) -> Result<Vec<(String, String, Peripheral)>, String> {
-    let a = adapter().await?;
-    a.start_scan(ScanFilter::default())
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::time::sleep(Duration::from_secs(secs)).await;
-    let _ = a.stop_scan().await;
-    let mut out = Vec::new();
-    for p in a.peripherals().await.map_err(|e| e.to_string())? {
-        if let Ok(Some(props)) = p.properties().await {
-            if let Some(name) = props.local_name {
-                out.push((name, p.address().to_string(), p));
-            }
-        }
-    }
-    out.sort_by(|x, y| x.0.cmp(&y.0));
-    Ok(out)
-}
-
-fn connect(device: Option<&str>) -> Result<Ble, String> {
-    let rt = Runtime::new().map_err(|e| e.to_string())?;
-    let (periph, write_char, rx) = rt.block_on(async {
-        tokio::time::timeout(CONNECT_WAIT, async {
-            let found = scan(4).await?;
-            let (name, _, periph) = found
-                .into_iter()
-                .find(|(n, a, _)| match device {
-                    Some(d) => n == d || a.eq_ignore_ascii_case(d),
-                    None => n.starts_with("hb-bridge-"),
-                })
-                .ok_or_else(|| match device {
-                    Some(d) => format!("no advertiser named or at {d}"),
-                    None => "no hb-bridge- advertiser found".to_string(),
-                })?;
-            periph.connect().await.map_err(|e| e.to_string())?;
-            periph
-                .discover_services()
-                .await
-                .map_err(|e| e.to_string())?;
-            // By property, not UUID, as the app's transport does.
-            let chars = periph.characteristics();
-            let write_char = chars
-                .iter()
-                .find(|c| c.properties.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE))
-                .cloned()
-                .ok_or("no write-without-response characteristic")?;
-            let notify_char = chars
-                .iter()
-                .find(|c| c.properties.contains(CharPropFlags::NOTIFY))
-                .cloned()
-                .ok_or("no notify characteristic")?;
-            periph
-                .subscribe(&notify_char)
-                .await
-                .map_err(|e| e.to_string())?;
-            let mut stream = periph.notifications().await.map_err(|e| e.to_string())?;
-            let (tx, rx) = mpsc::channel();
-            tokio::spawn(async move {
-                while let Some(n) = stream.next().await {
-                    if tx.send(n.value).is_err() {
-                        break;
-                    }
-                }
-            });
-            eprintln!("connected to {name}");
-            Ok::<_, String>((periph, write_char, rx))
-        })
-        .await
-        .unwrap_or_else(|_| {
-            Err(format!(
-                "no BLE connection within {} s",
-                CONNECT_WAIT.as_secs()
-            ))
-        })
-    })?;
-    Ok(Ble {
-        rt,
-        periph,
-        write_char,
-        rx,
-    })
+/// `scan`: refused, naming the feature.
+#[cfg(not(feature = "ble"))]
+fn scan_names(_secs: u64) -> Result<Vec<(String, String)>, String> {
+    Err(NO_BLE.into())
 }
 
 fn parse_u32(s: &str) -> Result<u32, String> {
@@ -322,13 +210,7 @@ fn print_info(i: &espsvc::EspInfo) {
         .map_or_else(|| "none".to_string(), |a| format!("{a:#05b}"));
     println!("last bad read: {bad_read}; no ack: {no_ack}");
     println!("mailbox     {state}");
-    let [a, b, c, d] = i.ip;
-    match espsvc::WifiState::from_u8(i.wifi) {
-        Some(espsvc::WifiState::Up) => println!("wifi        up, {a}.{b}.{c}.{d}"),
-        Some(espsvc::WifiState::Joined) => println!("wifi        joined, no address yet"),
-        Some(espsvc::WifiState::Down) => println!("wifi        not joined"),
-        None => println!("wifi        {}", i.wifi),
-    }
+    println!("wifi        {}", install::wifi_text(i));
     println!("slot        {}", slot_name(i));
     match i.node {
         NO_ADDRESS => println!("node        unassigned"),
@@ -352,17 +234,7 @@ fn print_info(i: &espsvc::EspInfo) {
     }
 }
 
-fn slot_name(i: &espsvc::EspInfo) -> String {
-    let slot = match i.slot {
-        espsvc::SLOT_NONE => "neither app slot".to_string(),
-        n => format!("ota_{n}"),
-    };
-    if i.pending {
-        format!("{slot}, pending verification")
-    } else {
-        slot
-    }
-}
+use install::slot_name;
 
 /// How long the bridge may take to reset into an update and answer again (Wi-Fi rejoin and DHCP
 /// included).
@@ -474,6 +346,160 @@ fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Re
         print_info(a);
     }
     Ok(())
+}
+
+/// A bridge that answered on a port: the client to it, the guest address it granted, its
+/// `device.name`, and its `ESP_INFO` when that decodes.
+type OnPort = (EspClient, u8, String, Option<espsvc::EspInfo>);
+
+/// A bridge on `port` that answers an attach within `wait`; `None` when nothing answers (a blank
+/// chip, other firmware, or a port that is not there yet).
+fn bridge_on(port: &str, wait: Duration) -> Option<OnPort> {
+    let link: Box<dyn ByteLink> = Box::new(Serial::open(port).ok()?);
+    let mut wire = Framed::new(link);
+    let src = guest::attach(&mut wire, 1, wait)?;
+    let name = match nodes::read(&mut wire, src, NO_ADDRESS, store::DEVICE_NAME.key())
+        .ok()?
+        .value()
+    {
+        Some(store::Value::Str(s)) => String::from_utf8_lossy(s).into_owned(),
+        _ => "the bridge".to_string(),
+    };
+    let mut c = Client::addressed(wire, src, NO_ADDRESS);
+    let info = c.info_if_decodes().ok().flatten();
+    Some((c, src, name, info))
+}
+
+/// Wait up to `within` for the bridge on `port` to answer with an `ESP_INFO` that `done` accepts,
+/// reopening the port while the chip resets: the answer, accepted or not when time ran out while
+/// connected; `None` when nothing answered.
+fn wait_for_bridge(
+    port: &str,
+    within: Duration,
+    done: impl Fn(&espsvc::EspInfo) -> bool,
+) -> Option<(EspClient, u8, String, espsvc::EspInfo)> {
+    let t0 = Instant::now();
+    while t0.elapsed() < within {
+        let Some((mut c, src, name, Some(mut info))) = bridge_on(port, HELLO_WAIT) else {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        };
+        loop {
+            if done(&info) || t0.elapsed() >= within {
+                return Some((c, src, name, info));
+            }
+            std::thread::sleep(RECONNECT_GAP);
+            match c.info() {
+                Ok(i) => info = i,
+                Err(_) => break,
+            }
+        }
+    }
+    None
+}
+
+/// `install-esp` (`specs/bridge-onboarding.md` section 3.2): check the image and the files, choose
+/// the port, ask before erasing a bridge that answers there, write the image, wait for the first
+/// boot, apply the files, and when they set an SSID, reset the bridge and wait for it to join.
+fn install_esp(given: Given, image_path: &str, files: &[&str], yes: bool) -> Result<(), String> {
+    let (port, found) = install::choose_port(given, &install::host_ports())?;
+    let image = std::fs::read(image_path).map_err(|e| format!("{image_path}: {e}"))?;
+    install::check_image(&image).map_err(|e| format!("{image_path}: {e}"))?;
+    let files = if files.is_empty() {
+        None
+    } else {
+        Some(load_files(files, false)?)
+    };
+    if found {
+        eprintln!("using {port}, the one ESP32-C3 USB port");
+    }
+
+    // 1. The guard.
+    let answered = bridge_on(&port, HELLO_WAIT).map(|(_, _, name, info)| Answered {
+        name,
+        addr: info.map(|i| i.node),
+        commit: info.map(|i| i.commit),
+    });
+    if let Some(a) = &answered {
+        println!("bridge on {port}: {}", a.describe());
+    }
+    match install::guard(answered.as_ref(), yes, std::io::stdin().is_terminal()) {
+        Guard::Proceed => {}
+        Guard::Refuse(why) => return Err(why),
+        Guard::Ask(q) => {
+            if !confirm(&q) {
+                return Err("nothing installed".into());
+            }
+        }
+    }
+
+    // 2. The install, ending in a hard reset into the new image.
+    let t0 = Instant::now();
+    install::write_image(&port, &image)?;
+    eprintln!(
+        "written and verified in {:.1} s; the chip is resetting into it",
+        t0.elapsed().as_secs_f32()
+    );
+
+    // 3. The first boot.
+    let (mut c, src, name, info) = wait_for_bridge(&port, install::BOOT_WAIT, |_| true)
+        .ok_or_else(|| {
+            format!(
+                "the bridge did not answer on {port} within {} s of the install",
+                install::BOOT_WAIT.as_secs()
+            )
+        })?;
+    println!(
+        "booted: {name}, slot {}, wifi {}",
+        slot_name(&info),
+        install::wifi_text(&info)
+    );
+
+    // 4. The files.
+    let Some(files) = files else {
+        return Ok(());
+    };
+    let mut b = Board {
+        wire: c.wire(),
+        src,
+        dst: NO_ADDRESS,
+        name,
+    };
+    let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
+    let plan = config::plan(&files, &reads, &unknown, false).map_err(|p| {
+        let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
+        msgs.join("\nerror: ")
+    })?;
+    let after = config::execute(&mut b, &plan).map_err(|r| {
+        for l in config::written_lines(&b.name, &plan, &reads, &r) {
+            println!("{l}");
+        }
+        r.msg
+    })?;
+    for l in config::report(&b.name, &plan, &reads, &after) {
+        println!("{l}");
+    }
+    drop(c);
+    let ssid = files.entries.iter().find_map(|e| {
+        (e.key == store::WIFI_SSID.key())
+            .then(|| e.value.as_str())
+            .flatten()
+            .filter(|s| !s.is_empty())
+    });
+    let Some(ssid) = ssid else {
+        return Ok(());
+    };
+    install::reset(&port)?;
+    eprintln!("reset; waiting for it to join {ssid}");
+    let up = |i: &espsvc::EspInfo| i.wifi == espsvc::WifiState::Up as u8;
+    match wait_for_bridge(&port, install::JOIN_WAIT, up) {
+        Some((_, _, name, info)) if up(&info) => {
+            let [a, b, c, d] = info.ip;
+            println!("joined: {name}, {ssid}, {a}.{b}.{c}.{d}");
+            Ok(())
+        }
+        _ => Err(format!("did not join {ssid}")),
+    }
 }
 
 fn confirm(prompt: &str) -> bool {
@@ -800,7 +826,7 @@ enum Via<'a> {
 impl Via<'_> {
     fn open(&self) -> Result<Box<dyn ByteLink>, String> {
         Ok(match *self {
-            Via::Ble(device) => Box::new(connect(device)?),
+            Via::Ble(device) => ble_link(device)?,
             Via::Serial(device) => {
                 let s = Serial::open(device)?;
                 eprintln!("opened {device}");
@@ -831,6 +857,7 @@ const COMMANDS: &[&str] = &[
     "id",
     "flash",
     "update-esp",
+    "install-esp",
     "clear-protection",
     "disarm",
     "halt",
@@ -932,8 +959,14 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
     if let Some(e) = early {
         return Err(e);
     }
+    let given = match &via {
+        None => Given::Nothing,
+        Some(Via::Serial(p)) => Given::Serial(p),
+        Some(Via::Tcp(_)) => Given::Tcp,
+        Some(Via::Ble(_)) => Given::Device,
+    };
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
     let cmd = match word {
         Some(_) if COMMANDS.contains(&rest[0]) => rest[0],
         _ => return Err(usage.into()),
@@ -1011,6 +1044,9 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
                 names::path_of(k)
             );
         }
+        for l in config::left_out(&b.name, &reads) {
+            eprintln!("{l}");
+        }
         let stored = reads
             .values()
             .filter(|r| r.status == net::walk::CFG_OK)
@@ -1052,8 +1088,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
                 .map_err(|_| "bad --secs")?,
             _ => 5,
         };
-        let rt = Runtime::new().map_err(|e| e.to_string())?;
-        for (name, addr, _) in rt.block_on(scan(secs))? {
+        for (name, addr) in scan_names(secs)? {
             println!("{addr}  {name}");
         }
         return Ok(0);
@@ -1193,6 +1228,22 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         println!("neutral sent, power 0 sent");
         print_summary(&tally, elapsed);
         return Ok(0);
+    }
+
+    if cmd == "install-esp" {
+        let yes = rest.contains(&"--yes");
+        rest.retain(|a| *a != "--yes");
+        let need = "install-esp needs <image.bin> [<file>...] [--yes]";
+        let [_, image, ref files @ ..] = rest[..] else {
+            return Err(need.into());
+        };
+        if rest.iter().any(|a| a.starts_with("--")) {
+            return Err(need.into());
+        }
+        if node.is_some() {
+            return Err("install-esp takes no --node: it installs the bridge on the port".into());
+        }
+        return install_esp(given, image, files, yes).map(|()| 0);
     }
 
     if cmd == "update-esp" {

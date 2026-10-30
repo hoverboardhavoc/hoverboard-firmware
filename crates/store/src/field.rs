@@ -355,6 +355,14 @@ pub const CONTROL_FRAME: Field<u8> = Field::new(0x25, 0);
 /// row (`specs/integration.md`), NOT on the tune lane.
 pub const CONTROL_SIDE: Field<u8> = Field::new(0x26, 0);
 pub const DEVICE_NAME: StrField = StrField::new(0x10, "Hoverboard");
+/// The Wi-Fi network a bridge joins (`specs/bridge-onboarding.md` section 2.1): 1 to 32 bytes, read
+/// once at boot. Empty or unstored (the default), the bridge does not start its Wi-Fi station. A
+/// bridge refuses a longer one (`net::walk::bridge_value_usable`); a board stores it like any key
+/// and never reads it. Index 1 is reserved for a second network and nothing reads it.
+pub const WIFI_SSID: StrField = StrField::new(0x11, "");
+/// The password of [`WIFI_SSID`]'s network: empty for an open network, else 8 to 63 bytes (a
+/// 64-digit hex PSK is not accepted). A [`SECRET`]: no node reads it back over a link.
+pub const WIFI_PASS: StrField = StrField::new(0x12, "");
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
 /// The board's persistent L3 node address (`specs/l3.md`, "Addressing"): assigned once by the walk's
@@ -858,6 +866,12 @@ pub const BOARD_OWNED: &[u8] = &[NODE_ADDRESS.id(), LINK_SET.id(), MOTOR_ODOMETE
 /// key is un-stored, so it does not predict one.
 pub const NODE_DEFAULTS: &[u8] = &[DEVICE_NAME.id()];
 
+/// The ids no node reads back over a link (`specs/bridge-onboarding.md` section 2.2): [`WIFI_PASS`].
+/// A `CONFIG_READ` of a stored one answers `CFG_SECRET` with no value (`net`'s `read_value`); a
+/// configuration tool never prints one, leaves it out of a dump, counts it as changed whenever a
+/// file gives it, and never un-stores it unless a file says `null`.
+pub const SECRET: &[u8] = &[WIFI_PASS.id()];
+
 // The store-test fields, value consts, and scenario ids are gated behind `test-fields` (off by
 // default) so they do NOT compile into a production build: the production field set is exactly the
 // genuine tunables above. The `store-test` firmware, the emulator-runner store scenarios, and the
@@ -935,6 +949,8 @@ field_ids! {
     0x02, // LINK_SET
     0x03, // NODE_CLASS
     0x10, // DEVICE_NAME
+    0x11, // WIFI_SSID
+    0x12, // WIFI_PASS
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
@@ -997,6 +1013,8 @@ field_ids! {
     0x02, // LINK_SET
     0x03, // NODE_CLASS
     0x10, // DEVICE_NAME
+    0x11, // WIFI_SSID
+    0x12, // WIFI_PASS
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
@@ -1090,10 +1108,10 @@ pub struct FieldDef {
 /// [`BOARD_BATTERY_CAL`], [`CONTROL_DRIVE_TURN`] and [`CONTROL_REFERENCE`]: one id, two defaults, so
 /// one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 58 + 9;
+pub const REGISTRY_LEN: usize = 60 + 9;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 60 + 9;
+pub const REGISTRY_LEN: usize = 62 + 9;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1133,7 +1151,7 @@ static BYTES_DEFAULTS: [&[u8]; 2] = [DEVICE_NAME.default(), &[]];
 
 /// [`DEVICE_NAME`]'s slot in [`BYTES_DEFAULTS`].
 const BYTES_DEVICE_NAME: u32 = 0;
-/// The empty default, shared by every `BLOB` field that declares one.
+/// The empty default, shared by every `STR` and `BLOB` field that declares one.
 const BYTES_EMPTY: u32 = 1;
 
 impl FieldEntry {
@@ -1205,6 +1223,8 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     LINK_SET.entry(),
     NODE_CLASS.entry().read_only(),
     DEVICE_NAME.entry(BYTES_DEVICE_NAME),
+    WIFI_SSID.entry(BYTES_EMPTY),
+    WIFI_PASS.entry(BYTES_EMPTY),
     MOTOR_CURRENT_LIMIT.entry(),
     MOTOR_METHOD.entry(),
     CONTROL_MODE.entry(),
@@ -1452,6 +1472,11 @@ pub mod names {
             NODE_DEFAULTS.contains(&self.id)
         }
 
+        /// Whether no node reads this field back ([`SECRET`]).
+        pub fn secret(&self) -> bool {
+            SECRET.contains(&self.id)
+        }
+
         /// Whether the registry marks this field read-only (`node.class`).
         pub fn read_only(&self) -> bool {
             lookup(self.id).is_some_and(|d| d.read_only)
@@ -1479,6 +1504,8 @@ pub mod names {
         FieldName::single(LINK_SET, "link.set", Kind::Int),
         FieldName::single(NODE_CLASS, "node.class", Kind::Int),
         FieldName::text(DEVICE_NAME, "device.name"),
+        FieldName::text(WIFI_SSID, "wifi.ssid"),
+        FieldName::text(WIFI_PASS, "wifi.pass"),
         FieldName::motor(MOTOR_CURRENT_LIMIT, "current.limit", Kind::Int),
         FieldName::motor(MOTOR_METHOD, "method", METHOD),
         FieldName::single(CONTROL_MODE, "control.mode", MODE),
@@ -1657,6 +1684,12 @@ pub mod names {
                 .map(|r| r.path)
                 .collect();
             assert_eq!(node, ["device.name"]);
+            let secret: Vec<&str> = NAMES
+                .iter()
+                .filter(|r| r.secret())
+                .map(|r| r.path)
+                .collect();
+            assert_eq!(secret, ["wifi.pass"]);
         }
     }
 }
@@ -1697,6 +1730,16 @@ mod registry_tests {
         let n = lookup(DEVICE_NAME.id()).unwrap();
         assert_eq!(n.kind, Type::Str);
         assert_eq!(n.default, Value::Str(b"Hoverboard"));
+        // The bridge's Wi-Fi credentials: two strings, both empty by default (no station).
+        for (f, id) in [(WIFI_SSID, 0x11), (WIFI_PASS, 0x12)] {
+            assert_eq!(f.id(), id);
+            let d = lookup(id).unwrap();
+            assert_eq!(
+                (d.kind, d.default, d.read_only),
+                (Type::Str, Value::Str(b""), false)
+            );
+        }
+        assert_eq!(SECRET, [WIFI_PASS.id()]);
         let b = lookup(SOME_BLOB.id()).unwrap();
         assert_eq!(b.kind, Type::Blob);
         assert_eq!(b.default, Value::Bytes(&[]));
@@ -1895,6 +1938,8 @@ mod registry_tests {
     fn every_bytes_row_resolves_to_its_handles_default() {
         let expected: &[(u8, &[u8])] = &[
             (DEVICE_NAME.id(), DEVICE_NAME.default()),
+            (WIFI_SSID.id(), WIFI_SSID.default()),
+            (WIFI_PASS.id(), WIFI_PASS.default()),
             (SOME_BLOB.id(), SOME_BLOB.default()),
             #[cfg(feature = "test-fields")]
             (T_BLOB.id(), T_BLOB.default()),

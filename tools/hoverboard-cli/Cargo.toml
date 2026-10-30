@@ -12,6 +12,13 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Terminal tool for the hoverboard bridge: scan, info, id, flash, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
 
+[features]
+default = ["ble"]
+# BLE through btleplug (CoreBluetooth, BlueZ over D-Bus, WinRT). The bench Pi's build turns it off,
+# which drops btleplug and its D-Bus dependency; that CLI refuses --device and scan
+# (specs/bridge-onboarding.md section 4.2).
+ble = ["dep:btleplug", "dep:tokio", "dep:futures"]
+
 [dependencies]
 link = { path = "../../crates/link" }
 net = { path = "../../crates/net" }
@@ -21,15 +28,20 @@ store = { path = "../../crates/store", features = ["names"] }
 linkctl = { path = "../../crates/linkctl" }
 espsvc = { path = "../../crates/espsvc" }
 embedded-io = "0.6"
-btleplug = "0.11"
-tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
-futures = "0.3"
+# The BLE link and `scan` (the `ble` feature).
+btleplug = { version = "0.11", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
+futures = { version = "0.3", optional = true }
 object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
 regex = "1"
 sha2 = "0.10"
 uuid = "1"
-# The USB console (--serial). No libudev: only opening a named device is used.
+# The USB console (--serial), and the port list install-esp chooses from. No libudev: the list
+# comes from sysfs on Linux.
 serialport = { version = "4", default-features = false }
+# install-esp (specs/bridge-onboarding.md section 3.3): the flasher and the serial connection, with
+# Espressif's flasher stub, and none of espflash's own command line.
+espflash = { version = "~4.6", default-features = false, features = ["serialport"] }
 # `drive` sends its stop frames on Ctrl-C.
 ctrlc = "3"
 # A board's store as a JSON file (`dump`, `apply`, `replace`, `diff`, `fields --json`), in the order

@@ -954,11 +954,20 @@ fn the_usb_console_answers_again_after_its_host_closes_and_reopens_the_port() {
 
 #[test]
 fn esp_info_reports_the_wifi_station() {
+    let i = info_with((espsvc::WifiState::Up, [192, 168, 0, 57]));
+    assert_eq!(
+        (i.wifi, i.ip),
+        (espsvc::WifiState::Up as u8, [192, 168, 0, 57])
+    );
+}
+
+/// `ESP_INFO` from a bridge whose platform reports the station as `wifi`.
+fn info_with(wifi: (espsvc::WifiState, [u8; 4])) -> espsvc::EspInfo {
     let (mut port, mut fw) = booted(Family::F10x, Inject::default());
     attach(&mut port, &mut fw);
     let rx: &mut ImageBuffer = std::boxed::Box::leak(std::boxed::Box::new(ImageBuffer::new()));
     let mut platform = SimPlatform::new();
-    platform.wifi = (espsvc::WifiState::Up, [192, 168, 0, 57]);
+    platform.wifi = wifi;
     let build = Build {
         version: [0, 1, 0],
         commit: 0,
@@ -978,10 +987,76 @@ fn esp_info_reports_the_wifi_station() {
     let Ok(Msg::Info(i)) = Msg::decode(&Pdu::decode(&r[0]).unwrap()) else {
         panic!("no ESP_INFO");
     };
+    i
+}
+
+/// `specs/bridge-onboarding.md` section 2.1: the station starts from the store's `wifi.ssid` and
+/// `wifi.pass`, read at boot; with no usable network it stays off and `ESP_INFO` says not configured.
+#[test]
+fn the_station_starts_only_from_a_store_holding_a_usable_network() {
+    use crate::node::{station, Station};
+    use store::{WIFI_PASS, WIFI_SSID};
+    let boot = |ssid: Option<&str>, pass: Option<&str>| {
+        let mut flash = RamFlash::erased(4096);
+        let mut s = store::Store::mount(&mut flash).unwrap();
+        if let Some(v) = ssid {
+            s.set_str(WIFI_SSID, v).unwrap();
+        }
+        if let Some(v) = pass {
+            s.set_str(WIFI_PASS, v).unwrap();
+        }
+        station(&s)
+    };
+    let join = |ssid: &str, pass: &str| Station::Join {
+        ssid: heapless::String::try_from(ssid).unwrap(),
+        pass: heapless::String::try_from(pass).unwrap(),
+    };
+
+    // No network: off, and ESP_INFO reads not configured.
+    let off = boot(None, None);
+    assert_eq!(off, Station::Off);
+    assert_eq!(off.state(), espsvc::WifiState::NotConfigured);
+    let i = info_with((off.state(), [0; 4]));
+    assert_eq!(i.wifi, 3);
     assert_eq!(
-        (i.wifi, i.ip),
-        (espsvc::WifiState::Up as u8, [192, 168, 0, 57])
+        espsvc::WifiState::from_u8(i.wifi),
+        Some(espsvc::WifiState::NotConfigured)
     );
+    assert_eq!(boot(None, Some("hunter2hunter2")), Station::Off);
+    assert_eq!(boot(Some(""), Some("hunter2hunter2")), Station::Off);
+
+    // Both: it joins, and reads not joined until it has.
+    let on = boot(Some("bench"), Some("hunter2hunter2"));
+    assert_eq!(on, join("bench", "hunter2hunter2"));
+    assert_eq!(on.network(), Some(("bench", "hunter2hunter2")));
+    assert_eq!(on.state(), espsvc::WifiState::Down);
+    assert_eq!(off.network(), None);
+    // Debug names the network and never prints the password.
+    assert_eq!(
+        std::format!("{on:?}"),
+        "Join { ssid: \"bench\", pass: (set) }"
+    );
+    assert_eq!(
+        std::format!("{:?}", join("cafe", "")),
+        "Join { ssid: \"cafe\", pass: (empty) }"
+    );
+    assert_eq!(std::format!("{off:?}"), "Off");
+    // An open network: a name and no password.
+    assert_eq!(boot(Some("cafe"), None), join("cafe", ""));
+    assert_eq!(boot(Some("cafe"), Some("")), join("cafe", ""));
+
+    // Values a store written before the bridge's checks may hold: the station stays off.
+    let long_ssid = "s".repeat(net::walk::WIFI_SSID_MAX + 1);
+    let hex_psk = "a".repeat(64);
+    for (ssid, pass) in [
+        (long_ssid.as_str(), "hunter2hunter2"),
+        ("bench", "short"),
+        ("bench", hex_psk.as_str()),
+    ] {
+        assert_eq!(boot(Some(ssid), Some(pass)), Station::Off, "{ssid} {pass}");
+    }
+    let longest = "p".repeat(net::walk::WIFI_PASS_MAX);
+    assert_eq!(boot(Some("bench"), Some(&longest)), join("bench", &longest));
 }
 
 // ---- the bridge's own update ----
@@ -2785,6 +2860,55 @@ fn a_commanded_connect_tries_for_500_ms_and_the_background_retry_makes_one_short
         Msg::decode(&Pdu::decode(f).unwrap()),
         Ok(Msg::Result { .. })
     )));
+}
+
+/// `specs/bridge-onboarding.md` sections 2.1 and 2.2, on the bridge's own node: it refuses Wi-Fi
+/// credentials its station cannot use, a board behind it stores them, and a stored password reads
+/// back from either as `CFG_SECRET` with no value.
+#[test]
+fn the_bridge_refuses_unusable_wifi_credentials_and_never_reads_the_password_back() {
+    let mut flash = RamFlash::erased(4096);
+    let mut m = Rig::new(&mut flash);
+    m.walk(0);
+    let write = |m: &mut Rig<'_>, dst: u8, key: store::Key, v: &[u8]| {
+        let mut w = vec![key.field_id, key.index, store::Type::Str.tag()];
+        w.extend_from_slice(v);
+        let r = m.ask(0, Opcode::ConfigWrite.to_u8(), dst, &w);
+        let p = r
+            .iter()
+            .map(|f| Pdu::decode(f).unwrap())
+            .find(|p| p.known() == Some(Opcode::ConfigResp) && p.src == dst)
+            .expect("a CONFIG_RESP");
+        p.payload.to_vec()
+    };
+    let ssid = store::WIFI_SSID.key();
+    let pass = store::WIFI_PASS.key();
+    let long_ssid = [b's'; net::walk::WIFI_SSID_MAX + 1];
+    for (key, v) in [(ssid, &long_ssid[..]), (pass, b"x"), (pass, b"1234567")] {
+        assert_eq!(
+            write(&mut m, 0x03, key, v)[2],
+            net::walk::CFG_BAD,
+            "{key:?}"
+        );
+        assert_eq!(m.config_read(0x03, key)[2], net::walk::CFG_DEFAULT);
+        assert_eq!(write(&mut m, 0x01, key, v)[2], net::walk::CFG_OK, "{key:?}");
+    }
+    for dst in [0x03, 0x01] {
+        assert_eq!(write(&mut m, dst, ssid, b"bench")[2], net::walk::CFG_OK);
+        assert_eq!(
+            write(&mut m, dst, pass, b"hunter2hunter2"),
+            [pass.field_id, 0, net::walk::CFG_OK, 0],
+            "the echo carries no value"
+        );
+        assert_eq!(
+            m.config_read(dst, pass),
+            [pass.field_id, 0, net::walk::CFG_SECRET, 0],
+            "{dst:#04x}"
+        );
+        let r = m.config_read(dst, ssid);
+        assert_eq!(r[2..4], [net::walk::CFG_OK, store::Type::Str.tag()]);
+        assert_eq!(&r[4..], b"bench");
+    }
 }
 
 #[test]

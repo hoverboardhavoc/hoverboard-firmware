@@ -66,6 +66,15 @@ object Fields {
     /** The advertised device name. */
     val DEVICE_NAME = FieldDef(0x10, Type.Str, Value.Str("Hoverboard"))
 
+    /**
+     * The Wi-Fi network a bridge joins (`specs/bridge-onboarding.md` section 2.1). Mirrored for the
+     * drift gate; the app reads neither Wi-Fi field.
+     */
+    val WIFI_SSID = FieldDef(0x11, Type.Str, Value.Str(""))
+
+    /** The Wi-Fi password: a secret, never read back ([com.hoverboard.protocol.l3.Walk.CFG_SECRET]). */
+    val WIFI_PASS = FieldDef(0x12, Type.Str, Value.Str(""))
+
     /** The motor current limit, milliamps. The firmware converts it against the board's own counts per amp at bring-up, then clamps the COUNT into the window the comparison admits (see [CURRENT_LIMIT_MA]). */
     val MOTOR_CURRENT_LIMIT = FieldDef(0x20, Type.U32, Value.U32(10_000))
 
@@ -387,6 +396,8 @@ object Fields {
         "LINK_SET" to LINK_SET,
         "NODE_CLASS" to NODE_CLASS,
         "DEVICE_NAME" to DEVICE_NAME,
+        "WIFI_SSID" to WIFI_SSID,
+        "WIFI_PASS" to WIFI_PASS,
         "MOTOR_CURRENT_LIMIT" to MOTOR_CURRENT_LIMIT,
         "MOTOR_METHOD" to MOTOR_METHOD,
         "CONTROL_MODE" to CONTROL_MODE,
