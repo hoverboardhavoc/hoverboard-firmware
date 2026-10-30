@@ -28,8 +28,8 @@ import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
 import com.hoverboard.remote.model.machineSpeed
-import com.hoverboard.remote.model.rigidLeader
 import com.hoverboard.remote.model.odometerReading
+import com.hoverboard.remote.model.rigidLeader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay

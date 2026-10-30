@@ -511,7 +511,6 @@ class TelemetryPanelTest {
             TelemetryPanel(
                 telemetry = telemetry,
                 throttlePercent = throttlePercent,
-                armed = false,
                 battery = batteryReading(telemetry, packCells, chemistry),
                 currents = listOfNotNull(BOARD to current, peerCurrent?.let { PEER to it }),
                 speed = speed,

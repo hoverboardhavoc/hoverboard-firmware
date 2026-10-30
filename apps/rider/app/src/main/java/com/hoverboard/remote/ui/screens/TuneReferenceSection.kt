@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -21,7 +22,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
@@ -29,10 +29,10 @@ import com.hoverboard.remote.BoardGains
 import com.hoverboard.remote.R
 import com.hoverboard.remote.TuneActions
 import com.hoverboard.remote.TuneState
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.WarningText
 import kotlin.math.roundToInt
 
 /** Test tag on the reference section's heading. */
@@ -75,7 +75,7 @@ internal fun Reference(state: TuneState, armed: Boolean, actions: TuneActions) {
     Text(
         stringResource(R.string.tune_reference_title),
         style = MaterialTheme.typography.titleMedium,
-        color = TextPrimary,
+        color = Fg,
         modifier = Modifier.testTag(TUNE_REFERENCE_TAG),
     )
     Caption(R.string.tune_reference_body)
@@ -89,10 +89,10 @@ internal fun Reference(state: TuneState, armed: Boolean, actions: TuneActions) {
             },
         ),
         style = MaterialTheme.typography.titleSmall,
-        color = if (dead == false) TextPrimary else AccentYellow,
+        color = if (dead == false) Fg else FgMuted,
         modifier = Modifier.testTag(TUNE_REFERENCE_STATE_TAG),
     )
-    if (armed) Text(stringResource(R.string.tune_reference_armed), color = AccentRed)
+    if (armed) Text(stringResource(R.string.tune_reference_armed), color = Primary)
     for (i in state.referenceKeys.indices) ReferenceRow(state, i, actions)
 }
 
@@ -114,13 +114,13 @@ private fun ReferenceRow(state: TuneState, index: Int, actions: TuneActions) {
             Text(
                 stringResource(REFERENCE_LABELS[index]),
                 style = MaterialTheme.typography.titleSmall,
-                color = TextPrimary,
+                color = Fg,
                 modifier = Modifier.weight(1f),
             )
             Text(
                 staged?.toString() ?: stringResource(R.string.tune_unread),
                 style = MaterialTheme.typography.titleLarge,
-                color = TextPrimary,
+                color = Fg,
             )
         }
         ReferenceSlider(state, key, index, staged, range, actions)
@@ -215,10 +215,9 @@ internal fun LiveEntry(
         ) { Text(stringResource(R.string.setup_set)) }
     }
     if (text.isNotEmpty() && parsed == null) {
-        Text(
+        WarningText(
             stringResource(R.string.tune_reference_entry_invalid, range.first.toString(), range.last.toString()),
             style = MaterialTheme.typography.bodySmall,
-            color = AccentRed,
         )
     }
 }
@@ -232,8 +231,9 @@ internal fun FlashLine(gains: BoardGains, key: Key) {
     Row {
         Text(
             stringResource(R.string.tune_flash, gains.flash[key]?.toString() ?: stringResource(R.string.tune_unread)),
-            color = TextSecondary,
+            color = FgMuted,
         )
-        if (gains.unsaved(key)) Text(" " + stringResource(R.string.tune_unsaved_mark), color = AccentYellow)
+        if (gains.unsaved(key)) Text(" " + stringResource(R.string.tune_unsaved_mark), color = Primary)
+
     }
 }

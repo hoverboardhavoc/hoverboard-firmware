@@ -3,8 +3,8 @@ package com.hoverboard.remote
 import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
-import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.MachineTravel
+import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.machineOdometer

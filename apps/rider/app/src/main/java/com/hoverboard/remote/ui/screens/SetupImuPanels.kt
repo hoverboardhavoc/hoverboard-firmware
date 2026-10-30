@@ -20,11 +20,13 @@ import com.hoverboard.remote.SetupState
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.display
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.Tone
+import com.hoverboard.remote.ui.theme.ToneText
+import com.hoverboard.remote.ui.theme.WarningText
 
 @Composable
 internal fun AttitudeNow(telemetry: TelemetryUi?) {
@@ -34,7 +36,7 @@ internal fun AttitudeNow(telemetry: TelemetryUi?) {
         } else {
             stringResource(R.string.setup_attitude_none)
         },
-        color = TextPrimary,
+        color = Fg,
     )
 }
 
@@ -51,7 +53,7 @@ internal fun Level(state: SetupState, editable: Boolean, telemetry: TelemetryUi?
             state.values[f.key]?.let {
                 Text(
                     stringResource(R.string.setup_change_line, stringResource(f.label), it.display()),
-                    color = TextSecondary,
+                    color = FgMuted,
                 )
             }
         }
@@ -77,7 +79,7 @@ internal fun OrientationPanel(state: SetupState, editable: Boolean, telemetry: T
         if (state.frameWriting) {
             Text(
                 stringResource(R.string.setup_frame_writing),
-                color = AccentYellow,
+                color = Primary,
                 modifier = Modifier.testTag(SETUP_FRAME_WRITING_TAG),
             )
         }
@@ -96,15 +98,15 @@ private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?
         } else {
             stringResource(R.string.setup_orientation_stored, stored.toString())
         },
-        color = if (stored == null) TextSecondary else TextPrimary,
+        color = if (stored == null) FgMuted else Fg,
     )
     Text(
         if (roles == null) stringResource(R.string.setup_orientation_roles_unread) else rolesLine(roles),
-        color = if (roles == null) TextSecondary else TextPrimary,
+        color = if (roles == null) FgMuted else Fg,
     )
     if (stored == null || roles == null) return
     if (Orientation.check(stored, roles) != null) {
-        Text(stringResource(R.string.setup_orientation_mirrored), color = AccentRed)
+        WarningText(stringResource(R.string.setup_orientation_mirrored))
     } else {
         val pose = state.storedPose
         val name = when {
@@ -120,9 +122,9 @@ private fun StoredFrame(state: SetupState, stored: List<Int>?, roles: List<Int>?
         } else {
             R.string.setup_orientation_stored_as
         }
-        Text(stringResource(line, name), color = TextPrimary)
+        Text(stringResource(line, name), color = Fg)
     }
-    if (0 in stored || 0 in roles) Text(stringResource(R.string.setup_orientation_unset), color = TextSecondary)
+    if (0 in stored || 0 in roles) Text(stringResource(R.string.setup_orientation_unset), color = FgMuted)
 }
 
 /** `UP = X, PITCH_RATE = Z`, with an unset role shown as the compiled one it falls back to. */
@@ -141,7 +143,7 @@ internal fun RotationCheckPanel(state: SetupState, telemetry: TelemetryUi?, acti
         PanelTitle(R.string.setup_check_title)
         Caption(R.string.setup_check_body)
         if (!state.orientationSettled) {
-            Text(stringResource(R.string.setup_check_blocked), color = AccentYellow)
+            CautionText(stringResource(R.string.setup_check_blocked))
             return@Panel
         }
         AttitudeNow(telemetry)
@@ -158,16 +160,17 @@ internal fun RotationCheckPanel(state: SetupState, telemetry: TelemetryUi?, acti
 
 @Composable
 internal fun CheckStep(action: Int, hint: Int, result: CheckResult?, onRun: () -> Unit) {
-    Text(stringResource(hint), style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+    Text(stringResource(hint), style = MaterialTheme.typography.bodySmall, color = FgMuted)
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         OutlinedButton(onClick = onRun) { Text(stringResource(action)) }
-        val (text, color) = when (result) {
-            CheckResult.PASS -> R.string.setup_check_pass to AccentGreen
-            CheckResult.FAIL -> R.string.setup_check_fail to AccentRed
-            CheckResult.INCONCLUSIVE -> R.string.setup_check_inconclusive to AccentYellow
-            null -> R.string.setup_check_not_run to TextSecondary
+        val (text, tone) = when (result) {
+            CheckResult.PASS -> R.string.setup_check_pass to Tone.PRIMARY
+            CheckResult.FAIL -> R.string.setup_check_fail to Tone.WARNING
+            CheckResult.INCONCLUSIVE -> R.string.setup_check_inconclusive to Tone.CAUTION
+            null -> R.string.setup_check_not_run to Tone.MUTED
         }
-        Text(stringResource(text), color = color)
+        ToneText(stringResource(text), tone)
+
     }
 }
 

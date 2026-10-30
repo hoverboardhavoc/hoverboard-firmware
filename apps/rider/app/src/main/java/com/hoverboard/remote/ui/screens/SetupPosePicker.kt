@@ -39,12 +39,11 @@ import com.hoverboard.protocol.imu.Orientation.Heading
 import com.hoverboard.protocol.imu.Orientation.Pose
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.TelemetryUi
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
-import com.hoverboard.remote.ui.theme.ThrottleTrack
-import com.hoverboard.remote.ui.theme.ZeroLine
+import com.hoverboard.remote.ui.theme.BgCode
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
 
 /**
  * The two-step pose picker (`specs/rider-ui.md` 3.4): which face of the board points up, then what
@@ -114,7 +113,7 @@ private fun PoseGlyph(pose: Pose, @StringRes label: Int, selected: Boolean, enab
     Column(
         modifier = Modifier
             .width(GLYPH_WIDTH)
-            .border(if (selected) 2.dp else 1.dp, if (selected) AccentGreen else ZeroLine, shape)
+            .border(if (selected) 2.dp else 1.dp, if (selected) Primary else FgFaint, shape)
             .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -123,7 +122,7 @@ private fun PoseGlyph(pose: Pose, @StringRes label: Int, selected: Boolean, enab
         Text(
             stringResource(label),
             style = MaterialTheme.typography.labelSmall,
-            color = if (selected) TextPrimary else TextSecondary,
+            color = if (selected) Fg else FgMuted,
             textAlign = TextAlign.Center,
         )
     }
@@ -161,17 +160,17 @@ private fun DrawScope.drawPose(pose: Pose) {
         }
         path.close()
         val component = axis == 2 && sign == 1
-        drawPath(path, if (component) AccentGreen.copy(alpha = COMPONENT_ALPHA) else ThrottleTrack)
-        drawPath(path, TextSecondary, style = edge)
+        drawPath(path, if (component) Primary.copy(alpha = COMPONENT_ALPHA) else BgCode)
+        drawPath(path, FgMuted, style = edge)
     }
     val tail = project(listOf(BOX[0], 0f, 0f))
     val tip = project(listOf(BOX[0] + ARROW, 0f, 0f))
     val wingA = project(listOf(BOX[0] + ARROW - HEAD, HEAD, 0f))
     val wingB = project(listOf(BOX[0] + ARROW - HEAD, -HEAD, 0f))
     val arrow = 2.dp.toPx()
-    drawLine(AccentYellow, tail, tip, arrow)
-    drawLine(AccentYellow, tip, wingA, arrow)
-    drawLine(AccentYellow, tip, wingB, arrow)
+    drawLine(Primary, tail, tip, arrow)
+    drawLine(Primary, tip, wingA, arrow)
+    drawLine(Primary, tip, wingB, arrow)
 }
 
 /**
@@ -200,7 +199,7 @@ private fun TiltView(@StringRes label: Int, clockwise: Float, length: Float, nos
         Canvas(Modifier.size(MODEL_WIDTH, MODEL_HEIGHT)) {
             val half = size.width * length / 2
             drawLine(
-                ZeroLine,
+                FgFaint,
                 Offset(0f, center.y),
                 Offset(size.width, center.y),
                 1.dp.toPx(),
@@ -208,18 +207,18 @@ private fun TiltView(@StringRes label: Int, clockwise: Float, length: Float, nos
             )
             rotate(clockwise) {
                 val thick = SLAB.toPx()
-                drawRect(AccentGreen, Offset(center.x - half, center.y - thick / 2), Size(half * 2, thick))
+                drawRect(Primary, Offset(center.x - half, center.y - thick / 2), Size(half * 2, thick))
                 if (nose) {
                     val n = NOSE.toPx()
                     val w = 2.dp.toPx()
                     val tip = Offset(center.x + half + n, center.y)
-                    drawLine(AccentYellow, Offset(center.x + half, center.y), tip, w)
-                    drawLine(AccentYellow, tip, Offset(tip.x - n / 2, center.y - n / 2), w)
-                    drawLine(AccentYellow, tip, Offset(tip.x - n / 2, center.y + n / 2), w)
+                    drawLine(Primary, Offset(center.x + half, center.y), tip, w)
+                    drawLine(Primary, tip, Offset(tip.x - n / 2, center.y - n / 2), w)
+                    drawLine(Primary, tip, Offset(tip.x - n / 2, center.y + n / 2), w)
                 }
             }
         }
-        Text(stringResource(label), style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+        Text(stringResource(label), style = MaterialTheme.typography.labelSmall, color = FgMuted)
     }
 }
 

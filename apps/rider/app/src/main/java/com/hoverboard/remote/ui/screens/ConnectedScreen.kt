@@ -32,8 +32,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.TextPrimary
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.Primary
 
 /** Test tag on the top bar surface, which carries the armed outline on every destination. */
 const val TOP_BAR_TAG = "top_bar"
@@ -48,7 +48,7 @@ const val UP_ICON_TAG = "up_icon"
 fun menuItemTag(destination: AppDestination): String = "menu_item_${destination.name.lowercase()}"
 
 /**
- * The top bar surface's armed outline: [AccentRed] while armed (`specs/rider-ui.md` section 2a).
+ * The top bar surface's armed outline: [Primary] while armed (`specs/rider-ui.md` section 2a).
  *
  * The Ride screen makes armed state legible by tinting its two big surfaces
  * ([com.hoverboard.remote.ui.screens.ControlScreen], section 3.1), and the pushed destinations show
@@ -57,7 +57,8 @@ fun menuItemTag(destination: AppDestination): String = "menu_item_${destination.
  * the telemetry panel and the throttle pad already use, in the same colour, so it reads as the same
  * signal, and it keeps the title and the icons legible where a filled red bar would not.
  */
-internal fun armedBarOutline(armed: Boolean): Color = if (armed) AccentRed else Color.Transparent
+internal fun armedBarOutline(armed: Boolean): Color = if (armed) Primary else Color.Transparent
+
 
 /**
  * The connected app: RIDE under a top bar whose three-dot icon pushes the other three destinations,
@@ -155,14 +156,14 @@ private fun TopBar(
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = stringResource(R.string.nav_up),
-                    tint = TextPrimary,
+                    tint = Fg,
                 )
             }
         }
         Text(
             title,
             style = MaterialTheme.typography.titleLarge,
-            color = TextPrimary,
+            color = Fg,
             modifier = Modifier
                 .weight(1f)
                 .padding(start = if (destination.isRoot) TITLE_INSET else 0.dp)
@@ -187,7 +188,7 @@ private fun OverflowMenu(onPush: (AppDestination) -> Unit) {
             Icon(
                 imageVector = Icons.Filled.MoreVert,
                 contentDescription = stringResource(R.string.nav_open),
-                tint = TextPrimary,
+                tint = Fg,
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {

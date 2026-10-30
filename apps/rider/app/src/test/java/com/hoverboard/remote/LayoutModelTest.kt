@@ -12,9 +12,9 @@ import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.Refused
 import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.model.LayoutEditor
 import com.hoverboard.remote.model.LayoutRows
-import com.hoverboard.protocol.store.Fields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest

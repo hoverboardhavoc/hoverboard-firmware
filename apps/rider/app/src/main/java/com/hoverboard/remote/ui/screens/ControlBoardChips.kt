@@ -22,13 +22,14 @@ import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.UiState
 import com.hoverboard.remote.model.BoardMode
 import com.hoverboard.remote.model.DriveFallback
-import com.hoverboard.remote.model.driveModeLabel
 import com.hoverboard.remote.model.TelemetryUi
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.DarkBackground
-import com.hoverboard.remote.ui.theme.ZeroLine
+import com.hoverboard.remote.model.driveModeLabel
+import com.hoverboard.remote.ui.theme.Bg
+import com.hoverboard.remote.ui.theme.Caution
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.Warning
 
 /** Test tag on the chip for the motor controller at [address], read by the Ride screen's tests. */
 fun boardChipTag(address: Int): String = "board_chip_${boardHex(address)}"
@@ -58,7 +59,7 @@ internal fun BoardChips(state: UiState) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         BoardChip(
             text = stringResource(R.string.drive_chip, stringResource(driveModeLabel(state.driveMode))),
-            color = if (state.drive.fallback == null) ZeroLine else AccentYellow,
+            color = if (state.drive.fallback == null) FgFaint else Caution,
             tag = DRIVE_CHIP_TAG,
         )
         for (node in state.motorControllers) {
@@ -70,17 +71,16 @@ internal fun BoardChips(state: UiState) {
             )
         }
         if (state.attachedNode != null && state.motorControllers.isEmpty()) {
-            BoardChip(text = stringResource(R.string.board_chip_none), color = ZeroLine, tag = BOARD_CHIP_NONE_TAG)
+            BoardChip(text = stringResource(R.string.board_chip_none), color = FgFaint, tag = BOARD_CHIP_NONE_TAG)
         }
         machineBadge(state)?.let {
-            BoardChip(text = stringResource(it), color = AccentRed, tag = BOARD_CHIP_MACHINE_TAG)
+            BoardChip(text = stringResource(it), color = Caution, tag = BOARD_CHIP_MACHINE_TAG)
         }
     }
     driveFallbackText(state)?.let {
-        Text(
+        CautionText(
             text = it,
             style = MaterialTheme.typography.labelMedium,
-            color = AccentYellow,
             modifier = Modifier.testTag(DRIVE_FALLBACK_TAG),
         )
     }
@@ -151,11 +151,11 @@ private fun boardSays(telemetry: TelemetryUi?): Int = when {
 
 /** The same three-way reading in colour: trouble, live, and everything quiet or idle. */
 private fun boardColor(telemetry: TelemetryUi?): Color = when {
-    telemetry == null || !telemetry.hasState -> ZeroLine
-    telemetry.anyFault -> AccentRed
-    telemetry.lockdown -> AccentYellow
-    telemetry.mode == BoardMode.RUN -> AccentGreen
-    else -> ZeroLine
+    telemetry == null || !telemetry.hasState -> FgFaint
+    telemetry.anyFault -> Warning
+    telemetry.lockdown -> Caution
+    telemetry.mode == BoardMode.RUN -> Primary
+    else -> FgFaint
 }
 
 @Composable
@@ -164,7 +164,7 @@ private fun BoardChip(text: String, color: Color, tag: String) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelMedium,
-        color = DarkBackground,
+        color = Bg,
         modifier = Modifier
             .testTag(tag)
             .background(color, shape)

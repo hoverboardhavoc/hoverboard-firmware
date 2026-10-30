@@ -19,6 +19,7 @@ import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.SetupFields
+import kotlin.math.abs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -31,7 +32,6 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlin.math.abs
 
 /** What the last Tune operation came to, for the screen to say. */
 sealed interface TuneNotice {

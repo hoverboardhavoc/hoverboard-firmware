@@ -28,6 +28,7 @@ import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.floorOutsidePack
+import kotlin.math.abs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,7 +40,6 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlin.math.abs
 
 /**
  * What became of one field's write (`specs/rider-ui.md` 3.6a: per-FIELD state, not one verdict).

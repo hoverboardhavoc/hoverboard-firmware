@@ -28,11 +28,16 @@ import com.hoverboard.remote.LayoutActions
 import com.hoverboard.remote.LayoutNotice
 import com.hoverboard.remote.LayoutState
 import com.hoverboard.remote.R
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.BgElevated
+import com.hoverboard.remote.ui.theme.Border
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.Tone
+import com.hoverboard.remote.ui.theme.ToneText
+import com.hoverboard.remote.ui.theme.Warning
+import com.hoverboard.remote.ui.theme.WarningText
 
 /** Test tag on the verdict panel. */
 const val LAYOUT_VERDICT_TAG = "layout_verdict"
@@ -93,12 +98,12 @@ fun LayoutScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(stringResource(R.string.layout_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+        Text(stringResource(R.string.layout_title), style = MaterialTheme.typography.headlineSmall, color = Fg)
         Text(
             text = state.board?.let { stringResource(R.string.layout_target, boardHex(it)) }
                 ?: stringResource(R.string.layout_no_board),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
+            color = FgMuted,
         )
         if (state.board != null) Part(state)
         if (armed) Lock()
@@ -117,13 +122,13 @@ private fun Lock() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(2.dp, AccentRed, RoundedCornerShape(8.dp))
+            .border(2.dp, Primary, RoundedCornerShape(8.dp))
             .padding(12.dp)
             .testTag(LAYOUT_LOCK_TAG),
     ) {
         val type = MaterialTheme.typography
-        Text(stringResource(R.string.layout_locked_title), style = type.titleMedium, color = AccentRed)
-        Text(stringResource(R.string.layout_locked_body), style = type.bodyMedium, color = TextPrimary)
+        Text(stringResource(R.string.layout_locked_title), style = type.titleMedium, color = Primary)
+        Text(stringResource(R.string.layout_locked_body), style = type.bodyMedium, color = Fg)
     }
 }
 
@@ -132,11 +137,12 @@ private fun Notice(notice: LayoutNotice, state: LayoutState, actions: LayoutActi
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(AccentYellow.copy(alpha = 0.15f), RoundedCornerShape(8.dp))
+            .background(BgElevated, RoundedCornerShape(8.dp))
+            .border(1.dp, Border, RoundedCornerShape(8.dp))
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(layoutNoticeText(notice), modifier = Modifier.weight(1f), color = TextPrimary)
+        Text(layoutNoticeText(notice), modifier = Modifier.weight(1f), color = Fg)
         // The slot was taken, the board was not asked: applying again is the retry, and what was
         // not written is still in the delta.
         if (notice == LayoutNotice.SlotBusy && state.board != null) {
@@ -149,14 +155,14 @@ private fun Notice(notice: LayoutNotice, state: LayoutState, actions: LayoutActi
 @Composable
 private fun Status(state: LayoutState, actions: LayoutActions) {
     when {
-        state.reading -> Text(stringResource(R.string.layout_reading), color = TextSecondary)
-        state.applying -> Text(stringResource(R.string.layout_writing), color = TextSecondary)
+        state.reading -> Text(stringResource(R.string.layout_reading), color = FgMuted)
+        state.applying -> Text(stringResource(R.string.layout_writing), color = FgMuted)
         state.board != null -> OutlinedButton(onClick = actions::refresh) {
             Text(stringResource(R.string.layout_refresh))
         }
     }
     if (state.unread.isNotEmpty()) {
-        Text(stringResource(R.string.layout_unread, state.unread.size), color = AccentYellow)
+        CautionText(stringResource(R.string.layout_unread, state.unread.size))
     }
 }
 
@@ -178,7 +184,7 @@ private fun Part(state: LayoutState) {
         Text(
             text = stringResource(R.string.layout_part, part.label),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary,
+            color = FgMuted,
         )
         return
     }
@@ -189,7 +195,7 @@ private fun Part(state: LayoutState) {
                 if (state.chip == null) R.string.layout_part_unsent else R.string.layout_part_unnamed,
             ),
             style = MaterialTheme.typography.bodyMedium,
-            color = TextPrimary,
+            color = Fg,
         )
         Caption(R.string.layout_part_unknown_body)
     }
@@ -200,10 +206,15 @@ private fun Part(state: LayoutState) {
 private fun Verdict(state: LayoutState) {
     val verdict = state.verdict
     val error = verdict?.error
-    val colour = when {
-        verdict == null -> TextSecondary
-        error == null -> AccentGreen
-        else -> AccentRed
+    val tone = when {
+        verdict == null -> Tone.MUTED
+        error == null -> Tone.PRIMARY
+        else -> Tone.WARNING
+    }
+    val colour = when (tone) {
+        Tone.PRIMARY -> Primary
+        Tone.WARNING -> Warning
+        else -> FgMuted
     }
     Column(
         modifier = Modifier
@@ -214,14 +225,14 @@ private fun Verdict(state: LayoutState) {
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         PanelTitle(R.string.layout_verdict_title)
-        Text(
+        ToneText(
             text = when {
                 verdict == null -> stringResource(R.string.layout_verdict_unknown)
                 error == null -> stringResource(R.string.layout_verdict_valid)
                 else -> layoutRefusalText(error)
             },
+            tone = tone,
             style = MaterialTheme.typography.bodyMedium,
-            color = colour,
         )
         if (verdict != null) {
             Caption(R.string.layout_verdict_exact)
@@ -233,15 +244,15 @@ private fun Verdict(state: LayoutState) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(2.dp, AccentRed, RoundedCornerShape(8.dp))
+            .border(2.dp, Warning, RoundedCornerShape(8.dp))
             .padding(12.dp)
             .testTag(LAYOUT_STORED_INVALID_TAG),
     ) {
-        Text(
+        WarningText(
             stringResource(R.string.layout_stored_invalid, layoutFieldLabel(stored.field)),
             style = MaterialTheme.typography.bodyMedium,
-            color = AccentRed,
         )
+
     }
 }
 
@@ -262,7 +273,7 @@ private fun Delta(state: LayoutState, armed: Boolean, actions: LayoutActions) {
                 Text(
                     layoutDeltaLine(slot, slot.of(stored), slot.of(staged)),
                     modifier = Modifier.weight(1f),
-                    color = TextPrimary,
+                    color = Fg,
                 )
                 TextButton(onClick = { actions.revert(slot) }) { Text(stringResource(R.string.layout_revert)) }
             }
@@ -295,7 +306,7 @@ private fun PowerCycle(state: LayoutState) {
         Text(
             stringResource(R.string.layout_power_cycle, state.written.size),
             style = MaterialTheme.typography.titleMedium,
-            color = TextPrimary,
+            color = Fg,
         )
         Caption(R.string.layout_power_cycle_watch)
     }

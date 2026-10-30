@@ -24,11 +24,13 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.RiderWaiver
 import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.ui.screens.boardHex
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.PanelSurface
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.ZeroLine
+import com.hoverboard.remote.ui.theme.BgElevated
+import com.hoverboard.remote.ui.theme.Caution
+import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.OnPrimary
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.Warning
 
 /**
  * The arm toggle: the app's only way to assert `power_request`, and the reason the motors are ever
@@ -77,7 +79,7 @@ fun ArmToggle(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
-            .background(if (armed) AccentRed else PanelSurface)
+            .background(if (armed) Primary else BgElevated)
             .clickable(enabled = live) { onToggle() }
             .padding(vertical = 22.dp)
             .testTag(ARM_TAG),
@@ -121,9 +123,9 @@ private fun Statement(text: String, armed: Boolean, refusal: Boolean = false) {
         style = MaterialTheme.typography.bodySmall,
         textAlign = TextAlign.Center,
         color = when {
-            armed -> TextPrimary
-            refusal -> AccentRed
-            else -> AccentYellow
+            armed -> OnPrimary
+            refusal -> Warning
+            else -> Caution
         },
         modifier = Modifier.padding(top = 4.dp, start = 12.dp, end = 12.dp),
     )
@@ -157,9 +159,9 @@ private fun frameName(rigid: Boolean): Int =
     if (rigid) R.string.setup_choice_frame_rigid else R.string.setup_choice_frame_pivoting
 
 private fun armColor(armed: Boolean, enabled: Boolean): Color = when {
-    armed -> TextPrimary
-    !enabled -> ZeroLine
-    else -> AccentRed
+    armed -> OnPrimary
+    !enabled -> FgFaint
+    else -> FgMuted
 }
 
 const val ARM_TAG = "arm_toggle"

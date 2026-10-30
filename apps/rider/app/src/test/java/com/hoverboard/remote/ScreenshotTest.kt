@@ -10,10 +10,10 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.github.takahirom.roborazzi.captureRoboImage
-import com.hoverboard.remote.ble.LinkConfig
 import com.hoverboard.protocol.linkctl.CyclicState
-import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.remote.ble.LinkConfig
+import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.DriveTargets
@@ -21,7 +21,7 @@ import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ControlScreen
-import com.hoverboard.remote.ui.theme.DarkBackground
+import com.hoverboard.remote.ui.theme.Bg
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Rule
 import org.junit.Test
@@ -412,7 +412,7 @@ class ScreenshotTest {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(DarkBackground),
+                        .background(Bg),
                 ) {
                     content()
                 }

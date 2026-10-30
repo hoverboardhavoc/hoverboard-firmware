@@ -17,8 +17,8 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest

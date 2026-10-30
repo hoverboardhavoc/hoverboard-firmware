@@ -27,13 +27,12 @@ import com.hoverboard.remote.model.CurrentReading
 import com.hoverboard.remote.model.FaultCause
 import com.hoverboard.remote.model.SpeedReading
 import com.hoverboard.remote.model.TelemetryUi
-import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
-import com.hoverboard.remote.ui.theme.AccentGreen
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.PanelSurface
-import com.hoverboard.remote.ui.theme.TextSecondary
-import com.hoverboard.remote.ui.theme.ZeroLine
+import com.hoverboard.remote.ui.theme.BgElevated
+import com.hoverboard.remote.ui.theme.CautionText
+import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.WarningText
 
 /**
  * Telemetry display (SPEC §10), prioritised: link health, battery, speed + throttle, attitude.
@@ -56,7 +55,6 @@ import com.hoverboard.remote.ui.theme.ZeroLine
 fun TelemetryPanel(
     telemetry: TelemetryUi?,
     throttlePercent: Int,
-    armed: Boolean,
     battery: BatteryReading,
     currents: List<Pair<String, CurrentReading>>,
     speed: SpeedReading,
@@ -68,8 +66,7 @@ fun TelemetryPanel(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(PanelSurface)
-            .border(ARMED_OUTLINE, if (armed) AccentRed else Color.Transparent, shape)
+            .background(BgElevated)
             .padding(20.dp),
     ) {
         Text(
@@ -83,7 +80,7 @@ fun TelemetryPanel(
             Text(
                 text = stringResource(R.string.telemetry_no_data),
                 style = MaterialTheme.typography.bodyMedium,
-                color = TextSecondary,
+                color = FgMuted,
             )
             return@Column
         }
@@ -133,20 +130,19 @@ private fun StatusChips(telemetry: TelemetryUi, board: String) {
     ) {
         Chip(
             text = stringResource(R.string.telemetry_chip_rider),
-            color = if (telemetry.riderPresent) AccentGreen else ZeroLine,
+            color = if (telemetry.riderPresent) Primary else FgFaint,
         )
         if (telemetry.lockdown) {
-            Chip(text = stringResource(R.string.telemetry_chip_lockdown), color = AccentYellow)
+            CautionText(text = stringResource(R.string.telemetry_chip_lockdown))
         }
     }
     // One line per set cause, naming the board, so a fault says where it is and what it is
     // (`specs/link-control.md`, `CYCLIC_STATE`).
     for (cause in telemetry.faultCauses) {
         Spacer(modifier = Modifier.height(8.dp))
-        Text(
+        WarningText(
             text = stringResource(R.string.telemetry_fault_cause, board, stringResource(cause.label())),
             style = MaterialTheme.typography.labelMedium,
-            color = AccentRed,
         )
     }
     if (!telemetry.anyFault) {
@@ -154,7 +150,7 @@ private fun StatusChips(telemetry: TelemetryUi, board: String) {
         Text(
             text = stringResource(R.string.telemetry_fault_unreported),
             style = MaterialTheme.typography.bodySmall,
-            color = TextSecondary,
+            color = FgMuted,
         )
     }
 }
@@ -218,7 +214,7 @@ private fun SpeedAndThrottleRow(speed: SpeedReading, throttlePercent: Int) {
                 stringResource(R.string.telemetry_speed_unset, speed.unset.joinToString(", "))
             },
             style = MaterialTheme.typography.bodySmall,
-            color = TextSecondary,
+            color = FgMuted,
         )
     }
 }
@@ -254,7 +250,7 @@ private fun Metric(label: String, value: String) {
         Text(
             text = label,
             style = MaterialTheme.typography.bodySmall,
-            color = TextSecondary,
+            color = FgMuted,
         )
         Text(
             text = value,

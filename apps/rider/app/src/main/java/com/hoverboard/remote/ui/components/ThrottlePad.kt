@@ -24,12 +24,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.Throttle
-import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.ThrottleForward
-import com.hoverboard.remote.ui.theme.ThrottleReverse
-import com.hoverboard.remote.ui.theme.ThrottleTrack
-import com.hoverboard.remote.ui.theme.ZeroLine
+import com.hoverboard.remote.ui.theme.BgCode
+import com.hoverboard.remote.ui.theme.FgFaint
+import com.hoverboard.remote.ui.theme.Primary
 
 /**
  * Deadman throttle pad (SPEC §9). A vertical pad active across its WHOLE height: touch
@@ -55,7 +52,6 @@ fun ThrottlePad(
     speed: Int,
     engaged: Boolean,
     enabled: Boolean,
-    armed: Boolean,
     onMove: (y: Float, height: Float) -> Unit,
     onRelease: () -> Unit,
     modifier: Modifier = Modifier,
@@ -86,7 +82,6 @@ fun ThrottlePad(
                 }
             }
             .drawBehind { drawThrottle(speed = speed, maxSpeed = maxSpeed) }
-            .border(ARMED_OUTLINE, if (armed) AccentRed else Color.Transparent, shape)
             .testTag(THROTTLE_TAG),
     ) {
         Text(
@@ -96,7 +91,7 @@ fun ThrottlePad(
                 stringResource(R.string.throttle_idle)
             },
             style = MaterialTheme.typography.titleMedium,
-            color = if (engaged) ThrottleForward else ZeroLine,
+            color = if (engaged) Primary else FgFaint,
             // Sit on the zero/rest line (0.75 H), not the pad centre.
             modifier = Modifier
                 .align(BiasAlignment(0f, fractionToBias(Throttle.ZERO_FRACTION)))
@@ -114,25 +109,25 @@ private fun DrawScope.drawThrottle(speed: Int, maxSpeed: Int) {
     val w = size.width
 
     // Track background.
-    drawRect(color = ThrottleTrack)
+    drawRect(color = BgCode)
 
     val zeroY = Throttle.ZERO_FRACTION * h // 0.5 H, the zero / rest line (pad centre)
 
     // The whole pad is active: tint forward (green) above the centre, reverse (red) below.
     drawRect(
-        color = ThrottleForward.copy(alpha = ZONE_ALPHA),
+        color = Primary.copy(alpha = ZONE_ALPHA),
         topLeft = Offset(0f, 0f),
         size = Size(w, zeroY),
     )
     drawRect(
-        color = ThrottleReverse.copy(alpha = ZONE_ALPHA),
+        color = Color.Transparent,
         topLeft = Offset(0f, zeroY),
         size = Size(w, h - zeroY),
     )
 
     // The zero / rest line at the centre (0.5 H).
     drawLine(
-        color = ZeroLine,
+        color = FgFaint,
         start = Offset(0f, zeroY),
         end = Offset(w, zeroY),
         strokeWidth = LINE_WIDTH * 2,
@@ -143,7 +138,7 @@ private fun DrawScope.drawThrottle(speed: Int, maxSpeed: Int) {
     val t = (speed.toFloat() / maxSpeed).coerceIn(-1f, 1f)
     // Invert §9 mapping: y = zeroY - t * (0.25 H).
     val thumbY = zeroY - t * (THROTTLE_HALF_SPAN * h)
-    val thumbColor = if (speed >= 0) ThrottleForward else ThrottleReverse
+    val thumbColor = if (speed >= 0) Primary else Primary
     val bandHalf = THUMB_HEIGHT / 2f
     drawRect(
         color = thumbColor,

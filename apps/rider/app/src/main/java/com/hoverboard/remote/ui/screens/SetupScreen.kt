@@ -16,11 +16,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -35,10 +35,13 @@ import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SetupGroup
 import com.hoverboard.remote.model.TelemetryUi
-import com.hoverboard.remote.ui.theme.AccentRed
-import com.hoverboard.remote.ui.theme.AccentYellow
-import com.hoverboard.remote.ui.theme.TextPrimary
-import com.hoverboard.remote.ui.theme.TextSecondary
+import com.hoverboard.remote.ui.theme.BgElevated
+import com.hoverboard.remote.ui.theme.Border
+import com.hoverboard.remote.ui.theme.Fg
+import com.hoverboard.remote.ui.theme.FgMuted
+import com.hoverboard.remote.ui.theme.Primary
+import com.hoverboard.remote.ui.theme.Warning
+import com.hoverboard.remote.ui.theme.WarningText
 
 /** Test tag on the armed lock statement. */
 const val SETUP_LOCK_TAG = "setup_lock"
@@ -100,7 +103,7 @@ fun SetupScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.headlineSmall, color = TextPrimary)
+        Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.headlineSmall, color = Fg)
         NodeChips(state.nodes, state.board, actions::selectTarget, SETUP_NODE_TAG)
         if (armed) Lock()
         state.notice?.let { Notice(it, actions) }
@@ -159,13 +162,13 @@ private fun Lock() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(2.dp, AccentRed, RoundedCornerShape(8.dp))
+            .border(2.dp, Primary, RoundedCornerShape(8.dp))
             .padding(12.dp)
             .testTag(SETUP_LOCK_TAG),
     ) {
         val type = MaterialTheme.typography
-        Text(stringResource(R.string.setup_locked_title), style = type.titleMedium, color = AccentRed)
-        Text(stringResource(R.string.setup_locked_body), style = type.bodyMedium, color = TextPrimary)
+        Text(stringResource(R.string.setup_locked_title), style = type.titleMedium, color = Primary)
+        Text(stringResource(R.string.setup_locked_body), style = type.bodyMedium, color = Fg)
     }
 }
 
@@ -178,11 +181,12 @@ private fun Notice(notice: SetupNotice, actions: SetupActions) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(AccentYellow.copy(alpha = 0.15f), RoundedCornerShape(8.dp))
+            .background(BgElevated, RoundedCornerShape(8.dp))
+            .border(1.dp, Border, RoundedCornerShape(8.dp))
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(noticeText(notice), modifier = Modifier.weight(1f), color = TextPrimary)
+        Text(noticeText(notice), modifier = Modifier.weight(1f), color = Fg)
         TextButton(onClick = actions::dismissNotice) { Text(stringResource(R.string.setup_dismiss)) }
     }
 }
@@ -190,8 +194,8 @@ private fun Notice(notice: SetupNotice, actions: SetupActions) {
 @Composable
 private fun Status(state: SetupState, actions: SetupActions) {
     when {
-        state.reading -> Text(stringResource(R.string.setup_reading), color = TextSecondary)
-        state.writing -> Text(stringResource(R.string.setup_writing), color = TextSecondary)
+        state.reading -> Text(stringResource(R.string.setup_reading), color = FgMuted)
+        state.writing -> Text(stringResource(R.string.setup_writing), color = FgMuted)
         state.board != null -> OutlinedButton(onClick = actions::refresh) {
             Text(stringResource(R.string.setup_refresh))
         }
@@ -204,12 +208,13 @@ private fun FrameBad() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .border(2.dp, AccentRed, RoundedCornerShape(8.dp))
+            .border(2.dp, Warning, RoundedCornerShape(8.dp))
             .padding(12.dp)
             .testTag(SETUP_FRAME_BAD_TAG),
     ) {
         val type = MaterialTheme.typography
-        Text(stringResource(R.string.setup_frame_incomplete_title), style = type.titleMedium, color = AccentRed)
-        Text(stringResource(R.string.setup_frame_incomplete_body), style = type.bodyMedium, color = TextPrimary)
+        WarningText(stringResource(R.string.setup_frame_incomplete_title), style = type.titleMedium)
+
+        Text(stringResource(R.string.setup_frame_incomplete_body), style = type.bodyMedium, color = Fg)
     }
 }
