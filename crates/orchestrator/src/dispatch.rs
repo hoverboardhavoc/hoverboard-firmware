@@ -51,7 +51,7 @@ pub const UP_AXIS: usize = 2;
 /// lives here, its canonical row, defaulted benign; tests and later producers write it).
 pub struct ControlCtl {
     /// The mode dispatch (boot seam: `CONTROL_MODE` + `CONTROL_FRAME` bytes + `imu_configured` +
-    /// `CONTROL_RIDER_REQUIRED` byte + `CONTROL_BATTERY_FLOOR` word; the four stored ones are
+    /// `CONTROL_RIDER_REQUIRED` byte + `BOARD_BATTERY_FLOOR` word; the four stored ones are
     /// re-read at every arm through [`re_apply_control_values`]).
     pub dispatch: ControlDispatch,
     /// The throttle conditioning constants (EFeru defaults; a tunable surface).
@@ -207,7 +207,7 @@ pub struct BlockWords {
     /// The board's EFFECTIVE battery word, centivolts, **0 = UNKNOWN** (stock CB+0x20;
     /// `specs/sensing-and-safety.md`, "The battery word"). Writer: the 250 Hz tick's source rule
     /// ([`crate::battery::battery_source`]: the local filtered sense where the plan carries
-    /// `board.vbatt`, else a fresh peer's nonzero cyclic word, else 0). Readers: the balance law's
+    /// `board.battery.pin`, else a fresh peer's nonzero cyclic word, else 0). Readers: the balance law's
     /// `scale` while its word is a duty ([`law_scale`]), the balance engage gate in every method,
     /// and the cyclic/telemetry payload.
     pub battery: i16,
@@ -550,7 +550,7 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         },
         rider_present: rider,
         // An UNKNOWN battery word blocks engage (the law would run at zero output), and so does a
-        // word under the low-battery floor (`CONTROL_BATTERY_FLOOR`); engage only, never a
+        // word under the low-battery floor (`BOARD_BATTERY_FLOOR`); engage only, never a
         // disengage. The MEASURED word in every method: in torque mode the law no longer divides
         // by it, but an empty pack is still an empty pack.
         battery_ok: state.ctl.dispatch.battery_ok(state.block.battery),

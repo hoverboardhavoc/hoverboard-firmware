@@ -1516,9 +1516,10 @@ class RustSourceDriftTest {
         ).associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "$name discriminant") }
 
     /**
-     * The two vocabularies the firmware writes down only in a field's doc comment, because no code
+     * The vocabularies the firmware writes down only in a field's doc comment, because no code
      * on a board decodes them: [Fields.MachineDriveMode] (`MACHINE_DRIVE_MODE`, which the firmware
-     * stores and never reads) and [Fields.NodeClass] (`NODE_CLASS`, a registry default). The doc is
+     * stores and never reads), [Fields.BatteryChemistry] (`BOARD_BATTERY_CHEMISTRY`, likewise) and
+     * [Fields.NodeClass] (`NODE_CLASS`, a registry default). The doc is
      * the Rust's one statement of what each byte means, so it is what the mirror is pinned to, as an
      * exact set: a mode or class the Rust adds or renumbers fails here before the app writes or
      * reads the wrong byte.
@@ -1553,6 +1554,22 @@ class RustSourceDriftTest {
         assertTrue(
             Fields.MACHINE_DRIVE_MODE.id !in Fields.ARM_TIME,
             "the firmware never reads MACHINE_DRIVE_MODE, so it cannot be in the arm-time row",
+        )
+        val chemistries = Regex("""`(\d+)`\s*=\s*([a-z0-9_]+)""").findAll(docOf("BOARD_BATTERY_CHEMISTRY"))
+            .associate { it.groupValues[2] to it.groupValues[1].toInt() }
+        assertEquals(
+            mapOf(
+                "li_ion" to Fields.BatteryChemistry.LI_ION,
+                "lev50" to Fields.BatteryChemistry.LEV50,
+                "lto" to Fields.BatteryChemistry.LTO,
+            ),
+            chemistries,
+            "BOARD_BATTERY_CHEMISTRY vocabulary drifted",
+        )
+        assertEquals(Value.U8(Fields.BatteryChemistry.LI_ION), Fields.BOARD_BATTERY_CHEMISTRY.default)
+        assertTrue(
+            Fields.BOARD_BATTERY_CHEMISTRY.id !in Fields.ARM_TIME,
+            "the firmware never reads BOARD_BATTERY_CHEMISTRY, so it cannot be in the arm-time row",
         )
         val classes = Regex("""`0x(\p{XDigit}+)`\s*=\s*(motor controller|bridge)""").findAll(docOf("NODE_CLASS"))
             .associate { it.groupValues[2] to it.groupValues[1].toInt(16) }
@@ -1718,8 +1735,8 @@ class RustSourceDriftTest {
         assertEquals(cal("SLOPE_MIN")..cal("SLOPE_MAX"), Fields.VBATT_SLOPE, "the vbatt slope clamp drifted")
         assertEquals(cal("OFFSET_MIN")..cal("OFFSET_MAX"), Fields.VBATT_OFFSET, "the vbatt offset clamp drifted")
         for ((i, range) in listOf(Fields.VBATT_SLOPE, Fields.VBATT_OFFSET).withIndex()) {
-            val d = (Fields.BOARD_VBATT_CAL.defaults[i] as Value.I16).v.toLong()
-            assertTrue(d in range, "BOARD_VBATT_CAL default $i is outside its clamp")
+            val d = (Fields.BOARD_BATTERY_CAL.defaults[i] as Value.I16).v.toLong()
+            assertTrue(d in range, "BOARD_BATTERY_CAL default $i is outside its clamp")
         }
 
         // CONTROL_RIDER_REQUIRED's decode: 0 is the only byte that waives the rider. The rule has
@@ -1746,11 +1763,11 @@ class RustSourceDriftTest {
         assertEquals(0, Fields.RiderRequired.NOT_REQUIRED)
         assertEquals(Value.U8(Fields.RiderRequired.REQUIRED), Fields.CONTROL_RIDER_REQUIRED.default)
 
-        // CONTROL_BATTERY_FLOOR's decode: known AND (no floor at `<= 0`, else at or above it).
+        // BOARD_BATTERY_FLOOR's decode: known AND (no floor at `<= 0`, else at or above it).
         assertTrue(
             Regex("""battery\s*!=\s*0\s*&&\s*\(self\.battery_floor\s*<=\s*0\s*\|\|\s*battery\s*>=\s*self\.battery_floor\)""")
                 .containsMatchIn(rust("crates/control/src/mode.rs")),
-            "ControlDispatch::battery_ok no longer reads `<= 0` as no floor: review Fields.CONTROL_BATTERY_FLOOR and its Setup hint",
+            "ControlDispatch::battery_ok no longer reads `<= 0` as no floor: review Fields.BOARD_BATTERY_FLOOR and its Setup hint",
         )
     }
 

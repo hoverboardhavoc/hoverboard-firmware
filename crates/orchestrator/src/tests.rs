@@ -32,7 +32,7 @@ fn fresh() -> OrchestratorState {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     )
 }
@@ -60,7 +60,7 @@ fn balance_board(gains: control::GainShadow) -> OrchestratorState {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -1012,7 +1012,7 @@ fn configured_to_run() -> OrchestratorState {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -1040,7 +1040,7 @@ fn imu_board(configured: bool, staged: bool) -> OrchestratorState {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     )
 }
@@ -1086,7 +1086,7 @@ fn imu_live_tracks_read_success() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
 
@@ -1133,7 +1133,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     let good = good_sample();
@@ -1213,7 +1213,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     let good = good_sample();
@@ -1298,7 +1298,7 @@ fn unconfigured_board_never_loses_imu() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -1464,7 +1464,7 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -1558,7 +1558,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -1775,7 +1775,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     let obs = s.obs();
@@ -1795,7 +1795,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, 1);
@@ -1814,7 +1814,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     assert_eq!(s.obs().control_mode, 0);
@@ -1895,7 +1895,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -1985,7 +1985,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -2181,7 +2181,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     hold_power(&mut s);
@@ -2199,7 +2199,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         0,
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         store::CONTROL_POS_CLAMP.default(),
     );
     assert_eq!(s.obs().control_mode, 1, "the mode installed");
@@ -2295,7 +2295,7 @@ fn the_active_controller_can_change_between_two_arms() {
         0,
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         store::CONTROL_POS_CLAMP.default(),
     );
     assert_eq!(s.obs().control_mode, 0, "Throttle from this arm on");
@@ -2355,7 +2355,7 @@ fn the_active_controller_can_change_between_two_arms() {
         0,
         0,
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         store::CONTROL_POS_CLAMP.default(),
     );
     assert_eq!(s.obs().control_mode, 1, "Balance again");
@@ -2479,7 +2479,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -2523,7 +2523,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -2896,7 +2896,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     input_task(&mut s, &pads_on_button_held());
@@ -2938,7 +2938,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -2971,7 +2971,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     back.vbatt_raw = BENCH_CV;
@@ -3559,7 +3559,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     let one_rad = imu::Sample {
@@ -3609,7 +3609,7 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     for count in [i16::MAX, i16::MIN] {
@@ -3630,8 +3630,8 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
 fn vbatt_conversion_at_the_four_calibration_points() {
     use battery::VbattCal;
     let cal = VbattCal::new(
-        store::BOARD_VBATT_CAL.at(0).default(),
-        store::BOARD_VBATT_CAL.at(1).default(),
+        store::BOARD_BATTERY_CAL.at(0).default(),
+        store::BOARD_BATTERY_CAL.at(1).default(),
     );
     assert_eq!((cal.slope(), cal.offset()), (25200, -5));
     // (counts, measured rail centivolts, the conversion's exact output)
@@ -3747,8 +3747,8 @@ fn battery_source_rule_three_cases() {
 #[test]
 fn a_sensing_master_ignores_its_slaves_word() {
     let cal = battery::VbattCal::new(
-        store::BOARD_VBATT_CAL.at(0).default(),
-        store::BOARD_VBATT_CAL.at(1).default(),
+        store::BOARD_BATTERY_CAL.at(0).default(),
+        store::BOARD_BATTERY_CAL.at(1).default(),
     );
     let mut m = OrchestratorState::new(
         0,
@@ -3762,7 +3762,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     m.vbatt_raw = 995;
@@ -3799,7 +3799,7 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     for k in 0..40 {
@@ -3855,7 +3855,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     input_task(&mut s, &pads_on_button_held());
@@ -3891,7 +3891,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     for _ in 0..200 {
@@ -3929,7 +3929,7 @@ fn an_arm_time_mode_change_resets_the_law_and_an_unchanged_mode_does_not() {
             0,
             0,
             store::CONTROL_RIDER_REQUIRED.default(),
-            store::CONTROL_BATTERY_FLOOR.default(),
+            store::BOARD_BATTERY_FLOOR.default(),
             store::CONTROL_POS_CLAMP.default(),
         )
     };
@@ -3951,16 +3951,12 @@ fn an_arm_time_mode_change_resets_the_law_and_an_unchanged_mode_does_not() {
 
 /// A balance board (CONTROL_MODE = 1, IMU configured) whose `CONTROL_RIDER_REQUIRED` byte is
 /// `rider_required`, reading a known battery word where `vbatt` senses, at the default
-/// `CONTROL_BATTERY_FLOOR`.
+/// `BOARD_BATTERY_FLOOR`.
 fn rider_board(rider_required: u8, vbatt: Option<battery::VbattCal>) -> OrchestratorState {
-    policy_board(
-        rider_required,
-        store::CONTROL_BATTERY_FLOOR.default(),
-        vbatt,
-    )
+    policy_board(rider_required, store::BOARD_BATTERY_FLOOR.default(), vbatt)
 }
 
-/// [`rider_board`] with the `CONTROL_BATTERY_FLOOR` word given.
+/// [`rider_board`] with the `BOARD_BATTERY_FLOOR` word given.
 fn policy_board(
     rider_required: u8,
     battery_floor: i16,
@@ -4026,7 +4022,7 @@ fn the_rider_requirement_reaches_the_dispatch_through_the_constructor() {
             0,
             0,
             0,
-            store::CONTROL_BATTERY_FLOOR.default(),
+            store::BOARD_BATTERY_FLOOR.default(),
             store::CONTROL_POS_CLAMP.default(),
         );
     }
@@ -4338,7 +4334,7 @@ fn throttle_engagement_is_identical_at_either_rider_requirement() {
             store::CONTROL_POS_CLAMP.default(),
             control::DriveTurn::default(),
             byte,
-            store::CONTROL_BATTERY_FLOOR.default(),
+            store::BOARD_BATTERY_FLOOR.default(),
             TEST_IDENTITY,
         )
     };
@@ -4404,7 +4400,7 @@ fn engage_attempt_as(floor: i16, word: u16, torque_is_current: bool) -> Orchestr
 
 #[test]
 fn the_battery_floor_reaches_the_dispatch_through_the_constructor() {
-    assert_eq!(store::CONTROL_BATTERY_FLOOR.default(), 2400);
+    assert_eq!(store::BOARD_BATTERY_FLOOR.default(), 2400);
     let s = policy_board(1, 2400, sensing());
     assert!(!s.ctl.dispatch.battery_ok(2399));
     assert!(s.ctl.dispatch.battery_ok(2400));
@@ -4412,7 +4408,7 @@ fn the_battery_floor_reaches_the_dispatch_through_the_constructor() {
 
 #[test]
 fn the_default_floor_refuses_a_balance_engage_at_2399_and_takes_it_at_2400() {
-    let floor = store::CONTROL_BATTERY_FLOOR.default();
+    let floor = store::BOARD_BATTERY_FLOOR.default();
     let under = engage_attempt(floor, 2399);
     assert_eq!(under.ctl.fsm.sub_state as u8, 0, "2399 cV: no engage");
     assert_eq!(under.obs().torque_setpoint, 0);
@@ -4436,7 +4432,7 @@ fn a_zero_or_negative_floor_engages_at_any_known_word() {
 #[test]
 fn a_run_started_above_the_floor_is_not_ended_by_the_word_falling_under_it() {
     let level = level_sample_at(8192);
-    let mut s = engage_attempt(store::CONTROL_BATTERY_FLOOR.default(), BENCH_CV);
+    let mut s = engage_attempt(store::BOARD_BATTERY_FLOOR.default(), BENCH_CV);
     assert_eq!(s.ctl.fsm.sub_state as u8, 3, "RUN above the floor");
     // Sag: the counts fall to 1000 cV; the filter walks the word down under the floor.
     s.vbatt_raw = 1000;
@@ -4509,7 +4505,7 @@ fn torque_mode_board(vbatt: Option<u16>, torque_is_current: bool) -> Orchestrato
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = vbatt.unwrap_or(0);
@@ -4562,12 +4558,12 @@ fn torque_mode_pins_the_law_at_the_nominal_pack_whatever_the_battery_word() {
     }
 }
 
-/// The engage floor gate (`CONTROL_BATTERY_FLOOR`) reads the MEASURED battery word in torque mode
+/// The engage floor gate (`BOARD_BATTERY_FLOOR`) reads the MEASURED battery word in torque mode
 /// exactly as it does otherwise: 2399 cV refuses, 2400 engages, and an UNKNOWN word refuses, with
 /// the flag set or clear, although the law's divisor no longer moves with the word.
 #[test]
 fn the_engage_floor_reads_the_battery_word_in_torque_mode_too() {
-    let floor = store::CONTROL_BATTERY_FLOOR.default();
+    let floor = store::BOARD_BATTERY_FLOOR.default();
     for torque_is_current in [false, true] {
         let under = engage_attempt_as(floor, 2399, torque_is_current);
         assert_eq!(
@@ -4618,7 +4614,7 @@ fn rigid_board(imu: bool) -> OrchestratorState {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         0,
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -5210,7 +5206,7 @@ fn turning_leader(side_right: bool, turn: control::DriveTurn) -> OrchestratorSta
         store::CONTROL_POS_CLAMP.default(),
         turn,
         0,
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -5403,7 +5399,7 @@ fn the_side_owns_role_right_at_boot_and_at_the_arm() {
             store::CONTROL_FRAME.default(),
             byte,
             store::CONTROL_RIDER_REQUIRED.default(),
-            store::CONTROL_BATTERY_FLOOR.default(),
+            store::BOARD_BATTERY_FLOOR.default(),
             store::CONTROL_POS_CLAMP.default(),
         );
         assert_eq!(s.block.role_right, right, "side byte {byte}");
@@ -5435,7 +5431,7 @@ fn the_turn_carry_resets_with_the_engagement_machine() {
         store::CONTROL_FRAME.default(),
         1,
         0,
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         store::CONTROL_POS_CLAMP.default(),
     );
     assert_eq!(l.obs().control_mode, control::Producer::Throttle as u8);
@@ -5882,7 +5878,7 @@ fn sf_run_board(side: u8, gains: control::GainShadow) -> OrchestratorState {
         store::CONTROL_POS_CLAMP.default(),
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     s.vbatt_raw = BENCH_CV;
@@ -6186,7 +6182,7 @@ fn the_position_clamp_goes_through_its_seam_at_boot_and_at_the_arm() {
         900,
         control::DriveTurn::default(),
         store::CONTROL_RIDER_REQUIRED.default(),
-        store::CONTROL_BATTERY_FLOOR.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
     );
     assert_eq!(s.ctl.pos_clamp, control::sf::POS_CLAMP_MAX);
@@ -6198,7 +6194,7 @@ fn the_position_clamp_goes_through_its_seam_at_boot_and_at_the_arm() {
             0,
             0,
             store::CONTROL_RIDER_REQUIRED.default(),
-            store::CONTROL_BATTERY_FLOOR.default(),
+            store::BOARD_BATTERY_FLOOR.default(),
             stored,
         );
         assert_eq!(s.ctl.pos_clamp, want, "stored {stored}");

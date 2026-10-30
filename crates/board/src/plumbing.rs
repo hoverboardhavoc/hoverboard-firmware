@@ -33,7 +33,7 @@ pub fn read_fields<F: Flash>(s: &Store<F>) -> BoardFields {
     };
     BoardFields {
         self_hold: s.get(store::BOARD_SELF_HOLD),
-        vbatt: s.get(store::BOARD_VBATT),
+        vbatt: s.get(store::BOARD_BATTERY_PIN),
         buzzer: s.get(store::BOARD_BUZZER),
         led_green: s.get(store::LED_GREEN),
         led_orange: s.get(store::LED_ORANGE),
@@ -162,7 +162,7 @@ pub struct BoardObs {
 fn field_id(f: BoardField) -> u8 {
     match f {
         BoardField::SelfHold => store::BOARD_SELF_HOLD.id(),
-        BoardField::Vbatt => store::BOARD_VBATT.id(),
+        BoardField::Vbatt => store::BOARD_BATTERY_PIN.id(),
         BoardField::Buzzer => store::BOARD_BUZZER.id(),
         BoardField::LedGreen => store::LED_GREEN.id(),
         BoardField::LedOrange => store::LED_ORANGE.id(),

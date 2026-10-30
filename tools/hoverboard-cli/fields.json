@@ -90,7 +90,7 @@
   },
   {
     "id": 36,
-    "path": "control.battery_floor",
+    "path": "board.battery.floor",
     "type": "i16",
     "index": "single",
     "count": 1,
@@ -148,7 +148,7 @@
   },
   {
     "id": 65,
-    "path": "board.vbatt",
+    "path": "board.battery.pin",
     "type": "u8",
     "index": "single",
     "count": 1,
@@ -461,7 +461,7 @@
   },
   {
     "id": 105,
-    "path": "board.vbatt_cal",
+    "path": "board.battery.cal",
     "type": "i16",
     "index": "array",
     "count": 2,
@@ -471,11 +471,26 @@
   },
   {
     "id": 106,
-    "path": "board.pack_cells",
+    "path": "board.battery.cells",
     "type": "u8",
     "index": "single",
     "count": 1,
     "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 127,
+    "path": "board.battery.chemistry",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "enum",
+    "labels": {
+      "li_ion": 0,
+      "lev50": 1,
+      "lto": 2
+    },
     "board_owned": false,
     "read_only": false
   },

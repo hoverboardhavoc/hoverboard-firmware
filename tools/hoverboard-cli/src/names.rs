@@ -45,7 +45,7 @@ pub fn row_of(key: Key) -> Option<&'static FieldName> {
     by_id(key.field_id)
 }
 
-/// The path `key` prints as: `control.mode`, `board.vbatt_cal[1]`, `motors[0].hall.a`, or the raw
+/// The path `key` prints as: `control.mode`, `board.battery.cal[1]`, `motors[0].hall.a`, or the raw
 /// `0x99.0` for an id the table does not name. A single field at an index past its one prints with
 /// the index, so a forced write names what it wrote.
 pub fn path_of(key: Key) -> String {
@@ -130,7 +130,7 @@ pub fn write_checks(key: Key) -> Vec<Problem> {
 }
 
 /// A command-line path (`specs/cli-config.md` section 2.1): `motors.1.hall.a`,
-/// `board.vbatt_cal.0`, `control.mode`, or the raw `0x4A.1` / `0x22`. The form a path prints as
+/// `board.battery.cal.0`, `control.mode`, or the raw `0x4A.1` / `0x22`. The form a path prints as
 /// (`motors[1].hall.a`) is taken too. The key, with [`key_checks`]'s problems; `Err` when the path
 /// names no key.
 pub fn parse_path(s: &str) -> Result<(Key, Vec<Problem>), Problem> {
@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn the_spec_paths_name_their_keys() {
         assert_eq!(parse_path("motors.1.hall.a").unwrap().0, k(0x4A, 1));
-        assert_eq!(parse_path("board.vbatt_cal.0").unwrap().0, k(0x69, 0));
+        assert_eq!(parse_path("board.battery.cal.0").unwrap().0, k(0x69, 0));
         assert_eq!(parse_path("control.mode").unwrap().0, k(0x22, 0));
         assert_eq!(parse_path("0x4A.1").unwrap().0, k(0x4A, 1));
         assert_eq!(parse_path("0x22").unwrap().0, k(0x22, 0));
@@ -581,8 +581,8 @@ mod tests {
             "hall.a is per motor (motors.<n>.hall.a)"
         );
         assert_eq!(
-            parse_path("board.vbatt_cal").unwrap_err().msg,
-            "board.vbatt_cal has 2 indices (board.vbatt_cal.<index>)"
+            parse_path("board.battery.cal").unwrap_err().msg,
+            "board.battery.cal has 2 indices (board.battery.cal.<index>)"
         );
     }
 
@@ -597,10 +597,10 @@ mod tests {
             )]
         );
         assert!(p[0].stops(false) && !p[0].stops(true));
-        let (_, p) = parse_path("board.vbatt_cal.2").unwrap();
+        let (_, p) = parse_path("board.battery.cal.2").unwrap();
         assert_eq!(
             p[0].msg,
-            "board.vbatt_cal has 2 indices (--force writes index 2 anyway)"
+            "board.battery.cal has 2 indices (--force writes index 2 anyway)"
         );
         let (_, p) = parse_path("motors.2.hall.a").unwrap();
         assert_eq!(
@@ -718,11 +718,11 @@ mod tests {
         );
         assert_eq!(
             stop(k(0x24, 0), json!("low")),
-            "control.battery_floor: an integer, not \"low\""
+            "board.battery.floor: an integer, not \"low\""
         );
         assert_eq!(
             stop(k(0x24, 0), json!(40000)),
-            "control.battery_floor: 40000 is outside I16 (-32768..32767)"
+            "board.battery.floor: 40000 is outside I16 (-32768..32767)"
         );
         assert_eq!(
             stop(k(0x6C, 0), json!(["button", "pad_c"])),

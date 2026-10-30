@@ -289,7 +289,7 @@ relay.
   commanded lean converted into shaper `off` units through the live `kp`, so the commanded lean is
   gain-invariant. Built 2026-10-08.
 - **`CONTROL_RIDER_REQUIRED`** (id 0x23, default rider-required), `specs/control.md` (i), which is
-  what lets a padless rover engage at all. **`CONTROL_BATTERY_FLOOR`** (id 0x24) and the battery
+  what lets a padless rover engage at all. **`BOARD_BATTERY_FLOOR`** (id 0x24) and the battery
   word (`specs/sensing-and-safety.md`).
 - **`CYCLIC_STATE`** (opcode 0x10), the peer state mirror, emitted by BOTH boards from one builder
   (`dispatch.rs::cyclic_state`) every second control pass, so **125 Hz, an 8 ms nominal period**, on

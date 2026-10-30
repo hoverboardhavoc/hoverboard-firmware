@@ -204,13 +204,13 @@ SYMBOLIC_TOKENS = [
 GATE_COLOUR_FOR_PHASE = {"a": "Y", "b": "B", "c": "G"}
 
 # --------------------------------------------------------------------------------------------------
-# DECISION 2: ADC_BATTERY_VOLT to board.vbatt_cal
+# DECISION 2: ADC_BATTERY_VOLT to board.battery.cal
 # --------------------------------------------------------------------------------------------------
 
 #: The conversion, done once and recorded here.
 #:
 #: His `ADC_BATTERY_VOLT` is VOLTS PER ADC COUNT at the pack: 0.02507 on the bench layout, a divider
-#: of about 30 against a 3.3 V reference over a 12-bit converter. Ours is `board.vbatt_cal`
+#: of about 30 against a 3.3 V reference over a 12-bit converter. Ours is `board.battery.cal`
 #: (id 0x69, `specs/sensing-and-safety.md`, "The battery word"): index 0 is the slope in MICROVOLTS
 #: PER COUNT and index 1 an offset in CENTIVOLTS, read as
 #: `centivolts = raw12 * slope / 10_000 + offset`.
@@ -242,7 +242,7 @@ I16_MAX = 32767
 
 
 def vbatt_cal_slope(volts_per_count):
-    """The `board.vbatt_cal` index-0 slope, microvolts per count, for his volts-per-count figure."""
+    """The `board.battery.cal` index-0 slope, microvolts per count, for his volts-per-count figure."""
     return int(round(volts_per_count * VBATT_CAL_SLOPE_PER_VOLT))
 
 
@@ -319,7 +319,7 @@ def dead_time_dtg(his_ticks):
 #: (`protocol-kotlin/.../LayoutPresets.kt`, `LayoutPreset.applyTo`).
 FIELDS = [
     {"id": 0x40, "key": "board.self_hold", "kind": "pin", "frm": "SELF_HOLD"},
-    {"id": 0x41, "key": "board.vbatt", "kind": "pin", "frm": "VBATT"},
+    {"id": 0x41, "key": "board.battery.pin", "kind": "pin", "frm": "VBATT"},
     {"id": 0x42, "key": "board.buzzer", "kind": "pin", "frm": "BUZZER"},
     {"id": 0x43, "key": "led.green", "kind": "pin", "frm": "LED_GREEN"},
     {"id": 0x44, "key": "led.orange", "kind": "pin", "frm": "LED_ORANGE"},
@@ -343,11 +343,11 @@ FIELDS = [
     {"id": 0x60, "key": "imu.model", "kind": "decision3"},
     {"id": 0x64, "key": "gate.dead_time", "kind": "dead_time", "frm": "DEAD_TIME", "motor": 0},
     {"id": 0x66, "key": "current.sense", "kind": "current_sense", "motor": 0},
-    {"id": 0x69, "key": "board.vbatt_cal", "kind": "vbatt_cal", "frm": "ADC_BATTERY_VOLT"},
+    {"id": 0x69, "key": "board.battery.cal", "kind": "vbatt_cal", "frm": "ADC_BATTERY_VOLT"},
 ]
 
 #: The one field above the board validator does not judge, so it is not sent to the verdict oracle:
-#: `board.vbatt_cal` is a calibration the sensing producer owns, not a layout slot
+#: `board.battery.cal` is a calibration the sensing producer owns, not a layout slot
 #: (`protocol-kotlin/.../LayoutSlots.kt`, `Layout`).
 NOT_VALIDATED = {VBATT_CAL_FIELD}
 
@@ -824,7 +824,7 @@ def field_entries(values, notes, layout_defines):
             slope = vbatt_cal_slope(float(raw))
             if abs(slope) > I16_MAX:
                 notes.append(
-                    "board.vbatt_cal slope %d does not fit the i16 the field holds, so his "
+                    "board.battery.cal slope %d does not fit the i16 the field holds, so his "
                     "ADC_BATTERY_VOLT %s is carried unconverted in the notes only." % (slope, raw)
                 )
                 absent.append(
@@ -840,7 +840,7 @@ def field_entries(values, notes, layout_defines):
                     note=(
                         "his %s volts per ADC count x 1e6 = microvolts per count, the unit index 0 "
                         "holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave "
-                        "preset drops board.vbatt and this calibration both." % raw
+                        "preset drops board.battery.pin and this calibration both." % raw
                     ),
                 )
             )
@@ -882,7 +882,7 @@ def layout_notes(values, target):
     """The notes every preset for this layout carries, beyond the per-field ones."""
     notes = [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops "
-        "board.vbatt and board.vbatt_cal (battery sense is master-only on this hardware; the slave "
+        "board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave "
         "takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for "
         "imu.scl, imu.sda and imu.model.",
@@ -1335,10 +1335,10 @@ def decision_record():
             ),
         },
         {
-            "decision": "ADC_BATTERY_VOLT to board.vbatt_cal",
+            "decision": "ADC_BATTERY_VOLT to board.battery.cal",
             "settled": "slope_uV_per_count = round(ADC_BATTERY_VOLT * 1e6); offset = 0",
             "oracle": (
-                "his figure is volts per ADC count; index 0 of board.vbatt_cal is microvolts per "
+                "his figure is volts per ADC count; index 0 of board.battery.cal is microvolts per "
                 "count and the formula's /10_000 returns centivolts. 0.02507 becomes 25070 against "
                 "the registry default 25200 from the bench four-point fit, 0.5% apart"
             ),

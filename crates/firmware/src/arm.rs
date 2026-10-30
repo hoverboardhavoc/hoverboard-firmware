@@ -284,7 +284,7 @@ pub struct ArmValues {
     pub imu_roles: [u8; 2],
     /// `store::CONTROL_RIDER_REQUIRED` (0x23), raw: the owning type decodes it.
     pub rider_required_byte: u8,
-    /// `store::CONTROL_BATTERY_FLOOR` (0x24), centivolts, `<= 0` = no floor.
+    /// `store::BOARD_BATTERY_FLOOR` (0x24), centivolts, `<= 0` = no floor.
     pub battery_floor: i16,
     /// `store::CONTROL_GAIN_MAX` (0x7A), indices 0..3 = the per-gain inclusive upper bounds of
     /// `[gp, gr, gx, gv]`.
@@ -335,7 +335,7 @@ const ARM_ROW: [store::Key; 25] = [
     store::IMU_AXIS_ROLE.at(0).key(),
     store::IMU_AXIS_ROLE.at(1).key(),
     store::CONTROL_RIDER_REQUIRED.key(),
-    store::CONTROL_BATTERY_FLOOR.key(),
+    store::BOARD_BATTERY_FLOOR.key(),
     store::CONTROL_GAIN_MAX.at(0).key(),
     store::CONTROL_GAIN_MAX.at(1).key(),
     store::CONTROL_GAIN_MAX.at(2).key(),
@@ -370,7 +370,7 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             store::IMU_AXIS_ROLE.at(1).default(),
         ],
         rider_required_byte: store::CONTROL_RIDER_REQUIRED.default(),
-        battery_floor: store::CONTROL_BATTERY_FLOOR.default(),
+        battery_floor: store::BOARD_BATTERY_FLOOR.default(),
         gain_max: [
             store::CONTROL_GAIN_MAX.at(0).default(),
             store::CONTROL_GAIN_MAX.at(1).default(),
@@ -405,8 +405,8 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             v.current_cal = store::scalar_or_default(store::MOTOR_CURRENT_CAL.at(0), tag, b);
         } else if k == store::CONTROL_RIDER_REQUIRED.key() {
             v.rider_required_byte = store::scalar_or_default(store::CONTROL_RIDER_REQUIRED, tag, b);
-        } else if k == store::CONTROL_BATTERY_FLOOR.key() {
-            v.battery_floor = store::scalar_or_default(store::CONTROL_BATTERY_FLOOR, tag, b);
+        } else if k == store::BOARD_BATTERY_FLOOR.key() {
+            v.battery_floor = store::scalar_or_default(store::BOARD_BATTERY_FLOOR, tag, b);
         } else if k == store::CONTROL_POS_CLAMP.key() {
             v.pos_clamp = store::scalar_or_default(store::CONTROL_POS_CLAMP, tag, b);
         } else if k.field_id == store::IMU_AXIS_SIGN.id() {
@@ -449,7 +449,7 @@ pub struct Rederived {
     pub side_byte: u8,
     /// `CONTROL_RIDER_REQUIRED` raw, for `control::ControlDispatch` to decode by its own rule.
     pub rider_required_byte: u8,
-    /// `CONTROL_BATTERY_FLOOR` as written (the dispatch takes the word, `<= 0` = no floor).
+    /// `BOARD_BATTERY_FLOOR` as written (the dispatch takes the word, `<= 0` = no floor).
     pub battery_floor: i16,
     /// The turn bound and rate, through `control::DriveTurn::new`'s seam clamp.
     pub drive_turn: control::DriveTurn,
@@ -1431,7 +1431,7 @@ mod tests {
             s.set(store::IMU_AXIS_ROLE.at(0), 1).unwrap();
             s.set(store::IMU_AXIS_ROLE.at(1), 3).unwrap();
             s.set(store::CONTROL_RIDER_REQUIRED, 0).unwrap();
-            s.set(store::CONTROL_BATTERY_FLOOR, 2_900).unwrap();
+            s.set(store::BOARD_BATTERY_FLOOR, 2_900).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(0), 1_234).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(1), 567).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(2), 89).unwrap();
@@ -1540,7 +1540,7 @@ mod tests {
         0x65, // IMU_AXIS_SIGN
         0x68, // IMU_AXIS_ROLE
         0x23, // CONTROL_RIDER_REQUIRED
-        0x24, // CONTROL_BATTERY_FLOOR
+        0x24, // BOARD_BATTERY_FLOOR
         0x7A, // CONTROL_GAIN_MAX
         0x75, // CONTROL_DRIVE_TURN
         0x7C, // CONTROL_POS_CLAMP
@@ -1564,7 +1564,7 @@ mod tests {
                 store::IMU_AXIS_SIGN.id(),
                 store::IMU_AXIS_ROLE.id(),
                 store::CONTROL_RIDER_REQUIRED.id(),
-                store::CONTROL_BATTERY_FLOOR.id(),
+                store::BOARD_BATTERY_FLOOR.id(),
                 store::CONTROL_GAIN_MAX.at(0).id(),
                 store::CONTROL_DRIVE_TURN.at(0).id(),
                 store::CONTROL_POS_CLAMP.id(),

@@ -85,7 +85,7 @@ attached node from what the walk reports, never from a convention, and `--dst` t
   stored per board. Do not "correct" a sign map from a single static reading without knowing the
   board's actual physical attitude, and note that a board mounted upside down for a bench session
   carries a sign map that is wrong the moment it is turned over.
-- **`board.vbatt` (0x41) is master-only.** The pin is fleet-uniform (PA4) but only a master senses
+- **`board.battery.pin` (0x41) is master-only.** The pin is fleet-uniform (PA4) but only a master senses
   the rail; a slave reads that pin as a stuck ~2.0 V and gets the battery over the link, so the
   field defaults ABSENT and a master is staged `0x04` once (`specs/sensing-and-safety.md`).
 - **`pad.a` (0x46) and `pad.b` (0x47) default ABSENT** as of 2026-10-23. The pins are fleet-uniform
