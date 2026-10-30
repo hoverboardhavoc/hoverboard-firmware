@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.CurrentReading
+import com.hoverboard.remote.model.FaultCause
 import com.hoverboard.remote.model.SpeedReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
@@ -48,6 +49,8 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  *   label, in address order. One row is a machine with one board in it; a board that is there and
  *   silent draws a row saying so.
  * @param speed the machine's speed ([com.hoverboard.remote.model.machineSpeed]), or what it lacks.
+ * @param board the label of the board [telemetry] came from ([com.hoverboard.remote.ui.screens.nodeLabel]),
+ *   which each fault line names.
  */
 @Composable
 fun TelemetryPanel(
@@ -57,6 +60,7 @@ fun TelemetryPanel(
     battery: BatteryReading,
     currents: List<Pair<String, CurrentReading>>,
     speed: SpeedReading,
+    board: String,
     modifier: Modifier = Modifier,
 ) {
     val shape = RoundedCornerShape(20.dp)
@@ -84,7 +88,7 @@ fun TelemetryPanel(
             return@Column
         }
 
-        StatusChips(telemetry)
+        StatusChips(telemetry, board)
         Spacer(modifier = Modifier.height(16.dp))
         BatterySection(battery)
         Spacer(modifier = Modifier.height(16.dp))
@@ -121,7 +125,7 @@ fun TelemetryPanel(
  * plainly what is not.
  */
 @Composable
-private fun StatusChips(telemetry: TelemetryUi) {
+private fun StatusChips(telemetry: TelemetryUi, board: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -134,12 +138,16 @@ private fun StatusChips(telemetry: TelemetryUi) {
         if (telemetry.lockdown) {
             Chip(text = stringResource(R.string.telemetry_chip_lockdown), color = AccentYellow)
         }
-        if (telemetry.anyFault) {
-            Chip(
-                text = stringResource(R.string.telemetry_chip_fault_level, telemetry.faultLevel),
-                color = AccentRed,
-            )
-        }
+    }
+    // One line per set cause, naming the board, so a fault says where it is and what it is
+    // (`specs/link-control.md`, `CYCLIC_STATE`).
+    for (cause in telemetry.faultCauses) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.telemetry_fault_cause, board, stringResource(cause.label())),
+            style = MaterialTheme.typography.labelMedium,
+            color = AccentRed,
+        )
     }
     if (!telemetry.anyFault) {
         Spacer(modifier = Modifier.height(8.dp))
@@ -149,6 +157,19 @@ private fun StatusChips(telemetry: TelemetryUi) {
             color = TextSecondary,
         )
     }
+}
+
+/** The string a [FaultCause] is named by. */
+private fun FaultCause.label(): Int = when (this) {
+    FaultCause.COMMS_LOSS -> R.string.fault_cause_comms_loss
+    FaultCause.TILT_STOP -> R.string.fault_cause_tilt_stop
+    FaultCause.IMU_LOSS -> R.string.fault_cause_imu_loss
+    FaultCause.LATCH_A -> R.string.fault_cause_latch_a
+    FaultCause.LATCH_B -> R.string.fault_cause_latch_b
+    FaultCause.MOTOR_HALL -> R.string.fault_cause_motor_hall
+    FaultCause.MOTOR_CAL -> R.string.fault_cause_motor_cal
+    FaultCause.MOTOR_PERIOD -> R.string.fault_cause_motor_period
+    FaultCause.MOTOR_ARM -> R.string.fault_cause_motor_arm
 }
 
 @Composable

@@ -19,8 +19,8 @@ import com.hoverboard.protocol.linkctl.CyclicState
  *  - `pitch` and `roll` are centidegrees.
  *  - `wheelRate` is the period-measured wheel rate, Q12 of one hall edge per 320-period window:
  *    see [wheelRateQ12]. The window count `wheelSpeed` beside it is not shown.
- *  - `fault` is the latched fault LEVEL, 0 = healthy. See [anyFault] for why a zero here is not
- *    evidence of a healthy board.
+ *  - `fault` is the board's own producer level mask, a `u16`; [faultCauses] names the set fault
+ *    bits. See [anyFault] for why an empty set is not evidence of a healthy board.
  *  - `flags` bit0 rider present, bit7 lockdown.
  *  - the appended `CyclicObs` block: the last 64-period current window (peak and mean, stock
  *    current counts), the on-duty that closed it, the boot counter's low byte, the part the
@@ -173,11 +173,11 @@ data class TelemetryUi(
     val hasState: Boolean get() = cyclic != null
 
     /**
-     * A fault-A producer asserted in the cyclic fault mask.
+     * A fault producer asserted in the cyclic fault mask: [faultCauses] is not empty.
      *
      * `orchestrator::dispatch::cyclic_state` puts the board's gating-producer level mask in
-     * `CYCLIC_STATE.fault` on every emission, and [faultLevel] is that mask with the two
-     * non-fault bits (the mode fault and the power request) removed.
+     * `CYCLIC_STATE.fault` on every emission, and [faultCauses] names its fault bits, leaving out
+     * the two that are not faults (the mode fault and the power request).
      *
      * The mask is the board's OWN producers (`orchestrator::events::Levels::own_mask`), so a
      * false here means "no producer is asserted on the board this app is attached to", not "the
@@ -185,15 +185,20 @@ data class TelemetryUi(
      * [com.hoverboard.remote.ui.components.TelemetryPanel].
      */
     val anyFault: Boolean
-        get() = faultLevel != 0
+        get() = faultCauses.isNotEmpty()
 
     /**
-     * The cyclic fault mask's FAULT-A bits (`CyclicState.FAULT_A_BITS`, mirroring the firmware's
-     * `events::FAULT_A_BITS`), 0 = no fault producer asserted. The mask also carries the mode
-     * fault and the power request, which are not faults and are masked out here so that an armed
-     * board does not light the chip by holding its own power request.
+     * Each fault bit set in the cyclic mask, in bit order (`specs/link-control.md`,
+     * `CYCLIC_STATE`): bits 0 to 2, 4, 5 and 8 to 11. The mask also carries the mode fault (bit 6)
+     * and the power request (bit 7), which are not faults and are left out so that an armed board
+     * does not light FAULT by holding its own power request. Bit 3 is retired and bits 12 to 15
+     * are unallocated; a board setting one is not named.
      */
-    val faultLevel: Int get() = (cyclic?.fault ?: 0) and CyclicState.FAULT_A_BITS
+    val faultCauses: List<FaultCause>
+        get() {
+            val mask = cyclic?.fault ?: 0
+            return FaultCause.entries.filter { mask and it.bit != 0 }
+        }
 
     /** Fold a freshly decoded [CyclicState] in. Latest-wins: the board sends one state, cyclically. */
     fun merge(state: CyclicState): TelemetryUi = copy(cyclic = state)
@@ -252,3 +257,20 @@ enum class BoardMode {
  */
 fun rigidLeader(boards: Collection<Int>, telemetry: Map<Int, TelemetryUi>): Int? =
     boards.filter { telemetry[it]?.leadsRigidFrame == true }.singleOrNull()
+
+/**
+ * One named fault bit of `CYCLIC_STATE.fault`, in bit order (`crates/orchestrator/src/events.rs`,
+ * `FAULT_A_BITS` and the bits beside it): comms loss, the tilt cutout, IMU loss, motor 0's latch,
+ * motor 1's latch (fault B) and the four motor-side causes.
+ */
+enum class FaultCause(val bit: Int) {
+    COMMS_LOSS(CyclicState.EV_COMMS_LOSS),
+    TILT_STOP(CyclicState.EV_STOP_ALL),
+    IMU_LOSS(CyclicState.EV_IMU_LOSS),
+    LATCH_A(CyclicState.EV_LATCH_A),
+    LATCH_B(CyclicState.EV_LATCH_B),
+    MOTOR_HALL(CyclicState.EV_MOTOR_HALL),
+    MOTOR_CAL(CyclicState.EV_MOTOR_CAL),
+    MOTOR_PERIOD(CyclicState.EV_MOTOR_PERIOD),
+    MOTOR_ARM(CyclicState.EV_MOTOR_ARM),
+}

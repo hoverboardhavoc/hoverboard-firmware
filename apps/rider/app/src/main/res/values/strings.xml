@@ -146,8 +146,17 @@
     <!-- The board's own state bits. RIDER is drawn lit or dim; the alarms only when they assert. -->
     <string name="telemetry_chip_rider">RIDER</string>
     <string name="telemetry_chip_lockdown">LOCKDOWN</string>
-    <!-- %1$d is the CYCLIC_STATE latched fault level. -->
-    <string name="telemetry_chip_fault_level">FAULT LEVEL %1$d</string>
+    <!-- One line per set fault bit of CYCLIC_STATE.fault: %1$s is the board's label, %2$s the cause. -->
+    <string name="telemetry_fault_cause">FAULT %1$s: %2$s</string>
+    <string name="fault_cause_comms_loss">peer link lost</string>
+    <string name="fault_cause_tilt_stop">stopped by the tilt cutout</string>
+    <string name="fault_cause_imu_loss">IMU lost</string>
+    <string name="fault_cause_latch_a">motor 0 fault latch</string>
+    <string name="fault_cause_latch_b">motor 1 fault latch</string>
+    <string name="fault_cause_motor_hall">hall sensor dwell</string>
+    <string name="fault_cause_motor_cal">current calibration refused</string>
+    <string name="fault_cause_motor_period">motor period lost</string>
+    <string name="fault_cause_motor_arm">arm aborted</string>
 
     <!-- Shown whenever no fault is asserting, so silence does not read as "healthy". The chip is
          drawn from CYCLIC_STATE.fault, which is the attached board's OWN producer mask
