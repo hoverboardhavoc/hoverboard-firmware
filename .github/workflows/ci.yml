@@ -657,7 +657,9 @@ jobs:
   # BlueZ over D-Bus, WinRT), the USB console through serialport, the Wi-Fi console over TCP. Linux
   # needs the D-Bus headers for btleplug. The explicit --target keeps the root .cargo/config.toml's
   # thumbv7m default out of a host build, as every other host job here does. The binaries are uploaded
-  # per platform and attached to a release on a tag beside the firmware images.
+  # per platform and attached to a release on a tag beside the firmware images, each named for its
+  # target triple (`hoverboard-cli-<triple>`, `.exe` on Windows): softprops/action-gh-release
+  # replaces an asset of the same name, so one shared name would leave one platform's binary.
   hoverboard-cli:
     name: hoverboard-cli (${{ matrix.os }})
     strategy:
@@ -666,13 +668,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            bin: hoverboard-cli
+            ext: ""
           - os: macos-latest
             target: aarch64-apple-darwin
-            bin: hoverboard-cli
+            ext: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            bin: hoverboard-cli.exe
+            ext: .exe
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -742,24 +744,30 @@ jobs:
           --manifest-path tools/hoverboard-cli/Cargo.toml
           --target ${{ matrix.target }}
 
+      - name: Name the binary for its target
+        run: |
+          mkdir -p tools/hoverboard-cli/target/dist
+          cp tools/hoverboard-cli/target/${{ matrix.target }}/release/hoverboard-cli${{ matrix.ext }} \
+            tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: hoverboard-cli-${{ matrix.target }}
-          path: hoverboard-firmware/tools/hoverboard-cli/target/${{ matrix.target }}/release/${{ matrix.bin }}
+          path: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
 
       - name: Attach to GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: hoverboard-firmware/tools/hoverboard-cli/target/${{ matrix.target }}/release/${{ matrix.bin }}
+          files: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
           # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
           # same text, so whichever job runs last leaves it.
           body: |
             The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
-            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli` is run; Windows
-            SmartScreen warns once. A download with `curl` is not quarantined.
+            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
+            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
 
             A release promises no compatibility with any other release: a CLI, app, bridge image and
             board image from different releases may not work together.
@@ -810,24 +818,31 @@ jobs:
           --target ${{ env.PI_TARGET }}
           --no-default-features
 
+      # Named for its target triple beside the other platforms' (the hoverboard-cli job says why).
+      - name: Name the binary for its target
+        run: |
+          mkdir -p tools/hoverboard-cli/target/dist
+          cp tools/hoverboard-cli/target/${{ env.PI_TARGET }}/release/hoverboard-cli \
+            tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: hoverboard-cli-arm-unknown-linux-gnueabihf
-          path: hoverboard-firmware/tools/hoverboard-cli/target/arm-unknown-linux-gnueabihf/release/hoverboard-cli
+          name: hoverboard-cli-${{ env.PI_TARGET }}
+          path: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
           if-no-files-found: error
 
       - name: Attach to GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: hoverboard-firmware/tools/hoverboard-cli/target/arm-unknown-linux-gnueabihf/release/hoverboard-cli
+          files: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
           # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
           # same text, so whichever job runs last leaves it.
           body: |
             The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
-            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli` is run; Windows
-            SmartScreen warns once. A download with `curl` is not quarantined.
+            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
+            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
 
             A release promises no compatibility with any other release: a CLI, app, bridge image and
             board image from different releases may not work together.
@@ -935,8 +950,8 @@ jobs:
           # same text, so whichever job runs last leaves it.
           body: |
             The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
-            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli` is run; Windows
-            SmartScreen warns once. A download with `curl` is not quarantined.
+            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
+            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
 
             A release promises no compatibility with any other release: a CLI, app, bridge image and
             board image from different releases may not work together.
