@@ -75,8 +75,8 @@ pub struct SfInputs {
     pub pitch_word: i16,
     /// `block.pitch_rate`, rad/s x 10000, negative forward.
     pub pitch_rate: i32,
-    /// `block.wheel_rate_q`, this board's wheel, 1/4096 count in the counter's sense.
-    pub wheel_rate_q: i32,
+    /// `block.wheel_rate_q12`, this board's wheel, 1/4096 count in the counter's sense.
+    pub wheel_rate_q12: i32,
     /// `block.wheel_pos`, this board's wheel, edges in the counter's sense, wrapping.
     pub wheel_pos: i32,
     /// The peer wheel's unwrapped position (`LinkInbox::peer_wheel_pos`), edges in the SENDER's
@@ -206,7 +206,7 @@ pub fn sf_step(cfg: &SfConfig, inp: &SfInputs, st: &mut SfState) -> i16 {
     st.own_prev = own;
     st.peer_prev = peer;
 
-    let v = wheel_forward(inp.wheel_rate_q, inp.role_right);
+    let v = wheel_forward(inp.wheel_rate_q12, inp.role_right);
     st.v_filt += (v - st.v_filt) / FILT_DIV;
 
     st.live = if inp.in_run {

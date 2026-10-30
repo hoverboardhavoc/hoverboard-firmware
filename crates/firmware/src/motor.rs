@@ -67,10 +67,10 @@ pub static SPEED: AtomicI32 = AtomicI32::new(0);
 /// count = one edge per 320-period window, [`SPEED`]'s unit), decaying as `1/t` between edges
 /// and 0 across a reversal. The outer speed loop's measurement; copied into the block beside the
 /// count, published as `CTRL_OBS` word 39. Written by the period ISR.
-pub static RATE_Q: AtomicI32 = AtomicI32::new(0);
+pub static WHEEL_RATE_Q12: AtomicI32 = AtomicI32::new(0);
 /// The wheel's SIGNED edge position (`specs/state-feedback.md` section 3): the commutator's
 /// `pos_edges`, +1 or -1 per counted hall edge in the counter's own sense, never cleared, wrapping.
-/// Copied into the block's `wheel_pos` by the 250 Hz shell beside [`RATE_Q`]; the cyclic carries
+/// Copied into the block's `wheel_pos` by the 250 Hz shell beside [`WHEEL_RATE_Q12`]; the cyclic carries
 /// its low 16 bits to the peer. Written by the period ISR.
 pub static POS_EDGES: AtomicI32 = AtomicI32::new(0);
 /// The free-running period counter: the liveness signal. Written by the period ISR.
@@ -2706,7 +2706,7 @@ pub mod hw {
         }
         ANGLE.store(comm.angle as u32, Ordering::Relaxed);
         SPEED.store(comm.speed, Ordering::Relaxed);
-        RATE_Q.store(comm.rate_q, Ordering::Relaxed);
+        WHEEL_RATE_Q12.store(comm.rate_q, Ordering::Relaxed);
         POS_EDGES.store(comm.pos_edges, Ordering::Relaxed);
         INVALID_DWELL.store(comm.invalid_dwell, Ordering::Relaxed);
         FAULT.store(m.faults, Ordering::Relaxed);

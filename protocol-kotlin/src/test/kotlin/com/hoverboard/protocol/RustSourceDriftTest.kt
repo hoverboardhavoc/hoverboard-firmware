@@ -833,7 +833,8 @@ class RustSourceDriftTest {
             ).groupValues[1],
         )
         assertEquals(encoded, CyclicState.ENCODED_LEN, "CyclicState::ENCODED_LEN drifted")
-        assertEquals(CyclicState.LEN + CyclicObs.LEN, CyclicState.ENCODED_LEN)
+        assertEquals(CyclicState.LEN + CyclicObs.LEN + 4, CyclicState.ENCODED_LEN)
+        assertEquals(CyclicState.LEN + CyclicObs.LEN, CyclicState.WHEEL_RATE_OFF)
     }
 
     /**
@@ -867,6 +868,7 @@ class RustSourceDriftTest {
             "i16" to 2,
             "u16" to 2,
             "u32" to 4,
+            "i32" to 4,
             "u8" to 1,
             "DriveKind" to 1,
             "ChipTag" to 1,
@@ -881,7 +883,7 @@ class RustSourceDriftTest {
             "CyclicState" to listOf(
                 "pitch" to "i16", "roll" to "i16", "wheelSpeed" to "i16", "battery" to "u16",
                 "mode" to "u8", "fault" to "u8", "flags" to "u8", "peerDemand" to "i16",
-                "wheelPos" to "i16", "obs" to "CyclicObs",
+                "wheelPos" to "i16", "obs" to "CyclicObs", "wheelRate" to "i32",
             ),
             "CyclicObs" to listOf(
                 "phasePeak" to "i16", "phaseMean" to "i16", "dutyOn" to "u16",

@@ -1026,7 +1026,7 @@ mod firmware {
         /// in word 1 is the fact to read beside it; it is in the same block and the same `mdw`, so
         /// it is not copied here.
         reset_cause: u32,
-        /// The period-based wheel rate (`specs/control.md` (o)): `motor::RATE_Q`, the reciprocal of
+        /// The period-based wheel rate (`specs/control.md` (o)): `motor::WHEEL_RATE_Q12`, the reciprocal of
         /// the periods between two same-direction hall edges in 1/4096 of a count, the
         /// state-feedback law's speed measurement. Appended LAST, offset-preserving, at word 39.
         /// The hand-spin gate reads it: smooth and sign-correct while the wheel turns, decaying to
@@ -1319,7 +1319,8 @@ mod firmware {
                     | ((o.pad_held as u32) << 16),
             );
             addr_of_mut!((*p).reset_cause).write_volatile(RESET_CAUSE.load(Ordering::Relaxed));
-            addr_of_mut!((*p).motor_rate_q).write_volatile(motor::RATE_Q.load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_rate_q)
+                .write_volatile(motor::WHEEL_RATE_Q12.load(Ordering::Relaxed));
             addr_of_mut!((*p).retired_40).write_volatile(0);
             addr_of_mut!((*p).mailbox_staged).write_volatile(staged.mailbox);
             addr_of_mut!((*p).wheel_pos_own).write_volatile(o.wheel_pos_own);
@@ -1459,7 +1460,7 @@ mod firmware {
         // The period-based rate beside it (`specs/control.md` (o)): the state-feedback law's speed
         // measurement, already in the law's own 1/4096-count unit, so there is nothing to narrow
         // and nothing to convert. One load, like the count's.
-        shell.orch.block.wheel_rate_q = motor::RATE_Q.load(Ordering::Relaxed);
+        shell.orch.block.wheel_rate_q12 = motor::WHEEL_RATE_Q12.load(Ordering::Relaxed);
         // The signed position beside it (`specs/state-feedback.md` section 3): the law folds it,
         // the cyclic carries its low half to the peer and the observation publishes it mirrored.
         // One load.
@@ -3441,7 +3442,7 @@ mod guest_tx {
         (word & !(0xFFFF << shift)) | (half << shift)
     }
 
-    /// The `CYCLIC_STATE` PDU the mailbox port carries, `[0x10][src][dst 0x00][27 B]`, encoded into
+    /// The `CYCLIC_STATE` PDU the mailbox port carries, `[0x10][src][dst 0x00][31 B]`, encoded into
     /// `pdu`; the encoded length, or `None` if `pdu` is too small. dst 0x00 by the point-to-point
     /// rule: the port carries exactly one peer (`specs/link-control.md`, "Addressing and emission").
     pub fn sample_pdu(src: u8, state: &CyclicState, pdu: &mut [u8]) -> Option<usize> {
@@ -3657,32 +3658,28 @@ mod guest_tx {
         }
 
         /// Ports and Counters: a full ring drops the sample, counts exactly one refused write, and
-        /// leaves the mailbox word where it was. A 28 B PDU is 33 B on the ring, so seven fit in
-        /// the 256 B ring with nothing draining it and the eighth is refused.
+        /// leaves the mailbox word where it was. A 34 B PDU is 39 B on the ring, so six fit in
+        /// the 256 B ring with nothing draining it and the seventh is refused.
         #[test]
         fn a_full_ring_drops_the_sample_and_counts_one_refused_write() {
             let mut r = Rig::new(true);
-            for k in 0..7 {
+            for k in 0..6 {
                 r.slots.fill(Some(state(k)), None);
                 r.pass();
             }
             assert_eq!(r.refused(), 0);
-            assert_eq!(r.staged.mailbox, 7);
+            assert_eq!(r.staged.mailbox, 6);
             let used = r.ring_used();
             r.slots.fill(Some(state(8)), None);
             r.pass();
             assert_eq!(r.refused(), 1, "one refused write for the dropped sample");
             assert_eq!(
-                r.staged.mailbox, 7,
+                r.staged.mailbox, 6,
                 "a refused sample is not counted as staged"
             );
             assert_eq!(r.ring_used(), used, "nothing of it entered the ring");
             let tags: Vec<u8> = r.mailbox_pdus().iter().map(|p| p[3]).collect();
-            assert_eq!(
-                tags,
-                (0..7).collect::<Vec<u8>>(),
-                "the queued seven, intact"
-            );
+            assert_eq!(tags, (0..6).collect::<Vec<u8>>(), "the queued six, intact");
         }
 
         /// Counters: each staged sample advances the word by one, own in the low half and forwards

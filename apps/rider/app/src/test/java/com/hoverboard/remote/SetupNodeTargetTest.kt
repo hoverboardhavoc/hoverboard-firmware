@@ -35,7 +35,7 @@ class SetupNodeTargetTest {
     private val name = SetupFields.DEVICE_NAME.key
 
     private fun telemetry(rig: SetupRig, pitch: Int, roll: Int, from: Int? = null) =
-        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, 0, 0, QUIET_OBS), from)
+        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, 0, 0, QUIET_OBS, 0), from)
 
     // --- the node list (`specs/rider-ui.md` section 2) -----------------------------------------
 

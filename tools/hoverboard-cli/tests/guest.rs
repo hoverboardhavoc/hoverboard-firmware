@@ -42,6 +42,7 @@ fn state(mode: u8, peer_demand: i16, battery: u16) -> CyclicState {
             chip: ChipTag::Unknown,
             odometer: 0,
         },
+        wheel_rate: 0,
     }
 }
 

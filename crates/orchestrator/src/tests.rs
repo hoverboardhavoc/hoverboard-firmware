@@ -142,6 +142,7 @@ fn cyclic(flags: u8) -> Payload {
         peer_demand: 0,
         wheel_pos: 0,
         obs: PEER_OBS,
+        wheel_rate: 0,
     })
 }
 
@@ -2544,6 +2545,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         wheel_pos: 0,
         flags: 0,
         obs: PEER_OBS,
+        wheel_rate: 0,
     };
     for k in 0..160 {
         if k % 20 == 0 {
@@ -3428,7 +3430,7 @@ fn ble_peer_tx_forwards_nothing_before_a_peer_is_seen() {
 #[test]
 fn ble_peer_tx_carries_the_inbox_state_and_its_source_unchanged() {
     // The forward is the inbox's decoded copy under the address it arrived with, and the codec is
-    // a bijection on the 27 B layout: re-encoding it gives the bytes the peer put on the wire.
+    // a bijection on the 31 B layout: re-encoding it gives the bytes the peer put on the wire.
     // The rigid words ride through it like the rest: a leader's commanded torque and its leader
     // flag are the peer's to state, and the forward restates them rather than this board's.
     let frame = CyclicState {
@@ -3442,6 +3444,7 @@ fn ble_peer_tx_carries_the_inbox_state_and_its_source_unchanged() {
         peer_demand: -4096,
         wheel_pos: -321,
         obs: PEER_OBS,
+        wheel_rate: 0,
     };
     let mut wire = [0u8; CyclicState::ENCODED_LEN];
     frame.encode(&mut wire);
@@ -3716,6 +3719,7 @@ fn peer_with_battery(battery: u16) -> Payload {
         wheel_pos: 0,
         flags: 0,
         obs: PEER_OBS,
+        wheel_rate: 0,
     })
 }
 
@@ -3934,7 +3938,7 @@ fn an_arm_time_mode_change_resets_the_law_and_an_unchanged_mode_does_not() {
         )
     };
     let mut s = balance_board(sf_start());
-    s.block.wheel_rate_q = 4096;
+    s.block.wheel_rate_q12 = 4096;
     run_ticks(&mut s, 30);
     let carried = s.ctl.sf;
     assert_ne!(
@@ -4635,6 +4639,7 @@ fn leader_cyclic(mode: Mode, demand: i16) -> Payload {
         peer_demand: demand,
         wheel_pos: 0,
         obs: PEER_OBS,
+        wheel_rate: 0,
     })
 }
 
@@ -5745,6 +5750,7 @@ fn cyclic_at(wheel_pos: i16) -> Payload {
         peer_demand: 0,
         wheel_pos,
         obs: PEER_OBS,
+        wheel_rate: 0,
     })
 }
 
@@ -5766,6 +5772,32 @@ fn the_cyclic_carries_the_low_half_of_the_position_unmirrored() {
                 pos as i16,
                 "at offset 13"
             );
+        }
+    }
+}
+
+/// The cyclic carries the block's `wheel_rate_q12` whole and unscaled, unmirrored whichever side
+/// the board drives, as the `i32` at offset 27 (`specs/link-control.md`, `CYCLIC_STATE`), and a
+/// peer that accepts the frame holds the same word.
+#[test]
+fn the_cyclic_carries_the_wheel_rate_unscaled_and_the_peer_decodes_it() {
+    for role_right in [false, true] {
+        for rate in [0i32, 4096, -4096, 80 * 4096, -1, i32::MAX, i32::MIN] {
+            let mut a = fresh();
+            a.block.role_right = role_right;
+            a.block.wheel_rate_q12 = rate;
+            let c = cyclic_tx(&a, true).expect("tick 0 emits");
+            assert_eq!(c.wheel_rate, rate, "rate {rate}, right {role_right}");
+            let mut wire = [0u8; CyclicState::ENCODED_LEN];
+            c.encode(&mut wire);
+            assert_eq!(
+                i32::from_le_bytes([wire[27], wire[28], wire[29], wire[30]]),
+                rate,
+                "at offset 27"
+            );
+            let mut b = fresh();
+            b.inbox.accept(PEER, Payload::CyclicState(c));
+            assert_eq!(b.inbox.peer().map(|p| p.wheel_rate), Some(rate));
         }
     }
 }
@@ -6090,7 +6122,7 @@ fn a_rigid_follower_runs_no_law_and_publishes_its_position() {
     let mut s = rigid_board(false);
     assert_eq!(s.obs().control_mode, control::Producer::Follower as u8);
     walk_to_run(&mut s);
-    s.block.wheel_rate_q = -80 * 4096;
+    s.block.wheel_rate_q12 = -80 * 4096;
     s.block.wheel_pos = 1_234;
     feed_drive(&mut s, i16::MAX, 0);
     run_with_peer(&mut s, 100, &leader_cyclic(Mode::Run, 1000), None);
@@ -6105,7 +6137,7 @@ fn a_rigid_follower_runs_no_law_and_publishes_its_position() {
 #[test]
 fn the_observation_carries_the_terms_and_the_reference() {
     let mut s = balance_board(sf_start());
-    s.block.wheel_rate_q = 4096;
+    s.block.wheel_rate_q12 = 4096;
     for _ in 0..50 {
         control_task(&mut s, Some(&tilted_sample()), 1);
     }

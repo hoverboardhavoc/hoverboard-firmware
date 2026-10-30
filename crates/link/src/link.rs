@@ -482,41 +482,25 @@ mod tests {
     }
 
     #[test]
-    fn stage_of_a_cyclic_state_pdu_is_two_frames_of_forty_bytes_on_the_ble_wire() {
-        // The arithmetic the 5 Hz BLE rate is derived from (orchestrator::BLE_CYCLIC_DIVISOR),
-        // re-derived every time CYCLIC_STATE grew: the appended observation block, then
-        // `peer_demand`, then the odometer, then `wheel_pos` (specs/state-feedback.md section 3).
-        // A 27-byte payload (15 B committed + the 12 B block) in a 3-byte-header L3 PDU is 30 B;
-        // the BLE link's frame capacity is 16, so the usable chunk is 15 and the packet is TWO
-        // fragments, 15 B and 15 B; the wire frames are SOF + len + (frag-hdr + chunk) + CRC =
-        // 20 B and 20 B, 40 B in all. 40 B at 9600 8N1 is 41.7 ms, which is why the emission is
-        // metered rather than sent. Each frame still fits one 20-byte ATT notification, so the
-        // module never re-chunks one. If these numbers move, the rate must be re-derived.
+    fn stage_of_a_cyclic_state_pdu_is_one_frame_on_a_128_byte_link() {
+        // The 5 Hz controller sample (orchestrator::BLE_CYCLIC_DIVISOR) rides the SWD mailbox
+        // port, and the bridge re-frames it onto its BLE link; both carriers' L2 frame capacity is
+        // 128 (`swd_mailbox::FRAME_CAPACITY`, the bridge's `router::FRAME`). A 31-byte payload
+        // (15 B committed + the 12 B block + the i32 `wheel_rate`) in a 3-byte-header L3 PDU is
+        // 34 B, one fragment: SOF + len + (frag-hdr + 34) + CRC = 39 B of stream, which the bridge
+        // carries in two 20-byte notifications (20 + 19), the same two the 27-byte payload took.
         //
-        // It was 14 B, one fragment and 19 B of wire, then 22 B and 32 B, then 24 B and 34 B,
-        // then 28 B and 38 B. Crossing the 15 B chunk is what made the first eight payload bytes
-        // cost thirteen here; every byte after them costs one. 30 B is the last PDU two
-        // fragments hold: one more byte is a third fragment and a whole frame's overhead.
-        //
-        // The headroom this spends is real: 40 B at 5 Hz is 200 B/s of the module's 960 against
-        // 190 before, and `specs/link-control.md`'s occupancy table says what is left.
-        const BLE_FRAME_CAP: usize = 16;
-        let pdu = [0u8; 3 + 27];
-        let mut link =
-            Link::<_, MAX_PACKET, BLE_FRAME_CAP>::new(MockByteStreamLink::new(BLE_FRAME_CAP));
-        let mut out = [0u8; 32];
+        // The CC2541 port this test used to price (a 16-byte frame, 15-byte chunk, 9600 baud) is
+        // gone, and with it the limit that 30 B was the last PDU two fragments held.
+        const FRAME_CAP: usize = 128;
+        let pdu = [0u8; 3 + 31];
+        let mut link = Link::<_, MAX_PACKET, FRAME_CAP>::new(MockByteStreamLink::new(FRAME_CAP));
+        let mut out = [0u8; FRAME_CAP + 4];
 
-        let first = link.stage_fragment(&pdu, 0, &mut out).expect("stages");
-        assert!(first.more, "two fragments: 30 B against a 15 B chunk");
-        assert_eq!(first.len, 20, "the first frame is 20 B on the BLE wire");
-        let second = link.stage_fragment(&pdu, 1, &mut out).expect("stages");
-        assert!(!second.more, "and the second is the last");
-        assert_eq!(second.len, 20, "the second frame is 20 B");
-        assert_eq!(first.len + second.len, 40, "40 B of wire per sample");
-        assert!(
-            first.len <= 20 && second.len <= 20,
-            "each frame fits one ATT notification without re-chunking"
-        );
+        let only = link.stage_fragment(&pdu, 0, &mut out).expect("stages");
+        assert!(!only.more, "one fragment: 34 B against a 127 B chunk");
+        assert_eq!(only.len, 39, "39 B of stream per sample");
+        assert_eq!(only.len.div_ceil(20), 2, "two 20-byte notifications");
     }
 
     #[test]

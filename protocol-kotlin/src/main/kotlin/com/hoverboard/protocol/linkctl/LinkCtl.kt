@@ -116,7 +116,10 @@ private fun wrU32(b: ByteArray, at: Int, v: Long) {
     wrU16(b, at + 2, ((v ushr U16_BITS) and U16_MASK).toInt())
 }
 
-// --- CYCLIC_STATE (27 B: 15 B committed + a 12 B appended block) --------------------------------
+/** A wire `i32`: the `u32` read narrowed back to its signed bits. */
+private fun rdI32(b: ByteArray, at: Int): Int = rdU32(b, at).toInt()
+
+// --- CYCLIC_STATE (31 B: 15 B committed + a 12 B appended block + the i32 wheelRate) ----------
 
 /**
  * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
@@ -245,8 +248,8 @@ data class CyclicObs(
 /**
  * Board state, emitted cyclically. Mirror of `crates/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 27 bytes and only 27 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`), of
- * which the first 15 are the committed words and the last 12 the appended [CyclicObs] block:
+ * Wire layout, 31 bytes and only 31 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`): the 15
+ * committed words, the 12-byte appended [CyclicObs] block and the `i32` [wheelRate]:
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
@@ -258,14 +261,15 @@ data class CyclicObs(
  * off 11..13 i16 LE  peerDemand   the torque a rigid LEADER commands its peer to apply, else 0
  * off 13..15 i16 LE  wheelPos     the low 16 bits of the wheel's signed hall-edge position
  * off 15..27         the CyclicObs block
+ * off 27..31 i32 LE  wheelRate    the period-measured wheel rate, Q12 of wheelSpeed's unit
  * ```
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
  * no rescaling: the `SPEED` cell saturated into an i16 (`crates/firmware/src/motor.rs`,
  * `wheel_speed_word`, `SPEED`), so a stationary wheel reads exactly 0. It is not the stock speed
  * unit, and it is not a road speed: deriving one needs the motor's pole-pair count and a wheel
- * diameter, and neither is a registered store field, so this mirror reports the edge count as it is
- * rather than inventing a unit for it.
+ * diameter (`Fields.MOTOR_POLE_PAIRS`, `Fields.WHEEL_DIAMETER_MM`), so this mirror reports the edge
+ * count as it is. The rider's speed readout reads [wheelRate] instead.
  *
  * [fault] is the board's gating-producer LEVEL MASK as of the pass that built the frame
  * (`crates/orchestrator/src/dispatch.rs`, `cyclic_state`, from `crates/orchestrator/src/events.rs`,
@@ -281,6 +285,11 @@ data class CyclicObs(
  * (`crates/linkctl/src/lib.rs`, `CyclicState::wheel_pos`; `specs/state-feedback.md` section 3), in
  * the hall counter's own sense and not mirrored to forward, wrapping. A rigid leader unwraps it by
  * delta; the telemetry model shows nothing for it.
+ *
+ * [wheelRate] is the board's period-measured wheel rate (`crates/linkctl/src/lib.rs`,
+ * `CyclicState::wheel_rate`; `specs/link-control.md`, `CYCLIC_STATE`), unscaled: Q12 of
+ * [wheelSpeed]'s unit, so 4096 is one hall edge per 320-period (20 ms) window, in the hall
+ * counter's own sense. The rider's speed readout converts it (`specs/rider-ui.md` 3.1a).
  *
  * [battery] and [mode] are held as unsigned values in an Int, since Kotlin's Byte/Short are signed.
  *
@@ -300,6 +309,7 @@ data class CyclicState(
     val peerDemand: Int,
     val wheelPos: Int,
     val obs: CyclicObs,
+    val wheelRate: Int,
 ) {
     /** Rider-present flag, bit0. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
     fun riderPresent(): Boolean = flags and FLAG_RIDER != 0
@@ -335,6 +345,7 @@ data class CyclicState(
         wrU16(out, 11, peerDemand)
         wrU16(out, 13, wheelPos)
         obs.encode().copyInto(out, LEN)
+        wrU32(out, WHEEL_RATE_OFF, wheelRate.toLong())
         return out
     }
 
@@ -349,7 +360,10 @@ data class CyclicState(
          * The ONE on-wire length of a `CYCLIC_STATE` payload: what the firmware emits and the only
          * length [decode] accepts. `crates/linkctl/src/lib.rs`, `CyclicState::ENCODED_LEN`.
          */
-        const val ENCODED_LEN = LEN + CyclicObs.LEN
+        const val ENCODED_LEN = LEN + CyclicObs.LEN + Int.SIZE_BYTES
+
+        /** The offset of [wheelRate]. `crates/linkctl/src/lib.rs`, `CyclicState::WHEEL_RATE_OFF`. */
+        const val WHEEL_RATE_OFF = LEN + CyclicObs.LEN
 
         /** `flags` bit0: rider present. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
         const val FLAG_RIDER = 1 shl 0
@@ -395,6 +409,7 @@ data class CyclicState(
                 peerDemand = rdI16(b, 11),
                 wheelPos = rdI16(b, 13),
                 obs = CyclicObs.decode(b, LEN),
+                wheelRate = rdI32(b, WHEEL_RATE_OFF),
             )
         }
     }
