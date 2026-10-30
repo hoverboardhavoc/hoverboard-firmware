@@ -68,7 +68,7 @@ const val LAYOUT_PART_UNKNOWN_TAG = "layout_part_unknown"
  * verdict is clean, and the changes are listed as a delta from what the board holds.
  *
  * It adjusts a board that is already onboarded. Taking a board from blank to a bootable layout is
- * done from `hoverboard-cli` at the bench (`hoverboard-specs/decision-cli-onboarding.md`), so this
+ * done from `hoverboard-cli` at the bench (`specs/decision-cli-onboarding.md` section 1), so this
  * screen offers no whole-layout presets.
  *
  * The verdict is exact, not advisory: the board's boot validator is a pure function of these fields,
