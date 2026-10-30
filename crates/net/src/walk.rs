@@ -30,7 +30,7 @@
 use heapless::Vec;
 use store::{
     DynError, Flash, Key, Store, StoreError, Stored, Type, Value, DEVICE_NAME, ERASED_TAG,
-    NODE_ADDRESS, NODE_CLASS, SECRET, WIFI_PASS, WIFI_SSID,
+    NODE_ADDRESS, NODE_CLASS, SECRET, WIFI_PASS, WIFI_SSID, WIFI_TX_POWER, WIFI_TX_POWER_RANGE,
 };
 
 use crate::forward::Forwarder;
@@ -153,13 +153,20 @@ pub const CONFIG_WRITE_VALUE_MAX: usize = MAX_PDU - pdu::HEADER_LEN - CONFIG_WRI
 /// ([`CFG_SECRET`]), so it is bound by [`CONFIG_WRITE_VALUE_MAX`] alone.
 pub const CONFIG_RESP_VALUE_MAX: usize = MAX_PDU - pdu::HEADER_LEN - CONFIG_RESP_HEAD;
 
-/// Whether a bridge can use `value` for `key` (`specs/bridge-onboarding.md` section 2.1): a
-/// `device.name` that passes [`bridge_name_usable`] (ASCII, so UTF-8), a `wifi.ssid` of at most
+/// Whether a bridge can use `value` for `key` (`specs/bridge-onboarding.md` sections 2.1 and 2.4):
+/// a `device.name` that passes [`bridge_name_usable`] (ASCII, so UTF-8), a `wifi.ssid` of at most
 /// [`WIFI_SSID_MAX`] bytes, a `wifi.pass` that is empty or [`WIFI_PASS_MIN`] to [`WIFI_PASS_MAX`]
-/// bytes, the two Wi-Fi fields UTF-8, which the radio's station configuration takes. Any other key
-/// or value is the store's to judge. A bridge's `CONFIG_WRITE` of a value this refuses answers
-/// [`CFG_BAD`]; a board stores any of them.
+/// bytes, the two Wi-Fi strings UTF-8, which the radio's station configuration takes, and a
+/// `wifi.tx_power` in [`WIFI_TX_POWER_RANGE`]. Any other key or value is the store's to judge. A
+/// bridge's `CONFIG_WRITE` of a value this refuses answers [`CFG_BAD`]; a board stores any of them.
+/// The bridge's boot read of the same fields applies the same check.
 pub fn bridge_value_usable(key: Key, value: &Value) -> bool {
+    if key.field_id == WIFI_TX_POWER.id() {
+        return match value {
+            Value::U8(v) => WIFI_TX_POWER_RANGE.contains(v),
+            _ => true,
+        };
+    }
     let Value::Str(v) = value else {
         return true;
     };

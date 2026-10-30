@@ -55,6 +55,7 @@ pub use field::{
     MOTOR_GATE_LO_C, MOTOR_HALL_A, MOTOR_HALL_B, MOTOR_HALL_C, MOTOR_METHOD, MOTOR_NOISE_FLOOR,
     MOTOR_ODOMETER, MOTOR_PHASE_A, MOTOR_PHASE_B, NODE_ADDRESS, NODE_CLASS, NODE_DEFAULTS, PAD_A,
     PAD_B, PIN_ABSENT, REGISTRY, REGISTRY_LEN, SECRET, SOME_BLOB, WIFI_PASS, WIFI_SSID,
+    WIFI_TX_POWER, WIFI_TX_POWER_RANGE,
 };
 // The host-only name table (`specs/cli-config.md` section 3), behind the `names` feature.
 #[cfg(feature = "names")]

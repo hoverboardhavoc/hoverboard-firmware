@@ -8,7 +8,9 @@
 //!   reads not configured ([`set_state`]). The bridge joins as a station, takes an address by DHCP,
 //!   and joins again whenever the association drops.
 //!   BLE runs beside it on the same radio (`esp-radio`'s coexistence). Its transmit power is
-//!   capped at [`MAX_TX_POWER`] after every start, before it joins.
+//!   capped after every start, before it joins, at the store's `wifi.tx_power`, read once at boot
+//!   with the network (`hoverboard_bridge_core::node::tx_power`, `specs/bridge-onboarding.md`
+//!   section 2.4).
 //! - **Console.** TCP port [`CONSOLE_PORT`] carries the same L2 stream as the USB console, the
 //!   same L3 port (port 2) on a second carrier: both are served whenever present, a reply goes
 //!   back on the carrier its request came in on, and board packets go out on both. One client at
@@ -71,12 +73,6 @@ const TX: usize = 2048;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often a socket that is mid-handshake is looked at again.
 const HANDSHAKE_POLL: Duration = Duration::from_millis(5);
-/// The station's transmit power cap in quarter-dBm units, 34 for 8.5 dBm, set after every start and
-/// before the join (`esp_wifi_set_max_tx_power`, as `wireless-esp32-dap`'s `feat/tx-power-cap`
-/// does). At full power, SuperMinis from one batch stop acknowledging the access point's
-/// authentication response and never join; capped they join in 2 s at -38 dBm. The bridge is never
-/// more than a room away from its access point, so the cap costs nothing.
-const MAX_TX_POWER: i8 = 34;
 /// How long the station waits after a drop or a failed join before joining again.
 const REJOIN: Duration = Duration::from_secs(5);
 /// A console client that leaves sent bytes unacknowledged this long is gone (a laptop that left
@@ -159,9 +155,14 @@ pub static GDB_OUT: Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, 4> = Chann
 pub static GDB_CLOSE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Join the network `config` names ([`config`]) and join it again whenever the association drops,
-/// forever.
+/// forever. The transmit power is capped at `power` quarter-dBm after every start and before the
+/// join (`esp_wifi_set_max_tx_power`, as `wireless-esp32-dap`'s `feat/tx-power-cap` does): at full
+/// power, SuperMinis from one batch stop acknowledging the access point's authentication response
+/// and never join, and at the store's default, 8.5 dBm, they join in 2 s at -38 dBm.
 #[embassy_executor::task]
-pub async fn station(mut controller: WifiController<'static>, config: Config) {
+pub async fn station(mut controller: WifiController<'static>, config: Config, power: u8) {
+    // `wifi.tx_power`'s range, 8 to 84, is inside `i8`'s.
+    let power = power as i8;
     loop {
         if matches!(controller.is_connected(), Ok(true)) {
             let _e = controller.wait_for_disconnect_async().await;
@@ -181,11 +182,8 @@ pub async fn station(mut controller: WifiController<'static>, config: Config) {
                     continue;
                 }
             }
-            match controller.set_max_tx_power(MAX_TX_POWER) {
-                Ok(()) => boot!(
-                    "Wi-Fi: transmit power capped at {} quarter-dBm",
-                    MAX_TX_POWER
-                ),
+            match controller.set_max_tx_power(power) {
+                Ok(()) => boot!("Wi-Fi: transmit power capped at {} quarter-dBm", power),
                 Err(_e) => boot!("Wi-Fi: transmit power cap failed: {:?}", _e),
             }
         }

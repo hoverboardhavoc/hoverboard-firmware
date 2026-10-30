@@ -1713,6 +1713,48 @@ fn a_bridge_refuses_wifi_credentials_its_station_cannot_use_and_a_board_stores_t
     }
 }
 
+/// `specs/bridge-onboarding.md` section 2.4: a bridge refuses a `wifi.tx_power` outside 8 to 84
+/// quarter-dBm with `CFG_BAD` and keeps what it held; a board stores any value.
+#[test]
+fn a_bridge_refuses_a_tx_power_outside_its_range_and_a_board_stores_it() {
+    let mut m = Mesh::new();
+    let bridge = m.add_node(3, [PORT_BLE, PORT_SWD, PORT_UART, 0], CLASS_BRIDGE);
+    let board = m.add_board_kinds(3, [PORT_SWD, PORT_UART, PORT_BLE, 0]);
+    m.attach_controller(bridge, 2);
+    m.wire(bridge, 1, board, 0);
+    m.run_walk();
+    let (b, d) = (m.live_addr(bridge), m.live_addr(board));
+    let key = store::WIFI_TX_POWER.key();
+    for v in [0u8, 7, 85, 255] {
+        let w = m.config_write(b, key, Value::U8(v));
+        assert_eq!(resp_status(&w), CFG_BAD, "{v}");
+        let r = m.config_read(b, key);
+        assert_eq!(
+            (resp_status(&r), resp_value(&r)),
+            (CFG_DEFAULT, Some(Value::U8(34))),
+            "nothing stored after {v}"
+        );
+        let w = m.config_write(d, key, Value::U8(v));
+        assert_eq!(resp_status(&w), CFG_OK, "a board stores {v}");
+    }
+    for v in [8u8, 34, 84] {
+        let w = m.config_write(b, key, Value::U8(v));
+        assert_eq!(resp_status(&w), CFG_OK, "{v}");
+        let r = m.config_read(b, key);
+        assert_eq!(
+            (resp_status(&r), resp_value(&r)),
+            (CFG_OK, Some(Value::U8(v)))
+        );
+    }
+    // A bridge refuses an out-of-range value after an in-range one and keeps the in-range one.
+    let w = m.config_write(b, key, Value::U8(85));
+    assert_eq!(resp_status(&w), CFG_BAD);
+    assert_eq!(resp_value(&m.config_read(b, key)), Some(Value::U8(84)));
+    // The wrong type is the store's to refuse, on either class.
+    let w = m.config_write(b, key, Value::U16(34));
+    assert_eq!(resp_status(&w), CFG_TYPE_MISMATCH);
+}
+
 /// The value limits are what the PDU encoder takes: a `CONFIG_WRITE` of [`CONFIG_WRITE_VALUE_MAX`]
 /// value bytes and a `CONFIG_RESP` of [`CONFIG_RESP_VALUE_MAX`] fill one PDU, and a byte more
 /// fits neither.

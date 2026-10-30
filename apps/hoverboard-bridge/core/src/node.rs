@@ -34,7 +34,9 @@ use net::walk::{
     bridge_name_usable, bridge_value_usable, Emits, Responder, CLASS_BRIDGE, MAX_PORTS,
     MCU_ESP32C3, PORT_BLE, PORT_SWD, PORT_UART, WIFI_PASS_MAX, WIFI_SSID_MAX,
 };
-use store::{Flash, Store, StrField, Type, Value, DEVICE_NAME, WIFI_PASS, WIFI_SSID};
+use store::{
+    Flash, Store, StrField, Type, Value, DEVICE_NAME, WIFI_PASS, WIFI_SSID, WIFI_TX_POWER,
+};
 
 use crate::mailbox::{MailboxPort, MAX_PACKET};
 use crate::router::{Port, Router, PORTS};
@@ -96,9 +98,10 @@ pub fn advertised_name<F: Flash>(
     })
 }
 
-/// The bridge's Wi-Fi station as its store sets it up at boot (`specs/bridge-onboarding.md` section
-/// 2.1): the network in `wifi.ssid` and `wifi.pass`, or none. Its `Debug` prints the SSID and
-/// whether a password is set, never the password.
+/// The bridge's Wi-Fi station as its store sets it up at boot (`specs/bridge-onboarding.md`
+/// sections 2.1 and 2.4): the network in `wifi.ssid` and `wifi.pass` and the transmit power cap in
+/// `wifi.tx_power`, or none. Its `Debug` prints the SSID, whether a password is set, never the
+/// password, and the power.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Station {
     /// No network: the station is not started, and `ESP_INFO` reads [`WifiState::NotConfigured`].
@@ -109,20 +112,53 @@ pub enum Station {
         ssid: String<WIFI_SSID_MAX>,
         /// Its password, empty for an open network.
         pass: String<WIFI_PASS_MAX>,
+        /// The transmit power cap, applied after every start and before every join.
+        power: TxPower,
     },
+}
+
+/// The station's transmit power cap as the store sets it at boot (`specs/bridge-onboarding.md`
+/// section 2.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TxPower {
+    /// The cap the station applies, in quarter-dBm: `wifi.tx_power` when a bridge takes it
+    /// ([`bridge_value_usable`]), else the field's default.
+    pub applied: u8,
+    /// A stored value the bridge does not take (written by an image without the check), which is
+    /// not applied.
+    pub refused: Option<u8>,
+}
+
+/// The transmit power cap the store sets, read once at boot: `wifi.tx_power`, unstored its default
+/// (34, 8.5 dBm). A stored value outside the range is not applied, so it never leaves the bridge off
+/// Wi-Fi: the default is, and [`TxPower::refused`] names the value for the boot log.
+pub fn tx_power<F: Flash>(store: &Store<'_, F>) -> TxPower {
+    let stored = store.get(WIFI_TX_POWER);
+    if bridge_value_usable(WIFI_TX_POWER.key(), &Value::U8(stored)) {
+        TxPower {
+            applied: stored,
+            refused: None,
+        }
+    } else {
+        TxPower {
+            applied: WIFI_TX_POWER.default(),
+            refused: Some(stored),
+        }
+    }
 }
 
 impl core::fmt::Debug for Station {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Station::Off => f.write_str("Off"),
-            Station::Join { ssid, pass } => f
+            Station::Join { ssid, pass, power } => f
                 .debug_struct("Join")
                 .field("ssid", &ssid.as_str())
                 .field(
                     "pass",
                     &format_args!("{}", if pass.is_empty() { "(empty)" } else { "(set)" }),
                 )
+                .field("power", power)
                 .finish(),
         }
     }
@@ -134,7 +170,15 @@ impl Station {
     pub fn network(&self) -> Option<(&str, &str)> {
         match self {
             Station::Off => None,
-            Station::Join { ssid, pass } => Some((ssid.as_str(), pass.as_str())),
+            Station::Join { ssid, pass, .. } => Some((ssid.as_str(), pass.as_str())),
+        }
+    }
+
+    /// The transmit power cap: `None` for [`Station::Off`].
+    pub fn power(&self) -> Option<TxPower> {
+        match self {
+            Station::Off => None,
+            Station::Join { power, .. } => Some(*power),
         }
     }
 
@@ -148,8 +192,8 @@ impl Station {
 }
 
 /// The station the store sets up, read once at boot: [`Station::Join`] when `wifi.ssid` holds a name
-/// and both fields hold values a bridge takes ([`bridge_value_usable`], which takes only UTF-8), else
-/// [`Station::Off`]. A value the bridge would refuse can be in a store written before the check
+/// and both fields hold values a bridge takes ([`bridge_value_usable`], which takes only UTF-8), at
+/// the power [`tx_power`] reads, else [`Station::Off`]. A value the bridge would refuse can be in a store written before the check
 /// existed; it leaves the station off, as an empty name does.
 pub fn station<F: Flash>(store: &Store<'_, F>) -> Station {
     fn text<const N: usize>(field: StrField, v: &[u8]) -> Option<String<N>> {
@@ -166,7 +210,11 @@ pub fn station<F: Flash>(store: &Store<'_, F>) -> Station {
         text(WIFI_SSID, ssid),
         text(WIFI_PASS, store.get_text(WIFI_PASS)),
     ) {
-        (Some(ssid), Some(pass)) => Station::Join { ssid, pass },
+        (Some(ssid), Some(pass)) => Station::Join {
+            ssid,
+            pass,
+            power: tx_power(store),
+        },
         _ => Station::Off,
     }
 }

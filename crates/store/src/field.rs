@@ -363,6 +363,17 @@ pub const WIFI_SSID: StrField = StrField::new(0x11, "");
 /// The password of [`WIFI_SSID`]'s network: empty for an open network, else 8 to 63 bytes (a
 /// 64-digit hex PSK is not accepted). A [`SECRET`]: no node reads it back over a link.
 pub const WIFI_PASS: StrField = StrField::new(0x12, "");
+/// The bridge's Wi-Fi transmit power cap in quarter-dBm (`specs/bridge-onboarding.md` section
+/// 2.4), read once at boot with [`WIFI_SSID`] and applied after every station start and before
+/// every join. The default, 34 (8.5 dBm), is the cap at which the SuperMinis from one batch join:
+/// at full power they stop acknowledging the access point's authentication response. A bridge
+/// refuses a write outside [`WIFI_TX_POWER_RANGE`] (`net::walk::bridge_value_usable`), and a stored
+/// value outside it (written by an image without the check) is not applied: the bridge uses the
+/// default. A board stores it like any key and never reads it.
+pub const WIFI_TX_POWER: Field<u8> = Field::new(0x13, 34);
+/// The values [`WIFI_TX_POWER`] takes: what `esp_wifi_set_max_tx_power` accepts, 2 to 21 dBm. The
+/// radio applies the nearest of its own discrete levels.
+pub const WIFI_TX_POWER_RANGE: core::ops::RangeInclusive<u8> = 8..=84;
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
 /// The board's persistent L3 node address (`specs/l3.md`, "Addressing"): assigned once by the walk's
@@ -951,6 +962,7 @@ field_ids! {
     0x10, // DEVICE_NAME
     0x11, // WIFI_SSID
     0x12, // WIFI_PASS
+    0x13, // WIFI_TX_POWER
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
@@ -1015,6 +1027,7 @@ field_ids! {
     0x10, // DEVICE_NAME
     0x11, // WIFI_SSID
     0x12, // WIFI_PASS
+    0x13, // WIFI_TX_POWER
     0x20, // MOTOR_CURRENT_LIMIT
     0x21, // MOTOR_METHOD
     0x22, // CONTROL_MODE
@@ -1108,10 +1121,10 @@ pub struct FieldDef {
 /// [`BOARD_BATTERY_CAL`], [`CONTROL_DRIVE_TURN`] and [`CONTROL_REFERENCE`]: one id, two defaults, so
 /// one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 60 + 9;
+pub const REGISTRY_LEN: usize = 61 + 9;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 62 + 9;
+pub const REGISTRY_LEN: usize = 63 + 9;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1225,6 +1238,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     DEVICE_NAME.entry(BYTES_DEVICE_NAME),
     WIFI_SSID.entry(BYTES_EMPTY),
     WIFI_PASS.entry(BYTES_EMPTY),
+    WIFI_TX_POWER.entry(),
     MOTOR_CURRENT_LIMIT.entry(),
     MOTOR_METHOD.entry(),
     CONTROL_MODE.entry(),
@@ -1506,6 +1520,10 @@ pub mod names {
         FieldName::text(DEVICE_NAME, "device.name"),
         FieldName::text(WIFI_SSID, "wifi.ssid"),
         FieldName::text(WIFI_PASS, "wifi.pass"),
+        FieldName::single(WIFI_TX_POWER, "wifi.tx_power", Kind::Int).range(
+            *WIFI_TX_POWER_RANGE.start() as i64,
+            *WIFI_TX_POWER_RANGE.end() as i64,
+        ),
         FieldName::motor(MOTOR_CURRENT_LIMIT, "current.limit", Kind::Int),
         FieldName::motor(MOTOR_METHOD, "method", METHOD),
         FieldName::single(CONTROL_MODE, "control.mode", MODE),
@@ -1740,6 +1758,15 @@ mod registry_tests {
             );
         }
         assert_eq!(SECRET, [WIFI_PASS.id()]);
+        // The bridge's transmit power cap: a u8, default 34 quarter-dBm (8.5 dBm), inside its range.
+        assert_eq!(WIFI_TX_POWER.id(), 0x13);
+        let t = lookup(0x13).unwrap();
+        assert_eq!(
+            (t.kind, t.default, t.read_only),
+            (Type::U8, Value::U8(34), false)
+        );
+        assert_eq!(WIFI_TX_POWER_RANGE, 8..=84);
+        assert!(WIFI_TX_POWER_RANGE.contains(&WIFI_TX_POWER.default()));
         let b = lookup(SOME_BLOB.id()).unwrap();
         assert_eq!(b.kind, Type::Blob);
         assert_eq!(b.default, Value::Bytes(&[]));
