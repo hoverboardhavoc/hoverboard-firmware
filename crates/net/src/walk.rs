@@ -154,20 +154,22 @@ pub const CONFIG_WRITE_VALUE_MAX: usize = MAX_PDU - pdu::HEADER_LEN - CONFIG_WRI
 pub const CONFIG_RESP_VALUE_MAX: usize = MAX_PDU - pdu::HEADER_LEN - CONFIG_RESP_HEAD;
 
 /// Whether a bridge can use `value` for `key` (`specs/bridge-onboarding.md` section 2.1): a
-/// `device.name` that passes [`bridge_name_usable`], a `wifi.ssid` of at most [`WIFI_SSID_MAX`]
-/// bytes, a `wifi.pass` that is empty or [`WIFI_PASS_MIN`] to [`WIFI_PASS_MAX`] bytes. Any other key
+/// `device.name` that passes [`bridge_name_usable`] (ASCII, so UTF-8), a `wifi.ssid` of at most
+/// [`WIFI_SSID_MAX`] bytes, a `wifi.pass` that is empty or [`WIFI_PASS_MIN`] to [`WIFI_PASS_MAX`]
+/// bytes, the two Wi-Fi fields UTF-8, which the radio's station configuration takes. Any other key
 /// or value is the store's to judge. A bridge's `CONFIG_WRITE` of a value this refuses answers
 /// [`CFG_BAD`]; a board stores any of them.
 pub fn bridge_value_usable(key: Key, value: &Value) -> bool {
     let Value::Str(v) = value else {
         return true;
     };
+    let text = || core::str::from_utf8(v).is_ok();
     if key == DEVICE_NAME.key() {
         bridge_name_usable(v)
     } else if key.field_id == WIFI_SSID.id() {
-        v.len() <= WIFI_SSID_MAX
+        v.len() <= WIFI_SSID_MAX && text()
     } else if key.field_id == WIFI_PASS.id() {
-        v.is_empty() || (WIFI_PASS_MIN..=WIFI_PASS_MAX).contains(&v.len())
+        (v.is_empty() || (WIFI_PASS_MIN..=WIFI_PASS_MAX).contains(&v.len())) && text()
     } else {
         true
     }

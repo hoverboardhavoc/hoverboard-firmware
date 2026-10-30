@@ -1654,9 +1654,10 @@ fn a_stored_secret_answers_cfg_secret_with_no_value_on_a_board_and_on_a_bridge()
 }
 
 /// `specs/bridge-onboarding.md` section 2.1: a bridge refuses Wi-Fi credentials its station could
-/// not use with `CFG_BAD` and keeps what it held; a board stores them. A password longer than one
-/// `CONFIG_WRITE` carries cannot be sent at all; the bridge's check on the longer ones is exercised
-/// by the bridge core's boot read of a store written before the check existed.
+/// not use with `CFG_BAD` and keeps what it held, a value that is not UTF-8 among them; a board
+/// stores them. A password longer than one `CONFIG_WRITE` carries cannot be sent at all; the
+/// bridge's check on the longer ones is exercised by the bridge core's boot read of a store written
+/// before the check existed.
 #[test]
 fn a_bridge_refuses_wifi_credentials_its_station_cannot_use_and_a_board_stores_them() {
     let mut m = Mesh::new();
@@ -1672,7 +1673,16 @@ fn a_bridge_refuses_wifi_credentials_its_station_cannot_use_and_a_board_stores_t
     assert!(writable < WIFI_PASS_MAX);
     let long_ssid = [b's'; WIFI_SSID_MAX + 1];
     let short = [b'p'; WIFI_PASS_MIN - 1];
-    let refused: [(Key, &[u8]); 3] = [(ssid, &long_ssid), (pass, b"x"), (pass, &short)];
+    // Not UTF-8, at lengths the length checks take.
+    let raw_ssid: &[u8] = b"bench\xff";
+    let raw_pass: &[u8] = b"hunter2\xc3(";
+    let refused: [(Key, &[u8]); 5] = [
+        (ssid, &long_ssid),
+        (pass, b"x"),
+        (pass, &short),
+        (ssid, raw_ssid),
+        (pass, raw_pass),
+    ];
     for (key, v) in refused {
         let w = m.config_write(b, key, Value::Str(v));
         assert_eq!(resp_status(&w), CFG_BAD, "{key:?} {}", v.len());
