@@ -75,6 +75,12 @@ object Fields {
     /** The Wi-Fi password: a secret, never read back ([com.hoverboard.protocol.l3.Walk.CFG_SECRET]). */
     val WIFI_PASS = FieldDef(0x12, Type.Str, Value.Str(""))
 
+    /**
+     * A bridge's Wi-Fi transmit power cap, quarter-dBm, 8 to 84; default 34, 8.5 dBm
+     * (`specs/bridge-onboarding.md` section 2.4). Mirrored for the drift gate; the app does not read it.
+     */
+    val WIFI_TX_POWER = FieldDef(0x13, Type.U8, Value.U8(34))
+
     /** The motor current limit, milliamps. The firmware converts it against the board's own counts per amp at bring-up, then clamps the COUNT into the window the comparison admits (see [CURRENT_LIMIT_MA]). */
     val MOTOR_CURRENT_LIMIT = FieldDef(0x20, Type.U32, Value.U32(10_000))
 
@@ -398,6 +404,7 @@ object Fields {
         "DEVICE_NAME" to DEVICE_NAME,
         "WIFI_SSID" to WIFI_SSID,
         "WIFI_PASS" to WIFI_PASS,
+        "WIFI_TX_POWER" to WIFI_TX_POWER,
         "MOTOR_CURRENT_LIMIT" to MOTOR_CURRENT_LIMIT,
         "MOTOR_METHOD" to MOTOR_METHOD,
         "CONTROL_MODE" to CONTROL_MODE,

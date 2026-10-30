@@ -42,7 +42,9 @@ use trouble_host::prelude::ExternalController;
 use esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN;
 use hoverboard_bridge_core::gdb::Gdb;
 use hoverboard_bridge_core::mailbox::MailboxPort;
-use hoverboard_bridge_core::node::{advertised_name, default_name, station, Node, BRIDGE_NAME_MAX};
+use hoverboard_bridge_core::node::{
+    advertised_name, default_name, station, Node, Station, TxPower, BRIDGE_NAME_MAX,
+};
 use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
 #[cfg(feature = "boot-log")]
 use hoverboard_bridge_core::svc::Platform;
@@ -149,7 +151,8 @@ async fn main(spawner: Spawner) {
     };
     let default = DEFAULT_NAME.init(default_name(mac));
     let name = name(&store, default);
-    // The Wi-Fi network, read once, as the name is (`specs/bridge-onboarding.md` section 2.1).
+    // The Wi-Fi network and its transmit power, read once, as the name is
+    // (`specs/bridge-onboarding.md` sections 2.1 and 2.4).
     let wifi_station = station(&store);
     wifi::set_state(wifi_station.state());
     boot!(
@@ -160,6 +163,23 @@ async fn main(spawner: Spawner) {
             .network()
             .map_or("not configured", |(ssid, _)| ssid)
     );
+    match wifi_station.power() {
+        Some(TxPower {
+            applied: _applied,
+            refused: None,
+        }) => boot!("Wi-Fi transmit power {} quarter-dBm", _applied),
+        Some(TxPower {
+            applied: _applied,
+            refused: Some(_stored),
+        }) => boot!(
+            "Wi-Fi transmit power {} quarter-dBm: the stored {} is outside {}..={}, not applied",
+            _applied,
+            _stored,
+            store::WIFI_TX_POWER_RANGE.start(),
+            store::WIFI_TX_POWER_RANGE.end()
+        ),
+        None => {}
+    }
 
     // The SWD side and the USB console first: they need no radio, and a radio that fails to come
     // up leaves them working.
@@ -196,8 +216,14 @@ async fn main(spawner: Spawner) {
     };
     // The station only for a network in the store: with none, the Wi-Fi driver is not started and
     // `ESP_INFO` reads not configured.
-    if let Some((ssid, pass)) = wifi_station.network() {
-        start_wifi(spawner, p.WIFI, wifi::config(ssid, pass), name);
+    if let Station::Join { ssid, pass, power } = &wifi_station {
+        start_wifi(
+            spawner,
+            p.WIFI,
+            wifi::config(ssid, pass),
+            power.applied,
+            name,
+        );
     }
 
     match connector {
@@ -209,13 +235,14 @@ async fn main(spawner: Spawner) {
     }
 }
 
-/// Start the Wi-Fi driver and its tasks: the station joining the network `config` names, the IP
-/// stack, the TCP console, the GDB listener and the mDNS responder for `name`. A driver that fails
-/// to start leaves everything else running.
+/// Start the Wi-Fi driver and its tasks: the station joining the network `config` names at the
+/// transmit power cap `power` (quarter-dBm), the IP stack, the TCP console, the GDB listener and
+/// the mDNS responder for `name`. A driver that fails to start leaves everything else running.
 fn start_wifi(
     spawner: Spawner,
     wifi: esp_hal::peripherals::WIFI<'static>,
     config: esp_radio::wifi::Config,
+    power: u8,
     name: &'static str,
 ) {
     boot!("radio: Wi-Fi driver");
@@ -230,7 +257,7 @@ fn start_wifi(
                 seed,
             );
             spawner.must_spawn(wifi::watch(stack));
-            spawner.must_spawn(wifi::station(wifi, config));
+            spawner.must_spawn(wifi::station(wifi, config, power));
             spawner.must_spawn(wifi::net(runner));
             spawner.must_spawn(wifi::console(stack));
             spawner.must_spawn(wifi::gdb(stack));

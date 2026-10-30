@@ -994,7 +994,7 @@ fn info_with(wifi: (espsvc::WifiState, [u8; 4])) -> espsvc::EspInfo {
 /// `wifi.pass`, read at boot; with no usable network it stays off and `ESP_INFO` says not configured.
 #[test]
 fn the_station_starts_only_from_a_store_holding_a_usable_network() {
-    use crate::node::{station, Station};
+    use crate::node::{station, Station, TxPower};
     use store::{WIFI_PASS, WIFI_SSID};
     let boot = |ssid: Option<&str>, pass: Option<&str>| {
         let mut flash = RamFlash::erased(4096);
@@ -1010,6 +1010,10 @@ fn the_station_starts_only_from_a_store_holding_a_usable_network() {
     let join = |ssid: &str, pass: &str| Station::Join {
         ssid: heapless::String::try_from(ssid).unwrap(),
         pass: heapless::String::try_from(pass).unwrap(),
+        power: TxPower {
+            applied: 34,
+            refused: None,
+        },
     };
 
     // No network: off, and ESP_INFO reads not configured.
@@ -1034,11 +1038,11 @@ fn the_station_starts_only_from_a_store_holding_a_usable_network() {
     // Debug names the network and never prints the password.
     assert_eq!(
         std::format!("{on:?}"),
-        "Join { ssid: \"bench\", pass: (set) }"
+        "Join { ssid: \"bench\", pass: (set), power: TxPower { applied: 34, refused: None } }"
     );
     assert_eq!(
         std::format!("{:?}", join("cafe", "")),
-        "Join { ssid: \"cafe\", pass: (empty) }"
+        "Join { ssid: \"cafe\", pass: (empty), power: TxPower { applied: 34, refused: None } }"
     );
     assert_eq!(std::format!("{off:?}"), "Off");
     // An open network: a name and no password.
@@ -1057,6 +1061,46 @@ fn the_station_starts_only_from_a_store_holding_a_usable_network() {
     }
     let longest = "p".repeat(net::walk::WIFI_PASS_MAX);
     assert_eq!(boot(Some("bench"), Some(&longest)), join("bench", &longest));
+}
+
+/// `specs/bridge-onboarding.md` section 2.4: the station's transmit power cap is `wifi.tx_power`,
+/// read at boot: 34 unstored, the stored value in range, and 34 with the stored value named as
+/// refused when it is out of range (a store written by an image without the check).
+#[test]
+fn the_station_power_is_the_stored_tx_power_in_range_else_34() {
+    use crate::node::{station, tx_power, TxPower};
+    use store::{WIFI_PASS, WIFI_SSID, WIFI_TX_POWER};
+    let boot = |power: Option<u8>| {
+        let mut flash = RamFlash::erased(4096);
+        let mut s = store::Store::mount(&mut flash).unwrap();
+        s.set_str(WIFI_SSID, "bench").unwrap();
+        s.set_str(WIFI_PASS, "hunter2hunter2").unwrap();
+        if let Some(v) = power {
+            s.set(WIFI_TX_POWER, v).unwrap();
+        }
+        (tx_power(&s), station(&s).power())
+    };
+    let applied = |v| TxPower {
+        applied: v,
+        refused: None,
+    };
+    assert_eq!(boot(None), (applied(34), Some(applied(34))));
+    for v in [8, 34, 80, 84] {
+        assert_eq!(boot(Some(v)), (applied(v), Some(applied(v))), "{v}");
+    }
+    for v in [0, 7, 85, 255] {
+        let p = TxPower {
+            applied: 34,
+            refused: Some(v),
+        };
+        assert_eq!(boot(Some(v)), (p, Some(p)), "{v}");
+    }
+
+    // No network: no station, so no power to apply.
+    let mut flash = RamFlash::erased(4096);
+    let mut s = store::Store::mount(&mut flash).unwrap();
+    s.set(WIFI_TX_POWER, 80).unwrap();
+    assert_eq!(station(&s).power(), None);
 }
 
 // ---- the bridge's own update ----

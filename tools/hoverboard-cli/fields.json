@@ -60,6 +60,20 @@
     "read_only": false
   },
   {
+    "id": 19,
+    "path": "wifi.tx_power",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "range": [
+      8,
+      84
+    ],
+    "board_owned": false,
+    "read_only": false
+  },
+  {
     "id": 32,
     "path": "current.limit",
     "type": "u32",
