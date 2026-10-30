@@ -106,7 +106,10 @@ sealed interface BatteryReading {
             /** Nothing has stated how many cells this machine runs. */
             NO_CELLS,
 
-            /** The stated chemistry is a byte this app has no table for, or it is unread. */
+            /** The chemistry has not been read from the board yet. */
+            NO_CHEMISTRY,
+
+            /** The stated chemistry is a byte this app has no table for. */
             UNKNOWN_CHEMISTRY,
         }
     }
@@ -137,12 +140,15 @@ sealed interface BatteryReading {
  */
 fun batteryReading(telemetry: TelemetryUi?, packCells: Int?, chemistry: Int?): BatteryReading {
     val volts = telemetry?.batteryVolts ?: return BatteryReading.NoReading
-    if (packCells == null || packCells <= 0) return BatteryReading.Unjudged(volts, Why.NO_CELLS)
-    val fraction = chemistry?.let { BatteryCurve.fraction(volts, packCells, it) }
-        ?: return BatteryReading.Unjudged(volts, Why.UNKNOWN_CHEMISTRY)
-    return BatteryReading.Charge(
-        volts = volts,
-        fraction = fraction,
-        low = fraction <= BatteryCurve.LOW_FRACTION,
-    )
+    val fraction = chemistry?.let { packCells?.takeIf { it > 0 }?.let { BatteryCurve.fraction(volts, it, chemistry) } }
+    return when {
+        packCells == null || packCells <= 0 -> BatteryReading.Unjudged(volts, Why.NO_CELLS)
+        chemistry == null -> BatteryReading.Unjudged(volts, Why.NO_CHEMISTRY)
+        fraction == null -> BatteryReading.Unjudged(volts, Why.UNKNOWN_CHEMISTRY)
+        else -> BatteryReading.Charge(
+            volts = volts,
+            fraction = fraction,
+            low = fraction <= BatteryCurve.LOW_FRACTION,
+        )
+    }
 }

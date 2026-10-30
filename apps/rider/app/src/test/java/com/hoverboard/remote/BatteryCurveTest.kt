@@ -100,10 +100,16 @@ class BatteryCurveTest {
     }
 
     @Test
-    fun `an unknown or unread chemistry yields the volts and no charge`() {
+    fun `an unknown chemistry yields the volts and no charge`() {
         val telemetry = telemetry(battery = 2_900)
         assertEquals(Unjudged(29.0f, Why.UNKNOWN_CHEMISTRY), batteryReading(telemetry, rover, 3))
-        assertEquals(Unjudged(29.0f, Why.UNKNOWN_CHEMISTRY), batteryReading(telemetry, rover, null))
+    }
+
+    /** An unread chemistry is its own reason, never reported as a byte the app does not know. */
+    @Test
+    fun `an unread chemistry yields the volts and no charge, as unread`() {
+        val telemetry = telemetry(battery = 2_900)
+        assertEquals(Unjudged(29.0f, Why.NO_CHEMISTRY), batteryReading(telemetry, rover, null))
     }
 
     @Test

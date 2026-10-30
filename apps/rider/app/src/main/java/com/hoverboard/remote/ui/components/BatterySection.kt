@@ -124,6 +124,7 @@ private fun UnjudgedBattery(battery: BatteryReading.Unjudged) {
         text = stringResource(
             when (battery.why) {
                 BatteryReading.Unjudged.Why.NO_CELLS -> R.string.telemetry_battery_no_pack
+                BatteryReading.Unjudged.Why.NO_CHEMISTRY -> R.string.telemetry_battery_no_chemistry
                 BatteryReading.Unjudged.Why.UNKNOWN_CHEMISTRY -> R.string.telemetry_battery_unknown_chemistry
             },
         ),
