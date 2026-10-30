@@ -978,7 +978,47 @@ class RustSourceDriftTest {
     }
 
     /**
+     * The `u16` level-mask constants (`crates/orchestrator/src/events.rs`, `EV_LATCH_B` and the bits
+     * beside it), evaluated: each is
+
+     * `1 << N` or an OR of constants declared before it (`EV_MOTOR_BITS`, `FAULT_A_BITS`). A
+     * constant written in any other form fails by name in [bitValue] rather than dropping out.
+     */
+    private fun rustLevelMasks(): Map<String, Int> {
+        val events = rust("crates/orchestrator/src/events.rs")
+        val values = linkedMapOf<String, Int>()
+        for (m in findAll(events, """^pub\s+const\s+(\w+)\s*:\s*u16\s*=\s*([^;]+);""", "events.rs u16 masks")) {
+            val name = m.groupValues[1]
+            val expr = m.groupValues[2].trim()
+            values[name] = if (expr.contains('|')) {
+                expr.split('|').map { it.trim() }.fold(0) { acc, term ->
+                    acc or checkNotNull(values[term]) { "$name names $term, which events.rs has not declared above it" }
+                }
+            } else {
+                bitValue(name, expr)
+            }
+        }
+        return values
+    }
+
+    /**
+     * `CyclicState.ARM_BLOCKING_BITS` is Fault A and Fault B: `FAULT_A_BITS | EV_LATCH_B`, as the
+     * Rust declares them (`crates/orchestrator/src/events.rs`, `FAULT_A_BITS`). The rider app's
+     * fault lamps and fault disarm read it, so a bit the firmware adds to either group has to reach
+     * the app or fail here.
+     */
+    @Test
+    fun armBlockingBitsAreFaultAAndFaultBInTheRustSource() {
+        val masks = rustLevelMasks()
+        val faultA = checkNotNull(masks["FAULT_A_BITS"]) { "events.rs no longer declares FAULT_A_BITS" }
+        val latchB = checkNotNull(masks["EV_LATCH_B"]) { "events.rs no longer declares EV_LATCH_B" }
+        assertEquals(faultA, CyclicState.FAULT_A_BITS, "FAULT_A_BITS drifted from the Rust")
+        assertEquals(faultA or latchB, CyclicState.ARM_BLOCKING_BITS, "ARM_BLOCKING_BITS drifted from the Rust")
+    }
+
+    /**
      * Exact-set comparison against every `*_TIMEOUT_TICKS` const (`crates/linkctl/src/lib.rs`,
+
      * the supervision timeouts).
      *
      * It used to look the timeouts up BY NAME, one assertion each, which is how
