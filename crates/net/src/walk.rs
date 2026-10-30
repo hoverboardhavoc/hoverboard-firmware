@@ -135,10 +135,23 @@ pub const WIFI_SSID_MAX: usize = 32;
 /// The shortest non-empty `wifi.pass` a bridge takes: a WPA2 passphrase's minimum.
 pub const WIFI_PASS_MIN: usize = 8;
 /// The longest `wifi.pass` a bridge takes: a WPA2 passphrase's maximum (a 64-digit hex PSK is not
-/// accepted). One `CONFIG_WRITE` carries at most 58 value bytes ([`MAX_PDU`] less the PDU header,
-/// the key and the type tag), so 59 to 63 bytes cannot be written over a link; the bound matters to
-/// a store written by an image that had no check.
+/// accepted). One `CONFIG_WRITE` carries at most [`CONFIG_WRITE_VALUE_MAX`] value bytes, so the
+/// longer ones cannot be written over a link; the bound matters to a store written by an image that
+/// had no check.
 pub const WIFI_PASS_MAX: usize = 63;
+
+/// `CONFIG_WRITE`'s payload before the value: `[field_id, index, type_tag]`.
+const CONFIG_WRITE_HEAD: usize = 3;
+/// `CONFIG_RESP`'s payload before the value: `[field_id, index, status, type_tag]`.
+const CONFIG_RESP_HEAD: usize = 4;
+/// The most value bytes one `CONFIG_WRITE` carries: [`MAX_PDU`] less the PDU header and
+/// `[field_id, index, type_tag]`.
+pub const CONFIG_WRITE_VALUE_MAX: usize = MAX_PDU - pdu::HEADER_LEN - CONFIG_WRITE_HEAD;
+/// The most value bytes one `CONFIG_RESP` carries: [`MAX_PDU`] less the PDU header and
+/// `[field_id, index, status, type_tag]`. A write's echo and a read of the key carry the value, so
+/// a longer value is stored but never answered; a secret's echo and read carry none
+/// ([`CFG_SECRET`]), so it is bound by [`CONFIG_WRITE_VALUE_MAX`] alone.
+pub const CONFIG_RESP_VALUE_MAX: usize = MAX_PDU - pdu::HEADER_LEN - CONFIG_RESP_HEAD;
 
 /// Whether a bridge can use `value` for `key` (`specs/bridge-onboarding.md` section 2.1): a
 /// `device.name` that passes [`bridge_name_usable`], a `wifi.ssid` of at most [`WIFI_SSID_MAX`]
@@ -652,14 +665,19 @@ impl Responder {
     /// `CONFIG_RESP [field_id, index, status, type_tag, value...]` echoing the value a read answers
     /// now, none for a stored secret.
     fn on_config_write<F: Flash>(&mut self, pdu: &Pdu, store: &mut Store<F>, out: &mut Emits) {
-        if pdu.payload.len() < 3 {
+        if pdu.payload.len() < CONFIG_WRITE_HEAD {
             return;
         }
         let key = Key {
             field_id: pdu.payload[0],
             index: pdu.payload[1],
         };
-        let status = self.apply_write(store, key, pdu.payload[2], &pdu.payload[3..]);
+        let status = self.apply_write(
+            store,
+            key,
+            pdu.payload[2],
+            &pdu.payload[CONFIG_WRITE_HEAD..],
+        );
 
         let mut resp: PduBuf = Vec::new();
         let _ = resp.push(key.field_id);

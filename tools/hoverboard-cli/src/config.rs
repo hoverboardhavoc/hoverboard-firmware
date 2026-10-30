@@ -1380,6 +1380,19 @@ mod tests {
         let msgs: Vec<&str> = wrong.problems.iter().map(|p| p.msg.as_str()).collect();
         assert_eq!(msgs, ["w.json: wifi.pass: a string, not a number"]);
         all.extend(msgs.iter().map(|m| m.to_string()));
+        // One longer than a CONFIG_WRITE carries is refused by the file check, before any read.
+        let max = net::walk::CONFIG_WRITE_VALUE_MAX;
+        let long = "p".repeat(max + 1);
+        let f = files(&[("w.json", json!({ "wifi": { "pass": long } }))]);
+        let msgs: Vec<&str> = f.problems.iter().map(|p| p.msg.as_str()).collect();
+        assert_eq!(
+            msgs,
+            [format!(
+                "w.json: wifi.pass: {} bytes, more than the {max} one CONFIG_WRITE carries",
+                max + 1
+            )]
+        );
+        assert!(!msgs[0].contains(&long));
 
         for l in &all {
             assert!(!l.contains(PASS) && !l.contains("12345678"), "{l}");
