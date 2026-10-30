@@ -17,8 +17,8 @@ import com.hoverboard.protocol.linkctl.CyclicState
  *    volts = cV / 100. The retired code read millivolts here, which would have shown a 36 V pack
  *    as 3.6 V. Zero is not a reading: see [batteryVolts].
  *  - `pitch` and `roll` are centidegrees.
- *  - `wheelSpeed` is the signed HALL EDGE COUNT per 320-period window (`motor::SPEED` saturated to
- *    i16), explicitly not the stock unit and not a speed: see [hallEdgesPerWindow].
+ *  - `wheelRate` is the period-measured wheel rate, Q12 of one hall edge per 320-period window:
+ *    see [wheelRateQ12]. The window count `wheelSpeed` beside it is not shown.
  *  - `fault` is the latched fault LEVEL, 0 = healthy. See [anyFault] for why a zero here is not
  *    evidence of a healthy board.
  *  - `flags` bit0 rider present, bit7 lockdown.
@@ -60,22 +60,11 @@ data class TelemetryUi(
      */
 
     /**
-     * `CYCLIC_STATE.wheel_speed`: the signed count of hall edges in the last 320-period window
-     * (`motor::SPEED` as the period ISR produces it, saturated to i16, copied to the wire with no
-     * rescaling).
-     *
-     * It is a COUNT, not a speed, and the owner decision of 2026-10-09 put the raw count on the
-     * wire deliberately (`specs/link-control.md`, the CYCLIC_STATE mirror section). A road speed
-     * needs the motor's pole-pair count and the wheel's diameter, which are registered fields
-     * defaulting to unset, so no board carries them until a bench measures that hub. The label
-     * says count and implies no speed; converting this word is not worth a second read pass for a
-     * figure the Ride panel refreshes many times a second.
-     *
-     * The word also has no writer yet on any board (bench 2026-10-09): the copy from `motor::SPEED`
-     * into the control block is one line that has not been written, so this reads 0 from every
-     * board regardless of what the wheel is doing.
+     * `CYCLIC_STATE.wheel_rate`: the period-measured wheel rate, Q12 of one hall edge per
+     * 320-period window, in the board's own counter sense, or null before the first frame. What the
+     * Ride panel's speed is converted from ([machineSpeed], `specs/rider-ui.md` 3.1a).
      */
-    val hallEdgesPerWindow: Int get() = cyclic?.wheelSpeed ?: 0
+    val wheelRateQ12: Int? get() = cyclic?.wheelRate
 
     /** Pitch in degrees (centidegrees / 100). */
     val pitchDegrees: Float get() = (cyclic?.pitch ?: 0) / CENTIDEGREES_PER_DEGREE

@@ -20,11 +20,14 @@ import com.hoverboard.remote.model.FrameStats
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.OdometerReading
 import com.hoverboard.remote.model.RiderCommand
+import com.hoverboard.remote.model.SpeedFacts
+import com.hoverboard.remote.model.SpeedReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
 import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
+import com.hoverboard.remote.model.machineSpeed
 import com.hoverboard.remote.model.rigidLeader
 import com.hoverboard.remote.model.odometerReading
 import kotlinx.coroutines.CancellationException
@@ -89,6 +92,8 @@ import kotlinx.coroutines.launch
  * @param packCells each board's `board.battery.cells`, from the same read ([SetupState.packCellsOf]).
  * @param wheelGeometry each board's pole-pair count and wheel diameter, from the same read
  *   ([SetupState.wheelGeometryOf]): what turns that wheel's counted hall edges into a distance.
+ * @param speedFacts each REPORTING motor controller's wheel rate with its geometry and side
+ *   ([SetupState.speedFactsOf]), in address order: what [speed] is computed from.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -117,6 +122,7 @@ data class UiState(
     val packCells: Map<Int, Int> = emptyMap(),
     val packChemistry: Map<Int, Int> = emptyMap(),
     val wheelGeometry: Map<Int, WheelGeometry> = emptyMap(),
+    val speedFacts: List<SpeedFacts> = emptyList(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -172,6 +178,13 @@ data class UiState(
      * where it has not, or silence from a board that has sent nothing.
      */
     fun odometerOf(address: Int): OdometerReading = odometerReading(telemetryOf(address), wheelGeometry[address])
+
+    /**
+     * What the Ride panel's speed shows (`specs/rider-ui.md` 3.1a): the reporting motor
+     * controllers' wheel rates, each folded forward by its side and converted with its own wheel,
+     * averaged; or what is missing for that.
+     */
+    val speed: SpeedReading get() = machineSpeed(speedFacts)
 
     /**
      * Whether the arm control will accept a press right now.
@@ -408,6 +421,9 @@ class MainViewModel(
                 packCells = mcs.mapNotNull { a -> b.setup.packCellsOf(a)?.let { a to it } }.toMap(),
                 packChemistry = mcs.mapNotNull { a -> b.setup.packChemistryOf(a)?.let { a to it } }.toMap(),
                 wheelGeometry = mcs.mapNotNull { a -> b.setup.wheelGeometryOf(a)?.let { a to it } }.toMap(),
+                speedFacts = mcs.mapNotNull { a ->
+                    b.telemetry[a]?.wheelRateQ12?.let { b.setup.speedFactsOf(a, it) }
+                },
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)

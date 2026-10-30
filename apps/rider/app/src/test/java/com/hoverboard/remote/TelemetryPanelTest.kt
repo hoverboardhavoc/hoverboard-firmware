@@ -12,6 +12,7 @@ import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.model.BatteryCurve
 import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.CurrentReading
+import com.hoverboard.remote.model.SpeedReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
@@ -278,19 +279,25 @@ class TelemetryPanelTest {
             .assertDoesNotExist()
     }
 
-    /**
-     * The number beside the speed label is a hall EDGE COUNT per window, not a speed, so the label
-     * has to say so: a road speed needs the motor's pole-pair count and the wheel's diameter,
-     * registered fields that default to unset, so no board carries them
-     * (`specs/link-control.md`, the payload shapes).
-     */
+    /** The speed reads in km/h, to a tenth below 10 (`specs/rider-ui.md` 3.1a). */
     @Test
-    fun theWheelSpeedWordIsLabelledAsTheCountItIs() {
-        show(TelemetryUi().merge(cyclic(battery = 2_900)))
+    fun theSpeedReadsInKmPerHour() {
+        show(TelemetryUi().merge(cyclic()), speed = SpeedReading.Kmh(3.26))
 
-        val label = context.getString(R.string.telemetry_speed)
-        compose.onNodeWithText(label).assertIsDisplayed()
-        assertFalse("the label must not call the count a speed", label.contains("speed", true))
+        compose.onNodeWithText(context.getString(R.string.telemetry_speed)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.telemetry_speed_tenths, 3.3)).assertIsDisplayed()
+    }
+
+    /** With a geometry field unset there is no speed, and the line under it names the field. */
+    @Test
+    fun anUnsetGeometryFieldIsNamedAndNoSpeedIsShown() {
+        val missing = SpeedReading.NoSpeed(unread = emptyList(), unset = listOf(SpeedReading.POLE_PAIRS))
+        show(TelemetryUi().merge(cyclic()), speed = missing)
+
+        compose.onNodeWithText(context.getString(R.string.telemetry_speed_none)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.telemetry_speed_unset, SpeedReading.POLE_PAIRS))
+            .assertIsDisplayed()
+        compose.onNodeWithText("km/h", substring = true).assertDoesNotExist()
     }
 
     /**
@@ -459,6 +466,7 @@ class TelemetryPanelTest {
         chemistry: Int? = LI_ION,
         current: CurrentReading = CurrentReading.Silent,
         peerCurrent: CurrentReading? = null,
+        speed: SpeedReading = SpeedReading.Kmh(0.0),
     ) = compose.setContent {
         HoverboardRemoteTheme {
             TelemetryPanel(
@@ -467,6 +475,7 @@ class TelemetryPanelTest {
                 armed = false,
                 battery = batteryReading(telemetry, packCells, chemistry),
                 currents = listOfNotNull(BOARD to current, peerCurrent?.let { PEER to it }),
+                speed = speed,
             )
         }
     }

@@ -22,6 +22,7 @@ import com.hoverboard.remote.model.FloorOutside
 import com.hoverboard.remote.model.NodeInfo
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.SpeedFacts
 import com.hoverboard.remote.model.TakesEffect
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.WheelGeometry
@@ -453,6 +454,15 @@ data class SetupState(
      */
     fun wheelGeometryOf(address: Int): WheelGeometry? =
         setupOf(address).let { WheelGeometry.of(it.polePairs, it.diameterMm) }
+
+    /**
+     * What the board at [address] brings to the Ride panel's speed beside its [wheelRateQ12]
+     * (`specs/rider-ui.md` 3.1a): its pole pairs, wheel diameter and `control.side`, each null
+     * while this session has not read it.
+     */
+    fun speedFactsOf(address: Int, wheelRateQ12: Int): SpeedFacts = setupOf(address).let {
+        SpeedFacts(wheelRateQ12, it.polePairs, it.diameterMm, storedByte(address, SetupFields.CONTROL_SIDE.key))
+    }
 
     val values: Map<Key, Value> get() = current.values
     val running: Map<Key, Value> get() = current.running

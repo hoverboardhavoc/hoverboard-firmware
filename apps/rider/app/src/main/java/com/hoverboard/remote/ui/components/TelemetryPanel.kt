@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.BatteryReading
 import com.hoverboard.remote.model.CurrentReading
+import com.hoverboard.remote.model.SpeedReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.theme.ARMED_OUTLINE
 import com.hoverboard.remote.ui.theme.AccentGreen
@@ -46,6 +47,7 @@ import com.hoverboard.remote.ui.theme.ZeroLine
  * @param currents each motor controller's current display ([CurrentSection]), labelled by its node
  *   label, in address order. One row is a machine with one board in it; a board that is there and
  *   silent draws a row saying so.
+ * @param speed the machine's speed ([com.hoverboard.remote.model.machineSpeed]), or what it lacks.
  */
 @Composable
 fun TelemetryPanel(
@@ -54,6 +56,7 @@ fun TelemetryPanel(
     armed: Boolean,
     battery: BatteryReading,
     currents: List<Pair<String, CurrentReading>>,
+    speed: SpeedReading,
     modifier: Modifier = Modifier,
 ) {
     val shape = RoundedCornerShape(20.dp)
@@ -87,7 +90,7 @@ fun TelemetryPanel(
         Spacer(modifier = Modifier.height(16.dp))
         CurrentSection(currents)
         Spacer(modifier = Modifier.height(16.dp))
-        SpeedAndThrottleRow(telemetry, throttlePercent)
+        SpeedAndThrottleRow(speed, throttlePercent)
         Spacer(modifier = Modifier.height(16.dp))
         AttitudeRow(telemetry)
     }
@@ -162,24 +165,39 @@ private fun Chip(text: String, color: Color) {
 }
 
 @Composable
-private fun SpeedAndThrottleRow(telemetry: TelemetryUi, throttlePercent: Int) {
+private fun SpeedAndThrottleRow(speed: SpeedReading, throttlePercent: Int) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        // Labelled for what the number is, not for what a panel slot in that position usually
-        // holds: `CYCLIC_STATE.wheel_speed` is the signed hall-edge count per 320-period window
-        // (`specs/link-control.md`, the CYCLIC_STATE mirror section), and a road speed needs the
-        // motor's pole-pair count and the wheel's diameter, which are registered fields that
-        // default to unset, so no board carries them. The count is shown as a count. The word
-        // also has no writer on any board yet, so it reads 0.
+        // The machine's road speed from `CYCLIC_STATE.wheel_rate` (`specs/rider-ui.md` 3.1a):
+        // signed forward, tenths below 10 km/h. "none" while a conversion fact is missing, and the
+        // line under the row names it.
         Metric(
             label = stringResource(R.string.telemetry_speed),
-            value = stringResource(R.string.telemetry_speed_value, telemetry.hallEdgesPerWindow),
+            value = when (speed) {
+                is SpeedReading.Kmh -> when (val shown = speed.shown) {
+                    is SpeedReading.Shown.Tenths -> stringResource(R.string.telemetry_speed_tenths, shown.kmh)
+                    is SpeedReading.Shown.Whole -> stringResource(R.string.telemetry_speed_whole, shown.kmh)
+                }
+                SpeedReading.Silent, is SpeedReading.NoSpeed -> stringResource(R.string.telemetry_speed_none)
+            },
         )
         Metric(
             label = stringResource(R.string.telemetry_throttle),
             value = stringResource(R.string.telemetry_throttle_value, throttlePercent),
+        )
+    }
+    if (speed is SpeedReading.NoSpeed) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = if (speed.unread.isNotEmpty()) {
+                stringResource(R.string.telemetry_speed_unread, speed.unread.joinToString(", "))
+            } else {
+                stringResource(R.string.telemetry_speed_unset, speed.unset.joinToString(", "))
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary,
         )
     }
 }

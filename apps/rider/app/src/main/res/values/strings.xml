@@ -130,11 +130,14 @@
     <string name="telemetry_battery_value">%1$.1f V</string>
     <string name="telemetry_battery_percent">%1$d%%</string>
     <string name="telemetry_battery_low">LOW BATTERY</string>
-    <!-- NOT a speed: the word is the signed hall-edge count per 320-period window, and a road
-         speed is not derivable without motor.pole_pairs and a wheel diameter
-         (specs/link-control.md, the CYCLIC_STATE mirror section). -->
-    <string name="telemetry_speed">Hall edges / window</string>
-    <string name="telemetry_speed_value">%1$d</string>
+    <!-- The machine's speed from CYCLIC_STATE.wheel_rate (specs/rider-ui.md 3.1a). -->
+    <string name="telemetry_speed">Speed</string>
+    <string name="telemetry_speed_tenths">%1$.1f km/h</string>
+    <string name="telemetry_speed_whole">%1$d km/h</string>
+    <string name="telemetry_speed_none">none</string>
+    <!-- %1$s is a comma-separated list of field names as the host config tool spells them. -->
+    <string name="telemetry_speed_unread">No speed yet: %1$s not read from the board.</string>
+    <string name="telemetry_speed_unset">No speed: %1$s not set. Set it with the host config tool.</string>
     <string name="telemetry_throttle">Throttle</string>
     <string name="telemetry_throttle_value">%1$d%%</string>
     <string name="telemetry_pitch">Pitch</string>
