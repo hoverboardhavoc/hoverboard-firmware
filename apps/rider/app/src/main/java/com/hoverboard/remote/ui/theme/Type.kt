@@ -9,7 +9,7 @@ import com.hoverboard.remote.R
 
 /**
  * Atkinson Hyperlegible, regular and bold (`specs/rider-ui.md` 3.10), under the SIL Open Font
- * License 1.1; the licence ships as `assets/fonts/OFL.txt` and the Connect screen shows it.
+ * License 1.1; the licence ships beside them as `assets/fonts/OFL.txt`.
  */
 val Atkinson = FontFamily(
     Font(R.font.atkinson_hyperlegible_regular, FontWeight.Normal),

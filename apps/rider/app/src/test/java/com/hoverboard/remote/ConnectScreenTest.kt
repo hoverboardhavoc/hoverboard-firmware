@@ -3,17 +3,14 @@ package com.hoverboard.remote
 import android.app.Application
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.remote.ble.ScanCandidate
 import com.hoverboard.remote.ble.SelectedBoard
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.ui.screens.ConnectScreen
-import com.hoverboard.remote.ui.screens.FONT_LICENCE_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -140,23 +137,6 @@ class ConnectScreenTest {
         cachedName = null,
         rssi = rssi,
     )
-
-    /**
-     * The font notice at the foot of the screen opens the licence, read from the asset the fonts
-     * ship with (`specs/rider-ui.md` 3.10), and Close dismisses it.
-     */
-    @Test
-    fun theFontLicenceLineOpensTheLicence() {
-        show(ConnectionState.DISCONNECTED)
-        val firstLine = context.assets.open("fonts/OFL.txt").bufferedReader().use { it.readLine() }
-
-        compose.onNodeWithTag(FONT_LICENCE_TAG).performScrollTo().performClick()
-
-        compose.onNodeWithText(context.getString(R.string.font_licence_title)).assertIsDisplayed()
-        compose.onNodeWithText(firstLine, substring = true).assertExists()
-        compose.onNodeWithText(context.getString(R.string.font_licence_close)).performClick()
-        compose.onNodeWithText(context.getString(R.string.font_licence_title)).assertDoesNotExist()
-    }
 
     private fun show(
         state: ConnectionState,
