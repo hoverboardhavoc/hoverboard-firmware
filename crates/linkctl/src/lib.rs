@@ -18,8 +18,8 @@
 //!   payload shorter than the committed prefix is rejected; the delivery class is best-effort /
 //!   latest-wins, so the caller drops the PDU and no error propagates ([`decode`] returns
 //!   `None`).
-//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 31 bytes: the
-//!   fifteen committed bytes, the appended [`CyclicObs`] block and the trailing `wheel_rate`). Any other length is a
+//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 32 bytes: the
+//!   sixteen committed bytes, the appended [`CyclicObs`] block and the trailing `wheel_rate`). Any other length is a
 //!   protocol error. It once accepted eleven bytes with the block absent, for a peer on an image
 //!   from before the block; nothing in this project owes an older image compatibility until a
 //!   version is released, and boards and phones are updated together (owner policy, 2026-10-10).
@@ -163,10 +163,10 @@ fn rd_i32(b: &[u8], off: usize) -> i32 {
     rd_u32(b, off) as i32
 }
 
-// --- CYCLIC_STATE (31 B: 15 B committed + a 12 B appended block + the i32 wheel_rate) ----------
+// --- CYCLIC_STATE (32 B: 16 B committed + a 12 B appended block + the i32 wheel_rate) ----------
 
 /// The part a board reports in [`CyclicObs::chip`]: what `detect_chip` identified at boot
-/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 20). A controller needs it to
+/// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 23). A controller needs it to
 /// know which capability table predicts this board's layout verdict, and the board is the only
 /// thing that knows: the three fleet parts differ in pin bonding, gate maps and ADC channels,
 /// and nothing else on the wire distinguishes them.
@@ -234,7 +234,7 @@ impl ChipTag {
 }
 
 /// The APPENDED observation block (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets
-/// 15..27): the current window a controller displays and cross-checks the board's calibration
+/// 16..28): the current window a controller displays and cross-checks the board's calibration
 /// against, the two per-boot constants that date the rest of the payload, and this wheel's
 /// odometer.
 ///
@@ -273,7 +273,7 @@ pub struct CyclicObs {
 }
 
 impl CyclicObs {
-    /// On-wire length of the appended block: `i16 + i16 + u16 + u8 + u8 + u32`, offsets 15 to 26
+    /// On-wire length of the appended block: `i16 + i16 + u16 + u8 + u8 + u32`, offsets 16 to 27
     /// of the payload.
     ///
     /// Additions go on the END, so every existing offset survives one, which is how the odometer
@@ -334,14 +334,16 @@ pub struct CyclicState {
     /// The mode byte. Peer consumer: the rigid follower's engagement intent (it engages while
     /// its leader reports RUN, `specs/rover-one-imu.md` section 2) and supervision/OBS.
     pub mode: u8,
-    /// The board's gating-producer LEVEL MASK this pass (`orchestrator::events::Levels::mask`,
-    /// one `EV_*` bit per producer; `specs/rover-one-imu.md` section 4), 0 = every producer
+    /// The board's OWN gating-producer LEVEL MASK this pass, `u16` LE at offset 9
+    /// (`orchestrator::events::Levels::own_mask`, one `EV_*` bit per producer, the motor-side
+    /// level as its four causes on bits 8 to 11; `specs/link-control.md`, `CYCLIC_STATE`;
+    /// `specs/rover-one-imu.md` section 4), 0 = every producer
     /// clear. A level, not a code: the mode machine's SHUTDOWN is one pass long while this frame
     /// goes out every second pass, so a code naming one fault could be missed entirely, and what
     /// a peer needs to know is whether this board is healthy right now. The fault-A group is
     /// `fault & orchestrator::events::FAULT_A_BITS`; the mask also carries the mode fault and the
     /// power request, which are not faults and which that constant excludes by construction.
-    pub fault: u8,
+    pub fault: u16,
     /// Flag bits: [`Self::FLAG_RIDER`] (bit0), [`Self::FLAG_LEADER`] (bit1),
     /// [`Self::FLAG_FOLLOWER`] (bit2), [`Self::FLAG_LOCKDOWN`] (bit7).
     pub flags: u8,
@@ -362,7 +364,7 @@ pub struct CyclicState {
     /// accepted payload has it, which is the guarantee the exact-length decode buys: a consumer
     /// reads the current window and the board's identity without a present/absent arm.
     pub obs: CyclicObs,
-    /// This board's period-measured wheel rate, at offset 27 after the block
+    /// This board's period-measured wheel rate, at offset 28 after the block
     /// (`specs/link-control.md`, `CYCLIC_STATE`): `motor::WHEEL_RATE_Q12` as the block carries
     /// it, unscaled, in Q12 of [`Self::wheel_speed`]'s unit (4096 = one hall edge per 320-period
     /// window), in the counter's own sense, decaying as `1/t` between edges and 0 across a
@@ -375,7 +377,7 @@ impl CyclicState {
     /// Length of the committed words, which is also the offset the appended [`CyclicObs`] block
     /// sits at (`specs/link-control.md` gives the layout in those parts). A length the wire never
     /// carries on its own: see [`Self::ENCODED_LEN`].
-    pub const LEN: usize = 15;
+    pub const LEN: usize = 16;
 
     /// The offset of [`Self::wheel_rate`], the word after the [`CyclicObs`] block.
     pub const WHEEL_RATE_OFF: usize = Self::LEN + CyclicObs::LEN;
@@ -383,7 +385,7 @@ impl CyclicState {
     /// The ONE on-wire length of a `CYCLIC_STATE` payload: the committed words, the appended
     /// [`CyclicObs`] block and the `i32` [`Self::wheel_rate`]. [`Self::encode`] writes exactly this, [`Self::decode`] accepts
     /// exactly this, and a buffer handed to either has to be this long.
-    pub const ENCODED_LEN: usize = 31;
+    pub const ENCODED_LEN: usize = 32;
 
     /// `flags` bit0: rider present. Peer consumer: rider mirror (profile select).
     pub const FLAG_RIDER: u8 = 1 << 0;
@@ -434,10 +436,10 @@ impl CyclicState {
         out[4..6].copy_from_slice(&self.wheel_speed.to_le_bytes());
         out[6..8].copy_from_slice(&self.battery.to_le_bytes());
         out[8] = self.mode;
-        out[9] = self.fault;
-        out[10] = self.flags;
-        out[11..13].copy_from_slice(&self.peer_demand.to_le_bytes());
-        out[13..15].copy_from_slice(&self.wheel_pos.to_le_bytes());
+        out[9..11].copy_from_slice(&self.fault.to_le_bytes());
+        out[11] = self.flags;
+        out[12..14].copy_from_slice(&self.peer_demand.to_le_bytes());
+        out[14..16].copy_from_slice(&self.wheel_pos.to_le_bytes());
         self.obs.encode(&mut out[Self::LEN..]);
         out[Self::WHEEL_RATE_OFF..Self::ENCODED_LEN]
             .copy_from_slice(&self.wheel_rate.to_le_bytes());
@@ -448,7 +450,7 @@ impl CyclicState {
     /// [`DecodeError::WrongLen`]**, short or long.
     ///
     /// The exception to the crate's committed-prefix rule, and the module doc carries the whole
-    /// argument: a sender in this tree writes thirty-one bytes, L2 never delivers a truncated
+    /// argument: a sender in this tree writes thirty-two bytes, L2 never delivers a truncated
     /// frame, and no older image is owed compatibility, so every other length is a peer that is
     /// not speaking this protocol.
     pub fn decode(b: &[u8]) -> Result<CyclicState, DecodeError> {
@@ -461,10 +463,10 @@ impl CyclicState {
             wheel_speed: rd_i16(b, 4),
             battery: rd_u16(b, 6),
             mode: b[8],
-            fault: b[9],
-            flags: b[10],
-            peer_demand: rd_i16(b, 11),
-            wheel_pos: rd_i16(b, 13),
+            fault: rd_u16(b, 9),
+            flags: b[11],
+            peer_demand: rd_i16(b, 12),
+            wheel_pos: rd_i16(b, 14),
             obs: CyclicObs::decode(&b[Self::LEN..]),
             wheel_rate: rd_i32(b, Self::WHEEL_RATE_OFF),
         })
@@ -650,19 +652,19 @@ mod tests {
 
     #[test]
     fn committed_lengths_pinned() {
-        assert_eq!(CyclicState::LEN, 15);
+        assert_eq!(CyclicState::LEN, 16);
         assert_eq!(DriveCmd::LEN, 5);
         assert_eq!(Inputs::LEN, 2);
     }
 
     /// The appended block's length and the `CYCLIC_STATE` payload's one on-wire length, against
-    /// the committed words it is built from: 15 is where the block starts, 27 is where
-    /// `wheel_rate` starts, 31 is what the wire carries and what a decoder requires.
+    /// the committed words it is built from: 16 is where the block starts, 28 is where
+    /// `wheel_rate` starts, 32 is what the wire carries and what a decoder requires.
     #[test]
     fn appended_block_lengths_pinned() {
         assert_eq!(CyclicObs::LEN, 12, "i16 + i16 + u16 + u8 + u8 + u32");
-        assert_eq!(CyclicState::WHEEL_RATE_OFF, 27);
-        assert_eq!(CyclicState::ENCODED_LEN, 31);
+        assert_eq!(CyclicState::WHEEL_RATE_OFF, 28);
+        assert_eq!(CyclicState::ENCODED_LEN, 32);
         assert_eq!(
             CyclicState::ENCODED_LEN,
             CyclicState::LEN + CyclicObs::LEN + 4
@@ -678,7 +680,7 @@ mod tests {
             wheel_speed: -1, // 0xFFFF
             battery: 0xA1B2, // LE B2 A1
             mode: 0x03,
-            fault: 0x11,
+            fault: 0x0911,
             flags: CyclicState::FLAG_RIDER | CyclicState::FLAG_LOCKDOWN,
             peer_demand: -28500, // 0x90AC
             wheel_pos: -0x1235,  // 0xEDCB
@@ -706,18 +708,18 @@ mod tests {
                 0xFF, 0xFF, // wheel_speed -1
                 0xB2, 0xA1, // battery 0xA1B2
                 0x03, // mode
-                0x11, // fault
+                0x11, 0x09, // fault 0x0911
                 0x81, // flags: bit0 | bit7
                 0xAC, 0x90, // peer_demand -28500
                 0xCB, 0xED, // wheel_pos -0x1235
-                // The appended block, from offset 15.
+                // The appended block, from offset 16.
                 0x04, 0x03, // phase_peak 0x0304
                 0xFD, 0xFF, // phase_mean -3
                 0xC1, 0x08, // duty_on 0x08C1
                 0x7B, // boot_tag
                 0x02, // chip: F130C8
                 0x0D, 0x0C, 0x0B, 0x0A, // odometer 0x0A0B0C0D
-                0xFC, 0xFC, 0xFD, 0xFE, // wheel_rate -0x01020304, from offset 27
+                0xFC, 0xFC, 0xFD, 0xFE, // wheel_rate -0x01020304, from offset 28
             ]
         );
     }
@@ -755,7 +757,7 @@ mod tests {
         assert_eq!(CyclicState::decode(&buf), Ok(orig));
     }
 
-    /// A payload short of [`CyclicState::ENCODED_LEN`] is REFUSED, the fifteen committed bytes
+    /// A payload short of [`CyclicState::ENCODED_LEN`] is REFUSED, the sixteen committed bytes
     /// included.
     ///
     /// Eleven decoded here until 2026-10-10, for a peer on an image from before the appended
@@ -1023,8 +1025,8 @@ mod tests {
             assert_eq!(decode(op, &buf), None, "opcode {op:#04x}");
         }
         // Short payloads drop (no error propagates), per the best-effort class. For
-        // `CYCLIC_STATE` that is every length but its own, so the fifteen committed bytes and a
-        // twenty-eighth byte drop here as well.
+        // `CYCLIC_STATE` that is every length but its own, so the sixteen committed bytes and a
+        // thirty-third byte drop here as well.
         assert_eq!(decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN]), None);
         assert_eq!(decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN - 1]), None);
         assert_eq!(

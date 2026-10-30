@@ -882,7 +882,7 @@ class RustSourceDriftTest {
         val expected = mapOf(
             "CyclicState" to listOf(
                 "pitch" to "i16", "roll" to "i16", "wheelSpeed" to "i16", "battery" to "u16",
-                "mode" to "u8", "fault" to "u8", "flags" to "u8", "peerDemand" to "i16",
+                "mode" to "u8", "fault" to "u16", "flags" to "u8", "peerDemand" to "i16",
                 "wheelPos" to "i16", "obs" to "CyclicObs", "wheelRate" to "i32",
             ),
             "CyclicObs" to listOf(

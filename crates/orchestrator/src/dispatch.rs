@@ -398,7 +398,7 @@ pub(crate) fn control_dispatch_step(state: &mut OrchestratorState, run: bool) ->
 /// The LIVE mode-fault level (`events::EV_MODE_FAULT`): the validation seam's demotion, OR the
 /// two-leader staging error (`specs/rover-one-imu.md` section 2): a rigid leader whose fresh peer
 /// cyclic also claims the leader flag. One function, read by the pipeline's level fold and by the
-/// OBS snapshot, so the counter, the cyclic `fault` byte and `CTRL_OBS` cannot disagree about it.
+/// OBS snapshot, so the counter, the cyclic `fault` word and `CTRL_OBS` cannot disagree about it.
 /// Not a Fault A, deliberately: the refusal is the cleared engagement gate in [`balance_step`],
 /// which keeps both boards from engaging while this level says why.
 pub(crate) fn mode_fault_level(state: &OrchestratorState) -> bool {
@@ -756,7 +756,7 @@ pub fn re_apply_control_values(
 /// the link boundary (`specs/link-control.md`, "Payload shapes"). Returns `None` while the board
 /// holds no assigned address (pre-assignment there is no peer contract; the caller passes the
 /// address fact, which lives in `net`). The rider flag reports the LOCAL pads only (mirrored
-/// levels must not feed back); the `fault` byte is this pass's gating-producer level mask; the
+/// levels must not feed back); the `fault` word is this pass's gating-producer level mask; the
 /// lockdown flag has no local producer (the master-shutdown origin is motor-era work) and reports
 /// clear.
 pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicState> {
@@ -846,14 +846,15 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
 /// Control runs between BLE cyclic emissions: 250 Hz / 50 = **5 Hz**.
 ///
 /// The controller sample rides the SWD mailbox port and the bridge re-publishes it on its BLE
-/// link (`specs/hoverboard-bridge.md`). Since 2026-10-30 (`wheel_rate`) the payload is 31 B
-/// (15 B committed + the 12 B `CyclicObs` block + the `i32` rate), an L3 PDU of `3 + 31 = 34` B:
+/// link (`specs/hoverboard-bridge.md`). Since 2026-10-30 (`wheel_rate`, then the `u16` `fault`)
+/// the payload is 32 B (16 B committed + the 12 B `CyclicObs` block + the `i32` rate), an L3 PDU
+/// of `3 + 32 = 35` B:
 ///
 /// - Both carriers' L2 frame capacity is 128 (`swd_mailbox::FRAME_CAPACITY`, the bridge's
-///   `router::FRAME`), so the PDU is ONE fragment, `1 + 34 = 35` B of L2 frame and 39 B of
-///   stream with SOF, len and CRC. Own sample plus the 2.5 Hz peer forward put at most 78 B in
+///   `router::FRAME`), so the PDU is ONE fragment, `1 + 35 = 36` B of L2 frame and 40 B of
+///   stream with SOF, len and CRC. Own sample plus the 2.5 Hz peer forward put at most 80 B in
 ///   the mailbox's 256 B outbound ring between two host polls.
-/// - On the bridge's BLE link the 39 B stream is two 20-byte notifications (20 + 19), as the
+/// - On the bridge's BLE link the 40 B stream is two 20-byte notifications (20 + 20), as the
 ///   27 B payload's 35 B stream was. The phone reassembles from the byte stream, so no frame has
 ///   to fit one notification.
 ///
@@ -917,7 +918,7 @@ pub struct PeerCyclic {
 ///
 /// Gated on `addressed` as the board's own emissions are: an unassigned board is silent on the
 /// BLE port no matter what it has heard. The state is re-encoded by the firmware through the same
-/// codec the peer encoded it with, which is a bijection on the 31 B layout, so the bytes that
+/// codec the peer encoded it with, which is a bijection on the 32 B layout, so the bytes that
 /// reach the phone are the bytes the peer put on the inter-board wire.
 pub fn ble_peer_tx(state: &OrchestratorState, addressed: bool) -> Option<PeerCyclic> {
     if !addressed || !state.ble_peer_due {

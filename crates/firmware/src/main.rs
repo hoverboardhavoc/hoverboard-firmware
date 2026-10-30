@@ -749,8 +749,9 @@ mod firmware {
         /// Packed by `orchestrator::Obs::flags_byte`, which owns the bit assignment and is
         /// host-tested; this shell adds nothing to the byte.
         flags: u8,
-        /// The live gating-producer level mask (`orchestrator::events::EV_*`: b0 comms_loss,
-        /// b1 stop_all (the tilt cutout), b2 imu_loss, b3 motor_fault, b4 latch A, b5 latch B, b6 mode_fault,
+        /// The live gating-producer level mask in the counter domain (`orchestrator::events::counted`:
+        /// b0 comms_loss, b1 stop_all (the tilt cutout), b2 imu_loss, b3 motor_fault (the union of
+        /// the four `EV_MOTOR_*` causes, which only the cyclic `fault` word carries apart), b4 latch A, b5 latch B, b6 mode_fault,
         /// b7 power_request), the level half of the O1 attribution instrument.
         ///
         /// This byte WAS the struct's reserved pad, so spending it moves no field offset: it is
@@ -1531,7 +1532,7 @@ mod firmware {
         arm::hw::enact(
             moe,
             motor_configured,
-            motor_fault,
+            motor_fault != 0,
             out.off_request_clear,
             || re_read_arm_values(shell),
         );
@@ -3442,7 +3443,7 @@ mod guest_tx {
         (word & !(0xFFFF << shift)) | (half << shift)
     }
 
-    /// The `CYCLIC_STATE` PDU the mailbox port carries, `[0x10][src][dst 0x00][31 B]`, encoded into
+    /// The `CYCLIC_STATE` PDU the mailbox port carries, `[0x10][src][dst 0x00][32 B]`, encoded into
     /// `pdu`; the encoded length, or `None` if `pdu` is too small. dst 0x00 by the point-to-point
     /// rule: the port carries exactly one peer (`specs/link-control.md`, "Addressing and emission").
     pub fn sample_pdu(src: u8, state: &CyclicState, pdu: &mut [u8]) -> Option<usize> {

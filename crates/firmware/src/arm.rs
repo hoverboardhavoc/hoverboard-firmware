@@ -164,7 +164,7 @@ pub enum ArmDecision {
 /// - `armed`: whether this layer has already set MOE (its own record, so the decision is an edge).
 /// - `brought_up`: the motor has a runtime (`motor::OBS_CONFIGURED`). A board with no motor can
 ///   never be armed, so a plan-less or failed bring-up cannot reach the bridge.
-/// - `fault_level`: the motor-side fault LEVEL ([`motor::motor_fault_level`]), never the raw
+/// - `fault_level`: the motor-side fault LEVEL, the union of [`motor::motor_fault_level`]'s causes, never the raw
 ///   `FAULT` word (see the module docs).
 ///
 /// The asymmetry is deliberate and is the safety property: `brought_up` and `fault_level` can only
@@ -914,7 +914,7 @@ mod tests {
             FAULT_DUTY_RANGE,
             FAULT_DEMAND_STALE | FAULT_DUTY_RANGE,
         ] {
-            let level = motor_fault_level(true, word, false, false);
+            let level = motor_fault_level(true, word, false, false) != 0;
             assert!(!level, "word {word:#x} is not a fault producer");
             assert_eq!(
                 decide(true, false, true, level),
@@ -924,15 +924,20 @@ mod tests {
         }
         // ...and the producers do block it, through the same level.
         for word in [FAULT_HALL, FAULT_INIT_CAL] {
-            let level = motor_fault_level(true, word, false, false);
+            let level = motor_fault_level(true, word, false, false) != 0;
             assert!(level);
             assert_eq!(decide(true, false, true, level), ArmDecision::Idle);
         }
         // As does a refused arm while it is held, so a board that failed to arm cannot sit in RUN
         // with an unarmed bridge, nor retry inside the same engage.
-        assert!(motor_fault_level(true, 0, false, true));
+        assert_ne!(motor_fault_level(true, 0, false, true), 0);
         assert_eq!(
-            decide(true, false, true, motor_fault_level(true, 0, false, true)),
+            decide(
+                true,
+                false,
+                true,
+                motor_fault_level(true, 0, false, true) != 0
+            ),
             ArmDecision::Idle
         );
     }
@@ -943,11 +948,11 @@ mod tests {
     /// differently either side of that clear, through the level's single owner.
     ///
     /// Both refusals are one `bool` here because `motor_fault_level` takes one and the arm layer
-    /// hands it the OR of its two statics: what differs between them is how long each is held, not
-    /// what the level means downstream.
+    /// hands it the OR of its two statics (one cause bit, `EV_MOTOR_ARM`): what differs between
+    /// them is how long each is held, not what the level means downstream.
     #[test]
     fn a_held_refusal_refuses_the_arm_and_a_released_one_permits_the_next() {
-        let held = motor_fault_level(true, 0, false, true);
+        let held = motor_fault_level(true, 0, false, true) != 0;
         assert!(held, "either refusal reaches the level while held");
         assert_eq!(
             decide(true, false, true, held),
@@ -957,7 +962,7 @@ mod tests {
         // And the shutdown the mode machine runs on the tick that reads the held level is what
         // takes the pass to OFF, where the re-read refusal is released.
         assert_eq!(decide(true, true, true, held), ArmDecision::Shutdown);
-        let released = motor_fault_level(true, 0, false, false);
+        let released = motor_fault_level(true, 0, false, false) != 0;
         assert!(!released);
         assert_eq!(
             decide(true, false, true, released),
@@ -1320,7 +1325,7 @@ mod tests {
     #[test]
     fn an_unmeasurable_speed_is_held_with_a_fault_not_in_silence() {
         let mut health = motor::PeriodHealth::new();
-        let level = |h: &motor::PeriodHealth| motor_fault_level(true, 0, h.loss(), false);
+        let level = |h: &motor::PeriodHealth| motor_fault_level(true, 0, h.loss(), false) != 0;
         for tick in 1..motor::PERIOD_LOSS_THRESHOLD {
             health.update(true, false);
             assert!(off_inhibit(true, false, 0), "inhibited from the first tick");

@@ -485,21 +485,21 @@ mod tests {
     fn stage_of_a_cyclic_state_pdu_is_one_frame_on_a_128_byte_link() {
         // The 5 Hz controller sample (orchestrator::BLE_CYCLIC_DIVISOR) rides the SWD mailbox
         // port, and the bridge re-frames it onto its BLE link; both carriers' L2 frame capacity is
-        // 128 (`swd_mailbox::FRAME_CAPACITY`, the bridge's `router::FRAME`). A 31-byte payload
-        // (15 B committed + the 12 B block + the i32 `wheel_rate`) in a 3-byte-header L3 PDU is
-        // 34 B, one fragment: SOF + len + (frag-hdr + 34) + CRC = 39 B of stream, which the bridge
-        // carries in two 20-byte notifications (20 + 19), the same two the 27-byte payload took.
+        // 128 (`swd_mailbox::FRAME_CAPACITY`, the bridge's `router::FRAME`). A 32-byte payload
+        // (16 B committed + the 12 B block + the i32 `wheel_rate`) in a 3-byte-header L3 PDU is
+        // 35 B, one fragment: SOF + len + (frag-hdr + 35) + CRC = 40 B of stream, which the bridge
+        // carries in two 20-byte notifications (20 + 20), the same two the 27-byte payload took.
         //
         // The CC2541 port this test used to price (a 16-byte frame, 15-byte chunk, 9600 baud) is
         // gone, and with it the limit that 30 B was the last PDU two fragments held.
         const FRAME_CAP: usize = 128;
-        let pdu = [0u8; 3 + 31];
+        let pdu = [0u8; 3 + 32];
         let mut link = Link::<_, MAX_PACKET, FRAME_CAP>::new(MockByteStreamLink::new(FRAME_CAP));
         let mut out = [0u8; FRAME_CAP + 4];
 
         let only = link.stage_fragment(&pdu, 0, &mut out).expect("stages");
-        assert!(!only.more, "one fragment: 34 B against a 127 B chunk");
-        assert_eq!(only.len, 39, "39 B of stream per sample");
+        assert!(!only.more, "one fragment: 35 B against a 127 B chunk");
+        assert_eq!(only.len, 40, "40 B of stream per sample");
         assert_eq!(only.len.div_ceil(20), 2, "two 20-byte notifications");
     }
 
