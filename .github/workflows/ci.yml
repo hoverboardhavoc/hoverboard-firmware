@@ -783,10 +783,11 @@ jobs:
 
   # The CLI for the bench Pi (a Raspberry Pi Model B, armv6l: arm-unknown-linux-gnueabihf), so
   # install-esp can reinstall a bench bridge on the Pi's USB (specs/bridge-onboarding.md section 4.2).
-  # Built with `cross`, whose image carries an armv6 C toolchain and glibc (Ubuntu's gnueabihf one
-  # is armv7). The `ble` feature is off: it drops btleplug and its D-Bus dependency, and the Pi has
-  # no Bluetooth adapter. cross mounts the manifest's path dependencies, the firmware crates and the
-  # sibling runtime-hal checkout among them. Nothing here runs the binary; the bench gate does.
+  # Built with cargo-zigbuild, which links with zig against an armv6 glibc 2.36 (the Pi runs 2.41;
+  # Ubuntu's gnueabihf toolchain is armv7). It builds on the runner itself, so the sibling
+  # runtime-hal checkout resolves as in every other job; `cross` built inside Docker, which did not
+  # mount it. The `ble` feature is off: it drops btleplug and its D-Bus dependency, and the Pi has
+  # no Bluetooth adapter. Nothing here runs the binary; the bench gate does.
   hoverboard-cli-pi:
     name: hoverboard-cli (bench Pi, arm-unknown-linux-gnueabihf, no BLE)
     runs-on: ubuntu-latest
@@ -815,16 +816,23 @@ jobs:
           targets: arm-unknown-linux-gnueabihf
           components: rustfmt, clippy, rust-src
 
-      - name: Install cross (pinned binary release)
+      - name: Install zig (pinned)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Install cargo-zigbuild (pinned binary release)
         uses: taiki-e/install-action@v2
         with:
-          tool: cross@0.2.5
+          tool: cargo-zigbuild@0.23.4
 
+      # The `.2.36` suffix is cargo-zigbuild's glibc version; the output directory is the plain
+      # triple.
       - name: Build release (no ble)
         run: >
-          cross build --release
+          cargo zigbuild --release
           --manifest-path tools/hoverboard-cli/Cargo.toml
-          --target ${{ env.PI_TARGET }}
+          --target ${{ env.PI_TARGET }}.2.36
           --no-default-features
 
       # Named for its target triple beside the other platforms' (the hoverboard-cli job says why).
