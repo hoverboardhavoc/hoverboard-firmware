@@ -112,7 +112,7 @@ pub enum Station {
         ssid: String<WIFI_SSID_MAX>,
         /// Its password, empty for an open network.
         pass: String<WIFI_PASS_MAX>,
-        /// The transmit power cap, applied after every start and before every join.
+        /// The transmit power cap, applied before every join.
         power: TxPower,
     },
 }
@@ -130,7 +130,7 @@ pub struct TxPower {
 }
 
 /// The transmit power cap the store sets, read once at boot: `wifi.tx_power`, unstored its default
-/// (34, 8.5 dBm). A stored value outside the range is not applied, so it never leaves the bridge off
+/// (34, 8 dBm on the C3). A stored value outside the range is not applied, so it never leaves the bridge off
 /// Wi-Fi: the default is, and [`TxPower::refused`] names the value for the boot log.
 pub fn tx_power<F: Flash>(store: &Store<'_, F>) -> TxPower {
     let stored = store.get(WIFI_TX_POWER);

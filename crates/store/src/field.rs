@@ -364,15 +364,17 @@ pub const WIFI_SSID: StrField = StrField::new(0x11, "");
 /// 64-digit hex PSK is not accepted). A [`SECRET`]: no node reads it back over a link.
 pub const WIFI_PASS: StrField = StrField::new(0x12, "");
 /// The bridge's Wi-Fi transmit power cap in quarter-dBm (`specs/bridge-onboarding.md` section
-/// 2.4), read once at boot with [`WIFI_SSID`] and applied after every station start and before
-/// every join. The default, 34 (8.5 dBm), is the cap at which the SuperMinis from one batch join:
-/// at full power they stop acknowledging the access point's authentication response. A bridge
+/// 2.4), read once at boot with [`WIFI_SSID`] and applied before every join. The default, 34 (8 dBm
+/// on the C3), is the cap at which the SuperMinis from one batch join: at full power they stop
+/// acknowledging the access point's authentication response. A bridge
 /// refuses a write outside [`WIFI_TX_POWER_RANGE`] (`net::walk::bridge_value_usable`), and a stored
 /// value outside it (written by an image without the check) is not applied: the bridge uses the
 /// default. A board stores it like any key and never reads it.
 pub const WIFI_TX_POWER: Field<u8> = Field::new(0x13, 34);
-/// The values [`WIFI_TX_POWER`] takes: what `esp_wifi_set_max_tx_power` accepts, 2 to 21 dBm. The
-/// radio applies the nearest of its own discrete levels.
+/// The values [`WIFI_TX_POWER`] takes: what `esp_wifi_set_max_tx_power` accepts. The radio applies
+/// one of its own discrete levels from it: on the C3 the range spans 2 to 20 dBm, 34 applies 8 dBm,
+/// and 80 to 84 all apply 20 dBm (the ESP-IDF header's mapping table, `esp-wifi-sys-esp32c3`
+/// `include.rs`).
 pub const WIFI_TX_POWER_RANGE: core::ops::RangeInclusive<u8> = 8..=84;
 pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 
@@ -1758,7 +1760,7 @@ mod registry_tests {
             );
         }
         assert_eq!(SECRET, [WIFI_PASS.id()]);
-        // The bridge's transmit power cap: a u8, default 34 quarter-dBm (8.5 dBm), inside its range.
+        // The bridge's transmit power cap: a u8, default 34 quarter-dBm, inside its range.
         assert_eq!(WIFI_TX_POWER.id(), 0x13);
         let t = lookup(0x13).unwrap();
         assert_eq!(

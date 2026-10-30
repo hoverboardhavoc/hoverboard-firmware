@@ -76,8 +76,9 @@ object Fields {
     val WIFI_PASS = FieldDef(0x12, Type.Str, Value.Str(""))
 
     /**
-     * A bridge's Wi-Fi transmit power cap, quarter-dBm, 8 to 84; default 34, 8.5 dBm
-     * (`specs/bridge-onboarding.md` section 2.4). Mirrored for the drift gate; the app does not read it.
+     * A bridge's Wi-Fi transmit power cap, quarter-dBm, 8 to 84; default 34 (8 dBm on the C3)
+     * (`specs/bridge-onboarding.md` section 2.4). Mirrored for the drift gate; the app does not
+     * read it.
      */
     val WIFI_TX_POWER = FieldDef(0x13, Type.U8, Value.U8(34))
 
