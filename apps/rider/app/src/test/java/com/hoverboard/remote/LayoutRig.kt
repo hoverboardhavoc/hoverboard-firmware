@@ -3,8 +3,8 @@ package com.hoverboard.remote
 import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
-import com.hoverboard.protocol.board.LayoutPresets
 import com.hoverboard.protocol.board.LayoutSlot
+import com.hoverboard.protocol.board.NET_PORT_UART
 import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
@@ -63,18 +63,15 @@ internal class LayoutRig(scope: TestScope) {
         ),
     )
 
-    /** Put [value] in the fake board's store for [field], as if it had been staged earlier. */
-    fun preset(board: Int, field: BoardField, raw: Int, motor: Int? = null) {
-        val s = slot(field, motor)
-        transport.store[board to s.key] = s.value(raw)
-    }
-
     /** The keys written this session, in order. */
     val written: List<com.hoverboard.protocol.store.Key> get() = transport.writes.map { it.second }
 
     companion object {
-        /** The `LINK_SET` mask of a board whose inter-board link is live, every fleet board's. */
-        const val LINK_SET_INTER_BOARD = LayoutPresets.LINK_SET_INTER_BOARD
+        /**
+         * The `LINK_SET` mask of a board whose inter-board link is live, every fleet board's: the
+         * link's own bit ([NET_PORT_UART]) and no other.
+         */
+        const val LINK_SET_INTER_BOARD = 1 shl NET_PORT_UART
     }
 }
 
