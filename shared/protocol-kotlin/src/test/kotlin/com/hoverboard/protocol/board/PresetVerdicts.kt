@@ -17,8 +17,8 @@ import java.io.File
  * not get a second copy. The chain that makes this verdict trustworthy is two tests that already
  * exist: `RustSourceDriftTest` pins this mirror to the Rust, and the board crate's
  * `rcap_agreement` suite pins the Rust's mock tables to runtime-hal's real R-CAP queries on every
- * encodable pin. It is also exactly the verdict the rider app will show for the same preset
- * (`specs/rider-ui.md`, section 3.5), which is the verdict the consumer cares about.
+ * encodable pin. It is also exactly the verdict the remote app will show for the same preset
+ * (`specs/remote-ui.md`, section 3.5), which is the verdict the consumer cares about.
  *
  * It lives in the TEST source set deliberately: it is host-side verification tooling, so it must not
  * ride in the library artifact the two Android apps consume. It parses a line format of its own

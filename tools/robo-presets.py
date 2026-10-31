@@ -2,7 +2,7 @@
 """Generate board-layout presets from RoboDurden's per-board `defines` files.
 
 The requirement is `specs/robo-presets.md`. In one paragraph: the board layout editor
-(`specs/rider-ui.md` 3.5) needs known-good field bundles per board variant, RoboDurden's firmware
+(`specs/remote-ui.md` 3.5) needs known-good field bundles per board variant, RoboDurden's firmware
 repository is the most complete public record of hoverboard mainboard pinouts there is, and this
 turns his per-layout pin maps into presets in OUR schema with OUR field ids, deterministically,
 re-runnably against a newer upstream, and honest about what it could not map.
@@ -312,7 +312,7 @@ def dead_time_dtg(his_ticks):
 #:
 #: The three fields the validator carries WITHOUT judging (`direction`,
 #: `align_offset`, `current.cal`) are deliberately absent from this table, and so are
-#: machine-policy fields. A preset is board facts only (`specs/rider-ui.md` 3.7), and those three are
+#: machine-policy fields. A preset is board facts only (`specs/remote-ui.md` 3.7), and those three are
 #: not facts a pin map can state: the drive direction is a hall-and-phase wiring fact, the align
 #: offset is bench-swept, and the calibration belongs to the shunt chain fitted. The existing
 #: hand-written presets take them from the board for the same reason

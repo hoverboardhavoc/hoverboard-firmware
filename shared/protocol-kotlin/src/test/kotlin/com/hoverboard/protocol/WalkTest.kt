@@ -228,7 +228,7 @@ class WalkTest {
     }
 
     /**
-     * A board switched on after the walk (`specs/rider-ui.md` 3.1, "Boards that come up after the
+     * A board switched on after the walk (`specs/remote-ui.md` 3.1, "Boards that come up after the
      * connect"): the same controller re-walks from the gateway, assigns the new board and its peer,
      * and passes over nothing it already knew.
      */
@@ -308,7 +308,7 @@ class WalkTest {
     }
 
     /**
-     * The tune lane's two requests, byte for byte (`specs/rider-ui.md` section 4). There is no
+     * The tune lane's two requests, byte for byte (`specs/remote-ui.md` section 4). There is no
      * round-trip against the mock board here on purpose: the board side of this lane is not the
      * walk responder, it is the firmware's control block, so the mock has nothing to answer with.
      * What the mirror owes is the request shape and the reply parse, and those are pinned here.

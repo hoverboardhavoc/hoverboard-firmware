@@ -68,7 +68,7 @@ fn balance_board(gains: control::GainShadow) -> OrchestratorState {
     s
 }
 
-/// The controller these vectors speak as: one L3 guest address, the shape the rider app's session
+/// The controller these vectors speak as: one L3 guest address, the shape the remote app's session
 /// takes (`Controller` grants `0x80..0xFE` on first contact, and the app sends every payload of a
 /// session from the one it was granted).
 const CTRL: u8 = 0x81;

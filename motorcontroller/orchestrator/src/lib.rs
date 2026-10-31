@@ -771,7 +771,7 @@ pub struct PhaseWindow {
     /// The window's peak phase-current magnitude, stock current counts.
     pub peak: i16,
     /// The window's mean magnitude, same counts. A calibration cross-check compares this one: a
-    /// maximum over ADC samples reads high near the noise floor (`specs/rider-ui.md` 3.6).
+    /// maximum over ADC samples reads high near the noise floor (`specs/remote-ui.md` 3.6).
     pub mean: i16,
     /// The on-duty applied in the period that closed the window, `0..ARR`; 0 for a period that
     /// coasted.

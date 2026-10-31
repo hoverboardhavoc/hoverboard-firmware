@@ -269,7 +269,7 @@ impl<M: MemAp> WalkDriver<M> {
         )
     }
 
-    /// `TUNE_WRITE(dst, key, value)` -> the `CONFIG_RESP` it answers with (`specs/rider-ui.md`
+    /// `TUNE_WRITE(dst, key, value)` -> the `CONFIG_RESP` it answers with (`specs/remote-ui.md`
     /// section 4, the live tune lane). The payload is `CONFIG_WRITE`'s shape, so the one encoder
     /// serves both; `value` carries its own type tag, which is how a deliberately mis-typed
     /// probe (a `U32` at an `I16` gain) reaches the board's seam unchanged.

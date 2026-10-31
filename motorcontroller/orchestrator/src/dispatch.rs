@@ -193,7 +193,7 @@ pub struct BlockWords {
     ///
     /// Writer: the firmware's 250 Hz shell, from `motor::WHEEL_RATE_Q12`, beside `wheel_speed`. Reader:
     /// the state-feedback law's speed term ([`control::sf_step`]), through the side mirror
-    /// (`control::wheel_forward`), and the cyclic builder, for the rider app's speed readout. The
+    /// (`control::wheel_forward`), and the cyclic builder, for the remote app's speed readout. The
     /// recovered paths keep the count.
     pub wheel_rate_q12: i32,
     /// This board's SIGNED wheel position (`specs/state-feedback.md` section 3): the period ISR's

@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 
 /**
- * What a rider app's connect does (`specs/l3.md`, "How far a controller walks"; `specs/rider-ui.md`
+ * What a remote app's connect does (`specs/l3.md`, "How far a controller walks"; `specs/remote-ui.md`
  * section 2): the WHOLE walk, then a `CONFIG_READ` of `node.class` and `device.name` from every
  * address the walk addressed. Run against the in-memory mesh ([Mesh]) on the two attach points a
  * phone meets: a hoverboard bridge with the two motor controllers one and two hops behind it

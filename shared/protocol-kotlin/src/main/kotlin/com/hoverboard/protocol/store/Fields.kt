@@ -40,14 +40,14 @@ data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value
 }
 
 /**
- * The registered store fields a settings client edits or displays (`specs/rider-ui.md` section 3.4),
+ * The registered store fields a settings client edits or displays (`specs/remote-ui.md` section 3.4),
  * mirrored from `shared/store/src/field.rs`, plus the value vocabularies the firmware gives the
  * byte-valued ones.
  *
  * Not every registered field is here: `SOME_BLOB` and the test fields belong to nobody. The live
  * tune lane's keys, ranges and ramp are in [Gains]. A field is added when a client exercises it,
  * which is why the board-layout block (0x40-0x55 plus the per-motor facts) is here now: the layout
- * editor's mirrored validator reads it (`specs/rider-ui.md` section 3.5,
+ * editor's mirrored validator reads it (`specs/remote-ui.md` section 3.5,
  * [com.hoverboard.protocol.board.validate]).
  */
 object Fields {
@@ -357,7 +357,7 @@ object Fields {
     val CONTROL_DRIVE_TURN = IndexedFieldDef(0x75, Type.I16, listOf(Value.I16(0), Value.I16(24)))
 
     /**
-     * How the rider app drives the machine ([MachineDriveMode]; `specs/rider-ui.md` 3.2): written
+     * How the remote app drives the machine ([MachineDriveMode]; `specs/remote-ui.md` 3.2): written
      * with the same value to every motor controller of a machine. The firmware stores it and never
      * reads it, so it is in no boot seam and not in [ARM_TIME]; the app is its only consumer.
      */
@@ -473,7 +473,7 @@ object Fields {
      *
      * **It is mirrored here, and pinned, because a client that states the class gets it wrong
      * otherwise.** The class is a firmware fact with no presence on the wire, so nothing a client
-     * reads from a board reveals it, and it has gone stale twice in the rider app: `control.mode`
+     * reads from a board reveals it, and it has gone stale twice in the remote app: `control.mode`
      * and then `motor.direction` / `motor.align_offset` moved into the row while the screen went
      * on telling the owner to power-cycle. `RustSourceDriftTest` compares this set against the row
      * itself, so a field that moves between the two classes fails there rather than at the bench.

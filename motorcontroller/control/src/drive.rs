@@ -125,7 +125,7 @@ impl Default for DriveTurn {
 /// # The saturation rule, and why it inverts the app's
 ///
 /// **When the pair does not fit, the TURN shrinks and the common torque is kept.** The app's
-/// throttle-mode mixer (`DriveMix`, `specs/rider-ui.md` 3.2) does the opposite on purpose: it
+/// throttle-mode mixer (`DriveMix`, `specs/remote-ui.md` 3.2) does the opposite on purpose: it
 /// brings the pair into range with a shared OFFSET so the two demands still differ by exactly the
 /// steer, because a steering command that quietly straightens out at full deflection is the
 /// dangerous surprise and a machine that runs slower than asked is not. That is correct for a

@@ -67,7 +67,7 @@ data class ReadValue(val value: Value) : ConfigReadResult
  *
  * That is all it says: the STORED value matched, a statement about flash, never about what a
  * running loop is using. Whether and how fast a running loop follows a stored value is the field's
- * own business (`specs/rider-ui.md` section 3.3: a gain's engaged value converges to the staged
+ * own business (`specs/remote-ui.md` section 3.3: a gain's engaged value converges to the staged
  * one, it does not jump).
  */
 data class WriteVerified(val stored: Value) : ConfigWriteResult
@@ -126,7 +126,7 @@ data object Busy : ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWrit
  *
  * ## It does not turn the engine
  *
- * The engine has exactly one driver per session (in the rider app, `L3Session`'s service loop, the
+ * The engine has exactly one driver per session (in the remote app, `L3Session`'s service loop, the
  * link's single writer): that loop pumps received packets into the engine, which captures each
  * `CONFIG_RESP`, and flushes the engine's outgoing bytes, which carries the clients' requests and
  * the engine's re-sends. This only stages requests, collects responses and asks the engine whether
@@ -137,7 +137,7 @@ data object Busy : ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWrit
  *
  * A second call while one is outstanding returns [Busy] at once. Queueing would let a burst of
  * taps become a burst of back-to-back writes, which is the streaming the config path's stack depth
- * forbids (`specs/rider-ui.md` section 1.7: one in flight, apply-on-release, nothing streamed); a
+ * forbids (`specs/remote-ui.md` section 1.7: one in flight, apply-on-release, nothing streamed); a
  * refusal leaves that decision with the screen, which knows whether a newer value supersedes it.
  *
  * ## Matching a response to its request
@@ -188,7 +188,7 @@ class ConfigExchange(
 
     /**
      * Run [block] holding the engine's one outstanding request, as a request does, or return null
-     * without running it while another operation holds it. The rider app's re-walk
+     * without running it while another operation holds it. The remote app's re-walk
      * ([BleWalkEngine.rewalk]) runs here, so a walk request never interleaves with a config one.
      */
     suspend fun <T> withSlot(block: suspend () -> T): T? {
@@ -260,7 +260,7 @@ class ConfigExchange(
 }
 
 /**
- * The request/response layer over `CONFIG_READ` / `CONFIG_WRITE` (`specs/rider-ui.md` section 2):
+ * The request/response layer over `CONFIG_READ` / `CONFIG_WRITE` (`specs/remote-ui.md` section 2):
  * one operation at a time (on the session's [ConfigExchange], which the tune lane shares), to an
  * explicitly named board, with the engine's own retransmit, the status decoded to a typed result,
  * and every write verified against the stored value its `CONFIG_RESP` echoes.

@@ -17,7 +17,7 @@
 //!   reboot.
 //! - `--dst` picks the board: `attached` (the default) resolves the board this host's mailbox
 //!   link lands on from the walk; an address reaches a board THROUGH it (the two-hop case).
-//! - `--tune` sends `TUNE_WRITE` / `TUNE_READ` (`specs/rider-ui.md` section 4, the live lane:
+//! - `--tune` sends `TUNE_WRITE` / `TUNE_READ` (`specs/remote-ui.md` section 4, the live lane:
 //!   RAM only, no flash) instead of `CONFIG_WRITE` / `CONFIG_READ`.
 //! - `--force-type TYPE` encodes every written value as that store type whatever the registry
 //!   says, so the board's type check can be watched refusing it (`CFG_TYPE_MISMATCH`).

@@ -17,7 +17,7 @@ import org.junit.jupiter.api.assertThrows
 
 /**
  * [TuneClient] through a real [BleWalkEngine] against [FakeConfigBoards]' RAM shadow: the tune
- * lane's contract (`specs/rider-ui.md` section 4) and the one-in-flight slot it shares with
+ * lane's contract (`specs/remote-ui.md` section 4) and the one-in-flight slot it shares with
  * [ConfigClient].
  */
 @OptIn(ExperimentalCoroutinesApi::class)

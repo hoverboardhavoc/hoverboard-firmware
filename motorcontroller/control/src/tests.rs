@@ -385,7 +385,7 @@ fn fsm_arming_promotes_next_tick_with_one_tick_overshoot() {
     assert_eq!(st.env, 28500, "cap on the promote tick");
     assert_eq!(st.sub_state, SubState::Run);
     // The promote installs kp <- coeff1, bk <- coeff2 (already the engage seed's on this path) and
-    // leaves `pr` to the RUN ramp (`specs/rider-ui.md` section 4): (coeff1, coeff2, 0) stands on
+    // leaves `pr` to the RUN ramp (`specs/remote-ui.md` section 4): (coeff1, coeff2, 0) stands on
     // the promote tick, and with `kd` zero the first RUN pass takes `pr` the rest of the way (the
     // term it multiplies is zero).
     assert_eq!(st.gains, GainTriple::new(6000, 2000, 0));
@@ -477,7 +477,7 @@ fn fsm_sub2_promote_reseeds_env_from_reference() {
     // (the archive wrote CAP); the wind-down counter @0x94 clears; the quadruple gets the
     // @0x48 0.4f copy, and kp/bk get the profile's coeff1/coeff2 as the binary installs them.
     // `pr` is left to the RUN ramp (the binary's coeff3 install is not carried,
-    // `specs/rider-ui.md` section 4): the standby seed's 0 stands on the promote tick.
+    // `specs/remote-ui.md` section 4): the standby seed's 0 stands on the promote tick.
     let profile = GainProfile::of(RUN_PROFILE_A);
     let mut st = FsmState {
         sub_state: SubState::AltEngaged,

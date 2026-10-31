@@ -31,7 +31,7 @@ name: CI
 #     emulator-runner (it lives in that job because its unicorn build needs cmake),
 #   - run the Kotlin protocol mirror's drift gate: it reads the Rust as text and compares it to
 #     shared/protocol-kotlin's mirror of the wire protocol,
-#   - run the rider app's unit tests (both variants) and detekt. That job and the drift gate are
+#   - run the remote app's unit tests (both variants) and detekt. That job and the drift gate are
 #     the two with no Rust toolchain in them; it is the only one that needs the Android SDK.
 #
 # TOOLCHAIN: every CARGO job runs the PINNED NIGHTLY nightly-2026-07-20, not stable
@@ -1060,7 +1060,7 @@ jobs:
   # The Kotlin mirror's drift gate, and the only job here with no Rust toolchain in it.
   # shared/protocol-kotlin/ is the single Kotlin copy of the wire protocol that shared/link,
   # shared/net, shared/linkctl and shared/store define in Rust (with the motorcontroller crates it also
-  # reads), and the rider app consumes it. Its RustSourceDriftTest PARSES those Rust files and
+  # reads), and the remote app consumes it. Its RustSourceDriftTest PARSES those Rust files and
   # exact-set compares them against the Kotlin, so a firmware edit that outruns the mirror fails here
   # rather than turning up as an unexplained silence on the bench. shared/protocol-kotlin/README.md
   # has the full description.
@@ -1079,7 +1079,7 @@ jobs:
   # androidx.*) and it READS the Rust as text rather than building it. No Android build happens
   # here: com.android.application resolves the Android SDK at CONFIGURATION time, so every task in
   # such a build needs an SDK install this job does not want, and keeping this module SDK-free is
-  # what makes the gate cheap enough to run on every commit. The rider app (apps/rider), the
+  # what makes the gate cheap enough to run on every commit. The remote app (apps/remote), the
   # tree's one Android app, pays that cost in its own job at the end of this file.
   kotlin-protocol-drift:
     name: Kotlin protocol mirror (firmware drift gate)
@@ -1156,7 +1156,7 @@ jobs:
             exit 1
           fi
 
-  # The rider app's own suite (`specs/verification-gates.md` section 3). It was outside CI entirely
+  # The remote app's own suite (`specs/verification-gates.md` section 3). It was outside CI entirely
   # while its RELEASE unit-test variant was red: 102 of 332 cases, every test that drives a Compose
   # test rule, failed on an activity the release manifest does not declare, and nobody ran that
   # variant. Both variants pass now, so both are run here; a gate on the debug variant alone would
@@ -1182,12 +1182,12 @@ jobs:
   # for it), and then the build itself: two unit-test variants of 334 Robolectric cases each, plus
   # detekt. For scale, the same three tasks take 45 s on six warm cores with the dependencies
   # already present, which is the number to ignore when reasoning about this runner.
-  rider-app-tests:
-    name: Rider app (unit tests, both variants, + detekt)
+  remote-app-tests:
+    name: Remote app (unit tests, both variants, + detekt)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: hoverboard-firmware/apps/rider
+        working-directory: hoverboard-firmware/apps/remote
     steps:
       - name: Checkout firmware
         uses: actions/checkout@v4

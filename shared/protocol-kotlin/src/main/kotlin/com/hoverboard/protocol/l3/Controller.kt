@@ -129,7 +129,7 @@ object Walk {
 
     /**
      * `TUNE_WRITE`: set one live-tunable value in the board's RAM, replying `CONFIG_RESP`
-     * (`specs/rider-ui.md` section 4). The payload is `CONFIG_WRITE`'s
+     * (`specs/remote-ui.md` section 4). The payload is `CONFIG_WRITE`'s
      * `[field_id, index, type_tag, value...]`.
      *
      * It is a CONST here and not an [Opcode] entry for the same reason it is one in the Rust: L3
@@ -259,7 +259,7 @@ class Controller {
 
     /**
      * Walk again from [addrs], after the walk has finished, to find nodes that came up since
-     * (`specs/rider-ui.md` 3.1, "Boards that come up after the connect"): each of [addrs] this walk
+     * (`specs/remote-ui.md` 3.1, "Boards that come up after the connect"): each of [addrs] this walk
      * has placed is probed again. A neighbour already known at the port it answers on is passed over
      * ([onPorts]: "already known here"), and a new or unaddressed one is adopted or assigned and
      * descended into as on the first walk. Does nothing while a walk is still running.
@@ -534,7 +534,7 @@ class Controller {
         Pdu.of(Opcode.ConfigRead, guestAddr, dst, byteArrayOf(key.fieldId.toByte(), key.index.toByte())).encode()
 
     /**
-     * Build a `TUNE_WRITE(dst, key, value)` PDU (`specs/rider-ui.md` section 4): the same payload
+     * Build a `TUNE_WRITE(dst, key, value)` PDU (`specs/remote-ui.md` section 4): the same payload
      * shape as [buildConfigWrite], under [Walk.OP_TUNE_WRITE], and always an `I16` because the
      * live-tunable fields are.
      *
