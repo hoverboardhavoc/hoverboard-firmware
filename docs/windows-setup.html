@@ -55,12 +55,10 @@ fetches it on the first build (it is public, so no credentials are needed), whic
 <pre><code>cd C:\dev
 git clone https://github.com/hoverboardhavoc/hoverboard-firmware.git</code></pre>
 <p>To build against a local runtime-hal checkout instead (to change the HAL and the firmware together), clone it
-beside the firmware and add a patch to <code>C:\dev\.cargo\config.toml</code>, which cargo reads for every
-project under <code>C:\dev</code>:</p>
-<pre><code>[patch."https://github.com/hoverboardhavoc/runtime-hal"]
-runtime-hal = { path = "runtime-hal" }   # relative to C:\dev</code></pre>
-<p>A patched build ignores the pin and rewrites the runtime-hal entry in <code>Cargo.lock</code>; do not commit
-that change (the repo's <code>CLAUDE.md</code>, "Running the checks"). <code>runtime-hal</code> keeps its own
+beside the firmware and patch that one command, from <code>C:\dev\hoverboard-firmware</code> in Git Bash:</p>
+<pre><code>cargo --config 'patch."https://github.com/hoverboardhavoc/runtime-hal".runtime-hal.path="../runtime-hal"' image</code></pre>
+<p>A patched build rewrites the runtime-hal entry in <code>Cargo.lock</code>; restore it afterwards with
+<code>git checkout Cargo.lock</code> (the repo's <code>CLAUDE.md</code>, "Running the checks"). <code>runtime-hal</code> keeps its own
 stable toolchain pin, which never governs this build: rustup resolves the toolchain from the directory cargo
 runs in, and every firmware build runs in <code>hoverboard-firmware</code>.</p>
 
