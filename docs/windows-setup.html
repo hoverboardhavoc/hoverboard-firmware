@@ -88,8 +88,8 @@ script rather than a checkout setting.</p>
   <li><b>rustup</b>: <a href="https://rustup.rs">rustup.rs</a> or <code>winget install Rustlang.Rustup</code>.</li>
 </ol>
 <p>Nothing else to pick. <code>motorcontroller\rust-toolchain.toml</code> pins the channel and components, and the
-first cargo command inside <code>motorcontroller</code> installs exactly that set (<code>tools</code> pins the same
-nightly; <code>shared</code> and <code>bridge</code> pin 1.92, installed the same way on first use):</p>
+first cargo command inside <code>motorcontroller</code> installs exactly that set (<code>shared</code> and <code>tools</code> pin
+the same nightly; <code>bridge</code> pins 1.92, installed the same way on first use):</p>
 <pre><code>channel    = nightly-2026-07-20     (pinned like a version, never bump drive-by)
 components = rust-src, rustfmt, clippy
 targets    = thumbv7m-none-eabi</code></pre>
@@ -123,7 +123,7 @@ cargo clippy --target thumbv7m-none-eabi -- -D warnings
 cargo clippy --workspace --all-targets --target $H -F store/test-fields -- -D warnings
 cd ..\shared
 cargo fmt --all --check
-cargo +nightly-2026-07-20 clippy --target thumbv7m-none-eabi -- -D warnings
+cargo clippy --target thumbv7m-none-eabi -- -D warnings
 cargo clippy --workspace --all-targets --target $H -F store/test-fields -- -D warnings
 cd ..\tools
 cargo fmt --all --check

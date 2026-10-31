@@ -1,6 +1,9 @@
-# The crates here are linked by the GD32 firmware (../motorcontroller, a pinned nightly) and by the
-# ESP32-C3 bridge (../bridge, 1.92 stable). The bridge already requires them to build on 1.92, so
-# this workspace's own tests and lints run there; the motorcontroller build covers the nightly side.
+# The crates here are compiled into the GD32 image (../motorcontroller) by its pinned nightly, so
+# this workspace's tests and lints run on that same nightly, as they did on main before the split,
+# and Cargo.lock pins the dependency versions motorcontroller/Cargo.lock ships. The host tests link
+# the prebuilt core of this toolchain: build-std is only the motorcontroller's `cargo image`, so
+# rust-src is not needed here. The ESP32-C3 bridge (../bridge) also links some of these crates on
+# 1.92 stable, from its own lockfile; the bridge CI job is the check that they build there.
 [toolchain]
-channel = "1.92"
+channel = "nightly-2026-07-20"
 components = ["rustfmt", "clippy"]
