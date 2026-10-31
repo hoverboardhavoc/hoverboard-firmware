@@ -4,6 +4,7 @@ import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
+import com.hoverboard.protocol.board.NET_PORT_UART
 import com.hoverboard.protocol.board.PIN_ABSENT
 import com.hoverboard.protocol.board.Validated
 import com.hoverboard.protocol.board.reservedSet
@@ -19,12 +20,10 @@ import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.WriteMismatch
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.linkctl.ChipTag
-import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.TelemetryUi
-import com.hoverboard.remote.model.asLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -87,8 +86,6 @@ sealed interface LayoutNotice {
  *   when a DIFFERENT board attaches: the part is that board's fact, not the session's.
  * @param values the stored value of each layout field, as last read or verified-written.
  * @param unread fields whose last read failed.
- * @param linkSet the board's `LINK_SET` mask, which decides which allowlist pins are reserved
- *   against a layout field and which are freed for one. Read with the rest.
  * @param staged the layout being edited: ONE object, the whole field set, never a basket of
  *   independent values. Null until a read pass has produced a layout to edit.
  * @param written fields written AND verified this session: the firmware reads the layout once at
@@ -100,7 +97,6 @@ data class LayoutState(
     val chip: ChipTag? = null,
     val values: Map<Key, Value> = emptyMap(),
     val unread: Set<Key> = emptySet(),
-    val linkSet: Int? = null,
     val staged: BoardFields? = null,
     val reading: Boolean = false,
     val applying: Boolean = false,
@@ -123,7 +119,7 @@ data class LayoutState(
     val stored: BoardFields? get() = Layout.fieldsFrom(values)
 
     /** The reserved pins no field may claim on this board, or null while the inputs are not known. */
-    val reserved: List<Int>? get() = part?.let { p -> linkSet?.let { reservedSet(p, it) } }
+    val reserved: List<Int>? get() = part?.let { p -> reservedSet(p, 1 shl NET_PORT_UART) }
 
     /**
      * The verdict the board would reach on the staged layout: what [com.hoverboard.protocol.board.validate]
@@ -352,9 +348,9 @@ class LayoutModel(
         }
     }
 
-    /** The layout's own fields, plus the `LINK_SET` mask the reserved set is computed from. */
+    /** The layout's own fields. */
     private suspend fun readAll(board: Int) {
-        for (key in listOf(Fields.LINK_SET.key()) + Layout.SLOTS.map { it.key }) {
+        for (key in Layout.SLOTS.map { it.key }) {
             if (_state.value.board != board) return
             val r = awaitSlot { transport.readConfig(key, board) } ?: return
             record(key, r)
@@ -364,8 +360,7 @@ class LayoutModel(
     private fun record(key: Key, r: ConfigReadResult) {
         _state.update {
             if (r is ReadValue) {
-                val linkSet = if (key == Fields.LINK_SET.key()) r.value.asLong()?.toInt() else it.linkSet
-                it.copy(values = it.values + (key to r.value), unread = it.unread - key, linkSet = linkSet)
+                it.copy(values = it.values + (key to r.value), unread = it.unread - key)
             } else {
                 it.copy(values = it.values - key, unread = it.unread + key)
             }
@@ -408,9 +403,6 @@ class LayoutModel(
         val refusal = when {
             s.board == null -> LayoutNotice.NotAttached
             s.part == null -> LayoutNotice.PartUnknown
-            // The other half of the reserved set: the part is known and the board's LINK_SET is
-            // not, so the pins the link holds are not known either and there is nothing to judge.
-            s.linkSet == null -> LayoutNotice.NotRead
             !s.clean -> LayoutNotice.VerdictNotClean
             else -> null
         }

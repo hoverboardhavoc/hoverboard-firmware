@@ -1179,7 +1179,7 @@ mod plumbing_tests {
         let fields = read_fields(&s);
         assert_eq!(fields.motors[0].current_cal, 455, "unstaged: the default");
         assert_eq!(fields.motors[1].current_cal, 600);
-        let link_set: u8 = s.get(store::LINK_SET);
+        let link_set: u8 = 0b0010;
         let reserved = reserved_set(ALLOWLIST, link_set);
         let plan = validate(&fields, &MockChip::F130C8, reserved.as_slice())
             .plan
@@ -1316,12 +1316,11 @@ mod plumbing_tests {
         // flips it to the named failure record.
         let mut flash = TestFlash::erased();
         let mut s = Store::mount(&mut flash).unwrap();
-        s.set(store::LINK_SET, 0b0010).unwrap(); // the inter-board link live
         s.set(store::IMU_SCL_PIN, 0x16).unwrap();
         s.set(store::IMU_SDA_PIN, 0x17).unwrap();
         s.set(store::IMU_MODEL, 2).unwrap();
 
-        let link_set: u8 = s.get(store::LINK_SET);
+        let link_set: u8 = 0b0010;
         let reserved = reserved_set(ALLOWLIST, link_set);
         let fields = read_fields(&s);
         // The boot's own shape: the latch pin the board drove is stamped into whichever record

@@ -83,7 +83,7 @@ class LayoutScreenTest {
     }
 
     private val values: Map<Key, Value> =
-        Layout.SLOTS.associate { it.key to it.def.default } + (Fields.LINK_SET.key() to Value.U8(0))
+        Layout.SLOTS.associate { it.key to it.def.default }
 
     private val blank: BoardFields = checkNotNull(Layout.fieldsFrom(values))
 
@@ -100,7 +100,6 @@ class LayoutScreenTest {
         board = 0x01,
         chip = chip,
         values = values,
-        linkSet = 0,
         staged = staged,
         written = written,
     )
@@ -271,7 +270,6 @@ class LayoutScreenTest {
                 board = 0x01,
                 chip = ChipTag.F103C8,
                 values = partial,
-                linkSet = 0,
                 staged = whole,
                 written = setOf(Fields.MOTOR_HALL_A.key(0)),
             ),

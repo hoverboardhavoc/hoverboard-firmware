@@ -29,7 +29,7 @@ enum class SetupGroup(@StringRes val title: Int) {
  * fields (`motorcontroller/firmware/src/arm.rs`, `read_arm_values`); everything else is derived once in the
  * boot sequence, whether it configures a peripheral (the pins, the timer, `motor.dead_time`) or is
  * a value the boot path simply owns (`attitude.level_trim`, `board.battery.cal`, `imu.gyro_bias`,
- * `imu.model`, `link.link_set`). Those two groups differ in why they wait for a boot, not in what
+ * `imu.model`, `link.tx`). Those two groups differ in why they wait for a boot, not in what
  * the operator has to do about it, so the screen asks one question and gets two answers.
  *
  * Which of those two a row is in is NOT declared here: [SetupField.takesEffect] reads it off
@@ -269,10 +269,6 @@ object SetupFields {
     )
     val NODE_ADDRESS = SetupField(
         Fields.NODE_ADDRESS, 0, R.string.setup_field_node_address, SetupGroup.IDENTITY, Editor.ReadOnly,
-        note = R.string.setup_note_walk_owned,
-    )
-    val LINK_SET = SetupField(
-        Fields.LINK_SET, 0, R.string.setup_field_link_set, SetupGroup.IDENTITY, Editor.ReadOnly,
         note = R.string.setup_note_walk_owned,
     )
     val CONTROL_MODE = SetupField(
@@ -585,7 +581,7 @@ object SetupFields {
      * A bridge's rows (`specs/hoverboard-bridge.md`, "The bridge as a node"): its class, its name and its link
      * set. Also what a node whose class is not yet read shows, since those keys are every node's.
      */
-    val BRIDGE: List<SetupField> = listOf(DEVICE_NAME, NODE_CLASS, LINK_SET)
+    val BRIDGE: List<SetupField> = listOf(DEVICE_NAME, NODE_CLASS)
 
     /**
      * The three drive bounds, in screen order: the turn limit and its rate, then the position clamp
@@ -600,7 +596,7 @@ object SetupFields {
 
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
-        DEVICE_NAME, NODE_CLASS, NODE_ADDRESS, LINK_SET,
+        DEVICE_NAME, NODE_CLASS, NODE_ADDRESS,
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_CHEMISTRY, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
         MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, DRIVE_MODE, CONTROL_FRAME, CONTROL_SIDE,
         IMU_MODEL,

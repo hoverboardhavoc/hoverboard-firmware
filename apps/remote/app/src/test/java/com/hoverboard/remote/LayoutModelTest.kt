@@ -47,8 +47,7 @@ class LayoutModelTest {
         assertEquals("the staged layout starts as the board's", rig.state.stored, rig.state.staged)
         assertEquals(emptyList<Any>(), rig.state.delta)
         assertEquals(emptySet<Any>(), rig.state.unread)
-        // Every field of the layout was asked for, plus the link set the reserved pins come from.
-        assertTrue(Fields.LINK_SET.key() in rig.transport.reads.map { it.second })
+        // Every field of the layout was asked for.
         assertTrue(Layout.SLOTS.all { it.key in rig.transport.reads.map { r -> r.second } })
         // A board nobody has staged validates: that is what the benign registry defaults are for.
         assertTrue(rig.state.clean)
@@ -86,29 +85,6 @@ class LayoutModelTest {
     }
 
     @Test
-    fun aKnownPartWithNoLinkSetStillHasNoReservedSet() = runTest {
-        // The reserved set is the part AND the board's LINK_SET. With the mask unread the pins the
-        // link holds are unknown, so there is no verdict, and the refusal says the layout is not
-        // read rather than blaming a part the board did name.
-        val rig = LayoutRig(this)
-        rig.transport.unreadable += Fields.LINK_SET.key()
-        rig.transport.setAttachedBoard(BOARD)
-        rig.model.onShown()
-        runCurrent()
-        rig.reports(ChipTag.F103C8)
-        runCurrent()
-
-        assertEquals(ChipFamily.F103C8, rig.state.part)
-        assertNull(rig.state.reserved)
-        assertNull(rig.state.verdict)
-        rig.stage(BoardField.BUZZER, pin("PB5"))
-        rig.model.apply()
-        runCurrent()
-        assertEquals(LayoutNotice.NotRead, rig.state.notice)
-        assertEquals(emptyList<Any>(), rig.transport.writes)
-    }
-
-    @Test
     fun aLayoutThatStealsALinkPortCannotBeApplied() = runTest {
         val rig = layoutRig(BOARD)
 
@@ -125,23 +101,18 @@ class LayoutModelTest {
     }
 
     @Test
-    fun whichPinsAreReservedFollowsTheBoardsLinkSet() = runTest {
-        // The same pin, the same part, two masks. With the inter-board link's bit set, PA2/PA3 are
-        // the link's, so a button there is refused; a board whose mask clears that bit has freed
-        // them. PB6/PB7 and PB10/PB11 are reserved under neither mask: they were the CC2541's two
-        // wirings, which the firmware no longer drives.
-        val linked = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutRig.LINK_SET_INTER_BOARD)
+    fun theInterBoardLinkPinsAreReservedAndTheModulePinsAreNot() = runTest {
+        // PA2/PA3 are the inter-board link's, so a button there is refused. PB6/PB7 and PB10/PB11
+        // are reserved under no mask: they were the CC2541's two wirings, which the firmware no
+        // longer drives.
+        val linked = layoutRig(BOARD, chip = ChipTag.F130C8)
         linked.stage(BoardField.BUTTON, pin("PA3"))
         assertEquals(
             BoardErrorKind.ReservedPin(checkNotNull(Pin.byName("PA3"))),
             linked.state.verdict?.error?.kind,
         )
 
-        val freed = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = 0b0100)
-        freed.stage(BoardField.BUTTON, pin("PA3"))
-        assertTrue(freed.state.clean)
-
-        val imu = layoutRig(BOARD, chip = ChipTag.F130C8, linkSet = LayoutRig.LINK_SET_INTER_BOARD)
+        val imu = layoutRig(BOARD, chip = ChipTag.F130C8)
         imu.stage(BoardField.IMU_SCL, pin("PB6"))
         imu.stage(BoardField.IMU_SDA, pin("PB7"))
         imu.stage(BoardField.IMU_MODEL, Fields.ImuModel.CLONE_2E)
@@ -491,7 +462,7 @@ class LayoutModelTest {
     fun applyingAWholeLayoutWritesEveryFieldItChangesAndNothingElse() = runTest {
         // A board taken from the blank defaults to a full single-motor layout in one Apply: battery
         // sense, the IMU, halls, the six gates with their dead time, and the phase-current pair.
-        val rig = layoutRig(BOARD, linkSet = LayoutRig.LINK_SET_INTER_BOARD)
+        val rig = layoutRig(BOARD)
         rig.stage(BoardField.VBATT, pin("PA4"))
         rig.stage(BoardField.IMU_SCL, pin("PB6"))
         rig.stage(BoardField.IMU_SDA, pin("PB7"))

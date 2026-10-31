@@ -373,12 +373,11 @@ class ScreenshotTest {
 
     @Test
     fun layout_editor() {
-        val values = Layout.SLOTS.associate { it.key to it.def.default } + (Fields.LINK_SET.key() to Value.U8(0))
+        val values = Layout.SLOTS.associate { it.key to it.def.default }
         val state = LayoutState(
             board = 0x01,
             chip = ChipTag.F103C8,
             values = values,
-            linkSet = 0,
             staged = checkNotNull(Layout.fieldsFrom(values)),
         )
         capture("layout_editor") {

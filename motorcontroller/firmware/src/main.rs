@@ -90,7 +90,7 @@ mod firmware {
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_BATTERY_CAL, BOARD_BATTERY_FLOOR,
         CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_POS_CLAMP,
         CONTROL_REFERENCE, CONTROL_RIDER_REQUIRED, CONTROL_SF_GAINS, CONTROL_SIDE, IMU_AXIS_ROLE,
-        IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, NODE_CLASS,
+        IMU_AXIS_SIGN, IMU_GYRO_BIAS, NODE_CLASS,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -2206,8 +2206,6 @@ mod firmware {
             &mut state.uart_link,
             &mut state.responder.0,
             &mut state.wdg,
-            state.discovered,
-            state.configured,
             state.odometer_base,
         )
     }
@@ -2239,10 +2237,6 @@ mod firmware {
         /// uses the one already there.
         responder: Aligned4<Responder>,
         wdg: FreeWatchdog,
-        /// The discovered link-set bitmask (see its computation in [`boot`]).
-        discovered: u8,
-        /// Whether the board booted with a persisted `LINK_SET` (a walked board).
-        configured: bool,
         /// Motor 0's stored odometer total at boot (`specs/odometer.md`).
         odometer_base: u32,
     }
@@ -2352,8 +2346,6 @@ mod firmware {
                 Some(s) => s,
                 None => halt(),
             };
-        let link_set = store.get(LINK_SET);
-        let configured = link_set != 0;
         // The odometer's stored total, motor 0's (`specs/odometer.md`). Read here with the other
         // boot-read fields and handed to the loop, which owns every later read and the one write.
         let odometer_base = store.get(store::MOTOR_ODOMETER.at(0));
@@ -2368,7 +2360,7 @@ mod firmware {
         // withhold it. On the bench both boards run on debugger 3V3 that bypasses the latch, so
         // that assert is a no-op for power there and is verifiable only as the pin's `GPIOx.OCTL`
         // bit; it matters on battery + the inter-board cable.
-        let (plan, imu_staged) = apply_layout(&chip, store, &allowlist, link_set);
+        let (plan, imu_staged) = apply_layout(&chip, store, &allowlist, link_bit(PORT_IDX_UART));
 
         // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
         // raw register views internally and never consumes the one-shot flag, so ordering vs
@@ -2383,7 +2375,7 @@ mod firmware {
         //
         // Always brought up (both boards, every boot): it is the proven inter-board link. Configured
         // boards still bring it up iff its port bit is set (it always is for a walked board).
-        let want_uart = !configured || link_set & link_bit(PORT_IDX_UART) != 0;
+        let want_uart = true;
         // The inter-board link: the one safe-link slot with a single fleet-wide answer, declared
         // rather than resolved (see `LINK_USART` for why, including what resolving it costs).
         // `Usart::new` re-derives the pair through the pin model and refuses a mismatch, so a
@@ -2440,18 +2432,6 @@ mod firmware {
 
         // === The links into `net`: port 0 = mailbox (always), port 1 = UART ===
         place_mailbox_link(unsafe { addr_of_mut!((*st).mailbox_link) }, mailbox);
-        // The link fact the rest of the boot reads, taken once from the written slot.
-        // SAFETY: the field was written by its placer above; a shared read of initialized memory
-        // with no other reference alive.
-        let uart_up = unsafe { (*uart_link).is_some() };
-
-        // The discovered link-set: the bitmask of live USART links, persisted at assign (below) and
-        // read back as `LINK_SET` on every later boot.
-        let discovered = if uart_up {
-            link_bit(SAFE_LINK_USARTS[LINK_ENTRY_UART].link_set_bit)
-        } else {
-            0
-        };
 
         place_responder(
             // SAFETY: a `&mut MaybeUninit` to one field of `main`'s uninitialized state: the
@@ -2663,8 +2643,6 @@ mod firmware {
         unsafe {
             addr_of_mut!((*st).wdg).write(wdg);
             addr_of_mut!((*st).epoch_watch).write(EpochWatch::new(mailbox));
-            addr_of_mut!((*st).discovered).write(discovered);
-            addr_of_mut!((*st).configured).write(configured);
             addr_of_mut!((*st).odometer_base).write(odometer_base);
         }
     }
@@ -2791,17 +2769,14 @@ mod firmware {
         uart_link: &mut Option<UartLink>,
         responder: &mut Responder,
         wdg: &mut FreeWatchdog,
-        discovered: u8,
-        configured: bool,
         odometer_base: u32,
     ) -> ! {
         // The tick captured when the current `PROBE_PORTS` started (rising edge of `probing()`);
         // `None` when no probe is in flight. The poll window is measured from it (deviation 2).
         let mut probe_start: Option<u32> = None;
-        let mut link_set_saved = configured; // once assigned, persist LINK_SET once
-                                             // The odometer's running total and its write decision (`specs/odometer.md`). It lives
-                                             // here because the write belongs here: the loop is the main thread, it already samples
-                                             // the arm fact, and it is where the OTHER deferred persist waits for a disarmed pass.
+        // The odometer's running total and its write decision (`specs/odometer.md`). It lives
+        // here because the write belongs here: the loop is the main thread, it already samples
+        // the arm fact, and it is where the OTHER deferred persist waits for a disarmed pass.
         let mut odo = odometer::Odometer::new(odometer_base, motor::EDGES.load(Ordering::Relaxed));
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
@@ -2945,17 +2920,6 @@ mod firmware {
                 }
             };
             responder.set_armed(armed);
-
-            // 5. Persist LINK_SET once, at assignment (specs/l3.md: "Once assigned it persists the
-            //    set of ports that came up live") - DEFERRED while armed (integration.md R4: no
-            //    flash program while armed; the persist-once latch waits for a disarmed pass).
-            if !link_set_saved && !armed && responder.addr() != net::pdu::NO_ADDRESS {
-                // SAFETY: main-thread context, as the ingest borrows above.
-                if let Some(st) = unsafe { (*addr_of_mut!(STORE)).as_mut() } {
-                    let _ = st.set(LINK_SET, discovered);
-                }
-                link_set_saved = true;
-            }
 
             // 5b. The odometer (`specs/odometer.md`). Fold the ISR's edge count into the running
             //     total every pass, publish it for the cyclic payload and for an SWD read, and

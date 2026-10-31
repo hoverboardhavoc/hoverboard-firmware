@@ -298,7 +298,6 @@
     <string name="setup_field_node_class">Node class</string>
     <string name="setup_field_drive_mode">Drive mode (every board must match)</string>
     <string name="setup_field_node_address">Node address</string>
-    <string name="setup_field_link_set">Link set</string>
     <string name="setup_field_control_mode">Control mode</string>
     <string name="setup_field_rider_required">Rider required (balance mode)</string>
     <string name="setup_field_battery_floor">Low-battery floor (cV)</string>

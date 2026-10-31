@@ -4,12 +4,9 @@ import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
-import com.hoverboard.protocol.board.NET_PORT_UART
 import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
-import com.hoverboard.protocol.store.Fields
-import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -21,7 +18,6 @@ import kotlinx.coroutines.test.runCurrent
 internal class LayoutRig(scope: TestScope) {
     var armed = false
     val transport = FakeHoverboardTransport(scope.testScheduler).apply {
-        defaults[Fields.LINK_SET.key()] = Fields.LINK_SET.default
         for (slot in Layout.SLOTS) defaults[slot.key] = slot.def.default
     }
     val model = LayoutModel(transport, scope.backgroundScope) { armed }
@@ -65,14 +61,6 @@ internal class LayoutRig(scope: TestScope) {
 
     /** The keys written this session, in order. */
     val written: List<com.hoverboard.protocol.store.Key> get() = transport.writes.map { it.second }
-
-    companion object {
-        /**
-         * The `LINK_SET` mask of a board whose inter-board link is live, every fleet board's: the
-         * link's own bit ([NET_PORT_UART]) and no other.
-         */
-        const val LINK_SET_INTER_BOARD = 1 shl NET_PORT_UART
-    }
 }
 
 /**
@@ -85,10 +73,8 @@ internal class LayoutRig(scope: TestScope) {
 internal fun TestScope.layoutRig(
     board: Int,
     chip: ChipTag? = ChipTag.F103C8,
-    linkSet: Int? = null,
     stage: LayoutRig.() -> Unit = {},
 ): LayoutRig = LayoutRig(this).also {
-    linkSet?.let { mask -> it.transport.store[board to Fields.LINK_SET.key()] = Value.U8(mask) }
     it.stage()
     it.transport.setAttachedBoard(board)
     it.model.onShown()

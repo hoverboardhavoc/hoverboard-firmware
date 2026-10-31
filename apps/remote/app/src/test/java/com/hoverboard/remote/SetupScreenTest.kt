@@ -629,7 +629,6 @@ class SetupScreenTest {
         val bridge = mapOf(
             SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.BRIDGE),
             SetupFields.DEVICE_NAME.key to Value.Str("hb-bridge-1a2b"),
-            SetupFields.LINK_SET.key to Value.U8(1),
         )
         show(setupState(board = 0x01, values = bridge, other = 0x02))
 

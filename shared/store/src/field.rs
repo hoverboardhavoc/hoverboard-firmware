@@ -384,18 +384,36 @@ pub const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 /// it by relay before the board has an address.
 pub const NODE_ADDRESS: Field<u8> = Field::new(0x01, 0x00);
 
-/// The L3 **link-set** (`specs/l3.md`, "Unconfigured bring-up"; `specs/storage-layer.md`): a bitmask
-/// of the local ports that came up live (found a module or a peer) during discovery, persisted
-/// alongside [`NODE_ADDRESS`]. `0x00` (the default) means **unconfigured** -> the firmware runs the
-/// whitelist BT-probe + link-listen; a non-zero mask means **configured** -> bring up exactly those
-/// ports, never re-probing the whitelist.
-pub const LINK_SET: Field<u8> = Field::new(0x02, 0x00);
-
 /// What this node is (`specs/l3.md`, "Node class: what a node is"): `0x01` = motor controller,
 /// `0x02` = bridge. A board running this firmware is a motor controller, so the value is the
 /// registry default and is never stored: its registry row is [`FieldEntry::read_only`], so a
 /// `CONFIG_WRITE` of it is refused (`DynError::ReadOnly`) and a `CONFIG_READ` answers `0x01`.
 pub const NODE_CLASS: Field<u8> = Field::new(0x03, 0x01);
+
+/// What went wrong at this boot's bring-up (`specs/configured-links.md` section 5): the status
+/// record's entries, four bytes each (field id, index, reason, detail), as bytes. Read-only like
+/// [`NODE_CLASS`]: its registry row is [`FieldEntry::read_only`], so a `CONFIG_WRITE` is refused
+/// (`DynError::ReadOnly`), and a `CONFIG_READ` is answered by the node from its record, not from the
+/// store (`net`'s `Responder::set_status`). Never stored; the empty default is what a node with no
+/// record (a bridge) answers.
+pub const BOARD_STATUS: BlobField = BlobField::new(0x05, &[]);
+
+/// The number of inter-board links a board can have (`specs/configured-links.md` section 2): the
+/// index of [`LINK_TX`] / [`LINK_RX`]. Two is the most a chain needs (end boards use one link,
+/// middle boards two) and the most an F1x0 part has (USART0 and USART1). Every per-link array is
+/// sized by it, so the count has one owner.
+pub const LINKS: u8 = 2;
+
+/// Each inter-board link's transmit pin, index = the link (`specs/configured-links.md` section 2).
+/// A link is configured when both its pins are set; unset (the default), the link does not exist
+/// and its pins are not touched, so a board with nothing stored brings up its SWD mailbox and no
+/// UART. Which USART a pair drives is the HAL pin model's answer (`pincap::usart_pins`).
+pub const LINK_TX: IndexedField<u8, 2> = IndexedField::new(0x56, [PIN_ABSENT, PIN_ABSENT]);
+/// Each inter-board link's receive pin, index = the link (see [`LINK_TX`]).
+pub const LINK_RX: IndexedField<u8, 2> = IndexedField::new(0x57, [PIN_ABSENT, PIN_ABSENT]);
+// The two handles are sized by [`LINKS`]: written as a literal so the Kotlin mirror's drift gate
+// reads them, and held to the count here.
+const _: () = assert!(LINK_TX.len() == LINKS as usize && LINK_RX.len() == LINKS as usize);
 
 // ---------------------------------------------------------------------------
 // The board-layout fields (`specs/board-model.md`): the per-pin store fields (packed
@@ -868,10 +886,9 @@ pub const MACHINE_DRIVE_MODE: Field<u8> = Field::new(0x78, 0);
 pub const MOTORS: u8 = 2;
 
 /// The ids the board or the walk writes, not the operator (`specs/cli-config.md` section 3,
-/// "Board-owned fields"): [`NODE_ADDRESS`] (assigned by the walk), [`LINK_SET`] (the ports that
-/// came up) and [`MOTOR_ODOMETER`] (written after each ride). A configuration tool leaves them out
-/// of a dump and never un-stores them.
-pub const BOARD_OWNED: &[u8] = &[NODE_ADDRESS.id(), LINK_SET.id(), MOTOR_ODOMETER.id()];
+/// "Board-owned fields"): [`NODE_ADDRESS`] (assigned by the walk) and [`MOTOR_ODOMETER`] (written
+/// after each ride). A configuration tool leaves them out of a dump and never un-stores them.
+pub const BOARD_OWNED: &[u8] = &[NODE_ADDRESS.id(), MOTOR_ODOMETER.id()];
 
 /// The ids whose default a node may answer itself instead of the registry's (`specs/cli-config.md`
 /// sections 4.3 and 6.2): [`DEVICE_NAME`], which a bridge answers unstored with its MAC-based name
@@ -959,8 +976,8 @@ pub const DYN_VALUE: u32 = 6;
 #[cfg(not(feature = "test-fields"))]
 field_ids! {
     0x01, // NODE_ADDRESS
-    0x02, // LINK_SET
     0x03, // NODE_CLASS
+    0x05, // BOARD_STATUS
     0x10, // DEVICE_NAME
     0x11, // WIFI_SSID
     0x12, // WIFI_PASS
@@ -995,6 +1012,8 @@ field_ids! {
     0x53, // BOARD_BUTTON
     0x54, // MOTOR_PHASE_A
     0x55, // MOTOR_PHASE_B
+    0x56, // LINK_TX
+    0x57, // LINK_RX
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
     0x65, // IMU_AXIS_SIGN
@@ -1024,8 +1043,8 @@ field_ids! {
 #[cfg(feature = "test-fields")]
 field_ids! {
     0x01, // NODE_ADDRESS
-    0x02, // LINK_SET
     0x03, // NODE_CLASS
+    0x05, // BOARD_STATUS
     0x10, // DEVICE_NAME
     0x11, // WIFI_SSID
     0x12, // WIFI_PASS
@@ -1060,6 +1079,8 @@ field_ids! {
     0x53, // BOARD_BUTTON
     0x54, // MOTOR_PHASE_A
     0x55, // MOTOR_PHASE_B
+    0x56, // LINK_TX
+    0x57, // LINK_RX
     0x60, // IMU_MODEL
     0x61, // IMU_GYRO_BIAS
     0x65, // IMU_AXIS_SIGN
@@ -1123,10 +1144,10 @@ pub struct FieldDef {
 /// [`BOARD_BATTERY_CAL`], [`CONTROL_DRIVE_TURN`] and [`CONTROL_REFERENCE`]: one id, two defaults, so
 /// one extra each). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 61 + 9;
+pub const REGISTRY_LEN: usize = 63 + 11;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 63 + 9;
+pub const REGISTRY_LEN: usize = 65 + 11;
 
 /// One registry ROW: the same four facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1235,8 +1256,8 @@ impl FieldEntry {
 /// The handles stay the single source of truth: each row is that handle's own `entry()`.
 pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     NODE_ADDRESS.entry(),
-    LINK_SET.entry(),
     NODE_CLASS.entry().read_only(),
+    BOARD_STATUS.entry(BYTES_EMPTY).read_only(),
     DEVICE_NAME.entry(BYTES_DEVICE_NAME),
     WIFI_SSID.entry(BYTES_EMPTY),
     WIFI_PASS.entry(BYTES_EMPTY),
@@ -1306,6 +1327,10 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     CONTROL_REFERENCE.at(0).entry(),
     CONTROL_REFERENCE.at(1).entry(),
     CONTROL_POS_CLAMP.entry(),
+    LINK_TX.at(0).entry(),
+    LINK_TX.at(1).entry(),
+    LINK_RX.at(0).entry(),
+    LINK_RX.at(1).entry(),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY),
     #[cfg(feature = "test-fields")]
@@ -1517,8 +1542,8 @@ pub mod names {
     /// Every registered field's name (`specs/cli-config.md` section 3.1).
     pub static NAMES: &[FieldName] = &[
         FieldName::single(NODE_ADDRESS, "node.address", Kind::Int),
-        FieldName::single(LINK_SET, "link.set", Kind::Int),
         FieldName::single(NODE_CLASS, "node.class", Kind::Int),
+        FieldName::blob(BOARD_STATUS, "board.status"),
         FieldName::text(DEVICE_NAME, "device.name"),
         FieldName::text(WIFI_SSID, "wifi.ssid"),
         FieldName::text(WIFI_PASS, "wifi.pass"),
@@ -1584,6 +1609,8 @@ pub mod names {
         FieldName::array(CONTROL_GAIN_MAX, "control.gain_max", Kind::Int),
         FieldName::array(CONTROL_REFERENCE, "control.reference", Kind::Int),
         FieldName::single(CONTROL_POS_CLAMP, "control.pos_clamp", Kind::Int),
+        FieldName::array(LINK_TX, "link.tx", Kind::Pin),
+        FieldName::array(LINK_RX, "link.rx", Kind::Pin),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -1679,6 +1706,8 @@ pub mod names {
                 (CONTROL_SF_GAINS.len(), CONTROL_SF_GAINS.id()),
                 (CONTROL_GAIN_MAX.len(), CONTROL_GAIN_MAX.id()),
                 (CONTROL_REFERENCE.len(), CONTROL_REFERENCE.id()),
+                (LINK_TX.len(), LINK_TX.id()),
+                (LINK_RX.len(), LINK_RX.id()),
             ] {
                 assert_eq!(by_id(id).unwrap().index, Index::Array(handle_len as u8));
             }
@@ -1691,13 +1720,13 @@ pub mod names {
                 .filter(|r| r.board_owned())
                 .map(|r| r.path)
                 .collect();
-            assert_eq!(owned, ["node.address", "link.set", "odometer"]);
+            assert_eq!(owned, ["node.address", "odometer"]);
             let ro: Vec<&str> = NAMES
                 .iter()
                 .filter(|r| r.read_only())
                 .map(|r| r.path)
                 .collect();
-            assert_eq!(ro, ["node.class"]);
+            assert_eq!(ro, ["node.class", "board.status"]);
             let node: Vec<&str> = NAMES
                 .iter()
                 .filter(|r| r.node_default())
@@ -1727,7 +1756,9 @@ mod registry_tests {
             + (CONTROL_DRIVE_TURN.len() - 1)
             + (CONTROL_SF_GAINS.len() - 1)
             + (CONTROL_GAIN_MAX.len() - 1)
-            + (CONTROL_REFERENCE.len() - 1);
+            + (CONTROL_REFERENCE.len() - 1)
+            + (LINK_TX.len() - 1)
+            + (LINK_RX.len() - 1);
         assert_eq!(reg.len(), FIELD_IDS.len() + extra);
         // Every declared id is present, and no entry carries an id nothing declares.
         for id in FIELD_IDS {
@@ -1846,17 +1877,41 @@ mod registry_tests {
     }
 
     #[test]
-    fn node_class_is_the_one_read_only_field() {
+    fn node_class_and_board_status_are_the_read_only_fields() {
         let ro: std::vec::Vec<u8> = REGISTRY
             .iter()
             .filter(|r| r.def().read_only)
             .map(|r| r.field_id)
             .collect();
-        assert_eq!(ro, [NODE_CLASS.id()]);
+        assert_eq!(ro, [NODE_CLASS.id(), BOARD_STATUS.id()]);
         let c = lookup(NODE_CLASS.id()).unwrap();
         assert_eq!(c.kind, Type::U8);
         assert_eq!(c.default, Value::U8(0x01));
+        // `board.status` (`specs/configured-links.md` section 5): a blob the node answers from its
+        // boot record; the registry's empty default is what a node with no record answers.
+        let b = lookup(BOARD_STATUS.id()).unwrap();
+        assert_eq!(
+            (b.field_id, b.kind, b.default),
+            (0x05, Type::Blob, Value::Bytes(&[]))
+        );
         assert_eq!(core::mem::size_of::<FieldEntry>(), 8);
+    }
+
+    /// The inter-board link pins (`specs/configured-links.md` section 2): two indices each, both
+    /// unset by default, so a board with nothing stored brings up no UART.
+    #[test]
+    fn the_link_pins_are_two_unset_pin_families() {
+        assert_eq!((LINK_TX.id(), LINK_RX.id(), LINKS), (0x56, 0x57, 2));
+        for f in [LINK_TX, LINK_RX] {
+            assert_eq!(f.len(), LINKS as usize);
+            for i in 0..LINKS {
+                let d = lookup_key(f.at(i).key()).unwrap();
+                assert_eq!(
+                    (d.index, d.kind, d.default),
+                    (i, Type::U8, Value::U8(PIN_ABSENT))
+                );
+            }
+        }
     }
 
     #[test]
@@ -1970,6 +2025,7 @@ mod registry_tests {
             (WIFI_SSID.id(), WIFI_SSID.default()),
             (WIFI_PASS.id(), WIFI_PASS.default()),
             (SOME_BLOB.id(), SOME_BLOB.default()),
+            (BOARD_STATUS.id(), BOARD_STATUS.default()),
             #[cfg(feature = "test-fields")]
             (T_BLOB.id(), T_BLOB.default()),
         ];

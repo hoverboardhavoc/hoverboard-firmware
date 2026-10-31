@@ -1485,10 +1485,10 @@ class RustSourceDriftTest {
             // `pub const NAME: Field<u32> = Field::new(0x20, 10_000);` or `StrField::new(0x10, "Hoverboard")`
             val m = findOne(
                 field,
-                """^pub\s+const\s+$name\s*:\s*(Field\s*<\s*(\w+)\s*>|StrField)\s*=\s*\w+::new\(\s*([^,]+?)\s*,\s*(.+?)\s*\)\s*;""",
+                """^pub\s+const\s+$name\s*:\s*(Field\s*<\s*(\w+)\s*>|StrField|BlobField)\s*=\s*\w+::new\(\s*([^,]+?)\s*,\s*(.+?)\s*\)\s*;""",
                 name,
             )
-            val rustType = m.groupValues[2].ifEmpty { "str" }
+            val rustType = m.groupValues[2].ifEmpty { if (m.groupValues[1] == "BlobField") "blob" else "str" }
             val type = when (rustType) {
                 "u8" -> Type.U8
                 "u16" -> Type.U16
@@ -1496,6 +1496,7 @@ class RustSourceDriftTest {
                 "i16" -> Type.I16
                 "i32" -> Type.I32
                 "str" -> Type.Str
+                "blob" -> Type.Blob
                 else -> error("$name has Rust type $rustType, which this gate does not map yet")
             }
             assertEquals(type, def.type, "$name storage type drifted")
@@ -1506,6 +1507,10 @@ class RustSourceDriftTest {
                 Type.Str -> {
                     check(raw.startsWith("\"") && raw.endsWith("\"")) { "$name default is not a string literal: $raw" }
                     Value.Str(raw.substring(1, raw.length - 1))
+                }
+                Type.Blob -> {
+                    check(raw == "&[]") { "$name default is not the empty blob: $raw" }
+                    Value.Bytes(ByteArray(0))
                 }
                 Type.U8 -> Value.U8(int())
                 Type.U16 -> Value.U16(int())
@@ -1526,13 +1531,15 @@ class RustSourceDriftTest {
             )
             val type = when (m.groupValues[1]) {
                 "i16" -> Type.I16
+                "u8" -> Type.U8
                 else -> error("$name has Rust type ${m.groupValues[1]}, which this gate does not map yet")
             }
             assertEquals(type, def.type, "$name storage type drifted")
             assertEquals(literal(name, m.groupValues[3], "field id"), def.id, "$name id drifted")
             val defaults = m.groupValues[4].split(",").map { raw ->
-                val t = raw.trim().replace("_", "")
-                Value.I16(if (t.startsWith("-")) -literal(name, t.drop(1), "default") else literal(name, t, "default"))
+                val t = constOrLiteral(field, name, raw)
+                val n = if (t.startsWith("-")) -literal(name, t.drop(1), "default") else literal(name, t, "default")
+                if (type == Type.U8) Value.U8(n) else Value.I16(n)
             }
             assertEquals(m.groupValues[2].toInt(), defaults.size, "$name declares a count its defaults do not match")
             assertEquals(defaults, def.defaults, "$name defaults drifted")

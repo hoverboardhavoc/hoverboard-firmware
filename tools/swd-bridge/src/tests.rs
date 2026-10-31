@@ -580,7 +580,7 @@ mod config_tests {
     use net::{Opcode, Pdu, Responder};
     use store::{
         Flash, Store, Type, Value, ATTITUDE_LEVEL_TRIM, IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN,
-        LED_GREEN, LED_RED, LINK_SET, MOTOR_CURRENT_LIMIT, MOTOR_HALL_A, NODE_ADDRESS,
+        LED_GREEN, LED_RED, MOTOR_CURRENT_LIMIT, MOTOR_HALL_A, NODE_ADDRESS,
     };
 
     // --- the registry-sourced parser -------------------------------------------------------
@@ -659,7 +659,7 @@ mod config_tests {
             (MOTOR_HALL_A.id(), 1, "0x2A")
         );
         // Decimal field id works too.
-        assert_eq!(parse_field_arg("2=6").unwrap(), (0x02, 0, "6"));
+        assert_eq!(parse_field_arg("1=6").unwrap(), (0x01, 0, "6"));
         // A missing '=' or an unknown field id fails at the arg layer.
         assert!(matches!(
             parse_field_arg("0x48").unwrap_err(),
@@ -677,7 +677,7 @@ mod config_tests {
         // FIELD alone (index 0) and FIELD:INDEX, same id/index rules as the write form.
         assert_eq!(parse_key_arg("0x79").unwrap(), (0x79, 0));
         assert_eq!(parse_key_arg("0x79:2").unwrap(), (0x79, 2));
-        assert_eq!(parse_key_arg("2").unwrap(), (0x02, 0));
+        assert_eq!(parse_key_arg("1").unwrap(), (0x01, 0));
         // A value on a read is a confusion worth refusing, not silently splitting.
         assert!(matches!(
             parse_key_arg("0x79=9000").unwrap_err(),
@@ -873,7 +873,6 @@ mod config_tests {
         // The silicon-queue section-6 VALID case: stage the inter-board link in LINK_SET, then write
         // the standard-family IMU group. Each write is confirmed by a read-back over the wire path.
         let mut b = BoardNode::booted(0x01);
-        b.stage(LINK_SET.id(), 0, "0x02"); // bit 1 live: the inter-board link
         b.stage(IMU_SCL_PIN.id(), 0, "0x16"); // PB6
         b.stage(IMU_SDA_PIN.id(), 0, "0x17"); // PB7
         b.stage(IMU_MODEL.id(), 0, "2");
@@ -881,9 +880,7 @@ mod config_tests {
         // Now run the SAME validator the firmware runs at boot over the staged store.
         let mut flash = b.flash;
         let s = Store::mount(&mut flash).unwrap();
-        let link_set: u8 = s.get(LINK_SET);
-        assert_eq!(link_set, 0x02);
-        let reserved = reserved_set(ALLOWLIST, link_set);
+        let reserved = reserved_set(ALLOWLIST, 0x02);
         let plan = validate(&read_fields(&s), &MockChip, reserved.as_slice())
             .plan
             .expect("the staged valid layout must validate");
@@ -966,7 +963,7 @@ mod config_tests {
 
         let mut flash = b.flash;
         let s = Store::mount(&mut flash).unwrap();
-        let reserved = reserved_set(ALLOWLIST, s.get(LINK_SET));
+        let reserved = reserved_set(ALLOWLIST, 0x02);
         let err = validate(&read_fields(&s), &MockChip, reserved.as_slice())
             .plan
             .expect_err("the duplicate pin must be rejected");
