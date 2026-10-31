@@ -18,9 +18,9 @@
 # to the toolchain action in every job (see .github/workflows/ci.yml): a job that requested fewer would
 # trigger a full toolchain re-download on its first cargo call to satisfy this file.
 #
-# The sibling runtime-hal repo deliberately KEEPS its own 1.96.0 stable pin. rustup resolves the
-# toolchain from the directory cargo is invoked in, and every build of this image is invoked here, so
-# runtime-hal's pin never governs the image: the HAL is compiled by THIS toolchain as a path dep.
+# The runtime-hal repo deliberately KEEPS its own 1.96.0 stable pin. rustup resolves the toolchain
+# from the directory cargo is invoked in, and every build of this image is invoked here, so
+# runtime-hal's pin never governs the image: the HAL is compiled by THIS toolchain as a git dependency.
 # Leaving it on stable keeps the library provably stable-compatible for its own consumers (its own CI is
 # a host/thumbv7m check on stable, and that is the property that check should be proving). The
 # divergence it creates, that runtime-hal's CI never compiles it on nightly, is covered here: this
