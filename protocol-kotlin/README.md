@@ -2,12 +2,7 @@
 
 The single Kotlin mirror of the firmware's wire protocol, living beside the Rust it mirrors.
 
-Both Android apps in this repo depend on it:
-
-| App | Path | Package |
-| --- | --- | --- |
-| Protocol harness | `Hoverboard/` | `com.hoverboard.app` |
-| Rider remote | `apps/rider/` | `com.hoverboard.remote` |
+The rider app (`apps/rider/`, `com.hoverboard.remote`) depends on it.
 
 It exists because there used to be two hand-written Kotlin copies of the protocol, and they had
 drifted apart: the rider's copy expected a version byte where the current framing carries a length,
@@ -49,19 +44,17 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" ./gradle
 
 Runs in a couple of seconds. The HTML report is at `build/reports/tests/test/index.html`.
 
-## How the apps consume it
+## How the app consumes it
 
-Each app is its own Gradle build with its own version catalog, and they disagree about DI (Hilt vs
-Koin) and test tooling. So this is wired as a **composite build** rather than a shared subproject:
-each app's `settings.gradle.kts` has
+The app is its own Gradle build with its own version catalog, so this is wired as a **composite
+build** rather than a shared subproject: the app's `settings.gradle.kts` has
 
 ```kotlin
-includeBuild("../protocol-kotlin")      // Hoverboard/
-includeBuild("../../protocol-kotlin")   // apps/rider/
+includeBuild("../../protocol-kotlin")
 ```
 
 and declares `implementation("com.hoverboard:protocol")`. Gradle substitutes the coordinate onto
-the included build. Nothing is published, and the two apps stay independent.
+the included build. Nothing is published.
 
 ## The drift gate
 
