@@ -31,6 +31,25 @@ If a label's definition cannot be found, say so rather than guessing at it.
   resolves the host triple and passes CI's flags, and CI's host-test job runs the same script.
 - **Shipping image: `cargo image`**, the build-std release build whose bytes reach flash
   (`.cargo/config.toml` explains why it is an alias and not a config key).
+- **runtime-hal is a git dependency pinned by `Cargo.lock`** (root `Cargo.toml`,
+  `[workspace.dependencies]`); CI builds the pinned commit. Local builds use `~/dev/runtime-hal`
+  instead, through a patch in `~/dev/.cargo/config.toml` (outside the repo; cargo reads it for every
+  project under `~/dev`):
+
+  ```toml
+  [patch."https://github.com/hoverboardhavoc/runtime-hal"]
+  runtime-hal = { path = "runtime-hal" }   # relative to ~/dev
+  ```
+
+  Costs: a patched build ignores the pin (check out the pinned commit in `~/dev/runtime-hal` to
+  build what CI builds), it rewrites the runtime-hal entry in each lockfile it touches to the path
+  package with no `source` line (never commit that; CI's lint job fails a lockfile without the pin),
+  and `cargo image` and every other project under `~/dev` print a harmless "patch was not used"
+  warning.
+- **Bumping runtime-hal:** with `~/dev/.cargo/config.toml` moved aside, run `cargo update -p
+  runtime-hal` in the root, `tools/hoverboard-cli` and `apps/hoverboard-bridge` (the three tracked
+  lockfiles must pin the same commit), and commit the lockfiles alone, naming the new runtime-hal
+  commit and why the firmware needs it.
 
 ## No backwards compatibility until a version ships
 

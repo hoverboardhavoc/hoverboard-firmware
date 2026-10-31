@@ -18,7 +18,7 @@ panic-halt = "1"
 # bus-fault probe does not run under Unicorn). The runtime-hal dependency is target-gated like the
 # store's: the host build of this crate degrades to an empty main, so it never links the HAL.
 [target.'cfg(target_arch = "arm")'.dependencies]
-runtime-hal = { path = "../../../runtime-hal" }
+runtime-hal = { workspace = true }
 # The workspace flash vector table (crates/vectors): once ANY crate enables cortex-m-rt's
 # `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
 # one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
