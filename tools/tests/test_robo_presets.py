@@ -5,17 +5,18 @@ Run: python3 -m unittest discover -s tools/tests -p 'test_robo_presets.py'
  or: python3 -m pytest tools/tests -q
 
 Covers `specs/robo-presets.md`: the pin encoding both ways, the three mapping decisions it names
-plus the dead-time one it does not, the LINK_SET derivation, the marker grammar, the variant-axis
-sweep, the skip rules for his non-layout files and his out-of-scope targets, and the key-list
-invariants.
+plus the dead-time one it does not, the link mapping (`specs/configured-links.md` section 6), the
+marker grammar, the variant-axis sweep, the skip rules for his non-layout files and his
+out-of-scope targets, and the key-list invariants.
 
-Two tests need the pinned upstream clone, a C preprocessor and a JDK, and SKIP without them:
+Two tests matter most:
 
   - THE BENCH-PAIR PIN TEST, which is the oracle for decision 1 (the gate colour order). It runs
-    against the COMMITTED presets, so it needs none of those three, and it is the test that makes
-    the colour mapping proven rather than assumed.
+    against the COMMITTED presets, so it needs neither the clone nor a preprocessor, and it is the
+    test that makes the colour mapping proven rather than assumed.
   - THE DETERMINISM TEST, which generates twice from one SHA and compares byte for byte. That is
-    `specs/robo-presets.md`'s acceptance test, stated there as a property and not an intention.
+    `specs/robo-presets.md`'s acceptance test, stated there as a property and not an intention. It
+    needs the pinned upstream clone and a C preprocessor, and SKIPS without them.
 
 stdlib only, no hardware.
 """
@@ -59,13 +60,6 @@ def have_clone(sha):
     except SystemExit:
         return False
     return True
-
-
-def have_toolchain():
-    """Is there a C preprocessor and a JDK the verdict oracle can use?"""
-    if shutil.which("cc") is None:
-        return False
-    return bool(os.environ.get("JAVA_HOME")) or os.path.isdir(rp.FALLBACK_JAVA_HOME)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -165,17 +159,14 @@ class GateColourOrder(unittest.TestCase):
             self.skipTest("the committed presets are not here")
         doc = json.load(open(PRESETS))
         by_id = {p["id"]: p for p in doc["presets"]}
-        for preset_id, part in (("robo-2-1-20", "F130C8"), ("robo-2-2-20", "F103C8")):
+        for preset_id, chip in (("robo-2-1-20", "GD32F130"), ("robo-2-2-20", "GD32F103")):
             with self.subTest(preset=preset_id):
                 self.assertIn(preset_id, by_id)
                 p = by_id[preset_id]
                 got = {f["key"]: f["value"] for f in p["fields"]}
                 for key, pin in dict(self.BENCH, **self.BENCH_BOARD).items():
                     self.assertEqual(got.get(key), pin, "%s %s" % (preset_id, key))
-                # And the whole layout is one our own boot judge accepts on that part, which is what
-                # makes "known-good" a checked claim rather than a label.
-                self.assertEqual(p["validate"]["verdict"], "accepted")
-                self.assertIn(part, p["validate"]["accepted_on"])
+                self.assertEqual(p["chip"], chip)
 
     def test_the_bench_presets_carry_his_phase_sense_pins_as_his_file_states_them(self):
         # Recorded as a test rather than only in the report: his 2.1.20 gives PHASE_A PB0 and
@@ -308,9 +299,9 @@ class DeadTime(unittest.TestCase):
         self.assertEqual(rp.dead_time_dtg(60), 30)
         self.assertEqual(rp.dead_time_dtg(50), 25)
 
-    def test_the_result_clears_the_validators_floor(self):
-        # Below the floor every preset with gates would be refused on the dead time before any check
-        # that could say something about his file, because the first failure wins.
+    def test_the_result_clears_the_dead_time_floor(self):
+        # Below the floor every gated board would leave its motor down at boot, recorded in
+        # board.status as a dead time below the floor.
         self.assertGreaterEqual(rp.dead_time_dtg(60), 18)
 
     def test_the_dead_time_rides_only_where_there_is_a_gate_group(self):
@@ -340,39 +331,120 @@ class DeadTime(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------------------------------
-# The LINK_SET derivation and the reserved pins behind it
+# The links: his USART pairs to link.tx / link.rx
 # --------------------------------------------------------------------------------------------------
 
 
-class LinkSet(unittest.TestCase):
-    def test_a_declared_wiring_sets_its_bit_whichever_pin_is_tx(self):
-        mask, basis = rp.link_set_from_usarts({"USART1_TX": "PA3", "USART1_RX": "PA2"})
-        self.assertEqual(mask, 0b0010)
-        self.assertEqual([b["bit"] for b in basis], [1])
+class Links(unittest.TestCase):
+    """His USART pairs to `link.tx` / `link.rx` (`specs/configured-links.md` section 6)."""
 
-    def test_a_wiring_he_does_not_declare_sets_no_bit(self):
-        # Layout 2.2.1 declares USART0 on PB6/PB7 and USART2 on PB10/PB11 and no USART1, which is
-        # why PA3 is free for its BUTTON field. Neither of those is an allowlist wiring any more
-        # (they were the CC2541's), so they set no bit either.
-        mask, basis = rp.link_set_from_usarts(
-            {"USART0_TX": "PB6", "USART0_RX": "PB7", "USART2_TX": "PB10", "USART2_RX": "PB11"}
+    USART0 = {"USART0_TX": "PB6", "USART0_RX": "PB7"}
+    USART1 = {"USART1_TX": "PA2", "USART1_RX": "PA3"}
+    USART2 = {"USART2_TX": "PB10", "USART2_RX": "PB11"}
+
+    def pins(self, links):
+        return [None if l is None else (l["tx"], l["rx"]) for l in links]
+
+    def test_the_routing_table_mirrors_runtime_hals_rows(self):
+        # runtime-hal src/pincap.rs, USART_PINS (ce6ea27): PA2/PA3 USART1 and PB6/PB7 USART0 on
+        # both families, PB10/PB11 USART2 on the F10x only.
+        for family in ("F1x0", "F10x"):
+            self.assertEqual(rp.usart_route(family, "PA2", "PA3"), "USART1", family)
+            self.assertEqual(rp.usart_route(family, "PB6", "PB7"), "USART0", family)
+        self.assertEqual(rp.usart_route("F10x", "PB10", "PB11"), "USART2")
+        self.assertIsNone(rp.usart_route("F1x0", "PB10", "PB11"))
+
+    def test_a_pair_routes_only_as_tx_then_rx_of_one_usart(self):
+        self.assertIsNone(rp.usart_route("F1x0", "PA3", "PA2"))  # reversed
+        self.assertIsNone(rp.usart_route("F1x0", "PA2", "PB7"))  # across two USARTs
+        self.assertIsNone(rp.usart_route("F1x0", "PA2", "PA15"))  # not a row (2.1.3's RX)
+        self.assertIsNone(rp.usart_route("F10x", "PA9", "PA10"))  # USART0's default: the gates
+
+    def test_link_0_is_the_masterslave_usart1_pair_and_link_1_the_other(self):
+        # His USART0 is listed first, but USART1 is his MASTERSLAVE_USART, the original
+        # master-slave header, so it takes link 0.
+        links, empty, reasons = rp.link_assignment(dict(self.USART0, **self.USART1), "F1x0")
+        self.assertEqual(self.pins(links), [("PA2", "PA3"), ("PB6", "PB7")])
+        self.assertEqual(empty, [None, None])
+        self.assertEqual(set(reasons.values()), {None})
+        self.assertEqual(links[0]["tx_from"], "USART1_TX")
+        self.assertEqual(links[1]["usart"], "USART0")
+
+    def test_with_no_usart1_link_0_is_the_first_pair_listed(self):
+        # Layouts 2.2.1 and 2.2.3: USART0 on PB6/PB7 and USART2 on PB10/PB11, no USART1.
+        links, _, _ = rp.link_assignment(dict(self.USART0, **self.USART2), "F10x")
+        self.assertEqual(self.pins(links), [("PB6", "PB7"), ("PB10", "PB11")])
+
+    def test_an_unroutable_pair_stays_unmapped_with_its_reason(self):
+        # Layout 2.1.3: USART1 on PA2/PA15, which runtime-hal does not route. Link 0 stays empty
+        # (links are numbered before routability is asked) and its USART0 is still link 1.
+        values = dict(self.USART0, USART1_TX="PA2", USART1_RX="PA15")
+        links, empty, reasons = rp.link_assignment(values, "F1x0")
+        self.assertEqual(self.pins(links), [None, ("PB6", "PB7")])
+        self.assertIn("USART1_TX/USART1_RX", empty[0])
+        self.assertIn("does not route on the F1x0", reasons["USART1_TX"])
+        self.assertIn("board.status", reasons["USART1_RX"])
+        out = rp.unmapped_entries(values, sorted(values), reasons)
+        self.assertEqual(
+            {u["from"]: u["value"] for u in out}, {"USART1_TX": "PA2", "USART1_RX": "PA15"}
         )
-        self.assertEqual(mask, 0)
-        self.assertEqual(basis, [])
 
-    def test_a_usart_on_pins_the_allowlist_does_not_carry_sets_no_bit(self):
-        # Layout 2.1.3's USART1 is PA2/PA15, which is not the allowlist's PA2/PA3 wiring.
-        mask, basis = rp.link_set_from_usarts({"USART1_TX": "PA2", "USART1_RX": "PA15"})
-        self.assertEqual(mask, 0)
-        self.assertEqual(basis, [])
+    def test_a_family_that_does_not_route_pb10_pb11_leaves_it_unmapped(self):
+        # The F1x0 has no USART2; PB10/PB11 are its I2C1 pair.
+        links, empty, reasons = rp.link_assignment(dict(self.USART1, **self.USART2), "F1x0")
+        self.assertEqual(self.pins(links), [("PA2", "PA3"), None])
+        self.assertIsNotNone(empty[1])
+        self.assertIn("PB10 TX / PB11 RX", reasons["USART2_TX"])
+        links, _, _ = rp.link_assignment(dict(self.USART1, **self.USART2), "F10x")
+        self.assertEqual(self.pins(links), [("PA2", "PA3"), ("PB10", "PB11")])
 
-    def test_half_a_declaration_is_not_a_declaration(self):
-        mask, _ = rp.link_set_from_usarts({"USART1_TX": "PA2"})
-        self.assertEqual(mask, 0)
+    def test_a_third_pair_finds_no_link(self):
+        values = dict(self.USART0, **dict(self.USART1, **self.USART2))
+        links, _, reasons = rp.link_assignment(values, "F10x")
+        self.assertEqual(self.pins(links), [("PA2", "PA3"), ("PB6", "PB7")])
+        self.assertIn("2 links", reasons["USART2_TX"])
 
-    def test_the_allowlist_mirrors_the_firmwares_one_wiring(self):
-        # shared/protocol-kotlin/.../ReservedPins.kt, SAFE_LINK_USARTS: the inter-board link.
-        self.assertEqual([(e["bit"], e["pins"]) for e in rp.ALLOWLIST], [(1, ("PA2", "PA3"))])
+    def test_half_a_declaration_is_not_a_pair(self):
+        values = {"USART1_TX": "PA2"}
+        links, empty, reasons = rp.link_assignment(values, "F1x0")
+        self.assertEqual(links, [None, None])
+        self.assertEqual(reasons, {})
+        out = rp.unmapped_entries(values, sorted(values), reasons)
+        self.assertEqual(out, [{"from": "USART1_TX", "reason": rp.HALF_A_USART, "value": "PA2"}])
+
+    def test_the_link_count_is_the_stores(self):
+        # shared/store/src/field.rs, LINKS, and the name table's count for both link fields.
+        with open(FIELDS_JSON) as fh:
+            table = {r["id"]: r for r in json.load(fh)}
+        for fid in (0x56, 0x57):
+            self.assertEqual(table[fid]["count"], rp.LINKS)
+            self.assertEqual(table[fid]["kind"], "pin")
+
+    def test_the_committed_presets_carry_the_links(self):
+        if not os.path.exists(PRESETS):
+            self.skipTest("the committed presets are not here")
+        doc = json.load(open(PRESETS))
+        by_id = {p["id"]: p for p in doc["presets"]}
+
+        def links(preset_id):
+            got = {(f["key"], f["index"]): f["value"] for f in by_id[preset_id]["fields"]}
+            return [
+                (got.get(("link.tx", i)), got.get(("link.rx", i))) for i in range(rp.LINKS)
+            ]
+
+        self.assertEqual(links("robo-2-1-20"), [("PA2", "PA3"), ("PB6", "PB7")])
+        self.assertEqual(links("robo-2-2-20"), [("PA2", "PA3"), ("PB6", "PB7")])
+        self.assertEqual(links("robo-2-2-1"), [("PB6", "PB7"), ("PB10", "PB11")])
+        self.assertEqual(links("robo-2-2-7-left"), [("PA2", "PA3"), ("PB10", "PB11")])
+        self.assertEqual(links("robo-2-1-3"), [(None, None), ("PB6", "PB7")])
+        self.assertEqual(links("robo-2-1-6"), [("PA2", "PA3"), (None, None)])
+        for p in doc["presets"]:
+            self.assertNotIn("link_set", p, p["id"])
+            self.assertNotIn("validate", p, p["id"])
+            # A USART pin of his is either a link field or unmapped with a reason, never both.
+            linked = {f["from"] for f in p["fields"] if f["key"].startswith("link.")}
+            unmapped = {u["from"] for u in p["unmapped"]}
+            self.assertFalse(linked & unmapped, p["id"])
 
 
 # --------------------------------------------------------------------------------------------------
@@ -409,7 +481,9 @@ class KeyList(unittest.TestCase):
     def test_every_field_has_a_handler_and_a_source(self):
         for f in rp.FIELDS:
             self.assertIn(
-                f["kind"], {"pin", "decision3", "dead_time", "current_sense", "vbatt_cal"}, f["key"]
+                f["kind"],
+                {"pin", "link", "decision3", "dead_time", "current_sense", "vbatt_cal"},
+                f["key"],
             )
             if f["kind"] in {"pin", "dead_time", "vbatt_cal"}:
                 self.assertTrue(f.get("frm"), f["key"])
@@ -428,9 +502,6 @@ class KeyList(unittest.TestCase):
         # (shared/protocol-kotlin/.../LayoutPresets.kt, LayoutPreset.applyTo).
         self.assertFalse({f["id"] for f in rp.FIELDS} & {0x62, 0x63, 0x67})
 
-    def test_only_the_calibration_is_withheld_from_the_validator(self):
-        self.assertEqual(rp.NOT_VALIDATED, {0x69})
-
 
 # --------------------------------------------------------------------------------------------------
 # What is skipped, and loudly
@@ -439,7 +510,9 @@ class KeyList(unittest.TestCase):
 
 class Scope(unittest.TestCase):
     def test_only_his_targets_1_and_2_are_in_scope(self):
-        self.assertEqual(sorted(t for t, s in rp.TARGETS.items() if s["parts"]), [1, 2])
+        self.assertEqual(sorted(t for t, s in rp.TARGETS.items() if s["family"]), [1, 2])
+        self.assertEqual(rp.TARGETS[1]["family"], "F1x0")
+        self.assertEqual(rp.TARGETS[2]["family"], "F10x")
         self.assertEqual(rp.TARGETS[3]["chip"], "GD32E230")
         self.assertEqual(rp.TARGETS[4]["chip"], "MM32SPIN05")
 
@@ -539,6 +612,8 @@ class Document(unittest.TestCase):
             asked.add((f["key"], f.get("motor", 0)))
             if f["kind"] == "vbatt_cal":
                 asked.add((f["key"], 1))
+            if f["kind"] == "link":
+                asked |= {(f["key"], link) for link in range(rp.LINKS)}
         for p in self.doc["presets"]:
             seen = {(f["key"], f["index"]) for f in p["fields"]}
             seen |= {(a["key"], a["index"]) for a in p["absent"]}
@@ -562,14 +637,6 @@ class Document(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
         for i in ids:
             self.assertRegex(i, r"^robo-2-[12]-\d+(-[0-9a-z]+)*$")
-
-    def test_a_preset_names_the_part_it_was_judged_on(self):
-        for p in self.doc["presets"]:
-            parts = [e["part"] for e in p["validate"]["parts"]]
-            self.assertEqual(parts, rp.TARGETS[p["target"]]["parts"], p["id"])
-            if p["validate"]["verdict"] == "refused":
-                self.assertTrue(p["validate"]["reason"], p["id"])
-                self.assertTrue(p["validate"]["field"], p["id"])
 
     def test_the_upstream_census_leaves_nothing_unread(self):
         # The second pass's whole job: a #define of his our key list does not ask about is a diff,
@@ -596,10 +663,10 @@ class Determinism(unittest.TestCase):
         sha = json.load(open(PRESETS))["upstream_sha"]
         if not have_clone(sha):
             self.skipTest("the pinned upstream clone is not here, pristine and at %s" % sha[:12])
-        if not have_toolchain():
-            self.skipTest("no C preprocessor and JDK for the extraction and the verdicts")
-        first = rp.render(rp.generate(CLONE, sha, _ROOT))
-        second = rp.render(rp.generate(CLONE, sha, _ROOT))
+        if shutil.which("cc") is None:
+            self.skipTest("no C preprocessor for the extraction")
+        first = rp.render(rp.generate(CLONE, sha))
+        second = rp.render(rp.generate(CLONE, sha))
         self.assertEqual(first, second)
         # And the committed file is that same output, so the asset in the tree is reproducible from
         # the SHA it names rather than being a snapshot nobody can rebuild.

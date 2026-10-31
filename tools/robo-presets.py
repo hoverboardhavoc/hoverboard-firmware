@@ -54,23 +54,22 @@ IN SCOPE: his targets 1 (GD32F130) and 2 (GD32F103). Targets 3 (GD32E230) and 4 
 parts this image cannot run on at all, so they are skipped DELIBERATELY and named in the output,
 never silently dropped.
 
-THE VERDICT. The generator finishes by running every preset through the board validator and
-recording the verdict per preset. It asks the Kotlin mirror
-(`shared/protocol-kotlin/.../board/PresetVerdicts.kt`, which explains the choice) rather than the Rust:
-`validate` is a pure function of the fields, the part's capabilities and the reserved set, and the
-Kotlin module holds all three in ordinary code, while the Rust capability tables for the fleet's
-parts are `#[cfg(test)]`-private. Using them from the host would mean writing a second capability
-table for facts already modelled.
+THE LINKS. His USART pin pairs become the inter-board link fields `link.tx` / `link.rx` (0x56 /
+0x57, index = the link), as `specs/configured-links.md` section 6 sets out: link 0 is his USART1
+pair where the layout has one, else the first pair he lists, and link 1 is the other. A pair is
+staged only where runtime-hal's USART table routes it on the preset's family (`USART_PINS` below);
+one it does not route stays in `unmapped` with that reason, so a preset never stages a link the
+board would record as a permanent `board.status` entry. There is no verdict stage: the board judges
+its own fields at boot and reports what did not come up in `board.status`.
 
 DETERMINISM is a property, not an intention: canonical key order, no timestamps, no paths, no
 hostname, no toolchain identity, and generating twice from one SHA is byte-identical. That last one
 is a test (`tools/tests/test_robo_presets.py`).
 
 Usage:
-  tools/robo-presets.py --clone reference/robo-gd32 --sha <40 hex> [--out FILE] [--no-verdicts]
-  tools/robo-presets.py --selftest
+  tools/robo-presets.py --clone reference/robo-gd32 --sha <40 hex> [--out FILE]
 
-stdlib only; `cc` for the expansion and `shared/protocol-kotlin/gradlew` for the verdicts.
+stdlib only; `cc` for the expansion.
 """
 
 import argparse
@@ -88,7 +87,7 @@ import tempfile
 
 #: Bumped when the SCHEMA or the MAPPING changes, so a consumer can tell one generation from another.
 #: It is not a version of this file: a comment edit does not move it.
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2
 
 #: The upstream the pins come from, named as a repository rather than a path (a path is machine
 #: identity and would break determinism).
@@ -105,22 +104,18 @@ DEFINES_DIR = "HoverBoardGigaDevice/Inc/defines"
 INC_DIR = "HoverBoardGigaDevice/Inc"
 
 # --------------------------------------------------------------------------------------------------
-# His targets, and the parts of ours they are
+# His targets, and the families of ours they are
 # --------------------------------------------------------------------------------------------------
 
-#: His TARGET numbering (`HoverBoardGigaDevice/Inc/config.h`), the chip each one is, and the parts of
-#: that family our capability tables answer for. A target with no parts is out of scope: our image
-#: cannot run on it, so a preset for one would be an invitation to brick a board.
-#:
-#: Target 2 lists TWO parts because his "GD32F103" spans packages: layout 2.2.7 is a Gen1 dual-motor
-#: board whose halls sit on PC10-PC12 and whose second motor drives TIMER7, neither of which the
-#: LQFP48 part has. Validating against every part of the family is what tells "this layout needs the
-#: 64-pin part" apart from "this layout cannot be driven".
+#: His TARGET numbering (`HoverBoardGigaDevice/Inc/config.h`), the chip each one is, and the
+#: runtime-hal family it belongs to (`F1x0` = GD32F130, `F10x` = GD32F103), which is what the link
+#: routing below is asked against. A target with no family is out of scope: our image cannot run on
+#: it, so a preset for one would be an invitation to brick a board.
 TARGETS = {
-    1: {"chip": "GD32F130", "parts": ["F130C8"], "docs_dir": "target_1=GD32F130"},
-    2: {"chip": "GD32F103", "parts": ["F103C8", "F103RC"], "docs_dir": "target_2=GD32F103"},
-    3: {"chip": "GD32E230", "parts": [], "docs_dir": "target_3=GD32E230"},
-    4: {"chip": "MM32SPIN05", "parts": [], "docs_dir": "target_4=MM32SPIN05"},
+    1: {"chip": "GD32F130", "family": "F1x0", "docs_dir": "target_1=GD32F130"},
+    2: {"chip": "GD32F103", "family": "F10x", "docs_dir": "target_2=GD32F103"},
+    3: {"chip": "GD32E230", "family": None, "docs_dir": "target_3=GD32E230"},
+    4: {"chip": "MM32SPIN05", "family": None, "docs_dir": "target_4=MM32SPIN05"},
 }
 
 #: The non-layout files in his `defines` directory, and why each is skipped.
@@ -139,9 +134,6 @@ NOT_A_LAYOUT = {
 #: The packed pin encoding (`specs/board-model.md`, "The field vocabulary"): one byte,
 #: `(port << 4) | pin`, with no port E and nothing above F.
 PORTS = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 5}
-
-#: `0xFF`: the function is absent on this board, which is a valid state and not an error.
-PIN_ABSENT = 0xFF
 
 _PIN_TOKEN = re.compile(r"^P([ABCDF])([0-9]{1,2})$")
 
@@ -197,10 +189,11 @@ SYMBOLIC_TOKENS = [
 #: The mapping is a CONVENTION, and his colour labels are not always consistent with it: layout 2.1.3
 #: puts green on channel 0 and yellow on channel 2 (with his own channel defines commented out
 #: alongside, contradicting the pins), and 2.2.7's left motor reverses the order its right motor
-#: uses. Those layouts are REFUSED by our validator with `InvalidGateSet`, which is the honest
-#: outcome: reordering his pins to satisfy the timer would silently permute the phases against the
-#: halls, which is the wrong commutation the decision exists to prevent. His own commit "Autodetect
-#: now works with wrong bldc colors" says the labels are unreliable; the refusals say which.
+#: uses. Those layouts are carried as his file states them and never reordered: reordering his pins
+#: to satisfy the timer would silently permute the phases against the halls, which is the wrong
+#: commutation the decision exists to prevent, and a board that cannot drive the group reports it in
+#: `board.status` at boot. His own commit "Autodetect now works with wrong bldc colors" says the
+#: labels are unreliable.
 GATE_COLOUR_FOR_PHASE = {"a": "Y", "b": "B", "c": "G"}
 
 # --------------------------------------------------------------------------------------------------
@@ -273,10 +266,9 @@ IMU_ABSENT_REASON = (
 # --------------------------------------------------------------------------------------------------
 
 #: `gate.dead_time` is required at or above `DEAD_TIME_MIN_DTG` (18) wherever a gate group is
-#: configured (`motorcontroller/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`), so a preset that omitted it would be
-#: refused on the dead time before any check that could say something about HIS file: the group
-#: completeness check runs before the capability stage, and the first failure wins. Every preset with
-#: gates would read `DeadTimeBelowFloor` and the exercise would report nothing.
+#: configured (`motorcontroller/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`), so a preset that omitted it
+#: would leave every gated board's motor down at boot, recorded in `board.status` as a dead time below
+#: the floor, before anything about HIS file was tried.
 #:
 #: His dead time is a single figure in `defines.h` rather than per-layout data: `DEAD_TIME 60`, with
 #: his comment "60 = 1us, measured by oscilloscope". `HoverBoardGigaDevice/Src/setup.c` programs it
@@ -286,7 +278,7 @@ IMU_ABSENT_REASON = (
 #:
 #:     round(60 * (1/72e6) / (2/72e6)) = 30 ticks
 #:
-#: 30 is above our floor of 18 and below the 32 the 12-FET runs, so it validates and it is safe.
+#: 30 is above our floor of 18 and below the 32 the 12-FET runs, so it clears the floor and it is safe.
 #: It is HIS board-independent figure re-expressed for our divider, NOT a per-board measurement, and
 #: the bench boards' own silicon-proven value is 25 (`specs/commutation.md`). Every preset says so.
 DEAD_TIME_FIELD = 0x64
@@ -307,11 +299,13 @@ def dead_time_dtg(his_ticks):
 #: each with the macro of his it comes from.
 #:
 #: `motor` is the motor index for a per-motor field. `kind` is how the value is read:
-#:   "pin"     the marker's token is a pin, packed into the field byte
-#:   "derived" the generator computes it; the entry names what from
+#:   "pin"     the marker's token is a pin, checked against the packed encoding
+#:   "link"    one half of the link pairs `link_assignment` maps from his USART pairs, one entry per
+#:             link index
+#:   others    the generator computes it; the entry names what from
 #:
-#: The three fields the validator carries WITHOUT judging (`direction`,
-#: `align_offset`, `current.cal`) are deliberately absent from this table, and so are
+#: The three motor fields no pin map can state (`direction`,
+#: `align_offset`, `current.cal`) are absent from this table, and so are
 #: machine-policy fields. A preset is board facts only (`specs/remote-ui.md` 3.7), and those three are
 #: not facts a pin map can state: the drive direction is a hall-and-phase wiring fact, the align
 #: offset is bench-swept, and the calibration belongs to the shunt chain fitted. The existing
@@ -340,16 +334,17 @@ FIELDS = [
     {"id": 0x53, "key": "board.button", "kind": "pin", "frm": "BUTTON"},
     {"id": 0x54, "key": "current.phase_a", "kind": "pin", "frm": "PHASE_A", "motor": 0},
     {"id": 0x55, "key": "current.phase_b", "kind": "pin", "frm": "PHASE_B", "motor": 0},
+    {"id": 0x56, "key": "link.tx", "kind": "link", "half": "tx"},
+    {"id": 0x57, "key": "link.rx", "kind": "link", "half": "rx"},
     {"id": 0x60, "key": "imu.model", "kind": "decision3"},
     {"id": 0x64, "key": "gate.dead_time", "kind": "dead_time", "frm": "DEAD_TIME", "motor": 0},
     {"id": 0x66, "key": "current.sense", "kind": "current_sense", "motor": 0},
     {"id": 0x69, "key": "board.battery.cal", "kind": "vbatt_cal", "frm": "ADC_BATTERY_VOLT"},
 ]
 
-#: The one field above the board validator does not judge, so it is not sent to the verdict oracle:
-#: `board.battery.cal` is a calibration the sensing producer owns, not a layout slot
-#: (`shared/protocol-kotlin/.../LayoutSlots.kt`, `Layout`).
-NOT_VALIDATED = {VBATT_CAL_FIELD}
+#: The reason a USART pin of his stays unmapped when its partner is missing. A pair that IS declared
+#: is consumed by the link mapping or given its own reason there (`link_assignment`).
+HALF_A_USART = "his layout declares only this half of the USART, so it names no link pair"
 
 #: The keys of his we ASK ABOUT and do not consume, each with why. Recording them is half the point
 #: of owning the key list: every one is either a field we should add or a fact we have decided not to
@@ -391,12 +386,12 @@ UNMAPPED_KEYS = {
     "MPU_6050old": "decision 3: an IMU model claim a layout file cannot make good on",
     "MPU_6500": "decision 3: an IMU model claim a layout file cannot make good on",
     "BMI_160": "decision 3: an IMU model claim a layout file cannot make good on",
-    "USART0_TX": "not a layout field: the link ports are a compiled safety fact, reached through LINK_SET",
-    "USART0_RX": "not a layout field: the link ports are a compiled safety fact, reached through LINK_SET",
-    "USART1_TX": "not a layout field: the link ports are a compiled safety fact, reached through LINK_SET",
-    "USART1_RX": "not a layout field: the link ports are a compiled safety fact, reached through LINK_SET",
-    "USART2_TX": "not a layout field: the link ports are a compiled safety fact, reached through LINK_SET",
-    "USART2_RX": "not a layout field: the link ports are a compiled safety fact, reached through LINK_SET",
+    "USART0_TX": HALF_A_USART,
+    "USART0_RX": HALF_A_USART,
+    "USART1_TX": HALF_A_USART,
+    "USART1_RX": HALF_A_USART,
+    "USART2_TX": HALF_A_USART,
+    "USART2_RX": HALF_A_USART,
     "HAS_USART0": "not a pin: his own declaration that the layout has that USART",
     "HAS_USART1": "not a pin: his own declaration that the layout has that USART",
     "HAS_USART2": "not a pin: his own declaration that the layout has that USART",
@@ -450,58 +445,103 @@ def asked_keys():
 
 
 # --------------------------------------------------------------------------------------------------
-# The link set, and the reserved pins behind it
+# The links: his USART pairs, and the pairs runtime-hal can route
 # --------------------------------------------------------------------------------------------------
 
-#: The compiled safe-USART allowlist as the firmware declares it, mirrored from
-#: `shared/protocol-kotlin/.../ReservedPins.kt`: each wiring's `LINK_SET` bit and its two pins. The link's
-#: own pins are deliberately NOT layout fields (the allowlist is what lets a BLANK board probe for a
-#: controller before any field can exist), so this is how a layout is kept off them.
-#:
-#: One wiring since the firmware stopped driving the onboard CC2541 (2026-10-27,
-#: `specs/decision-cc2541-removal.md`): its two wirings, PB6/PB7 under bit 3 and PB10/PB11 under
-#: bit 2, are no longer link ports, so his USART0/USART2 declarations set no bit and those pins
-#: are free for layout fields.
-ALLOWLIST = [
-    {"bit": 1, "pins": ("PA2", "PA3")},
+#: The number of inter-board links the firmware brings up, each one index of `link.tx` / `link.rx`
+#: (`shared/store/src/field.rs`, `LINKS`).
+LINKS = 2
+
+#: runtime-hal's USART pin table, one row per pin: the pin, the USART it carries, the half, and the
+#: families that route it. Mirrored from runtime-hal `src/pincap.rs`, `USART_PINS` (commit ce6ea27,
+#: `runtime-hal/specs/usart-pin-remap.md` section 1), whose rows carry the datasheet citations:
+#: PA2/PA3 are USART1 on both families, PB6/PB7 are USART0 on both (the F10x through the AFIO
+#: remap), and PB10/PB11 are USART2 on the F10x only (the F1x0 has no USART2). The firmware's link
+#: bring-up asks that table which USART a stored pair drives, so a pair it does not answer is a link
+#: the board records in `board.status` at every boot.
+USART_PINS = [
+    {"pin": "PA2", "usart": "USART1", "half": "tx", "families": ("F1x0", "F10x")},
+    {"pin": "PA3", "usart": "USART1", "half": "rx", "families": ("F1x0", "F10x")},
+    {"pin": "PB6", "usart": "USART0", "half": "tx", "families": ("F1x0", "F10x")},
+    {"pin": "PB7", "usart": "USART0", "half": "rx", "families": ("F1x0", "F10x")},
+    {"pin": "PB10", "usart": "USART2", "half": "tx", "families": ("F10x",)},
+    {"pin": "PB11", "usart": "USART2", "half": "rx", "families": ("F10x",)},
 ]
 
-#: His USART pin-pair macros, in the order a layout declares them.
+
+def usart_route(family, tx, rx):
+    """The USART a (TX, RX) pair drives on `family`, or None.
+
+    runtime-hal's pair rule (`usart_pins`): the TX row for `tx` and the RX row for `rx` both exist on
+    the family and name the same USART. A reversed pair or a pair across two USARTs is None. The
+    F10x remap clause adds nothing here, because each USART's rows share one remap value.
+    """
+
+    def row(pin, half):
+        for r in USART_PINS:
+            if r["pin"] == pin and r["half"] == half and family in r["families"]:
+                return r
+        return None
+
+    t, r = row(tx, "tx"), row(rx, "rx")
+    if t is None or r is None or t["usart"] != r["usart"]:
+        return None
+    return t["usart"]
+
+
+#: His USART pin-pair macros, in the order his layouts declare them.
 HIS_USARTS = [("USART0_TX", "USART0_RX"), ("USART1_TX", "USART1_RX"), ("USART2_TX", "USART2_RX")]
 
+#: His inter-board USART, which link 0 takes where the layout declares it: `MASTERSLAVE_USART 1` in
+#: his `config.h`, "usually PA2/PA3 and the original master-slave 4pin header".
+MASTERSLAVE_PAIR = ("USART1_TX", "USART1_RX")
 
-def link_set_from_usarts(values):
-    """The `LINK_SET` mask a layout implies, and the basis for each bit.
 
-    A board's live link ports are at most the USART wirings its layout declares, so a wiring his file
-    does not mention cannot be one and its pins are free for layout fields. The derivation is
-    therefore: set an allowlist wiring's bit when some `USART<n>_TX`/`_RX` pair his layout declares
-    is that wiring's pin pair (unordered, because which of the two is TX is his wiring's business).
+def link_assignment(values, family):
+    """Which of his USART pairs become which link, and why the others do not.
 
-    An EMPTY basis is the statement that his layout declares no USART on a wiring our allowlist
-    carries, which leaves the mask at 0: the firmware reads that as UNCONFIGURED and probes every
-    routable allowlist port, so the validator then reserves them all against the layout. That is the
-    correct reading of "we do not know which ports are live", and the basis beside the mask is how a
-    reader tells it from a mask that was derived and came out empty.
+    Returns `(links, empty, reasons)`. `links` holds one entry per link index: None, or a dict with
+    his two macros, the two pin tokens and the USART runtime-hal routes them as. `empty` holds, per
+    link index, why it carries no pair (None where it does). `reasons` maps each USART macro of a
+    declared pair to its unmapped reason, or to None where the pair became a link.
 
-    Routability is NOT applied here. It is the part's answer, not the layout's, and `reservedSet`
-    already asks it per part.
+    The order (`specs/configured-links.md` section 6): link 0 is his `MASTERSLAVE_PAIR` where the
+    layout declares it, else the first pair he lists; link 1 is the next. Links are numbered BEFORE
+    routability is asked, so a master-slave pair the family cannot route leaves link 0 empty rather
+    than moving the other pair into its place. A pair the family does not route stays out of the
+    link fields with that reason.
     """
-    declared = []
-    for tx, rx in HIS_USARTS:
-        a, b = values.get(tx), values.get(rx)
-        if a is not None and b is not None:
-            declared.append(({a, b}, (tx, rx)))
-    mask, basis = 0, []
-    for entry in ALLOWLIST:
-        for pins, macros in declared:
-            if pins == set(entry["pins"]):
-                mask |= 1 << entry["bit"]
-                basis.append(
-                    {"bit": entry["bit"], "pins": list(entry["pins"]), "from": list(macros)}
-                )
-                break
-    return mask, basis
+    declared = [
+        (tx, rx) for tx, rx in HIS_USARTS if values.get(tx) is not None and values.get(rx) is not None
+    ]
+    if MASTERSLAVE_PAIR in declared:
+        declared.remove(MASTERSLAVE_PAIR)
+        declared.insert(0, MASTERSLAVE_PAIR)
+    links = [None] * LINKS
+    empty = ["his layout declares no USART pair for link %d" % i for i in range(LINKS)]
+    reasons = {}
+    for link, (tx_m, rx_m) in enumerate(declared):
+        tx, rx = values[tx_m], values[rx_m]
+        if link >= LINKS:
+            why = "the firmware has %d links and his earlier USART pairs take them" % LINKS
+        else:
+            usart = usart_route(family, tx, rx)
+            if usart is not None:
+                links[link] = {"tx_from": tx_m, "rx_from": rx_m, "tx": tx, "rx": rx, "usart": usart}
+                empty[link] = None
+                reasons[tx_m] = reasons[rx_m] = None
+                continue
+            why = (
+                "link %d would be his %s TX / %s RX, a pair runtime-hal's USART table does not "
+                "route on the %s, so staging it would put a permanent entry in board.status"
+                % (link, tx, rx, family)
+            )
+            empty[link] = "his %s/%s pair is not routable here: see its unmapped entries" % (
+                tx_m,
+                rx_m,
+            )
+        reasons[tx_m] = reasons[rx_m] = why
+    return links, empty, reasons
 
 
 # --------------------------------------------------------------------------------------------------
@@ -684,8 +724,8 @@ def census(clone, stubs, work, target, layout, extra, include_path):
 # --------------------------------------------------------------------------------------------------
 
 #: What a field's value is when his file routes it through `TODO_PIN`: a pin he does not know. It
-#: must travel as UNKNOWN and never as a plausible default, and the editor must refuse to apply a
-#: preset with an unknown pin in a field the validator requires.
+#: must travel as UNKNOWN and never as a plausible default, so the field carries no value and a
+#: consumer cannot stage one from it.
 UNKNOWN_PIN = "TODO_PIN"
 
 
@@ -702,21 +742,22 @@ def gates_complete(values):
     return all(pack_pin(values.get(m) or "") is not None for m in macros)
 
 
-def field_entries(values, notes, layout_defines):
-    """The `fields`, `absent` and staged-byte lists for one layout, in canonical (registry id) order.
+def field_entries(values, notes, layout_defines, links):
+    """The `fields` and `absent` lists for one layout, in canonical (registry id) order.
 
     `layout_defines` is what the LAYOUT FILE itself defines, from the census pass. It matters for one
     field: `defines.h` carries an `#ifndef` fallback for `ADC_BATTERY_VOLT`, so the expansion always
     finds one, and taking it would hand every board a per-board calibration his layout never stated.
-    A board fact has to come from the board's own file.
+    A board fact has to come from the board's own file. `links` is `link_assignment`'s
+    `(links, empty)` for the layout.
 
     The JSON carries a pin as HIS SYMBOLIC TOKEN and never as our packed byte
     (`specs/robo-presets.md`, the schema's second insistence): the app converts through the same pin
     encoding its editor already uses, so one encoder keeps one owner, and a human reading the file
-    sees `PC13` rather than `0x2D`. The packed bytes are built HERE, beside the tokens that produced
-    them, purely so the validator stage has something to judge; they do not reach the output.
+    sees `PC13` rather than `0x2D`.
     """
-    fields, absent, staged = [], [], []
+    fields, absent = [], []
+    pairs, empty = links
 
     def ref(f):
         out = {"id": "0x%02X" % f["id"], "key": f["key"], "index": f.get("motor", 0)}
@@ -726,13 +767,28 @@ def field_entries(values, notes, layout_defines):
         if f["kind"] == "decision3":
             absent.append(dict(ref(f), reason=IMU_ABSENT_REASON))
             continue
+        if f["kind"] == "link":
+            for link in range(LINKS):
+                at = dict(ref(f), index=link)
+                pair = pairs[link]
+                if pair is None:
+                    absent.append(dict(at, reason=empty[link]))
+                    continue
+                fields.append(
+                    dict(
+                        at,
+                        value=pair[f["half"]],
+                        **{"from": pair[f["half"] + "_from"]},
+                        note="runtime-hal routes his pair as %s on this chip" % pair["usart"],
+                    )
+                )
+            continue
         if f["kind"] == "pin":
             raw = values.get(f["frm"])
             if raw is None:
                 absent.append(dict(ref(f), reason="his layout defines no %s" % f["frm"]))
                 continue
-            packed = pack_pin(raw)
-            if packed is None:
+            if pack_pin(raw) is None:
                 why = (
                     "his file marks this pin TODO_PIN: he does not know it"
                     if raw == UNKNOWN_PIN
@@ -742,15 +798,11 @@ def field_entries(values, notes, layout_defines):
                 fields.append(
                     dict(ref(f), value=None, unknown=True, **{"from": f["frm"]}, note=why)
                 )
-                staged.append((f["id"], f.get("motor", 0), PIN_ABSENT))
                 notes.append(
-                    "%s is UNKNOWN (%s). It is staged ABSENT, never guessed at, so the verdict "
-                    "below is the verdict on this layout with that function absent."
-                    % (f["key"], why)
+                    "%s is UNKNOWN (%s). It carries no value, never a guess." % (f["key"], why)
                 )
                 continue
             fields.append(dict(ref(f), value=raw, **{"from": f["frm"]}))
-            staged.append((f["id"], f.get("motor", 0), packed))
             continue
         if f["kind"] == "dead_time":
             raw = values.get(f["frm"])
@@ -782,7 +834,6 @@ def field_entries(values, notes, layout_defines):
                     ),
                 )
             )
-            staged.append((f["id"], f.get("motor", 0), dtg))
             continue
         if f["kind"] == "current_sense":
             both = pack_pin(values.get("PHASE_A") or "") is not None and (
@@ -799,7 +850,6 @@ def field_entries(values, notes, layout_defines):
                     ),
                 )
             )
-            staged.append((f["id"], f.get("motor", 0), 1 if both else 0))
             continue
         if f["kind"] == "vbatt_cal":
             raw = values.get(f["frm"]) if f["frm"] in layout_defines else None
@@ -858,16 +908,20 @@ def field_entries(values, notes, layout_defines):
             )
             continue
         raise AssertionError("field %s has no kind handler" % f["key"])
-    return fields, absent, staged
+    return fields, absent
 
 
-def unmapped_entries(values, defined_names):
-    """The census of his keys this preset does not consume, with his value for each."""
+def unmapped_entries(values, defined_names, link_reasons):
+    """The census of his keys this preset does not consume, with his value for each.
+
+    `link_reasons` is `link_assignment`'s per-macro answer for his declared USART pairs, which
+    replaces the key list's own reason: None for a pin that became a link field, else why it did not.
+    """
     out = []
     for name in sorted(defined_names):
         if name not in UNMAPPED_KEYS:
             continue
-        reason = UNMAPPED_KEYS[name]
+        reason = link_reasons[name] if name in link_reasons else UNMAPPED_KEYS[name]
         if reason is None:
             continue
         raw = values.get(name)
@@ -878,7 +932,7 @@ def unmapped_entries(values, defined_names):
     return out
 
 
-def layout_notes(values, target):
+def layout_notes(values, target, pairs):
     """The notes every preset for this layout carries, beyond the per-field ones."""
     notes = [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops "
@@ -892,88 +946,15 @@ def layout_notes(values, target):
             "His layout DOES state an IMU bus, as a solderable pair flag. It is still carried as "
             "absent: the flag is a claim about an option, and PB6/PB7 is also where USART0 can live."
         )
+        on_imu = [i for i, p in enumerate(pairs) if p is not None and p["tx"] == "PB6"]
+        if values.get("I2C_PB6PB7") is not None and on_imu:
+            notes.append(
+                "This preset stages his USART0 on PB6/PB7 as link %d, the pins his I2C_PB6PB7 "
+                "option uses: a board with the IMU fitted there clears that link first." % on_imu[0]
+            )
     if target == 2 and values.get("STM32F103") is not None:
         notes.append("His layout says this board may carry an STM32F103 rather than a GD32F103.")
     return notes
-
-
-# --------------------------------------------------------------------------------------------------
-# The verdict oracle
-# --------------------------------------------------------------------------------------------------
-
-#: Where the Kotlin mirror lives, relative to the repository root, and the Gradle task that runs it.
-GRADLE_DIR = "shared/protocol-kotlin"
-GRADLE_TASK = "presetVerdicts"
-
-#: The JDK this machine has when `JAVA_HOME` is unset: Android Studio's bundled JBR, which
-#: `shared/protocol-kotlin/build.gradle.kts` already names as the only one here.
-FALLBACK_JAVA_HOME = "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
-
-
-def verdicts(repo_root, requests, work):
-    """One verdict per request line, from the Kotlin mirror of `board::validate`.
-
-    Fails LOUDLY: a verdict that could not be obtained is not recorded as unknown, because the whole
-    point of this stage is that a refusal is a finding. The spec calls it the highest-value part of
-    the exercise, and an exercise that silently skipped it would read as a clean run.
-    """
-    if not requests:
-        return {}
-    req_path = os.path.join(work, "verdict-requests.tsv")
-    rep_path = os.path.join(work, "verdict-replies.tsv")
-    with open(req_path, "w") as fh:
-        fh.write("\n".join(requests) + "\n")
-    env = dict(os.environ)
-    if not env.get("JAVA_HOME") and os.path.isdir(FALLBACK_JAVA_HOME):
-        env["JAVA_HOME"] = FALLBACK_JAVA_HOME
-    proc = subprocess.run(
-        [
-            "./gradlew",
-            "--offline",
-            "-q",
-            "--console=plain",
-            GRADLE_TASK,
-            "--args=%s %s" % (req_path, rep_path),
-        ],
-        cwd=os.path.join(repo_root, GRADLE_DIR),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
-    if proc.returncode != 0 or not os.path.exists(rep_path):
-        raise RuntimeError(
-            "the verdict oracle failed (gradle exit %d):\n%s\n%s"
-            % (proc.returncode, proc.stdout.strip(), proc.stderr.strip())
-        )
-    out = {}
-    for line in open(rep_path):
-        if not line.strip():
-            continue
-        col = line.rstrip("\n").split("\t")
-        if len(col) != 8:
-            raise RuntimeError("a verdict reply has %d columns, expected 8: %r" % (len(col), line))
-        name, part, verdict, latch, obs, field, motor, reason = col
-        entry = {
-            "part": part,
-            "verdict": verdict,
-            "self_hold": None if latch == "-" else latch,
-        }
-        if verdict == "refused":
-            entry["obs_result"] = int(obs)
-            entry["field"] = field
-            entry["motor"] = None if motor == "-" else int(motor)
-            entry["reason"] = reason
-        out.setdefault(name, []).append(entry)
-    return out
-
-
-def verdict_request(name, part, link_set, staged):
-    """One request line for the oracle: the staged layout as `<fieldId>:<index>=<raw>` pairs."""
-    pairs = [
-        "%d:%d=%d" % (fid, index, raw) for fid, index, raw in staged if fid not in NOT_VALIDATED
-    ]
-    return "\t".join([name, part, str(link_set), ",".join(pairs)])
 
 
 # --------------------------------------------------------------------------------------------------
@@ -1030,18 +1011,18 @@ def layout_files(clone):
     return found, skipped
 
 
-def generate(clone, sha, repo_root, want_verdicts=True):
+def generate(clone, sha):
     """The whole preset document for one pinned upstream commit."""
     check_clone(clone, sha)
     files, skipped = layout_files(clone)
-    presets, staged, unknown = [], {}, {}
+    presets, unknown = [], {}
     work = tempfile.mkdtemp(prefix="robo-presets-")
     try:
         stubs = _stub_dir(work)
         for target, layout, name in files:
             source_file = "%s/%s" % (DEFINES_DIR, name)
             spec = TARGETS.get(target)
-            if spec is None or not spec["parts"]:
+            if spec is None or not spec["family"]:
                 skipped.append(
                     {
                         "source_file": source_file,
@@ -1055,13 +1036,9 @@ def generate(clone, sha, repo_root, want_verdicts=True):
                     }
                 )
                 continue
-            for entry, pairs in presets_for_layout(
+            presets += presets_for_layout(
                 clone, stubs, work, target, layout, source_file, spec, unknown
-            ):
-                presets.append(entry)
-                staged[entry["id"]] = pairs
-        if want_verdicts:
-            attach_verdicts(repo_root, presets, staged, work)
+            )
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -1084,7 +1061,7 @@ def generate(clone, sha, repo_root, want_verdicts=True):
             "variant_axes": [a["macro"] for a in VARIANT_AXES],
         },
         "decisions": decision_record(),
-        "targets_in_scope": sorted(t for t, s in TARGETS.items() if s["parts"]),
+        "targets_in_scope": sorted(t for t, s in TARGETS.items() if s["family"]),
         "skipped": sorted(skipped, key=lambda s: s["source_file"]),
         "unknown_keys": [
             {"from": k, "layouts": sorted(v), "note": "his #define, not in our key list"}
@@ -1201,9 +1178,9 @@ def one_preset(
     preset_id, name, target, layout, source_file, spec, values, census_names, variant, role_keys
 ):
     """One preset entry."""
-    notes = layout_notes(values, target)
-    fields, absent, staged = field_entries(values, notes, set(census_names))
-    link_set, basis = link_set_from_usarts(values)
+    pairs, empty, link_reasons = link_assignment(values, spec["family"])
+    notes = layout_notes(values, target, pairs)
+    fields, absent = field_entries(values, notes, set(census_names), (pairs, empty))
     if role_keys:
         notes.append(
             "Role-dependent board facts: a SLAVE board of this layout differs in %s."
@@ -1226,8 +1203,6 @@ def one_preset(
         "target": target,
         "layout": layout,
         "source_file": source_file,
-        "link_set": link_set,
-        "link_set_basis": basis,
         "docs": {
             "repo": DOCS_UPSTREAM,
             "target_dir": spec["docs_dir"],
@@ -1242,77 +1217,20 @@ def one_preset(
         "notes": notes,
         "fields": fields,
         "absent": absent,
-        "unmapped": unmapped_entries(values, census_names),
+        "unmapped": unmapped_entries(values, census_names, link_reasons),
     }
     if variant:
         entry["variant"] = variant
-    return entry, staged
-
-
-def attach_verdicts(repo_root, presets, staged, work):
-    """Run every preset through the validator, for every part of its family, and record the verdict."""
-    requests, index = [], []
-    for p in presets:
-        for part in TARGETS[p["target"]]["parts"]:
-            requests.append(
-                verdict_request("%s|%s" % (p["id"], part), part, p["link_set"], staged[p["id"]])
-            )
-            index.append((p, part))
-    replies = verdicts(repo_root, requests, work)
-    for p, part in index:
-        got = replies.get("%s|%s" % (p["id"], part))
-        if not got:
-            raise RuntimeError("the oracle returned no verdict for %s on %s" % (p["id"], part))
-        p.setdefault("validate", {"parts": []})["parts"] += got
-    for p in presets:
-        parts = p["validate"]["parts"]
-        unknown = [f["key"] for f in p["fields"] if f.get("unknown")]
-        if unknown:
-            p["validate"]["unknown_pins_staged_absent"] = sorted(unknown)
-        accepted = [e for e in parts if e["verdict"] == "accepted"]
-        p["validate"]["verdict"] = "accepted" if accepted else "refused"
-        p["validate"]["accepted_on"] = [e["part"] for e in accepted]
-        if not accepted:
-            first = parts[0]
-            p["validate"]["field"] = first["field"]
-            p["validate"]["motor"] = first["motor"]
-            p["validate"]["reason"] = first["reason"]
-            p["validate"]["obs_result"] = first["obs_result"]
+    return entry
 
 
 def summarize(presets):
-    """The counts a reader wants before reading twenty-five entries.
-
-    With the validator stage skipped there are no verdicts, and the counts say so rather than
-    reporting every preset as accepted: an unasked question is not a pass.
-    """
+    """The counts a reader wants before reading twenty-five entries."""
     by_target = {}
     for p in presets:
         label = "target_%d" % p["target"]
         by_target[label] = by_target.get(label, 0) + 1
-    if presets and "validate" not in presets[0]:
-        return {"presets": len(presets), "by_target": by_target, "validated": False}
-    refused = sorted(
-        (p for p in presets if p.get("validate", {}).get("verdict") == "refused"),
-        key=lambda p: p["id"],
-    )
-    return {
-        "presets": len(presets),
-        "by_target": by_target,
-        "validated": True,
-        "accepted": len(presets) - len(refused),
-        "refused": len(refused),
-        "refusals": [
-            {
-                "id": p["id"],
-                "chip": p["chip"],
-                "field": p["validate"]["field"],
-                "motor": p["validate"]["motor"],
-                "reason": p["validate"]["reason"],
-            }
-            for p in refused
-        ],
-    }
+    return {"presets": len(presets), "by_target": by_target}
 
 
 def decision_record():
@@ -1329,9 +1247,10 @@ def decision_record():
                 "channel-to-pin pairing out"
             ),
             "consequence": (
-                "a layout whose colour labels contradict the convention is REFUSED with "
-                "InvalidGateSet rather than silently reordered, because reordering would permute "
-                "the phases against the halls"
+                "a layout whose colour labels contradict the convention is carried as his file "
+                "states it, never silently reordered, because reordering would permute the phases "
+                "against the halls; a board that cannot drive that gate group reports it in "
+                "board.status at boot"
             ),
         },
         {
@@ -1370,9 +1289,8 @@ def decision_record():
                 "setup.c; our bring-up runs the generator at /2 (27.8 ns a tick)"
             ),
             "consequence": (
-                "a preset with no dead time is refused on DeadTimeBelowFloor before any check that "
-                "could say something about his file, so every gated preset would report nothing. "
-                "This is HIS single global figure, not per-board data: the bench boards' own "
+                "a preset with no dead time leaves every gated board's motor down at boot, recorded "
+                "in board.status as a dead time below the floor. This is HIS single global figure, not per-board data: the bench boards' own "
                 "silicon-proven value is 25"
             ),
         },
@@ -1394,7 +1312,7 @@ def render(doc):
 
 
 def repo_root():
-    """This repository's root, which is where the Gradle wrapper and the default output sit."""
+    """This repository's root, which is where the default output sits."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -1403,16 +1321,11 @@ def main(argv=None):
     ap.add_argument("--clone", help="the pristine upstream clone, in the gitignored reference/ area")
     ap.add_argument("--sha", help="the upstream commit the clone is checked out at (40 hex)")
     ap.add_argument("--out", default=None, help="where to write the presets (default %s)" % DEFAULT_OUT)
-    ap.add_argument(
-        "--no-verdicts",
-        action="store_true",
-        help="skip the validator stage (for a tree with no JDK; the verdicts are then absent, never guessed)",
-    )
     args = ap.parse_args(argv)
     if not args.clone or not args.sha:
         ap.error("--clone and --sha are both required")
     root = repo_root()
-    doc = generate(args.clone, args.sha, root, want_verdicts=not args.no_verdicts)
+    doc = generate(args.clone, args.sha)
     out = args.out or os.path.join(root, DEFAULT_OUT)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w") as fh:
@@ -1421,12 +1334,6 @@ def main(argv=None):
     print("%d presets from %s" % (s["presets"], doc["upstream_sha"][:12]))
     for k in sorted(s["by_target"]):
         print("  %s: %d" % (k, s["by_target"][k]))
-    if not s["validated"]:
-        print("  the validator stage was skipped, so no preset carries a verdict")
-    else:
-        print("  accepted %d, refused %d" % (s["accepted"], s["refused"]))
-        for r in s["refusals"]:
-            print("  REFUSED %s (%s): %s %s" % (r["id"], r["chip"], r["field"], r["reason"]))
     if doc["unknown_keys"]:
         print("  upstream keys our list does not ask about:")
         for u in doc["unknown_keys"]:
