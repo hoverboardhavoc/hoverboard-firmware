@@ -23,3 +23,7 @@ __pycache__/
 # Agent conventions live in the private specs repo; a local CLAUDE.md symlink to specs/CLAUDE.md
 # stays untracked.
 /CLAUDE.md
+
+# Bench session scratch and evidence live in the private specs repo (specs/bench-work); a local
+# bench-work symlink to it keeps the bench-work/... paths the specs cite working, and stays untracked.
+/bench-work
