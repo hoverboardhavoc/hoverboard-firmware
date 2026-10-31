@@ -1050,9 +1050,8 @@ jobs:
   # androidx.*) and it READS the Rust as text rather than building it. No Android build happens
   # here: com.android.application resolves the Android SDK at CONFIGURATION time, so every task in
   # such a build needs an SDK install this job does not want, and keeping this module SDK-free is
-  # what makes the gate cheap enough to run on every commit. The rider app (apps/rider, the one
-  # app under apps/) pays that cost in its own job at the end of this file; the tree's other
-  # Android modules, crates/ble/test-harness, stress-test/ and Hoverboard/, are not built in CI.
+  # what makes the gate cheap enough to run on every commit. The rider app (apps/rider), the
+  # tree's one Android app, pays that cost in its own job at the end of this file.
   kotlin-protocol-drift:
     name: Kotlin protocol mirror (firmware drift gate)
     runs-on: ubuntu-latest
