@@ -19,3 +19,7 @@ bridge/.wifi.env
 # A settings file holding Wi-Fi credentials (wifi.pass) is named wifi*.json and never committed.
 wifi*.json
 __pycache__/
+
+# Agent conventions live in the private specs repo; a local CLAUDE.md symlink to specs/CLAUDE.md
+# stays untracked.
+/CLAUDE.md

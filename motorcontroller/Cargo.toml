@@ -35,7 +35,7 @@ license = "GPL-3.0-or-later"
 # the one Cargo.lock pins, so a runtime-hal push does not reach this repo until a commit bumps the
 # lockfiles (CI's lint job checks that every tracked lockfile pins the same commit). A plain build uses the pinned
 # commit, locally and in CI; a build against the ~/dev/runtime-hal checkout adds a per-command
-# `--config` patch (CLAUDE.md, "Running the checks").
+# `--config` patch (README.md, "Building and testing").
 [workspace.dependencies]
 runtime-hal = { git = "https://github.com/hoverboardhavoc/runtime-hal", branch = "main" }
 
