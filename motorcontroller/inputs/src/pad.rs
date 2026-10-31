@@ -14,7 +14,7 @@
 //! This field DRIVES THE GAIN SCHEDULE; it is NOT an on/off enable. With no rider the balance loop
 //! is still active at low-authority standby gains `{50, 20, 0}`; as the rider mounts and both pads
 //! assert, the working balance coefficients step to the RUN set `{6000, 2000, 40}` (~120x more
-//! proportional authority). The gain step itself lives in `crates/control` (the standby seed set and
+//! proportional authority). The gain step itself lives in `motorcontroller/control` (the standby seed set and
 //! Profile-A); this crate produces only the rider/pad FIELD that selects the step. Reference pins
 //! `PA11` (pad A) / `PC15` (pad B) are board-definition references the caller supplies as already-
 //! sampled high/low levels.

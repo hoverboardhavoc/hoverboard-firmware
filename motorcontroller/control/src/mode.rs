@@ -1,6 +1,6 @@
 //! The control-mode model and dispatch (`specs/control.md` (b)): the runtime-selected
 //! reference producer over ONE engagement shell. `CONTROL_MODE` and `CONTROL_FRAME` are
-//! registered store fields (the `MOTOR_METHOD` precedent; registered in `crates/store` with this
+//! registered store fields (the `MOTOR_METHOD` precedent; registered in `shared/store` with this
 //! consumer); the validation seam resolves the two bytes and the board's IMU fact into the one
 //! [`Producer`] that runs (`specs/rover-one-imu.md` section 2, the resolution table), with
 //! fallback + fault where the request cannot be honoured, the commutation

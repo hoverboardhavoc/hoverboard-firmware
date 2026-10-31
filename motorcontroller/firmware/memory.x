@@ -142,11 +142,11 @@ SECTIONS
      * scan alone went 108 ms -> 4 ms.
      *
      * `parse_header` and `is_committed` are on the 250 Hz control task's arm-time row read as
-     * well (see their own comments in `crates/store/src/record.rs`), so they meet the ordinary
+     * well (see their own comments in `shared/store/src/record.rs`), so they meet the ordinary
      * tick-rate bar for this window on their own account.
      *
-     * Anchors and not `#[link_section]`: `crates/store` is linked by the bench and emulator images
-     * too (`crates/store-test`), whose memory.x declares no `.hotcode`, exactly as described for
+     * Anchors and not `#[link_section]`: `shared/store` is linked by the bench and emulator images
+     * too (`motorcontroller/store-test`), whose memory.x declares no `.hotcode`, exactly as described for
      * base::crc16 above. ci.yml and tools/flash.sh carry all four names in the hot-window
      * membership guard, so a rename that silently unanchors them FAILS the build. */
     *(.text.*5store5store*7compact*)
@@ -167,7 +167,7 @@ SECTIONS
    * and the 256-aligned RAM vector table (0x300) holds the inter-board DMA receive ring (128 B).
    * It used to be a `.bss` static above the tables; here it is NOLOAD, so cortex-m-rt's zero loop
    * never sees it and `main` zeroes it explicitly before the ring is armed (`DMA_RING` in
-   * crates/firmware/src/main.rs). Its contents never matter before that: a DMA ring's reader only
+   * motorcontroller/firmware/src/main.rs). Its contents never matter before that: a DMA ring's reader only
    * ever reads bytes behind the live DMA write index. The section starts at ORIGIN(RAM), asserted
    * below, and the SIZEOF assert pins the ring to the gap: a ring that grew past 192 B would push
    * the vector table to the NEXT 256 boundary and silently cost 256 B.

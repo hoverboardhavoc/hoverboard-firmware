@@ -14,7 +14,7 @@
 //! from stock" and "Yaw").
 //!
 //! The recovered numeric constants are preserved exactly. The shared device fact `GYRO_SCALE` is
-//! owned by `crates/imu` (this crate's input layer); the pre-filter `Iir` lives there too.
+//! owned by `motorcontroller/imu` (this crate's input layer); the pre-filter `Iir` lives there too.
 //!
 //! No-FPU adaptation: the reference design computes the filter body in single-precision float and
 //! the Euler trig in double. This project bans software float from the 250 Hz loop, so the whole

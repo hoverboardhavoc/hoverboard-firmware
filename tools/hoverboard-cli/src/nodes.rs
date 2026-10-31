@@ -44,7 +44,7 @@ pub fn class_name(class: Option<u8>) -> &'static str {
     }
 }
 
-/// The name of a `CONFIG_RESP` status byte (`crates/net/src/walk.rs`, the `CFG_*` statuses).
+/// The name of a `CONFIG_RESP` status byte (`shared/net/src/walk.rs`, the `CFG_*` statuses).
 pub fn status_name(status: u8) -> String {
     use net::walk::*;
     match status {

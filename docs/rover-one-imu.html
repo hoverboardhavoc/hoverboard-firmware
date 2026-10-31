@@ -271,18 +271,18 @@ relay.
 ### Built and on main
 
 - **The whole balance cascade, on one board.** Pitch-target shaper, balance PID, speed loop,
-  engagement machine and output stage (`crates/control`, assembled in
-  `crates/orchestrator/src/dispatch.rs::balance_step`). The torque setpoint is a signed `i16` on the
+  engagement machine and output stage (`motorcontroller/control`, assembled in
+  `motorcontroller/orchestrator/src/dispatch.rs::balance_step`). The torque setpoint is a signed `i16` on the
   stock-native scale, full scale +-28500, passed to the commutation layer verbatim with no rescaling
   anywhere (`specs/control.md` (a)).
 - **The torque reaching the motor.** `motor::DEMAND` plus `motor::DEMAND_SEQ`, written once per
-  250 Hz pass by the control task as the sole writer (`crates/firmware/src/main.rs:1281`); the
+  250 Hz pass by the control task as the sole writer (`motorcontroller/firmware/src/main.rs:1281`); the
   16 kHz period ISR floats all three phases if the demand has not been rewritten within
   `DEMAND_STALE_PERIODS` (256 periods, 16 ms).
 - **`control.mode`** (`CONTROL_MODE`, id 0x22, `Field<u8>`, 0 = Throttle default, 1 = Balance,
   `specs/control.md` (b)). Applied at the next arm through the arm-time value row
   (`specs/integration.md`). **Balance on a board with no configured IMU demotes to Throttle and
-  raises the mode fault** (`crates/orchestrator/src/tests.rs::imu_absent_balance_demotes_to_throttle_with_mode_fault`).
+  raises the mode fault** (`motorcontroller/orchestrator/src/tests.rs::imu_absent_balance_demotes_to_throttle_with_mode_fault`).
 - **The balance-mode drive input**, `CONTROL_DRIVE_LEAN` (id 0x73, `IndexedField<i16, 2>`:
   index 0 `lean_max` in centidegrees at full stick, index 1 `lean_slew` in centidegrees per tick;
   default 0 = disabled). `specs/control.md` (h): `DRIVE_CMD.value` becomes a bounded, slewed
@@ -294,11 +294,11 @@ relay.
 - **`CYCLIC_STATE`** (opcode 0x10), the peer state mirror, emitted by BOTH boards from one builder
   (`dispatch.rs::cyclic_state`) every second control pass, so **125 Hz, an 8 ms nominal period**, on
   the inter-board UART, and decimated to 5 Hz on the BLE port. 19 bytes on the wire, decoded at
-  **exactly** that length (`CyclicState::ENCODED_LEN`, `crates/linkctl/src/lib.rs`): `pitch` i16,
+  **exactly** that length (`CyclicState::ENCODED_LEN`, `shared/linkctl/src/lib.rs`): `pitch` i16,
   `roll` i16, `wheel_speed` i16, `battery` u16, `mode` u8, `fault` u8, `flags` u8, then the appended
   8-byte `CyclicObs` block (`phase_peak`, `phase_mean`, `duty_on`, `boot_tag`, `chip`).
 - **The fault producers, all eight of them**, as the event instrument enumerates them
-  (`crates/orchestrator/src/events.rs`, `N_EVENT_PRODUCERS` = 8, one `u8` mask with every bit
+  (`motorcontroller/orchestrator/src/events.rs`, `N_EVENT_PRODUCERS` = 8, one `u8` mask with every bit
   allocated): `EV_COMMS_LOSS` (bit 0, peer silence past `CYCLIC_TIMEOUT_TICKS` = 25, 100 ms, with a
   never-seen-a-peer exemption), `EV_STOP_ALL` (bit 1, a received `FAULT` with `action = 1`, cleared
   on an OFF pass), `EV_IMU_LOSS` (bit 2, `IMU_LOSS_THRESHOLD` = 5 consecutive failed reads, 20 ms,
@@ -310,7 +310,7 @@ relay.
 - **Disarm means coast, and there is no brake anywhere.** The mode machine's response to any
   Fault-A is RUN -> SHUTDOWN -> OFF with MOE cleared and all three phases floated; six-step coasts
   at zero demand and hold/brake semantics are explicitly a future feature
-  (`crates/commutation/src/sixstep.rs`). A stopped wheel on this machine is a freewheeling wheel.
+  (`motorcontroller/commutation/src/sixstep.rs`). A stopped wheel on this machine is a freewheeling wheel.
 - **`off_inhibit` is real:** `arm::off_inhibit_from_speed(speed)` is `speed != 0`, so a board whose
   wheel is still turning cannot pass OFF -> INIT. It is never consulted in RUN, so it delays
   re-arming after a fall rather than affecting a stop.
@@ -577,7 +577,7 @@ SHUTDOWN phase is one pass long while the cyclic goes out every second pass, so 
 be missed entirely and a code identifying one fault cannot answer "is this peer healthy right now".
 
 The level already exists and is already a `u8`: **`events::Levels::mask()`**
-(`crates/orchestrator/src/events.rs`), computed on every pass for the fault-attribution instrument,
+(`motorcontroller/orchestrator/src/events.rs`), computed on every pass for the fault-attribution instrument,
 one bit per producer. Putting that word in the `fault` byte costs no new computation, tells the peer
 and the app exactly which producer fired, and replaces a definition that never had an
 implementation. `peer_down` then tests `peer.fault & FAULT_A_BITS`, where `FAULT_A_BITS` is the same
@@ -666,7 +666,7 @@ its torque on not falling has none to spare for yawing.
   rover the master stages 1 (right wall).
 - **Not on the live tune lane.** The lane's allowlist is exactly 0x71/0x72 and stays so: these are
   protection parameters, set disarmed, read at boot and at arm.
-- **All three new fields join the arm-time value row** (`crates/firmware/src/arm.rs`, `ArmValues`,
+- **All three new fields join the arm-time value row** (`motorcontroller/firmware/src/arm.rs`, `ArmValues`,
   currently 0x21, 0x62, 0x63, 0x22, 0x20, 0x67, 0x65, 0x68, 0x23, 0x24, 0x73, 0x74), so staging a
   frame, a side or a turn bound costs a disarm and a re-arm rather than a power cycle. That is the
   decided rule for machine-type settings (`specs/integration.md`, "When a stored value takes
@@ -699,7 +699,7 @@ stock path is left intact for pivoting mode.
 The machine can run away, so this section is the one to read twice. The organising fact:
 **on a rigid two-wheel balancer, a wheel that stops while the other drives is worse than both wheels
 stopping.** One wheel on a rigid axle delivers half the fore-aft authority and a yaw moment the loop
-cannot see and has no sensor for (the IMU is 6-axis, there is no yaw channel, and `crates/attitude`
+cannot see and has no sensor for (the IMU is 6-axis, there is no yaw channel, and `motorcontroller/attitude`
 publishes pitch and roll only), so it converts a fall into a fall plus a spin. And "stops" means
 FREEWHEELS: there is no brake in this firmware, so a disarmed wheel offers no resistance to the
 other one. Every rule below is that fact applied.

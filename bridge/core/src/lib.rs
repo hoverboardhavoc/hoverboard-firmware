@@ -13,7 +13,7 @@
 //! | [`svc`] | the ESP commands and the bulk transfer window |
 //! | [`update`] | the bridge's own slot update: the transfer into the inactive slot, its checks, activation |
 //!
-//! The firmware crate (`apps/hoverboard-bridge`) supplies the pins, the GATT peripheral, the USB console,
+//! The firmware crate (`bridge/`) supplies the pins, the GATT peripheral, the USB console,
 //! the Wi-Fi station with its TCP console, GDB listener and mDNS name, the heap the GDB session's
 //! buffers come from, and the main loop.
 #![no_std]

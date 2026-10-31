@@ -1,7 +1,7 @@
 name: CI
 
-# runtime-hal is a git dependency (the root Cargo.toml's `[workspace.dependencies]`), pinned by
-# commit in Cargo.lock. Cargo fetches it from the public hoverboardhavoc/runtime-hal repository
+# runtime-hal is a git dependency (`[workspace.dependencies]` in motorcontroller/Cargo.toml and
+# shared/Cargo.toml), pinned by commit in the lockfiles. Cargo fetches it from the public hoverboardhavoc/runtime-hal repository
 # itself, so no job checks it out, and every cargo job builds the commit the lockfile names rather
 # than whatever runtime-hal's main is at run time: a runtime-hal push cannot break this CI, a commit
 # here that bumps the pin can. Cargo resolves a target-gated dependency on every target, so the host

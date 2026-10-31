@@ -119,7 +119,7 @@ pub fn check_image(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() != IMAGE_LEN {
         return Err(format!(
             "not a merged install image: {} B, not {IMAGE_LEN} B (make one with espflash \
-             save-image --merge --flash-size 4mb, apps/hoverboard-bridge/README.md)",
+             save-image --merge --flash-size 4mb, bridge/README.md)",
             bytes.len()
         ));
     }

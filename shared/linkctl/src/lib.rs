@@ -5,8 +5,8 @@
 //! that ride L3 PDUs in the reserved control opcode block `0x10..0x2F`, plus the supervision
 //! timeout constants. An L7 payload here is the payload of one L3 PDU
 //! (`[opcode][src][dst][payload...]`, one PDU per L2 packet); this crate owns only the payload
-//! bytes. `crates/net` keeps forwarding the block by `dst` without interpreting it, and
-//! `crates/control` / `crates/state` keep consuming plain words: these types never leak into
+//! bytes. `shared/net` keeps forwarding the block by `dst` without interpreting it, and
+//! `motorcontroller/control` / `motorcontroller/state` keep consuming plain words: these types never leak into
 //! their APIs.
 //!
 //! Conventions, per the spec's "Envelope and conventions":
@@ -31,7 +31,7 @@
 //!   handled by the cyclic cadence plus the supervision timeouts below.
 //!
 //! Recovered shapes: the struct/codec pattern follows the archived payload set
-//! (`archive/accumulated-build:crates/link/src/payload.rs`) where it still fits; the opcode
+//! (`archive/accumulated-build:shared/link/src/payload.rs`) where it still fits; the opcode
 //! numbering is the re-allocation from the spec's "Opcode allocation" table (the archive's
 //! numbering partially collided with the reserved telemetry block and is superseded).
 //!
@@ -278,7 +278,7 @@ impl CyclicObs {
     ///
     /// Additions go on the END, so every existing offset survives one, which is how the odometer
     /// took it from 8 to 12. The BLE budget is derived from this number rather than guessed at:
-    /// see `BLE_CYCLIC_DIVISOR` in `crates/orchestrator/src/dispatch.rs`.
+    /// see `BLE_CYCLIC_DIVISOR` in `motorcontroller/orchestrator/src/dispatch.rs`.
     pub const LEN: usize = 12;
 
     /// Encode into `out` (the block alone, as it sits after the committed prefix), returning the

@@ -1,4 +1,4 @@
-//! The hoverboard bridge's RAM loader (`apps/hoverboard-bridge/loader/f1x.bin`) run under Unicorn,
+//! The hoverboard bridge's RAM loader (`bridge/loader/f1x.bin`) run under Unicorn,
 //! driven by the bridge's own driver (`hoverboard_bridge_core::loader`) through a memory port onto
 //! the emulator: the loader's bytes in RAM at `0x2000_0000`, the core registers set through
 //! `DCRSR`/`DCRDR`, the ring fed and read as over SWD, the halt from its `bkpt`, and the result

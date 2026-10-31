@@ -4,7 +4,7 @@
 # sampled GPIO line levels, pad levels, and the raw ADC throttle word; this crate produces the
 # debounced flags, combo flags, pad field, and filtered throttle. Host-testable.
 #
-# Recovered from the archived implementation (archive/accumulated-build:crates/inputs) per
+# Recovered from the archived implementation (archive/accumulated-build:motorcontroller/inputs) per
 # specs/integration.md's sources section; its consumer is the integration input task ("The input
 # task"). The reference constants are preserved exactly.
 [package]

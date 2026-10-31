@@ -4,22 +4,18 @@
 /specs/
 /old-specs/
 
-# Rust build output (root and any nested crate that was built in-place)
-/target/
+# Rust build output (each workspace's, and any nested crate that was built in-place)
 **/target/
 
-# Member crates do not carry their own lockfile; the workspace root owns Cargo.lock
-/crates/*/Cargo.lock
-
 # Flashable ELF artifacts staged for the Pi (built locally, not for publish)
-/crates/firmware/dist/
+/motorcontroller/firmware/dist/
 
 # Local reference: MCU manuals + bench notes (not for publish)
 /reference/
 
 # The bridge's Wi-Fi credentials were a build-time file; they are store fields now
 # (specs/bridge-onboarding.md), and the ignore stays so an old copy never reaches a commit.
-apps/hoverboard-bridge/.wifi.env
+bridge/.wifi.env
 # A settings file holding Wi-Fi credentials (wifi.pass) is named wifi*.json and never committed.
 wifi*.json
 __pycache__/

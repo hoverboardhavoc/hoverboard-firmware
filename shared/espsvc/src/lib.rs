@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The hoverboard bridge's commands (`specs/hoverboard-bridge.md`, "ESP commands").
 //!
-//! An ESP command is an ordinary L3 PDU (`[opcode][src][dst][payload]`, `crates/net`'s
+//! An ESP command is an ordinary L3 PDU (`[opcode][src][dst][payload]`, `shared/net`'s
 //! [`Pdu`]) whose opcode is in the bridge range `0x80..=0x9F`. This crate owns the opcodes and the
 //! payload bytes; the PDU header is `net`'s. All multi-byte fields are little-endian.
 //!

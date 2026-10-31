@@ -1370,7 +1370,7 @@ mod rcap_agreement {
     use runtime_hal::{descriptor_f103, descriptor_f130, synthesize, Family, PeriphLabel};
 
     /// The real [`Capabilities`] implementation over runtime-hal's R-CAP queries, mirroring the
-    /// firmware's `HalCaps` adapter (`crates/firmware`): packed bytes across the seam, the named
+    /// firmware's `HalCaps` adapter (`motorcontroller/firmware`): packed bytes across the seam, the named
     /// advanced timer mapped to the trait's zero-based index.
     struct RealCaps {
         chip: Chip,

@@ -63,16 +63,16 @@ Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned &nbs
 
 | Component | | What it is |
 |---|:--:|---|
-| Foundations (`crates/base`) | ✅ | CRC-16/MODBUS, fixed-point conventions, the shared error vocabulary |
+| Foundations (`shared/base`) | ✅ | CRC-16/MODBUS, fixed-point conventions, the shared error vocabulary |
 | HAL ([runtime-hal]) | ✅ | chip detection (GD32F103 / F130), GPIO / USART / timer / ADC / I2C / SPI, on-chip flash erase/program; commutation spins a wheel on real boards |
-| Config storage (`crates/store`) | ✅ | log-structured key/value config store in flash; host-tested and running on a board |
-| Universal firmware binary (`crates/firmware`) | ✅ | one image: detect the GD32 at boot, read and validate the board layout, mount the store, run the 250 Hz control pipeline and the 16 kHz motor ISR; valid fleet-wide |
+| Config storage (`shared/store`) | ✅ | log-structured key/value config store in flash; host-tested and running on a board |
+| Universal firmware binary (`motorcontroller/firmware`) | ✅ | one image: detect the GD32 at boot, read and validate the board layout, mount the store, run the 250 Hz control pipeline and the 16 kHz motor ISR; valid fleet-wide |
 | Onboard Bluetooth (the CC2541 module) | ❌ | the AT bring-up and the board's BLE port were proven on real phones and then removed (2026-10-27): the phone's way in is the hoverboard bridge's Bluetooth, and the module is no longer driven |
 | DMA UART ([runtime-hal]) | ✅ | interrupt- and DMA-driven buffered USART receive behind embedded-io adapters; proven on both chip families |
 | Config over Bluetooth | ✅ | a phone (the in-repo Android app) writes a setting into a board's on-board storage over the hoverboard bridge's Bluetooth and the board's SWD mailbox, and reads it back: the runtime-config path end to end (a browser configurator is planned) |
 | IMU + attitude | ✅ | a configurable I2C IMU driver (multiple models, per-board axis map and gyro bias) and the fused pitch/roll filter; both bench boards read their IMU and publish attitude every control tick |
-| Link stack (`crates/link` + `crates/net`) | ✅ | frame format, addressing, discovery, multi-hop forwarding, and the config register protocol wired to the store; framing proven over the inter-board UART and Bluetooth, discovery + config proven over Bluetooth (forwarding is host-tested) |
-| Config over SWD (`crates/swd-mailbox` + `crates/swd-bridge`) | ✅ | a RAM-mailbox link transport: a host sets and reads board config through a debug probe, no UART or radio needed |
+| Link stack (`shared/link` + `shared/net`) | ✅ | frame format, addressing, discovery, multi-hop forwarding, and the config register protocol wired to the store; framing proven over the inter-board UART and Bluetooth, discovery + config proven over Bluetooth (forwarding is host-tested) |
+| Config over SWD (`shared/swd-mailbox` + `tools/swd-bridge`) | ✅ | a RAM-mailbox link transport: a host sets and reads board config through a debug probe, no UART or radio needed |
 | Board model | ✅ | the per-board pin map (gates, halls, LEDs, timers, IMU bus, button, pads) read from config at boot, validated against the chip's own capability tables, and applied; a layout that would energize the wrong pin is refused rather than driven |
 | Sensing + safety | ✅ | the 250 Hz scheduler, the OFF/INIT/READY/RUN/SHUTDOWN mode machine, fault latches, and the arming gate that is the one place in the image able to energize a bridge; arming, fault escalation and self-shutdown proven on both boards |
 | Foot pads (rider detection) | 🚧 | the pad lines are configurable and debounced, and the rider level they produce is what the mode machine refuses to balance without (you only balance with someone on the board). Proven from the phone's rider mirror; no physical pads are wired to the bench boards yet |
@@ -158,6 +158,18 @@ supported part), so you can flash without a local toolchain:
   [nightly.link](https://nightly.link)).
 - Or open any commit's run in the [Actions](https://github.com/hoverboardhavoc/hoverboard-firmware/actions)
   tab and grab the **firmware** artifact (needs a GitHub login).
+
+Each build chain is its own folder; run cargo or Gradle from inside it:
+
+| Folder | Builds |
+|---|---|
+| `motorcontroller/` | the GD32 firmware image (`cargo image`) and its test and bench images |
+| `shared/` | the crates the firmware, the bridge and the host tools all link; `shared/protocol-kotlin/` is their Kotlin mirror |
+| `bridge/` | the ESP32-C3 bridge image |
+| `tools/` | the host programs (the CLI, the SWD mailbox bridge, the emulator and hardware runners) beside the scripts |
+| `apps/rider/` | the Android rider app |
+
+The host test suites run with `./tools/host-test.sh` from anywhere.
 
 ## Flashing
 

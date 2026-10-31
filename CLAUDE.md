@@ -25,31 +25,41 @@ If a label's definition cannot be found, say so rather than guessing at it.
 
 ## Running the checks
 
-- **Host test suite: `./tools/host-test.sh`** (it forwards cargo arguments, so `-p store` or a test
-  name works). A bare `cargo test` compiles the test binaries for the board and runs NONE of them,
-  silently, because `.cargo/config.toml` defaults the target to `thumbv7m-none-eabi`; the script
-  resolves the host triple and passes CI's flags, and CI's host-test job runs the same script.
-- **Shipping image: `cargo image`**, the build-std release build whose bytes reach flash
-  (`.cargo/config.toml` explains why it is an alias and not a config key).
-- **runtime-hal is a git dependency pinned by `Cargo.lock`** (root `Cargo.toml`,
-  `[workspace.dependencies]`). A plain build uses the pinned commit, locally and in CI. To build
-  against `~/dev/runtime-hal` (a HAL change not yet pushed), patch that one command, from the repo
-  root (`./tools/host-test.sh` passes the same `--config` through):
+The repository holds four Cargo workspaces, one per build chain (`specs/repo-layout.md`):
+`motorcontroller/` (the GD32 image), `shared/` (the crates more than one chain links), `tools/` (the
+host programs) and `bridge/` (the ESP32-C3 image). Run cargo from inside the workspace, so its
+`rust-toolchain.toml` and `.cargo/` apply; the root holds no Cargo workspace, and a bare
+`cargo build` there does nothing.
+
+- **Host test suites: `./tools/host-test.sh`** (from anywhere; it forwards cargo arguments, so
+  `-p store` or a test name works). With no `-p` it runs the motorcontroller suite and then the
+  shared suite; with `-p` it runs the workspace that owns each package. A bare `cargo test` in
+  `motorcontroller/` compiles the test binaries for the board and runs NONE of them, silently,
+  because `motorcontroller/.cargo/config.toml` defaults the target to `thumbv7m-none-eabi`; the
+  script resolves the host triple and passes CI's flags, and CI's host-test job runs the same
+  script.
+- **Shipping image: `cargo image` in `motorcontroller/`**, the build-std release build whose bytes
+  reach flash (`motorcontroller/.cargo/config.toml` explains why it is an alias and not a config
+  key). The ELF is `motorcontroller/target/thumbv7m-none-eabi/release/firmware`.
+- **runtime-hal is a git dependency pinned by the lockfiles** (`[workspace.dependencies]` in
+  `motorcontroller/Cargo.toml` and, identically, `shared/Cargo.toml`). A plain build uses the
+  pinned commit, locally and in CI. To build against `~/dev/runtime-hal` (a HAL change not yet
+  pushed), patch that one command, from `motorcontroller/` (`./tools/host-test.sh` passes the same
+  `--config` through, and runs each suite from a folder at the same depth):
 
   ```
-  cargo --config 'patch."https://github.com/hoverboardhavoc/runtime-hal".runtime-hal.path="../runtime-hal"' image
+  cargo --config 'patch."https://github.com/hoverboardhavoc/runtime-hal".runtime-hal.path="../../runtime-hal"' image
   ```
 
   A patched build rewrites the runtime-hal entry in each lockfile it touches to the local path,
-  with no `source` line. Afterwards run `git checkout Cargo.lock` (and `tools/hoverboard-cli/Cargo.lock`
-  / `apps/hoverboard-bridge/Cargo.lock` if the build touched them). A plain build does not restore
-  the pin: it re-resolves the branch and moves the pin to runtime-hal's current `main`. CI's lint
-  job fails a lockfile without the git source.
-- **Bumping runtime-hal:** `cargo update -p runtime-hal` in the root, `tools/hoverboard-cli` and
-  `apps/hoverboard-bridge` (the three tracked lockfiles must pin the same commit), committed as a
-  lockfile change naming the new runtime-hal commit and why the firmware needs it. A firmware
-  change that needs a runtime-hal change reaches CI only after runtime-hal is pushed and the pin is
-  bumped.
+  with no `source` line. Afterwards run `git checkout motorcontroller/Cargo.lock` (and
+  `shared/Cargo.lock`, `tools/Cargo.lock` or `bridge/Cargo.lock` if the build touched them). A
+  plain build does not restore the pin: it re-resolves the branch and moves the pin to
+  runtime-hal's current `main`. CI's lint job fails a lockfile without the git source.
+- **Bumping runtime-hal:** `cargo update -p runtime-hal` in `motorcontroller/`, `shared/`, `tools/`
+  and `bridge/` (the four tracked lockfiles must pin the same commit), committed as a lockfile
+  change naming the new runtime-hal commit and why the firmware needs it. A firmware change that
+  needs a runtime-hal change reaches CI only after runtime-hal is pushed and the pin is bumped.
 
 ## No backwards compatibility until a version ships
 

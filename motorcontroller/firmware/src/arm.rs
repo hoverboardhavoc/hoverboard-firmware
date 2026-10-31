@@ -1,7 +1,7 @@
 //! Arming: the one place in the image that can energize a bridge (`specs/motor-integration.md`,
 //! slice 5, "MOE enactment").
 //!
-//! `crates/firmware/src/motor.rs` is disarmed by construction and stays that way: it configures the
+//! `motorcontroller/firmware/src/motor.rs` is disarmed by construction and stays that way: it configures the
 //! timer, runs the counter and steps the commutator, and it never names the arming gate. This file
 //! is the complement. It holds the [`runtime_hal::ArmGate`] for the configured motor and it holds
 //! nothing else, so **the whole energize decision is one file, one static, one `arm()` call**, which
@@ -60,7 +60,7 @@ pub enum ArmStep {
     ///   different statement, about writes once the board IS armed, and it is not what this step
     ///   rests on: the responder's armed flag is sampled at step 4, before the dispatch that arms
     ///   at step 6, so R4's refusal begins a pass later than MOE does. That window is
-    ///   pre-existing and belongs to `crates/net`, not here;
+    ///   pre-existing and belongs to `shared/net`, not here;
     /// - it is ALL OR NOTHING ([`rederive`] derives and validates before anything is written), so a
     ///   refusal applies nothing.
     ///

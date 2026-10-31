@@ -10,7 +10,7 @@ from its store, `wifi.ssid` and `wifi.pass` (`specs/bridge-onboarding.md` sectio
 and with none stored it does not start its Wi-Fi station (`info` shows `wifi not configured`).
 
 ```
-cd apps/hoverboard-bridge
+cd bridge
 cargo build --release
 ```
 
@@ -34,8 +34,8 @@ arm-none-eabi-objcopy -O binary target/loader/f1x.o loader/f1x.bin
 
 A host test assembles the source the same way and fails if the result differs from `f1x.bin` (it
 is skipped when `arm-none-eabi-as` is not on the path). The loader bytes also run under Unicorn,
-driven by the bridge's own driver: `cargo test --manifest-path crates/emulator-runner/Cargo.toml
---features unicorn --target <host> --test bridge_loader` from the repository root.
+driven by the bridge's own driver: `cargo test -p emulator-runner --features unicorn --target <host>
+--test bridge_loader` in `tools/`.
 
 ## Flash layout
 

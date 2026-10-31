@@ -6,7 +6,7 @@
 //! gyro-bias subtraction (no accel bias), full-scale scaling into engineering units, and the IIR
 //! pre-filter. It produces, once per control tick, a calibrated gyro rate vector (rad/s), a
 //! sign-applied acceleration vector (direction-only counts), a temperature reading, and the
-//! bias-corrected raw words the attitude filter (`crates/attitude`) consumes in the same tick.
+//! bias-corrected raw words the attitude filter (`motorcontroller/attitude`) consumes in the same tick.
 //!
 //! Every numeric constant is preserved exactly from the recovered stock behavioral contract (the
 //! spec's source 1); which IMU model is fitted is a [`Model`] descriptor (the spec's model table).

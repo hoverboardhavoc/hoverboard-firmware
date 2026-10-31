@@ -442,7 +442,7 @@ pub const MIN_TRACKED_ELECTRICAL_HZ: u32 = 250;
 /// The 6-state base electrical-angle table. Index by hall code 1..6 (index 0 unused).
 /// These are the bit-exact recovered anchors, bench-confirmed against live stock.
 // In RAM, not flash: this is a 16 kHz hot-path table and the GD32F1x0 charges a flash DATA
-// read above its 32 KiB zero-wait window (crates/firmware/memory.x). RAM is a fixed 1 cycle
+// read above its 32 KiB zero-wait window (motorcontroller/firmware/memory.x). RAM is a fixed 1 cycle
 // on both families and costs 58 B of `.data` for the five tables together.
 #[cfg_attr(target_arch = "arm", link_section = ".data")]
 pub static BASE_ANGLE: [u16; 8] = [
@@ -458,13 +458,13 @@ pub static BASE_ANGLE: [u16; 8] = [
 
 /// Forward-next neighbor (dir = +1) per hall code (index 0/7 unused).
 // In RAM, not flash: this is a 16 kHz hot-path table and the GD32F1x0 charges a flash DATA
-// read above its 32 KiB zero-wait window (crates/firmware/memory.x). RAM is a fixed 1 cycle
+// read above its 32 KiB zero-wait window (motorcontroller/firmware/memory.x). RAM is a fixed 1 cycle
 // on both families and costs 58 B of `.data` for the five tables together.
 #[cfg_attr(target_arch = "arm", link_section = ".data")]
 static FWD_NEXT: [u8; 8] = [0, 3, 6, 2, 5, 1, 4, 0];
 /// Reverse-next neighbor (dir = -1) per hall code (index 0/7 unused).
 // In RAM, not flash: this is a 16 kHz hot-path table and the GD32F1x0 charges a flash DATA
-// read above its 32 KiB zero-wait window (crates/firmware/memory.x). RAM is a fixed 1 cycle
+// read above its 32 KiB zero-wait window (motorcontroller/firmware/memory.x). RAM is a fixed 1 cycle
 // on both families and costs 58 B of `.data` for the five tables together.
 #[cfg_attr(target_arch = "arm", link_section = ".data")]
 static REV_NEXT: [u8; 8] = [0, 5, 3, 1, 6, 4, 2, 0];

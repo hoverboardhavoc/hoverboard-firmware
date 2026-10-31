@@ -29,7 +29,7 @@ pub mod plumbing;
 pub const ABSENT: u8 = 0xFF;
 
 /// The gate timer's clock, hertz. TIMER0 is on APB2 and the image's tree runs APB2 undivided, so
-/// the timer clock is the sysclk; `crates/firmware/src/main.rs` asserts both the prescaler and
+/// the timer clock is the sysclk; `motorcontroller/firmware/src/main.rs` asserts both the prescaler and
 /// this number against the clock tree it configures, which is what makes the value here a fact
 /// about the running image rather than a copy of one.
 pub const GATE_TIMER_HZ: u32 = 72_000_000;
@@ -38,7 +38,7 @@ pub const GATE_TIMER_HZ: u32 = 72_000_000;
 /// what gives a stored `motor.dead_time` a UNIT: one DTG tick is `DEAD_TIME_DTS_DIV /
 /// GATE_TIMER_HZ`, 27.8 ns here.
 ///
-/// **The unit has one owner, which is this constant.** `crates/firmware/src/motor.rs` derives the
+/// **The unit has one owner, which is this constant.** `motorcontroller/firmware/src/motor.rs` derives the
 /// timer's CKDIV enum from this number rather than writing `ClockDiv::Div2` beside it, and
 /// [`DEAD_TIME_MIN_DTG`] below converts the fleet's nanosecond reference through it. So a change
 /// to the divider or to the clock moves the floor with it, and a board staged with a code that

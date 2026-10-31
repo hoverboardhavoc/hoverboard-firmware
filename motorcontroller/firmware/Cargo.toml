@@ -63,17 +63,17 @@ panic-halt = "1"
 [dev-dependencies]
 base = { path = "../../shared/base" }
 # The mode machine, for the one arm test that asserts the OFF gate itself opens after a shutdown
-# taken at speed (`crates/firmware/src/arm.rs`). The claim is "the machine can leave OFF", so the
+# taken at speed (`motorcontroller/firmware/src/arm.rs`). The claim is "the machine can leave OFF", so the
 # test drives the REAL machine rather than restating its gate. Already in the graph through
 # `orchestrator`, which does not re-export it; host-test only, no bytes in the image.
 state = { path = "../state" }
 
 # The HAL providing the runtime `detect_chip()` and the FMC flash driver. Target-gated exactly like
 # the store's dependency: the host build of this crate degrades to an empty `main`, so it never links
-# the HAL. runtime-hal is the workspace git dependency (root Cargo.toml).
+# the HAL. runtime-hal is the workspace git dependency (motorcontroller/Cargo.toml).
 [target.'cfg(target_arch = "arm")'.dependencies]
 runtime-hal = { workspace = true }
-# The workspace flash vector table (crates/vectors): once ANY crate enables cortex-m-rt's
+# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
 # `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
 # one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
 # `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.

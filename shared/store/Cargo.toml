@@ -13,7 +13,7 @@ base = { path = "../base" }
 # (it uses MockFlash), so the store core + field set stay base-only on the host. The chip2k Tier-2
 # build needs the HAL's `detect-internals` feature (the public descriptors are both 1 KiB, so the
 # 2 KiB `Chip` comes from `synthesize`); store-test forwards it through this crate's `chip2k`
-# feature. runtime-hal is the workspace git dependency (root Cargo.toml).
+# feature. runtime-hal is the workspace git dependency (shared/Cargo.toml).
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
 runtime-hal = { workspace = true }
 

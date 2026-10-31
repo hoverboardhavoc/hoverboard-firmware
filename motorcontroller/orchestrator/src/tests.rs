@@ -2121,7 +2121,7 @@ fn a_substate_tie_feeds_the_latches_in_run() {
 /// shell folds the period ISR's edge count into motor 0's row before each pass).
 ///
 /// The health rule is `(a != 0 || b != 0) && (a == 3 || b == 0)`
-/// (`crates/state/src/fault.rs`, `FaultLatch::is_healthy`), so a nonzero `b` changes the verdict
+/// (`motorcontroller/state/src/fault.rs`, `FaultLatch::is_healthy`), so a nonzero `b` changes the verdict
 /// everywhere the sub-state is not RUN. While the row was a structural 0 on every board, the whole
 /// suite only ever exercised the `b == 0` half of that conjunction, which is what this walks with a
 /// rolling wheel instead. What it establishes is that the new input cannot latch a fault on its own:
@@ -2599,7 +2599,7 @@ fn tripped_latch_clears_on_the_off_pass_and_reentry_succeeds() {
 /// where it is decided.
 ///
 /// The three lines that model the firmware are its `control_task_cb` exactly
-/// (`crates/firmware/src/main.rs`): the motor-side level is folded into `motor_fault` BEFORE the
+/// (`motorcontroller/firmware/src/main.rs`): the motor-side level is folded into `motor_fault` BEFORE the
 /// pass, and the arm layer is enacted AFTER it, attempting an arm whenever the mode machine allows
 /// MOE and no fault is held. This board's value row refuses every attempt (a bad `imu.axis_role`
 /// written over BLE), so `refused` stands in for `arm::hw`'s `RE_READ_REFUSED`, which is a

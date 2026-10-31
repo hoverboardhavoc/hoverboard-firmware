@@ -29,10 +29,10 @@ panic-halt = "1"
 
 # The HAL: detect_chip(), the GPIO split, Usart (polled TX) + RingBufferedRx (DMA RX + IDLE), the RAM
 # vector table. Target-gated exactly like firmware / ble-loopback; the host build degrades to an empty
-# main and never links the HAL. runtime-hal is the workspace git dependency (root Cargo.toml).
+# main and never links the HAL. runtime-hal is the workspace git dependency (motorcontroller/Cargo.toml).
 [target.'cfg(target_arch = "arm")'.dependencies]
 runtime-hal = { workspace = true }
-# The workspace flash vector table (crates/vectors): once ANY crate enables cortex-m-rt's
+# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
 # `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
 # one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
 # `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.

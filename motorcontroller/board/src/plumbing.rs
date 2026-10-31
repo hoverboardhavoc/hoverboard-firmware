@@ -1,7 +1,7 @@
 //! The plumbing (`specs/board-model.md`, slicing item 3): the fields -> validator read path, the
 //! reserved-set computation, and the `BOARD_OBS` record layout. Nothing here touches the live
 //! boot path; the boot wiring (and the real-chip `Capabilities` adapter over runtime-hal's R-CAP
-//! queries) lives in `crates/firmware` (slicing item 4).
+//! queries) lives in `motorcontroller/firmware` (slicing item 4).
 
 use crate::{BoardError, BoardErrorKind, BoardField, BoardFields, MotorFields};
 use store::{Flash, Store};
@@ -128,7 +128,7 @@ pub const OBS_OK: u8 = 0;
 
 /// The `BOARD_OBS` RAM record (`specs/board-model.md`, "The apply contract"): the validator
 /// outcome, readable over the SWD mailbox path. This crate defines the LAYOUT and the
-/// constructors; `crates/firmware` places it in RAM (the `#[no_mangle]` `BOARD_OBS` static,
+/// constructors; `motorcontroller/firmware` places it in RAM (the `#[no_mangle]` `BOARD_OBS` static,
 /// written once at boot).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

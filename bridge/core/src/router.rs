@@ -2,7 +2,7 @@
 //! the BLE link (L3 port 0) and the console (port 2) carry the same L2 stream. The console has two
 //! carriers, the C3's USB-Serial-JTAG and a client of the Wi-Fi console's TCP port, and both are
 //! served whenever present, each with its own stream. The GATT peripheral, the USB driver and the
-//! TCP listener are the firmware's (`apps/hoverboard-bridge/src/ble.rs`, `usb.rs`, `wifi.rs`).
+//! TCP listener are the firmware's (`bridge/src/ble.rs`, `usb.rs`, `wifi.rs`).
 //!
 //! The bytes on each link are a byte stream: a phone or the CC2541-shaped central coalesces and
 //! splits them at arbitrary points, and so does a USB host or a TCP client. Each link feeds its own

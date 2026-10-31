@@ -18,7 +18,7 @@
 //!    what the two stack gates in `tests/store_scenarios.rs` are built from.
 //!
 //! **What the stack high-water covers, and what it does not.** It measures the `store-test` image,
-//! not `crates/firmware`'s, so it is not a bound on the shipped image's deepest chain; that number
+//! not `motorcontroller/firmware`'s, so it is not a bound on the shipped image's deepest chain; that number
 //! comes from the shipped ELF's `.stack_sizes` and from the board's own boot paint
 //! (`specs/firmware.md`, "RAM/stack budget"). What transfers is the store code the two images share,
 //! and only where a gate states a DIFFERENCE between two scenarios run on this one image: the
@@ -56,7 +56,7 @@ const RAM_SIZE: u64 = 8 * 1024;
 /// The word RAM is filled with before each phase, so an untouched stack word is distinguishable from
 /// a written one ([`StoreEmu::stack_depth`]).
 ///
-/// This is the emulator's version of the firmware's own boot stack paint (`crates/firmware`'s
+/// This is the emulator's version of the firmware's own boot stack paint (`motorcontroller/firmware`'s
 /// `paint_stack`), and it measures the same quantity the bench reads out of `CTRL_OBS`. Doing it here
 /// costs the image nothing and needs no hardware: the emulator owns RAM before the reset vector runs,
 /// so the paint cannot disturb the run and no unsound write-below-the-stack-pointer is involved.
@@ -173,7 +173,7 @@ impl StoreEmu {
     /// still counts, because the scan stops at the first disturbed word below everything.
     ///
     /// It is a direct measurement rather than an estimate from frame sizes, and the image it measures
-    /// is `store-test`, the one running here. It says nothing about `crates/firmware`'s own depth: a
+    /// is `store-test`, the one running here. It says nothing about `motorcontroller/firmware`'s own depth: a
     /// figure from this is usable against another scenario's figure from this, on the same image, and
     /// a bare absolute carries over to nothing. It is also the COMPLEMENT of what
     /// `tools/stack-margin.sh` reports off a board, on a third image again: this is DEPTH BELOW the

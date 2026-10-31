@@ -30,8 +30,9 @@
 </style>
 
 <h1>hoverboard-firmware on a Windows machine</h1>
-<p class="lede">Written 2026-10-20 from this repo's actual build configuration (<code>rust-toolchain.toml</code>,
-<code>.cargo/config.toml</code>, <code>.github/workflows/ci.yml</code>, <code>apps/rider/app/build.gradle.kts</code>).
+<p class="lede">Written 2026-10-20 from this repo's actual build configuration (<code>motorcontroller/rust-toolchain.toml</code>,
+<code>motorcontroller/.cargo/config.toml</code>, <code>.github/workflows/ci.yml</code>, <code>apps/rider/app/build.gradle.kts</code>),
+and moved to the per-chain layout on 2026-10-31.
 Three tracks are independent: the Rust firmware, the Android rider app, and the Python tooling. Pick the ones you need.</p>
 
 <nav>
@@ -48,19 +49,22 @@ Three tracks are independent: the Rust firmware, the Android rider app, and the 
 </nav>
 
 <h2 id="layout">1. Repo layout, and runtime-hal</h2>
-<p>The firmware depends on the HAL repo as a <b>git dependency</b>: the root <code>Cargo.toml</code> names
-<code>https://github.com/hoverboardhavoc/runtime-hal</code>, and <code>Cargo.lock</code> pins the commit. Cargo
+<p>The repository holds four Cargo workspaces, one per build chain: <code>motorcontroller</code> (the GD32
+firmware), <code>shared</code> (the crates more than one chain links), <code>tools</code> (the host programs) and
+<code>bridge</code> (the ESP32-C3 image). Run cargo from inside the workspace; the root holds none.</p>
+<p>The firmware depends on the HAL repo as a <b>git dependency</b>: <code>motorcontroller\Cargo.toml</code> names
+<code>https://github.com/hoverboardhavoc/runtime-hal</code>, and <code>motorcontroller\Cargo.lock</code> pins the commit. Cargo
 fetches it on the first build (it is public, so no credentials are needed), which also clones its
 <code>third_party/GD32Firmware</code> submodule, about 23 MB, once. One clone is enough:</p>
 <pre><code>cd C:\dev
 git clone https://github.com/hoverboardhavoc/hoverboard-firmware.git</code></pre>
 <p>To build against a local runtime-hal checkout instead (to change the HAL and the firmware together), clone it
-beside the firmware and patch that one command, from <code>C:\dev\hoverboard-firmware</code> in Git Bash:</p>
-<pre><code>cargo --config 'patch."https://github.com/hoverboardhavoc/runtime-hal".runtime-hal.path="../runtime-hal"' image</code></pre>
+beside the firmware and patch that one command, from <code>C:\dev\hoverboard-firmware\motorcontroller</code> in Git Bash:</p>
+<pre><code>cargo --config 'patch."https://github.com/hoverboardhavoc/runtime-hal".runtime-hal.path="../../runtime-hal"' image</code></pre>
 <p>A patched build rewrites the runtime-hal entry in <code>Cargo.lock</code>; restore it afterwards with
 <code>git checkout Cargo.lock</code> (the repo's <code>CLAUDE.md</code>, "Running the checks"). <code>runtime-hal</code> keeps its own
 stable toolchain pin, which never governs this build: rustup resolves the toolchain from the directory cargo
-runs in, and every firmware build runs in <code>hoverboard-firmware</code>.</p>
+runs in, and every firmware build runs in <code>hoverboard-firmware\motorcontroller</code>.</p>
 
 <h2 id="git">2. Git for Windows, and the line-ending trap</h2>
 <p>Install <a href="https://git-scm.com/download/win">Git for Windows</a>. It brings Git Bash, which the repo's
@@ -83,39 +87,47 @@ script rather than a checkout setting.</p>
     that workload in the installer.</li>
   <li><b>rustup</b>: <a href="https://rustup.rs">rustup.rs</a> or <code>winget install Rustlang.Rustup</code>.</li>
 </ol>
-<p>Nothing else to pick. <code>rust-toolchain.toml</code> pins the channel and components, and the first cargo
-command inside the repo installs exactly that set:</p>
+<p>Nothing else to pick. <code>motorcontroller\rust-toolchain.toml</code> pins the channel and components, and the
+first cargo command inside <code>motorcontroller</code> installs exactly that set (<code>tools</code> pins the same
+nightly; <code>shared</code> and <code>bridge</code> pin 1.92, installed the same way on first use):</p>
 <pre><code>channel    = nightly-2026-07-20     (pinned like a version, never bump drive-by)
 components = rust-src, rustfmt, clippy
 targets    = thumbv7m-none-eabi</code></pre>
 <p>The pin is nightly because the shipping image is built with <code>-Z build-std</code>, which is nightly-only and
-worth 2,408 bytes of flash. The first <code>cargo</code> call in the repo will download the toolchain, which takes a
-few minutes. Verify with <code>rustc -vV</code>: it must print the <code>nightly-2026-07-20</code> commit and your
+worth 2,408 bytes of flash. The first <code>cargo</code> call in <code>motorcontroller</code> will download the toolchain, which takes a
+few minutes. Verify with <code>rustc -vV</code> in <code>motorcontroller</code>: it must print the <code>nightly-2026-07-20</code> commit and your
 host triple (<code>x86_64-pc-windows-msvc</code>).</p>
 
 <h3>Build</h3>
-<p><code>.cargo/config.toml</code> sets <code>[build] target = "thumbv7m-none-eabi"</code>, so a bare
-<code>cargo build</code> builds for the board. From <code>C:\dev\hoverboard-firmware</code>, in PowerShell:</p>
+<p><code>motorcontroller\.cargo\config.toml</code> sets <code>[build] target = "thumbv7m-none-eabi"</code>, so a bare
+<code>cargo build</code> there builds for the board. From <code>C:\dev\hoverboard-firmware\motorcontroller</code>, in PowerShell:</p>
 <pre><code>cargo build                 # embedded build, default thumbv7m target
 cargo image                  # the SHIPPING image (build-std release, the bytes that reach flash)</code></pre>
 <p><code>cargo image</code> is an alias, not a config key, so build-std applies only to that one build. Output:
-<code>target\thumbv7m-none-eabi\release\firmware</code> (ELF, with DWARF kept for SWD work).</p>
+<code>motorcontroller\target\thumbv7m-none-eabi\release\firmware</code> (ELF, with DWARF kept for SWD work).</p>
 
 <h3>Tests and the CI gates</h3>
 <p>A bare <code>cargo test</code> compiles the test binaries for the board and runs none of them, silently. Use the
 script, from <b>Git Bash</b>:</p>
 <pre><code>./tools/host-test.sh                 # what CI's host-test job runs
 ./tools/host-test.sh -p store        # arguments forward to cargo test</code></pre>
-<p>If you would rather stay in PowerShell, that script resolves to this, and the two are equivalent:</p>
-<pre><code>cargo test --target x86_64-pc-windows-msvc -F store/test-fields</code></pre>
+<p>If you would rather stay in PowerShell, that script resolves to this (the motorcontroller suite, then the
+shared one), and the two are equivalent:</p>
+<pre><code>cd motorcontroller; cargo test --target x86_64-pc-windows-msvc -F store/test-fields
+cd ..\shared;       cargo test --target x86_64-pc-windows-msvc -F store/test-fields; cd ..</code></pre>
 <p>The rest of the Rust gates CI enforces, in PowerShell, with <code>$H</code> as your host triple:</p>
 <pre><code>$H = "x86_64-pc-windows-msvc"
+cd motorcontroller
 cargo fmt --all --check
-cargo fmt --check --manifest-path crates/swd-bridge/Cargo.toml
-cargo fmt --check --manifest-path crates/emulator-runner/Cargo.toml
-cargo fmt --check --manifest-path crates/hardware-runner/Cargo.toml
 cargo clippy --target thumbv7m-none-eabi -- -D warnings
-cargo clippy --workspace --all-targets --target $H -F store/test-fields -- -D warnings</code></pre>
+cargo clippy --workspace --all-targets --target $H -F store/test-fields -- -D warnings
+cd ..\shared
+cargo fmt --all --check
+cargo +nightly-2026-07-20 clippy --target thumbv7m-none-eabi -- -D warnings
+cargo clippy --workspace --all-targets --target $H -F store/test-fields -- -D warnings
+cd ..\tools
+cargo fmt --all --check
+cd ..</code></pre>
 <p>Formatting is CI's first gate and runs before anything else, so an unformatted commit fails before the build
 is even attempted.</p>
 
@@ -124,6 +136,7 @@ is even attempted.</p>
 least friction is LLVM's equivalents, which rustup already has the pieces for:</p>
 <pre><code>rustup component add llvm-tools
 cargo install cargo-binutils
+cd motorcontroller
 cargo objcopy --release -p firmware --target thumbv7m-none-eabi -- -O binary firmware.bin</code></pre>
 <p>The alternative is the <a href="https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads">Arm GNU
 Toolchain</a> installer, which gives you the exact <code>arm-none-eabi-*</code> names CI uses, including
@@ -156,9 +169,9 @@ firmware.zip</a> needs no toolchain at all.</p>
 <p>That first line is CI's rider job verbatim. Both variants run the same sources and must report the same
 non-zero case count; the current suite is 359 cases per variant with 0 detekt findings. The debug APK comes out
 at <code>apps\rider\app\build\outputs\apk\debug\app-debug.apk</code>.</p>
-<p>The wire-protocol mirror is a separate Gradle build. From <code>protocol-kotlin</code>:</p>
+<p>The wire-protocol mirror is a separate Gradle build. From <code>shared\protocol-kotlin</code>:</p>
 <pre><code>.\gradlew.bat test --rerun --no-build-cache --console=plain</code></pre>
-<p>Its drift test parses the Rust under <code>crates/</code> as text and exact-set compares it against the Kotlin, so
+<p>Its drift test parses the Rust under <code>shared/</code> and <code>motorcontroller/</code> as text and exact-set compares it against the Kotlin, so
 it needs both repos present but no Rust toolchain.</p>
 
 <h2 id="python">6. Python tools</h2>
@@ -176,14 +189,15 @@ Which brings up the next point.</p>
   <tr><td><code>specs/</code></td>
       <td><b>Not in the clone.</b> It is a separate, deliberately local-only git repo, gitignored by the
       firmware repo, and it stays on the Mac. Nothing in the build needs it; the citation checker skips it.</td></tr>
-  <tr><td><code>crates/swd-bridge</code></td>
+  <tr><td><code>tools/swd-bridge</code></td>
       <td><b>Expect it not to compile.</b> Its binaries install a SIGINT handler through
       <code>libc::signal</code> with <code>sighandler_t</code>, which is Unix-only. Use WSL2 or the Mac for the
-      SWD mailbox tools. It is excluded from the workspace, so this does not block any other build.</td></tr>
-  <tr><td><code>crates/emulator-runner</code> (Unicorn, tier 2)</td>
+      SWD mailbox tools. It is a member of the <code>tools</code> workspace, and nothing else in that workspace links
+      it, so <code>-p</code> selections of the other members still build.</td></tr>
+  <tr><td><code>tools/emulator-runner</code> (Unicorn, tier 2)</td>
       <td>Untried here. It links Unicorn's cmake-built native library, so it needs CMake plus the MSVC build
-      tools (<code>winget install Kitware.CMake</code>) and is built through its own manifest with
-      <code>--features unicorn</code>.</td></tr>
+      tools (<code>winget install Kitware.CMake</code>) and is built in <code>tools</code> with
+      <code>-p emulator-runner --features unicorn</code>.</td></tr>
   <tr><td><code>tools/flash.sh</code>, <code>tools/bench-lock.sh</code>, the bench Python</td>
       <td>Bash, and wired to the bench: the Pi runner, the USB probe locations, the bench lock directory.
       Git Bash can execute them, but the probe side needs OpenOCD plus a WinUSB driver bound with
@@ -192,7 +206,8 @@ Which brings up the next point.</p>
 </table>
 
 <h2 id="check">8. Verification checklist</h2>
-<p>In order, from <code>C:\dev\hoverboard-firmware</code>. Each line should finish without error.</p>
+<p>In order, from <code>C:\dev\hoverboard-firmware</code> (the rustc and cargo lines in <code>motorcontroller</code>). Each line
+should finish without error.</p>
 <table>
   <tr><th>Command</th><th>Proves</th></tr>
   <tr><td><code>rustc -vV</code></td><td>pinned nightly installed, host triple is windows-msvc</td></tr>
@@ -205,7 +220,7 @@ Which brings up the next point.</p>
 </table>
 
 <footer>
-Source of truth, if any of this drifts: <code>rust-toolchain.toml</code>, <code>.cargo/config.toml</code>,
+Source of truth, if any of this drifts: <code>motorcontroller/rust-toolchain.toml</code>, <code>motorcontroller/.cargo/config.toml</code>,
 <code>tools/host-test.sh</code>, <code>.github/workflows/ci.yml</code>, <code>apps/rider/app/build.gradle.kts</code>.
 CI is the arbiter: every command above is the one CI runs, or its exact Windows equivalent.
 </footer>

@@ -1,4 +1,0 @@
-# The repo root defaults the build to the board target (thumbv7m); this tool runs on the machine
-# that builds it, so `cargo build` / `cargo test` here need no --target.
-[build]
-target = "host-tuple"
