@@ -38,12 +38,12 @@ import org.junit.jupiter.api.Test
  * are pinned to a single shared set of bytes.
  *
  * Repo-relative paths are against the firmware repo root, and every citation names the SYMBOL it
- * refers to (`crates/net/src/pdu.rs, Opcode`), never a line number.
+ * refers to (`shared/net/src/pdu.rs, Opcode`), never a line number.
  *
  * This file is where that rule was learned twice over. It carried 67 line-numbered citations pinned
  * to firmware main 59e30b9, and by the time anyone looked they pointed at whatever had drifted into
  * those positions since; the branch that first wrote this note then rotted thirteen MORE of them in
- * the same commit, by inserting twelve lines into `crates/net/src/pdu.rs`, so the citation for line
+ * the same commit, by inserting twelve lines into `shared/net/src/pdu.rs`, so the citation for line
  * 45 stopped being `NodeHello = 0x01` and became a doc line about `is_unicast`. A number that a
  * change elsewhere can silently falsify is not a citation, it is a decoration.
  *
@@ -73,7 +73,7 @@ class WireDriftTest {
     // --- Opcode allocation ----------------------------------------------------------------------
 
     /**
-     * L7 control block, `crates/linkctl/src/lib.rs` (`OP_CYCLIC_STATE`, `OP_DRIVE_CMD`,
+     * L7 control block, `shared/linkctl/src/lib.rs` (`OP_CYCLIC_STATE`, `OP_DRIVE_CMD`,
      * `OP_INPUTS`), pinned on the Rust side by its own `opcode_allocation_pinned`.
      *
      * These are the values the retired rider protocol got wrong: it had INPUTS at 0x50 and a
@@ -81,14 +81,14 @@ class WireDriftTest {
      */
     @Test
     fun linkctlOpcodesMatchTheFirmware() {
-        assertEquals(0x10, OP_CYCLIC_STATE, "crates/linkctl/src/lib.rs, OP_CYCLIC_STATE")
-        assertEquals(0x11, OP_DRIVE_CMD, "crates/linkctl/src/lib.rs, OP_DRIVE_CMD")
-        assertEquals(0x12, OP_INPUTS, "crates/linkctl/src/lib.rs, OP_INPUTS")
+        assertEquals(0x10, OP_CYCLIC_STATE, "shared/linkctl/src/lib.rs, OP_CYCLIC_STATE")
+        assertEquals(0x11, OP_DRIVE_CMD, "shared/linkctl/src/lib.rs, OP_DRIVE_CMD")
+        assertEquals(0x12, OP_INPUTS, "shared/linkctl/src/lib.rs, OP_INPUTS")
     }
 
     /**
      * The whole control block lives inside the reserved range `0x10..0x2F`, asserted on the Rust
-     * side by `opcode_allocation_pinned` in `crates/linkctl/src/lib.rs`. A new family added outside
+     * side by `opcode_allocation_pinned` in `shared/linkctl/src/lib.rs`. A new family added outside
      * the range would be forwarded by L3 but never handed back to the control decoder.
      */
     @Test
@@ -99,22 +99,22 @@ class WireDriftTest {
     }
 
     /**
-     * L3 opcodes, `crates/net/src/pdu.rs`, `Opcode`. 0x04 and 0x05 are reserved holes (the retired
+     * L3 opcodes, `shared/net/src/pdu.rs`, `Opcode`. 0x04 and 0x05 are reserved holes (the retired
      * ATTACH / ATTACH_ACK, `specs/l3.md`, "Discovery and address assignment") and must stay
      * unallocated.
      */
     @Test
     fun l3OpcodesMatchTheFirmware() {
-        assertEquals(0x01, Opcode.NodeHello.value, "crates/net/src/pdu.rs, Opcode::NodeHello")
-        assertEquals(0x02, Opcode.ProbePorts.value, "crates/net/src/pdu.rs, Opcode::ProbePorts")
-        assertEquals(0x03, Opcode.Ports.value, "crates/net/src/pdu.rs, Opcode::Ports")
-        assertEquals(0x06, Opcode.Assign.value, "crates/net/src/pdu.rs, Opcode::Assign")
-        assertEquals(0x07, Opcode.AssignAck.value, "crates/net/src/pdu.rs, Opcode::AssignAck")
-        assertEquals(0x30, Opcode.ConfigRead.value, "crates/net/src/pdu.rs, Opcode::ConfigRead")
-        assertEquals(0x31, Opcode.ConfigWrite.value, "crates/net/src/pdu.rs, Opcode::ConfigWrite")
-        assertEquals(0x32, Opcode.ConfigResp.value, "crates/net/src/pdu.rs, Opcode::ConfigResp")
-        assertEquals(0x33, Opcode.ConfigWriteMulti.value, "crates/net/src/pdu.rs, Opcode::ConfigWriteMulti")
-        assertEquals(0x36, Opcode.ConfigCompact.value, "crates/net/src/pdu.rs, Opcode::ConfigCompact")
+        assertEquals(0x01, Opcode.NodeHello.value, "shared/net/src/pdu.rs, Opcode::NodeHello")
+        assertEquals(0x02, Opcode.ProbePorts.value, "shared/net/src/pdu.rs, Opcode::ProbePorts")
+        assertEquals(0x03, Opcode.Ports.value, "shared/net/src/pdu.rs, Opcode::Ports")
+        assertEquals(0x06, Opcode.Assign.value, "shared/net/src/pdu.rs, Opcode::Assign")
+        assertEquals(0x07, Opcode.AssignAck.value, "shared/net/src/pdu.rs, Opcode::AssignAck")
+        assertEquals(0x30, Opcode.ConfigRead.value, "shared/net/src/pdu.rs, Opcode::ConfigRead")
+        assertEquals(0x31, Opcode.ConfigWrite.value, "shared/net/src/pdu.rs, Opcode::ConfigWrite")
+        assertEquals(0x32, Opcode.ConfigResp.value, "shared/net/src/pdu.rs, Opcode::ConfigResp")
+        assertEquals(0x33, Opcode.ConfigWriteMulti.value, "shared/net/src/pdu.rs, Opcode::ConfigWriteMulti")
+        assertEquals(0x36, Opcode.ConfigCompact.value, "shared/net/src/pdu.rs, Opcode::ConfigCompact")
 
         assertNull(Opcode.fromU8(0x04), "0x04 is a reserved hole: specs/l3.md, Discovery and address assignment")
         assertNull(Opcode.fromU8(0x05), "0x05 is a reserved hole: specs/l3.md, Discovery and address assignment")
@@ -123,7 +123,7 @@ class WireDriftTest {
     /**
      * The two opcode namespaces are disjoint layers and must never be merged into one enum: 0x10
      * is a perfectly valid L3 opcode byte that L3 deliberately does not interpret
-     * (`crates/net/src/pdu.rs`, `Opcode` and `Opcode::from_u8`). Merging them would make L3 reject or
+     * (`shared/net/src/pdu.rs`, `Opcode` and `Opcode::from_u8`). Merging them would make L3 reject or
      * mis-handle a
      * control PDU it is only supposed to forward by `dst`.
      */
@@ -137,7 +137,7 @@ class WireDriftTest {
     // --- Committed payload lengths --------------------------------------------------------------
 
     /**
-     * Pinned on the Rust side by `committed_lengths_pinned` in `crates/linkctl/src/lib.rs`.
+     * Pinned on the Rust side by `committed_lengths_pinned` in `shared/linkctl/src/lib.rs`.
      *
      * CyclicState at 13 is the 11 the retired rider protocol had at 7 (it was missing the
      * `battery` u16 inserted mid-struct, and had a single `status` byte where the firmware carries
@@ -149,9 +149,9 @@ class WireDriftTest {
      */
     @Test
     fun committedPayloadLengthsMatchTheFirmware() {
-        assertEquals(16, CyclicState.LEN, "crates/linkctl/src/lib.rs, CyclicState::LEN")
-        assertEquals(5, DriveCmd.LEN, "crates/linkctl/src/lib.rs, DriveCmd::LEN")
-        assertEquals(2, Inputs.LEN, "crates/linkctl/src/lib.rs, Inputs::LEN")
+        assertEquals(16, CyclicState.LEN, "shared/linkctl/src/lib.rs, CyclicState::LEN")
+        assertEquals(5, DriveCmd.LEN, "shared/linkctl/src/lib.rs, DriveCmd::LEN")
+        assertEquals(2, Inputs.LEN, "shared/linkctl/src/lib.rs, Inputs::LEN")
     }
 
     /**
@@ -159,13 +159,13 @@ class WireDriftTest {
      * where the block starts, 28 is where `wheelRate` starts, 32 is what the wire carries and the
      * only length a decoder takes.
      *
-     * Pinned on the Rust side by `appended_block_lengths_pinned` in `crates/linkctl/src/lib.rs`.
+     * Pinned on the Rust side by `appended_block_lengths_pinned` in `shared/linkctl/src/lib.rs`.
      */
     @Test
     fun theAppendedBlockLengthsMatchTheFirmware() {
-        assertEquals(12, CyclicObs.LEN, "crates/linkctl/src/lib.rs, CyclicObs::LEN")
-        assertEquals(28, CyclicState.WHEEL_RATE_OFF, "crates/linkctl/src/lib.rs, CyclicState::WHEEL_RATE_OFF")
-        assertEquals(32, CyclicState.ENCODED_LEN, "crates/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
+        assertEquals(12, CyclicObs.LEN, "shared/linkctl/src/lib.rs, CyclicObs::LEN")
+        assertEquals(28, CyclicState.WHEEL_RATE_OFF, "shared/linkctl/src/lib.rs, CyclicState::WHEEL_RATE_OFF")
+        assertEquals(32, CyclicState.ENCODED_LEN, "shared/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
     }
 
     /**
@@ -174,14 +174,14 @@ class WireDriftTest {
      */
     @Test
     fun theDriveDemandIsFullScaleNotTheThousandDomain() {
-        assertEquals(32767, DriveCmd.FULL_SCALE, "crates/control/src/config.rs, FRAME_IN_MAX")
+        assertEquals(32767, DriveCmd.FULL_SCALE, "motorcontroller/control/src/config.rs, FRAME_IN_MAX")
     }
 
     // --- Field order and byte layout, golden vectors from the Rust's own tests --------------------
 
     /**
      * Copied verbatim from `cyclic_state_wire_layout_is_little_endian` in
-     * `crates/linkctl/src/lib.rs`. This pins field ORDER, not just size: swapping any two fields
+     * `shared/linkctl/src/lib.rs`. This pins field ORDER, not just size: swapping any two fields
      * keeps the length the same and only this vector catches it.
      */
     @Test
@@ -236,7 +236,7 @@ class WireDriftTest {
      * into an Int would come back negative and a lifetime total would read as a wrong, small,
      * negative number. The word is a Long here, and this pins that it survives the round trip.
      *
-     * `u32::MAX` is where the firmware's total SATURATES (`crates/store/src/field.rs`,
+     * `u32::MAX` is where the firmware's total SATURATES (`shared/store/src/field.rs`,
      * `MOTOR_ODOMETER`), so it is a value a board can really send.
      */
     @Test
@@ -271,7 +271,7 @@ class WireDriftTest {
     /**
      * A payload of any length but [CyclicState.ENCODED_LEN] is REFUSED, short or long, from
      * `a_cyclic_payload_short_of_the_whole_is_refused` and
-     * `an_over_long_cyclic_payload_is_refused` in `crates/linkctl/src/lib.rs`.
+     * `an_over_long_cyclic_payload_is_refused` in `shared/linkctl/src/lib.rs`.
      *
      * The committed prefix alone decoded here until 2026-10-10, with the block absent, for a
      * board on an image from before the block existed. Both arguments for that are void: nothing
@@ -306,7 +306,7 @@ class WireDriftTest {
     /**
      * An unallocated chip byte is [ChipTag.Unknown] rather than an error, the same fail-safe the
      * drive kind has: a client that meets a part this build does not know says so.
-     * From `chip_tag_maps_both_ways` in `crates/linkctl/src/lib.rs`.
+     * From `chip_tag_maps_both_ways` in `shared/linkctl/src/lib.rs`.
      */
     @Test
     fun anUnknownChipByteIsUnknownNotAnError() {
@@ -319,7 +319,7 @@ class WireDriftTest {
         }
     }
 
-    /** From `drive_cmd_wire_layout_is_little_endian` in `crates/linkctl/src/lib.rs`. */
+    /** From `drive_cmd_wire_layout_is_little_endian` in `shared/linkctl/src/lib.rs`. */
     @Test
     fun driveCmdWireLayoutMatchesTheRustGoldenVector() {
         val cmd = DriveCmd(kind = DriveKind.Throttle, value = -300, steer = 0x1234)
@@ -329,7 +329,7 @@ class WireDriftTest {
         assertEquals(cmd, DriveCmd.decode(expected))
     }
 
-    /** From `inputs_wire_layout_is_little_endian` in `crates/linkctl/src/lib.rs`. */
+    /** From `inputs_wire_layout_is_little_endian` in `shared/linkctl/src/lib.rs`. */
     @Test
     fun inputsWireLayoutMatchesTheRustGoldenVector() {
         val inp = Inputs(buttons = Inputs.BUTTON_POWER, rider = Inputs.RIDER_PRESENT)
@@ -339,22 +339,22 @@ class WireDriftTest {
     }
 
     /**
-     * Flag and action bit values, all in `crates/linkctl/src/lib.rs`: `CyclicState::FLAG_RIDER` /
+     * Flag and action bit values, all in `shared/linkctl/src/lib.rs`: `CyclicState::FLAG_RIDER` /
      * `CyclicState::FLAG_LEADER` / `CyclicState::FLAG_FOLLOWER` / `CyclicState::FLAG_LOCKDOWN`,
      * `Inputs::BUTTON_POWER` /
      * `Inputs::RIDER_PRESENT`; and the
-     * fault-A group of the cyclic fault mask, `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`.
+     * fault-A group of the cyclic fault mask, `motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`.
      */
     @Test
     fun flagAndActionBitsMatchTheFirmware() {
-        assertEquals(0x01, CyclicState.FLAG_RIDER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_RIDER")
-        assertEquals(0x02, CyclicState.FLAG_LEADER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_LEADER")
-        assertEquals(0x04, CyclicState.FLAG_FOLLOWER, "crates/linkctl/src/lib.rs, CyclicState::FLAG_FOLLOWER")
-        assertEquals(0x0F17, CyclicState.FAULT_A_BITS, "crates/orchestrator/src/events.rs, FAULT_A_BITS")
+        assertEquals(0x01, CyclicState.FLAG_RIDER, "shared/linkctl/src/lib.rs, CyclicState::FLAG_RIDER")
+        assertEquals(0x02, CyclicState.FLAG_LEADER, "shared/linkctl/src/lib.rs, CyclicState::FLAG_LEADER")
+        assertEquals(0x04, CyclicState.FLAG_FOLLOWER, "shared/linkctl/src/lib.rs, CyclicState::FLAG_FOLLOWER")
+        assertEquals(0x0F17, CyclicState.FAULT_A_BITS, "motorcontroller/orchestrator/src/events.rs, FAULT_A_BITS")
         // FAULT_A_BITS | EV_LATCH_B: Fault A and Fault B, what holds a board in OFF.
-        assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS, "crates/orchestrator/src/events.rs, EV_LATCH_B")
+        assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS, "motorcontroller/orchestrator/src/events.rs, EV_LATCH_B")
 
-        val ev = "crates/orchestrator/src/events.rs"
+        val ev = "motorcontroller/orchestrator/src/events.rs"
         assertEquals(0x001, CyclicState.EV_COMMS_LOSS, "$ev, EV_COMMS_LOSS")
         assertEquals(0x002, CyclicState.EV_STOP_ALL, "$ev, EV_STOP_ALL")
         assertEquals(0x004, CyclicState.EV_IMU_LOSS, "$ev, EV_IMU_LOSS")
@@ -369,14 +369,14 @@ class WireDriftTest {
         assertEquals(
             0x80,
             CyclicState.FLAG_LOCKDOWN,
-            "crates/linkctl/src/lib.rs, CyclicState::FLAG_LOCKDOWN",
+            "shared/linkctl/src/lib.rs, CyclicState::FLAG_LOCKDOWN",
         )
-        assertEquals(0x01, Inputs.BUTTON_POWER, "crates/linkctl/src/lib.rs, Inputs::BUTTON_POWER")
-        assertEquals(0x01, Inputs.RIDER_PRESENT, "crates/linkctl/src/lib.rs, Inputs::RIDER_PRESENT")
+        assertEquals(0x01, Inputs.BUTTON_POWER, "shared/linkctl/src/lib.rs, Inputs::BUTTON_POWER")
+        assertEquals(0x01, Inputs.RIDER_PRESENT, "shared/linkctl/src/lib.rs, Inputs::RIDER_PRESENT")
     }
 
     /**
-     * Supervision timeouts, `crates/linkctl/src/lib.rs` (`CYCLIC_TIMEOUT_TICKS`,
+     * Supervision timeouts, `shared/linkctl/src/lib.rs` (`CYCLIC_TIMEOUT_TICKS`,
      * `DRIVE_TIMEOUT_TICKS`, `INPUTS_TIMEOUT_TICKS`), pinned on the Rust side by
      * `supervision_constants_pinned`. The controller mirrors these to decide when its own view has
      * gone stale, and `INPUTS_TIMEOUT_TICKS` additionally bounds how long a gap in its OWN sending
@@ -391,17 +391,17 @@ class WireDriftTest {
         assertEquals(
             25,
             com.hoverboard.protocol.linkctl.CYCLIC_TIMEOUT_TICKS,
-            "crates/linkctl/src/lib.rs, CYCLIC_TIMEOUT_TICKS",
+            "shared/linkctl/src/lib.rs, CYCLIC_TIMEOUT_TICKS",
         )
         assertEquals(
             50,
             com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS,
-            "crates/linkctl/src/lib.rs, DRIVE_TIMEOUT_TICKS",
+            "shared/linkctl/src/lib.rs, DRIVE_TIMEOUT_TICKS",
         )
         assertEquals(
             375,
             com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS,
-            "crates/linkctl/src/lib.rs, INPUTS_TIMEOUT_TICKS",
+            "shared/linkctl/src/lib.rs, INPUTS_TIMEOUT_TICKS",
         )
         assertTrue(
             com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS >
@@ -413,7 +413,7 @@ class WireDriftTest {
     // --- L2 frame header shape ------------------------------------------------------------------
 
     /**
-     * The L2 stream frame, `crates/link/src/framer.rs` (the module doc's diagram, with the encoder in
+     * The L2 stream frame, `shared/link/src/framer.rs` (the module doc's diagram, with the encoder in
      * `encode`):
      *
      * ```
@@ -425,15 +425,15 @@ class WireDriftTest {
      * single break that made every current frame unparseable to it.
      *
      * `len` counts the frag-hdr through end of chunk, so `len == 1 + chunk.size`. It is NOT the
-     * whole-frame length and does not include SOF, len or CRC (`crates/link/src/framer.rs`, the module doc).
+     * whole-frame length and does not include SOF, len or CRC (`shared/link/src/framer.rs`, the module doc).
      */
     @Test
     fun l2FrameHeaderIsSofThenLengthWithNoVersionByte() {
-        assertEquals(0x5A, StreamFrame.SOF, "crates/link/src/framer.rs, SOF")
-        assertEquals(2, StreamFrame.STREAM_HEADER_LEN, "crates/link/src/framer.rs, STREAM_HEADER_LEN")
-        assertEquals(2, StreamFrame.STREAM_CRC_LEN, "crates/link/src/framer.rs, STREAM_CRC_LEN")
-        assertEquals(255, StreamFrame.MAX_L2_LEN, "crates/link/src/framer.rs, MAX_L2_LEN")
-        assertEquals(259, StreamFrame.MAX_STREAM_FRAME, "crates/link/src/framer.rs, MAX_STREAM_FRAME")
+        assertEquals(0x5A, StreamFrame.SOF, "shared/link/src/framer.rs, SOF")
+        assertEquals(2, StreamFrame.STREAM_HEADER_LEN, "shared/link/src/framer.rs, STREAM_HEADER_LEN")
+        assertEquals(2, StreamFrame.STREAM_CRC_LEN, "shared/link/src/framer.rs, STREAM_CRC_LEN")
+        assertEquals(255, StreamFrame.MAX_L2_LEN, "shared/link/src/framer.rs, MAX_L2_LEN")
+        assertEquals(259, StreamFrame.MAX_STREAM_FRAME, "shared/link/src/framer.rs, MAX_STREAM_FRAME")
 
         // An L2 frame of frag-hdr 0x00 plus a 3-byte chunk.
         val l2 = byteArrayOf(0x00, 0xAA.toByte(), 0xBB.toByte(), 0xCC.toByte())
@@ -447,8 +447,8 @@ class WireDriftTest {
 
     /**
      * CRC choice and coverage. CRC-16/MODBUS, reflected poly 0xA001, init 0xFFFF, no final XOR
-     * (`crates/base/src/crc16.rs`, `modbus`). It covers SOF and the len byte as well as the body, i.e.
-     * everything except itself (`crates/link/src/framer.rs`: `encode` writes it,
+     * (`shared/base/src/crc16.rs`, `modbus`). It covers SOF and the len byte as well as the body, i.e.
+     * everything except itself (`shared/link/src/framer.rs`: `encode` writes it,
      * `StreamFramer::feed_one` verifies it), and is written little-endian, low byte first.
      *
      * Coverage is the subtle half: a CRC over the body only would still round-trip in isolation
@@ -456,15 +456,15 @@ class WireDriftTest {
      */
     @Test
     fun crcIsModbusOverSofAndLengthToo() {
-        // Known-answer vectors from crates/base/src/crc16.rs: golden_check_value, golden_frozen_pair,
+        // Known-answer vectors from shared/base/src/crc16.rs: golden_check_value, golden_frozen_pair,
         // empty_is_init.
-        assertEquals(0x4B37, Crc16.modbus("123456789".toByteArray()), "crates/base/src/crc16.rs, golden_check_value")
+        assertEquals(0x4B37, Crc16.modbus("123456789".toByteArray()), "shared/base/src/crc16.rs, golden_check_value")
         assertEquals(
             0xBB2A,
             Crc16.modbus(byteArrayOf(1, 2, 3, 4, 5)),
-            "crates/base/src/crc16.rs, golden_frozen_pair",
+            "shared/base/src/crc16.rs, golden_frozen_pair",
         )
-        assertEquals(0xFFFF, Crc16.modbus(ByteArray(0)), "crates/base/src/crc16.rs, empty_is_init")
+        assertEquals(0xFFFF, Crc16.modbus(ByteArray(0)), "shared/base/src/crc16.rs, empty_is_init")
 
         val l2 = byteArrayOf(0x00, 0xAA.toByte(), 0xBB.toByte(), 0xCC.toByte())
         val wire = StreamFrame.encode(l2)
@@ -479,15 +479,15 @@ class WireDriftTest {
     }
 
     /**
-     * The one-byte fragmentation header, `crates/link/src/frag.rs` (its module doc):
+     * The one-byte fragmentation header, `shared/link/src/frag.rs` (its module doc):
      * bit7 MORE, bits 6..4 PID (0..7), bits 3..0 FRAG_IDX (0..15).
      */
     @Test
     fun fragHeaderBitPositionsMatchTheFirmware() {
-        assertEquals(0b1000_0000, FragHdr.MORE_BIT, "crates/link/src/frag.rs, MORE_BIT")
-        assertEquals(0b0000_0111, FragHdr.MAX_PID, "crates/link/src/frag.rs, MAX_PID")
-        assertEquals(0b0000_1111, FragHdr.MAX_FRAG_IDX, "crates/link/src/frag.rs, MAX_FRAG_IDX")
-        assertEquals(16, FragHdr.MAX_FRAGMENTS, "crates/link/src/frag.rs, MAX_FRAGMENTS")
+        assertEquals(0b1000_0000, FragHdr.MORE_BIT, "shared/link/src/frag.rs, MORE_BIT")
+        assertEquals(0b0000_0111, FragHdr.MAX_PID, "shared/link/src/frag.rs, MAX_PID")
+        assertEquals(0b0000_1111, FragHdr.MAX_FRAG_IDX, "shared/link/src/frag.rs, MAX_FRAG_IDX")
+        assertEquals(16, FragHdr.MAX_FRAGMENTS, "shared/link/src/frag.rs, MAX_FRAGMENTS")
 
         // PID sits at bits 6..4, so pid 5 encodes as 0b0101_0000.
         assertEquals(0b0101_0011, FragHdr(more = false, pid = 5, fragIdx = 3).encode())
@@ -498,11 +498,11 @@ class WireDriftTest {
 
     /**
      * The L3 PDU is `[opcode][src][dst][payload...]` with no SOF, len, CRC, version, seq, TTL or
-     * hop count: L2 owns framing and integrity (`crates/net/src/pdu.rs`, the module doc + `HEADER_LEN`).
+     * hop count: L2 owns framing and integrity (`shared/net/src/pdu.rs`, the module doc + `HEADER_LEN`).
      */
     @Test
     fun l3PduHeaderIsThreeBytesAndCarriesNoIntegrity() {
-        assertEquals(3, HEADER_LEN, "crates/net/src/pdu.rs, HEADER_LEN")
+        assertEquals(3, HEADER_LEN, "shared/net/src/pdu.rs, HEADER_LEN")
 
         val payload = byteArrayOf(0x01, 0x02)
         val pdu = Pdu(opcode = OP_CYCLIC_STATE, src = 0x02, dst = 0x00, payload = payload)
@@ -514,11 +514,11 @@ class WireDriftTest {
         assertEquals(0x00, bytes[2].toInt() and 0xFF)
     }
 
-    /** Address ranges, `crates/net/src/pdu.rs` (`BROADCAST` through `is_unicast`). */
+    /** Address ranges, `shared/net/src/pdu.rs` (`BROADCAST` through `is_unicast`). */
     @Test
     fun addressRangesMatchTheFirmware() {
-        assertEquals(0xFF, com.hoverboard.protocol.l3.BROADCAST, "crates/net/src/pdu.rs, BROADCAST")
-        assertEquals(0x00, com.hoverboard.protocol.l3.NO_ADDRESS, "crates/net/src/pdu.rs, NO_ADDRESS")
+        assertEquals(0xFF, com.hoverboard.protocol.l3.BROADCAST, "shared/net/src/pdu.rs, BROADCAST")
+        assertEquals(0x00, com.hoverboard.protocol.l3.NO_ADDRESS, "shared/net/src/pdu.rs, NO_ADDRESS")
 
         assertTrue(com.hoverboard.protocol.l3.isBoard(0x01) && com.hoverboard.protocol.l3.isBoard(0x7F))
         assertTrue(!com.hoverboard.protocol.l3.isBoard(0x00) && !com.hoverboard.protocol.l3.isBoard(0x80))
@@ -555,7 +555,7 @@ class WireDriftTest {
 
     // --- Store value type tags ------------------------------------------------------------------
 
-    /** Type tags ride inside CONFIG_*; `crates/store/src/key.rs`, `Type::tag`. */
+    /** Type tags ride inside CONFIG_*; `shared/store/src/key.rs`, `Type::tag`. */
     @Test
     fun storeTypeTagsMatchTheFirmware() {
         assertEquals(0x01, Type.U8.tag)
@@ -573,7 +573,7 @@ class WireDriftTest {
     // --- Forward-compatibility contract -----------------------------------------------------------
 
     /**
-     * The committed-prefix rule (`crates/linkctl/src/lib.rs`, the module doc), pinned on the Rust
+     * The committed-prefix rule (`shared/linkctl/src/lib.rs`, the module doc), pinned on the Rust
      * side by `trailing_bytes_are_ignored_every_append_tolerant_family` and
      * `short_payloads_are_rejected`.
      *
@@ -595,7 +595,7 @@ class WireDriftTest {
 
     /**
      * An unknown DRIVE_CMD kind byte decodes as Neutral rather than failing
-     * (`crates/linkctl/src/lib.rs`, `DriveCmd::decode`, tested by `unknown_drive_kind_decodes_as_neutral`).
+     * (`shared/linkctl/src/lib.rs`, `DriveCmd::decode`, tested by `unknown_drive_kind_decodes_as_neutral`).
      * Fail-safe: an unrecognised
      * command must not be read as throttle.
      */
@@ -614,17 +614,17 @@ class WireDriftTest {
      * A CYCLIC_STATE PDU from the bridge is ONE stream frame, carried in TWO BLE notifications.
      *
      * ```
-     * CYCLIC_STATE payload            32 B   crates/linkctl, CyclicState::ENCODED_LEN
-     * + L3 header                      3 B   crates/net, HEADER_LEN
+     * CYCLIC_STATE payload            32 B   shared/linkctl, CyclicState::ENCODED_LEN
+     * + L3 header                      3 B   shared/net, HEADER_LEN
      *                                = 35 B PDU
      * bridge frame capacity 128 -> one fragment, L2 frame = frag-hdr 1 + 35 = 36 B
      * stream = SOF 1 + len 1 + 36 + CRC 2 = 40 B, notified as 20 B + 20 B
      * ```
      *
      * The bridge's controller links frame at 128 and notify at most 20 B
-     * (`apps/hoverboard-bridge/core/src/router.rs` (FRAME, NOTIFY_MAX)), so a frame spans
+     * (`bridge/core/src/router.rs` (FRAME, NOTIFY_MAX)), so a frame spans
      * notifications and the rider reassembles it from the byte stream. The Rust side asserts the 40 B by
-     * `stage_of_a_cyclic_state_pdu_is_one_frame_on_a_128_byte_link` in `crates/link/src/link.rs`.
+     * `stage_of_a_cyclic_state_pdu_is_one_frame_on_a_128_byte_link` in `shared/link/src/link.rs`.
      *
      * The app's own outgoing frame capacity stays 16, so each frame it writes is one 20 B ATT
      * write; that is pinned here beside the inbound arithmetic.
@@ -634,7 +634,7 @@ class WireDriftTest {
         assertEquals(
             16,
             BleStreamTransport.DEFAULT_FRAME_CAPACITY,
-            "apps/hoverboard-bridge/core/src/router.rs, NOTIFY_MAX",
+            "bridge/core/src/router.rs, NOTIFY_MAX",
         )
 
         val cyclic = CyclicState(
@@ -683,13 +683,13 @@ class WireDriftTest {
     }
 
     private companion object {
-        /** The chip byte's offset inside the appended block (`crates/linkctl/src/lib.rs`, `CyclicObs::decode`). */
+        /** The chip byte's offset inside the appended block (`shared/linkctl/src/lib.rs`, `CyclicObs::decode`). */
         const val CHIP_IN_BLOCK = 7
 
-        /** The bridge's controller-link L2 frame capacity, `FRAME` in `apps/hoverboard-bridge/core/src/router.rs`. */
+        /** The bridge's controller-link L2 frame capacity, `FRAME` in `bridge/core/src/router.rs`. */
         const val BRIDGE_FRAME = 128
 
-        /** The bridge's largest notification, `NOTIFY_MAX` in `apps/hoverboard-bridge/core/src/router.rs`. */
+        /** The bridge's largest notification, `NOTIFY_MAX` in `bridge/core/src/router.rs`. */
         const val NOTIFY_MAX = 20
     }
 }

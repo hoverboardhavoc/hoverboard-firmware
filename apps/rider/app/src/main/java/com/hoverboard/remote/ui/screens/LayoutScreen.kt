@@ -168,7 +168,7 @@ private fun Status(state: LayoutState, actions: LayoutActions) {
 
 /**
  * Which part the board says it is: the `chip` tag of its own `CYCLIC_STATE`
- * (`crates/linkctl/src/lib.rs`, `CyclicObs`), which is what the verdict is computed against.
+ * (`shared/linkctl/src/lib.rs`, `CyclicObs`), which is what the verdict is computed against.
  *
  * Two boards cannot be named: one that has sent no `CYCLIC_STATE` yet, so no part has arrived, and
  * one whose boot probe measured a combination the firmware allocates no fleet part for, which sends

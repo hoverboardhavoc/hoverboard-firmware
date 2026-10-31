@@ -7,12 +7,12 @@ import com.hoverboard.protocol.linkctl.CyclicState
  * UI-facing telemetry, derived from the board's CYCLIC_STATE PDUs (opcode 0x12's sibling, 0x10).
  *
  * CYCLIC_STATE is the telemetry source because the firmware has no telemetry opcode: the
- * 0x40..0x6F block is reserved and unimplemented (`crates/net/src/pdu.rs`, `Opcode`). This app
+ * 0x40..0x6F block is reserved and unimplemented (`shared/net/src/pdu.rs`, `Opcode`). This app
  * used to decode a TELEMETRY 0x20 frame, per motor, that nothing ever sent.
  *
  * That swap changes what the panel can show. CYCLIC_STATE is one board-level state record, not a
  * per-motor one, so there is no per-wheel current in it. What it does carry
- * (`crates/linkctl/src/lib.rs`, `CyclicState`), with the units the firmware puts on the wire:
+ * (`shared/linkctl/src/lib.rs`, `CyclicState`), with the units the firmware puts on the wire:
  *  - `battery` is CENTIVOLTS (`orchestrator::dispatch`, `BlockWords::battery`), so
  *    volts = cV / 100. The retired code read millivolts here, which would have shown a 36 V pack
  *    as 3.6 V. Zero is not a reading: see [batteryVolts].
@@ -151,7 +151,7 @@ data class TelemetryUi(
      *
      * It is the board's stored total plus everything counted since it booted, so it climbs
      * through a ride and survives a power cycle. A Long because the wire word is a `u32`
-     * (`crates/linkctl/src/lib.rs`, `CyclicObs`).
+     * (`shared/linkctl/src/lib.rs`, `CyclicObs`).
      *
      * COUNTS, not a distance. The conversion needs the motor's pole-pair count and the wheel's
      * diameter, both registered fields defaulting to unset, and both read per board on attach
@@ -210,7 +210,7 @@ data class TelemetryUi(
 }
 
 /**
- * The `CYCLIC_STATE.mode` byte, named (`crates/state/src/mode.rs`, `Mode`).
+ * The `CYCLIC_STATE.mode` byte, named (`motorcontroller/state/src/mode.rs`, `Mode`).
  *
  * The firmware's mode machine has exactly these five states and emits its mode byte on every
  * cyclic frame. [UNRECOGNISED] is the app's own: a byte this build does not know, which is a board
@@ -259,7 +259,7 @@ fun rigidLeader(boards: Collection<Int>, telemetry: Map<Int, TelemetryUi>): Int?
     boards.filter { telemetry[it]?.leadsRigidFrame == true }.singleOrNull()
 
 /**
- * One named fault bit of `CYCLIC_STATE.fault`, in bit order (`crates/orchestrator/src/events.rs`,
+ * One named fault bit of `CYCLIC_STATE.fault`, in bit order (`motorcontroller/orchestrator/src/events.rs`,
  * `FAULT_A_BITS` and the bits beside it): comms loss, the tilt cutout, IMU loss, motor 0's latch,
  * motor 1's latch (fault B) and the four motor-side causes.
  */

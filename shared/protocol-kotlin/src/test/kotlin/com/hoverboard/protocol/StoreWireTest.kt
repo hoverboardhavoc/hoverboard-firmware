@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 
-/** Mirror of `crates/store/src/{key,value}.rs`: the Type tags + little-endian Value forms. */
+/** Mirror of `shared/store/src/{key,value}.rs`: the Type tags + little-endian Value forms. */
 class StoreWireTest {
 
     @Test

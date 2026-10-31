@@ -7,7 +7,7 @@ import com.hoverboard.protocol.store.Key
 /**
  * The board-layout boot validator, mirrored in Kotlin: the packed port|pin encoding, the field set
  * a layout is made of, the set-level coherence checks and the chip-capability checks, as
- * `validate` in `crates/board/src/lib.rs` runs them at boot: the pure function
+ * `validate` in `motorcontroller/board/src/lib.rs` runs them at boot: the pure function
  * `specs/board-model.md` (section 2) calls "the judge".
  *
  * **Why a mirror exists at all.** `validate` is a pure function of three inputs: the staged fields,
@@ -33,7 +33,7 @@ const val PIN_ABSENT = 0xFF
 
 /**
  * The dead-time FLOOR a CONFIGURED gate group must meet, in `motor.dead_time` DTG ticks
- * (`crates/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`, which carries the full derivation).
+ * (`motorcontroller/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`, which carries the full derivation).
  *
  * The arithmetic in short: the gate timer is clocked at the 72 MHz sysclk with its dead-time
  * generator on the timer clock divided by 2, so one tick is 27.8 ns, and the 500 ns reference
@@ -147,7 +147,7 @@ interface Capabilities {
  * reads from.
  *
  * [def] is the registry entry, which owns the field's id, type and default ([Fields], which
- * `RustSourceDriftTest` pins against `crates/store/src/field.rs`, the `Field` handles); this enum owns only the mapping from a validator field to
+ * `RustSourceDriftTest` pins against `shared/store/src/field.rs`, the `Field` handles); this enum owns only the mapping from a validator field to
  * that entry, which is the mapping `board::plumbing`'s `field_id` makes on the firmware side and
  * `RustSourceDriftTest` pins against it. [perMotor] is whether the field is addressed per motor
  * (`Key.index` = the motor; a singleton uses index 0).
@@ -353,7 +353,7 @@ data class BoardFields(
     }
 
     companion object {
-        /** How many motors the field set carries (`crates/store/src/field.rs`, `MOTORS`, which sizes `board::BoardFields::motors`). */
+        /** How many motors the field set carries (`shared/store/src/field.rs`, `MOTORS`, which sizes `board::BoardFields::motors`). */
         const val MOTORS = 2
     }
 }
@@ -431,7 +431,7 @@ data class Validated(val selfHold: Pin?, val verdict: Verdict) {
 }
 
 /**
- * The boot validation (`validate` in `crates/board/src/lib.rs`;
+ * The boot validation (`validate` in `motorcontroller/board/src/lib.rs`;
  * `specs/board-model.md`, "The boot validator", checks 1-4):
  * parse plus chip-existence validity, group completeness including the rule that a configured gate
  * group carries a dead time at or above [DEAD_TIME_MIN_DTG], duplicates across the whole set,

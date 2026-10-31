@@ -298,7 +298,7 @@ class BleWalkEngine(
      * SAME board and key still matches; `ConfigClient`'s `WriteMismatch` documents that case.
      *
      * Precondition: single-key requests only, whose payload starts
-     * `[field_id, index]`. A `CONFIG_WRITE_MULTI` reply is `[0, 0, status, 0]` (`crates/net/src/walk.rs`,
+     * `[field_id, index]`. A `CONFIG_WRITE_MULTI` reply is `[0, 0, status, 0]` (`shared/net/src/walk.rs`,
      * `on_config_write_multi`) and never matches here, so a multi-write sender must extend this match.
      */
     private fun answersPendingConfig(frame: ByteArray): Boolean {

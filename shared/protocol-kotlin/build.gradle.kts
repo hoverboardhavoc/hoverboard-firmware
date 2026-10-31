@@ -47,16 +47,25 @@ tasks.test {
     // RustSourceDriftTest reads the firmware's Rust source and compares it to this mirror, so the
     // Rust files are genuine inputs to the test task. Without this, Gradle sees only Kotlin
     // sources, calls the task up to date after a firmware-only change, and the drift gate is
-    // silently skipped exactly when it matters. Verified: mutating an opcode in crates/linkctl
+    // silently skipped exactly when it matters. Verified: mutating an opcode in shared/linkctl
     // with this declaration absent left `gradlew test` reporting BUILD SUCCESSFUL from cache.
-    val crates = rootDir.parentFile?.resolve("crates")
-    if (crates != null && crates.isDirectory) {
-        inputs.files(fileTree(crates) { include("**/*.rs") })
-            .withPropertyName("firmwareRustSources")
-            .withPathSensitivity(PathSensitivity.RELATIVE)
+    //
+    // The gate reads crates in two workspaces, shared/ (linkctl, net, link, store, base) and
+    // motorcontroller/ (control, firmware, board, commutation, imu, orchestrator, scheduler), both
+    // resolved from the repository root two levels up. Each workspace keeps its build output in a
+    // target/ beside its crates, which holds generated .rs files and nothing the gate reads, so it
+    // is excluded.
+    val repo = rootDir.parentFile?.parentFile
+    for ((name, dir) in listOf("sharedRustSources" to "shared", "motorcontrollerRustSources" to "motorcontroller")) {
+        val tree = repo?.resolve(dir)
+        if (tree != null && tree.isDirectory) {
+            inputs.files(fileTree(tree) { include("**/*.rs"); exclude("target/**") })
+                .withPropertyName(name)
+                .withPathSensitivity(PathSensitivity.RELATIVE)
+        }
     }
 
-    // The same reasoning, for the one file outside crates/ that the gate reads:
+    // The same reasoning, for the one file outside the Rust workspaces that the gate reads:
     // theArmMirrorWindowOutlastsTheAppsKeepalive checks the firmware's arm-mirror window against the
     // rider app's INPUTS cadence, and reads that cadence out of the app's LinkConfig. The hazard the
     // test exists for is the APP moving, so an app-only edit is precisely the change that must not
@@ -65,7 +74,7 @@ tasks.test {
     //
     // One named file rather than a tree, because that is exactly what the test reads and the test
     // names the same path. If it ever reads a second app file, this declaration has to grow with it.
-    val linkConfig = rootDir.parentFile
+    val linkConfig = repo
         ?.resolve("apps/rider/app/src/main/java/com/hoverboard/remote/ble/LinkConfig.kt")
     if (linkConfig != null && linkConfig.isFile) {
         inputs.file(linkConfig)

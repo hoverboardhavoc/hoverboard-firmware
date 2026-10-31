@@ -81,7 +81,7 @@ sealed interface LayoutNotice {
  *
  * @param board the target: the attached board's address, or null while none is attached.
  * @param chip the part the board itself reports, from the `chip` tag of its `CYCLIC_STATE`
- *   (`crates/linkctl/src/lib.rs`, `CyclicObs`). Null until the board has sent a `CYCLIC_STATE` at
+ *   (`shared/linkctl/src/lib.rs`, `CyclicObs`). Null until the board has sent a `CYCLIC_STATE` at
  *   all, since every one of them carries the part. It survives a link drop the way the staged
  *   layout does, because power-cycling the board is part of applying a layout, and it is dropped
  *   when a DIFFERENT board attaches: the part is that board's fact, not the session's.
@@ -254,7 +254,7 @@ class LayoutModel(
 
     init {
         transport.attachedBoard.onEach(::onAttachedBoard).launchIn(scope)
-        // The board's own statements, carried in every CYCLIC_STATE (`crates/linkctl/src/lib.rs`,
+        // The board's own statements, carried in every CYCLIC_STATE (`shared/linkctl/src/lib.rs`,
         // `CyclicObs`), so the editor reads them instead of asking: the part it is, and the boot
         // it is on. The ATTACHED board's, by its address: the other board's state reaches the
         // phone on the same link, and this screen edits the layout of one board, so a part taken

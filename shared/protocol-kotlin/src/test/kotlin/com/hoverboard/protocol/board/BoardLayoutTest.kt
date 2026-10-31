@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test
  *
  * `RustSourceDriftTest` pins the SHAPE of this mirror (the field set, the error kinds and their
  * `BOARD_OBS` codes, the capability tables, the reserved-set rule) against the Rust source. This
- * file pins the BEHAVIOUR, by running the vectors from `crates/board/src/tests.rs`: the same
+ * file pins the BEHAVIOUR, by running the vectors from `motorcontroller/board/src/tests.rs`: the same
  * inputs, asserting the same outcome, field and kind. Each case names the Rust test it came from, so a Rust-side
  * change to one of them is a change to a case here with a name to look up.
  *
@@ -24,7 +24,7 @@ class BoardLayoutTest {
 
     /**
      * The reserved set the firmware passes an unconfigured board: the safe-USART allowlist pins
-     * plus SWD. The same vector as `RESERVED` in `crates/board/src/tests.rs`.
+     * plus SWD. The same vector as `RESERVED` in `motorcontroller/board/src/tests.rs`.
      */
     private val reserved = listOf(0x16, 0x17, 0x02, 0x03, 0x1A, 0x1B, 0x0D, 0x0E)
 
@@ -66,7 +66,7 @@ class BoardLayoutTest {
 
     /**
  * The same wiring with no phase-current sense: the vector `bench_motor0_no_sense` in
- * `crates/board/src/tests.rs`. It is the vector for the parts where PB0/PA0 are not free to be
+ * `motorcontroller/board/src/tests.rs`. It is the vector for the parts where PB0/PA0 are not free to be
  * analog inputs.
  */
     private fun benchMotor0NoSense() =
@@ -84,7 +84,7 @@ class BoardLayoutTest {
         checkNotNull(validate(fields, chip, res).error) { "expected a refusal, got a valid layout" }
 
     // --- the encoding: `parse_accepts_the_encoding_and_rejects_the_rest` in
-    // crates/board/src/tests.rs -----------------------------------------------------------------
+    // motorcontroller/board/src/tests.rs -----------------------------------------------------------------
 
     @Test
     fun parseAcceptsTheEncodingAndRejectsTheRest() {
@@ -115,7 +115,7 @@ class BoardLayoutTest {
     }
 
     // --- whole-set validation: `blank_board_validates_to_the_benign_plan` in
-    // crates/board/src/tests.rs, and its neighbours ---------------------------------------------
+    // motorcontroller/board/src/tests.rs, and its neighbours ---------------------------------------------
 
     @Test
     fun blankBoardValidatesToTheBenignPlan() {
@@ -210,7 +210,7 @@ class BoardLayoutTest {
 
     /**
      * The same vectors as `configured_gate_group_requires_a_dead_time_at_the_floor` in
-     * `crates/board/src/tests.rs`: the rule is a FLOOR, so 1..17 ticks are refused where they
+     * `motorcontroller/board/src/tests.rs`: the rule is a FLOOR, so 1..17 ticks are refused where they
      * used to validate, the floor itself and every value the fleet runs are taken, and 0 stays
      * legal with the gates unset.
      */
@@ -234,7 +234,7 @@ class BoardLayoutTest {
     @Test
     fun aZeroImuModelIsACompleteStateWhateverThePinsHold() {
         // The vector `a_zero_imu_model_is_a_complete_state_whatever_the_pins_hold` in
-        // `crates/board/src/tests.rs`. `imu.model` 0 is the group's ENABLE off
+        // `motorcontroller/board/src/tests.rs`. `imu.model` 0 is the group's ENABLE off
         // (`specs/board-model.md`, check 2, decided 2026-10-23), so the layout validates with both
         // pins still staged and the pins are inert. This case asserted `IncompleteGroup` against
         // `imu.model` until that decision; it was replaced because the refusal cost the board every
@@ -256,7 +256,7 @@ class BoardLayoutTest {
         plan(blankBoard().copy(imuScl = 0x08, imuSda = 0xFE)) // PA8 gate-capable, and not a pin at all
     }
 
-    /** The vector `an_enabled_imu_group_needs_both_of_its_pins` in `crates/board/src/tests.rs`. */
+    /** The vector `an_enabled_imu_group_needs_both_of_its_pins` in `motorcontroller/board/src/tests.rs`. */
     @Test
     fun anEnabledImuGroupNeedsBothOfItsPins() {
         // A model without pins: names the first absent pin.
@@ -507,7 +507,7 @@ class BoardLayoutTest {
     }
 
     // --- the fleet's own boards, end to end: `one_image_two_boards` in
-    // crates/board/src/tests.rs -----------------------------------------------------------------
+    // motorcontroller/board/src/tests.rs -----------------------------------------------------------------
 
     @Test
     fun theOffroadBoardGetsI2c1ConfiguredOrNot() {
@@ -533,7 +533,7 @@ class BoardLayoutTest {
     }
 
     // --- the reserved set itself: `reserved_set_frees_only_link_set_cleared_ports` and
-    // `reserved_set_ignores_ports_this_chip_cannot_route` in `crates/board/src/tests.rs` ----------
+    // `reserved_set_ignores_ports_this_chip_cannot_route` in `motorcontroller/board/src/tests.rs` ----------
 
     @Test
     fun theReservedSetFreesOnlyLinkSetClearedPorts() {

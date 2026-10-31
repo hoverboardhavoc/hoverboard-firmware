@@ -44,7 +44,7 @@ internal class LayoutRig(scope: TestScope) {
 
     /**
      * The board reports [chip] on its [boot]-th boot in its cyclic state, which is where the
-     * editor's part and its restart watch both come from (`crates/linkctl/src/lib.rs`,
+     * editor's part and its restart watch both come from (`shared/linkctl/src/lib.rs`,
      * `CyclicObs`). The rest of the payload is a board sitting still.
      */
     fun reports(chip: ChipTag, boot: Int = 1) = transport.emitCyclicState(

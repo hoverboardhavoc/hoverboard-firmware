@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Check that cross-file citations in the Kotlin protocol mirror and the rider app resolve.
 
-The mirror in protocol-kotlin/ documents, next to almost every declaration, the Rust it mirrors, and
-the rider app does the same for the firmware behaviour its screens describe. Those citations name a
-FILE and a SYMBOL (`crates/linkctl/src/lib.rs, CyclicState::LEN`) rather than a file and a line.
+The mirror in shared/protocol-kotlin/ documents, next to almost every declaration, the Rust it
+mirrors, and the rider app does the same for the firmware behaviour its screens describe. Those
+citations name a FILE and a SYMBOL (`shared/linkctl/src/lib.rs, CyclicState::LEN`) rather than a
+file and a line.
 This script is what makes that claim true rather than aspirational.
 
 Why it exists at all: a line number is falsified by any insertion above it, silently, from another
@@ -38,7 +39,7 @@ its own diagram), which checks the path and stops there. Citations may wrap acro
 
 WHAT IS READ. Comment text, and only comment text. The scope was two prose-heavy mirrors when this
 was written and reading whole files cost nothing; it costs a great deal once the scope is every
-Kotlin file, because a drift test NAMES the Rust it opens (`rust("crates/net/src/pdu.rs")`) and an
+Kotlin file, because a drift test NAMES the Rust it opens (`rust("shared/net/src/pdu.rs")`) and an
 app names the files it loads. A path a program opens is not a claim about that file's contents, and
 a rule that demanded it be rewritten as `<path>, <Symbol>` would be a rule about code. So each line
 contributes its comment span and nothing else (see comment_span), and the line-number check still
@@ -84,7 +85,7 @@ import sys
 # Both trees state the rule and are checked the same way. `apps/rider` is not a mirror of the Rust,
 # but it makes the same kind of claim about it (what a board does with a value, when a value takes
 # effect), and a claim about another file is a citation whoever writes it.
-SCOPE_ROOTS = ("protocol-kotlin/src", "apps/rider")
+SCOPE_ROOTS = ("shared/protocol-kotlin/src", "apps/rider")
 
 # Files inside those roots that the rule does not reach. Empty, and a name goes in here only with
 # the reason beside it; a growing list is the hand-written SCOPE coming back through the side door.
@@ -115,14 +116,14 @@ PATH = r"[A-Za-z0-9_./-]+\.(?:rs|md|c|h)(?![A-Za-z0-9_-])"
 SYM = r"[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z_][A-Za-z0-9_]*)?"
 Q = r"[`\"]?"
 
-# path first: `crates/net/src/pdu.rs, HEADER_LEN`
+# path first: `shared/net/src/pdu.rs, HEADER_LEN`
 PATH_THEN_SYM = re.compile(rf"{Q}({PATH}){Q}(?:'s)?\s*[,:]\s*{Q}({SYM}){Q}")
-# symbol first: `committed_lengths_pinned` in `crates/linkctl/src/lib.rs`. The symbol MUST be
+# symbol first: `committed_lengths_pinned` in `shared/linkctl/src/lib.rs`. The symbol MUST be
 # backticked here and the connector is only in/at: without that, ordinary prose ("Mirror of X",
 # "the engage gate in X", "known-answer vectors from X") parses as a citation and fails against a
 # symbol nobody claimed existed.
 SYM_THEN_PATH = re.compile(rf"`({SYM})`\s+(?:in|at)\s+{Q}({PATH}){Q}")
-# path then a parenthesised list: `crates/linkctl/src/lib.rs` (`OP_INPUTS`, `OP_DRIVE_CMD`)
+# path then a parenthesised list: `shared/linkctl/src/lib.rs` (`OP_INPUTS`, `OP_DRIVE_CMD`)
 PATH_THEN_PARENS = re.compile(rf"{Q}({PATH}){Q}\s*\(([^)]*)\)")
 # path then its own possessive: `link.rs`'s `Transport`. The same claim as `<Symbol>` in `<path>`,
 # written the way the sentence runs, and the symbol is checked the same way.
@@ -205,7 +206,7 @@ def comment_span(line: str, in_block: bool):
     """The (start, end) of the COMMENT text on one line, and the block state after it.
 
     Scanning the whole line was right while the scope was two prose-heavy mirrors and wrong the
-    moment it grew: `RustSourceDriftTest` names a dozen Rust files as arguments (`rust("crates/net/
+    moment it grew: `RustSourceDriftTest` names a dozen Rust files as arguments (`rust("shared/net/
     src/pdu.rs")`), and the app names its own under test. A path a program OPENS is not a claim
     about that file's contents, and demanding it be rewritten as `<path>, <Symbol>` would be a rule
     about code, not about citations. A citation is prose, so prose is what is read.
@@ -299,7 +300,7 @@ def main() -> int:
             cites.append((m.span(), m.group(1), None))
 
         # A short-form mention (`walk.rs`) is the file named in full elsewhere in the same file.
-        # The module doc spells `crates/net/src/walk.rs` once and the KDoc below it says `walk.rs`,
+        # The module doc spells `shared/net/src/walk.rs` once and the KDoc below it says `walk.rs`,
         # which is how these files are written and is worth keeping: the alternative is a
         # repo-relative path in the middle of every sentence. It is resolved rather than waved
         # through, so the SYMBOL beside it is still checked, and the short form has to be

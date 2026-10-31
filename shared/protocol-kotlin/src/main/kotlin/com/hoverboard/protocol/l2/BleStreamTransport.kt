@@ -2,7 +2,7 @@ package com.hoverboard.protocol.l2
 
 /**
  * L2 [Transport] over a raw BLE byte stream (the master's onboard CC2541 transparent-UART bridge), a
- * mirror of the firmware's byte-stream transport (`SerialTransport` in `crates/link/src/serial.rs`).
+ * mirror of the firmware's byte-stream transport (`SerialTransport` in `shared/link/src/serial.rs`).
  *
  * Outgoing L2 frames (`[ frag-hdr ][ chunk ]`) are wrapped SOF/len/CRC with [StreamFrame.encode] and
  * queued as a continuous byte stream for the GATT write char (0x1001); incoming notification bytes
@@ -54,7 +54,7 @@ class BleStreamTransport(
         /**
          * The L2 frame capacity (`frag-hdr` + chunk) for the BLE link: 16 B, so a whole stream
          * frame is `SOF + len + 16 + CRC = 20 B` = one BLE ATT write, the bridge's 20 B
-         * `NOTIFY_MAX` in `apps/hoverboard-bridge/core/src/router.rs`. It mirrored the board's own
+         * `NOTIFY_MAX` in `bridge/core/src/router.rs`. It mirrored the board's own
          * `BLE_FRAME_CAP` while the firmware still drove its CC2541; the phone's BLE peer is now
          * always a bridge.
          */

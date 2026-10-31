@@ -182,7 +182,7 @@ class CurrentReadingTest {
     )
 
     private companion object {
-        /** `crates/state/src/mode.rs`, `Mode`, in discriminant order. */
+        /** `motorcontroller/state/src/mode.rs`, `Mode`, in discriminant order. */
         const val OFF = 0
         const val INIT = 1
         const val READY = 2

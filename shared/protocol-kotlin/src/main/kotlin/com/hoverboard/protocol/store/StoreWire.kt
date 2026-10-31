@@ -1,7 +1,7 @@
 package com.hoverboard.protocol.store
 
 /**
- * The config store's on-wire vocabulary, a byte-for-byte mirror of `crates/store/src/{key,value}.rs`.
+ * The config store's on-wire vocabulary, a byte-for-byte mirror of `shared/store/src/{key,value}.rs`.
  * `CONFIG_*` PDUs carry a [Key] (`field_id`/`index`), a [Type] tag, and a little-endian [Value]
  * payload.
  */
@@ -9,7 +9,7 @@ package com.hoverboard.protocol.store
 /** A store key: `field_id` names the field, `index` selects the instance (a singleton uses 0). */
 data class Key(val fieldId: Int, val index: Int)
 
-/** The storage-layout type; its [tag] is the on-wire `type` byte (mirror of `crates/store/src/key.rs`'s `Type`). */
+/** The storage-layout type; its [tag] is the on-wire `type` byte (mirror of `shared/store/src/key.rs`'s `Type`). */
 enum class Type(val tag: Int) {
     U8(0x01),
     U16(0x02),
@@ -29,7 +29,7 @@ enum class Type(val tag: Int) {
 }
 
 /**
- * A dynamically typed config value (mirror of `crates/store/src/value.rs`'s `Value`): a [Type] tag plus the data.
+ * A dynamically typed config value (mirror of `shared/store/src/value.rs`'s `Value`): a [Type] tag plus the data.
  * Scalars encode little-endian; `Str` is UTF-8 bytes; `Bytes` is raw. Unsigned 32/64-bit values are
  * carried in `Long` (only the low N bits are written).
  */

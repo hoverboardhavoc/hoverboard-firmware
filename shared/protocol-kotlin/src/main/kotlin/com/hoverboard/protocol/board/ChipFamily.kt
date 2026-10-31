@@ -12,7 +12,7 @@ enum class McuFamily { F10X, F1X0 }
  * questions from a table like this one: it asks runtime-hal's descriptor-backed R-CAP queries
  * (`runtime_hal::pincap`), which this module cannot read, because they live in another repository
  * that the Kotlin drift gate deliberately does not check out. What it CAN read is
- * `crates/board/src/tests.rs`, `MockChip`: its tables are the same three parts' answers written
+ * `motorcontroller/board/src/tests.rs`, `MockChip`: its tables are the same three parts' answers written
  * out, and its `rcap_agreement` module asserts that the mock and the real queries agree on
  * EVERY encodable pin, on the fleet gate maps and their mutations, on every ordered pin pair, and
  * on `validate`'s whole outcome, per part. This table is the Kotlin mirror of `MockChip`, pinned to
@@ -21,7 +21,7 @@ enum class McuFamily { F10X, F1X0 }
  *
  * That is also the limit of the prediction. A part not listed here has no mirrored answers at all.
  * Which part a board IS comes from the board itself: every `CYCLIC_STATE` carries the tag its boot
- * probe measured (`crates/linkctl/src/lib.rs`, `ChipTag`), and [forTag] turns that tag into the
+ * probe measured (`shared/linkctl/src/lib.rs`, `ChipTag`), and [forTag] turns that tag into the
  * table a verdict is computed against, or into nothing when the tag names no part this table holds.
  */
 enum class ChipFamily(val label: String, val mcu: McuFamily) : Capabilities {
@@ -113,7 +113,7 @@ enum class ChipFamily(val label: String, val mcu: McuFamily) : Capabilities {
     companion object {
         /**
          * The capability table for the part a board NAMES on the wire, or null for a tag this
-         * module models no part for (`crates/linkctl/src/lib.rs`, `ChipTag`).
+         * module models no part for (`shared/linkctl/src/lib.rs`, `ChipTag`).
          *
          * [ChipTag.Unknown] is that null: the board's boot probe measured a family and an
          * advanced-timer count the firmware's own allocation has no fleet part for, so there are no

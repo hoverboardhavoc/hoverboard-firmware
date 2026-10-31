@@ -10,7 +10,7 @@ import java.io.File
  * **Why the generator asks Kotlin rather than Rust.** The verdict is `validate`, a pure function of
  * the staged fields, the part's capability answers and the reserved set. This module already holds
  * all three for the fleet's parts in ORDINARY code: `validate` (a mirror of `validate` in
- * `crates/board/src/lib.rs`), [ChipFamily] (the only non-test implementation of [Capabilities]
+ * `motorcontroller/board/src/lib.rs`), [ChipFamily] (the only non-test implementation of [Capabilities]
  * anywhere in the tree) and [reservedSet]. The Rust equivalents of the capability tables are
  * `#[cfg(test)]`-private to the board crate, so reaching the Rust validator from the host would mean
  * writing a SECOND capability table for the fleet's parts, and a fact that is already modelled does

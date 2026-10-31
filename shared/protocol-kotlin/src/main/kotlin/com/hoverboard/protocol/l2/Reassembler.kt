@@ -1,6 +1,6 @@
 package com.hoverboard.protocol.l2
 
-/** Why [fragment] failed (mirror of `crates/link/src/reasm.rs`'s `FragError`). */
+/** Why [fragment] failed (mirror of `shared/link/src/reasm.rs`'s `FragError`). */
 sealed class FragException(message: String) : Exception(message) {
     /** The packet needs more than [FragHdr.MAX_FRAGMENTS] fragments at this link's chunk capacity. */
     object PacketTooLarge : FragException("packet exceeds ${FragHdr.MAX_FRAGMENTS} fragments")

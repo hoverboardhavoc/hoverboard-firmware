@@ -1,7 +1,7 @@
 package com.hoverboard.protocol.linkctl
 
 /**
- * Kotlin mirror of `crates/linkctl/src/lib.rs`: the three L7 control payload families that ride
+ * Kotlin mirror of `shared/linkctl/src/lib.rs`: the three L7 control payload families that ride
  * L3 PDUs in the reserved control opcode block `0x10..0x2F`.
  *
  * An L7 payload here is the payload of one L3 PDU (`[opcode][src][dst][payload...]`, one PDU per
@@ -9,7 +9,7 @@ package com.hoverboard.protocol.linkctl
  * header and [com.hoverboard.protocol.l2] owns the frame.
  *
  * Conventions carried across from the Rust, all pinned by `WireDriftTest` and all stated in that
- * crate's module doc (`crates/linkctl/src/lib.rs`, the header):
+ * crate's module doc (`shared/linkctl/src/lib.rs`, the header):
  * - Every multi-byte field is **little-endian**.
  * - **Committed-prefix decode** for [DriveCmd] and [Inputs]: a decoder reads its
  *   committed prefix and ignores trailing bytes, so a firmware build that appends a field still
@@ -17,14 +17,14 @@ package com.hoverboard.protocol.linkctl
  * - **[CyclicState] is decoded by EXACT LENGTH** ([CyclicState.ENCODED_LEN]): the committed words
  *   plus the appended [CyclicObs] block, and any other length is a protocol error. It is the one
  *   family that does not tolerate a short or a long payload, and the firmware's decoder is the
- *   same (`crates/linkctl/src/lib.rs`, `CyclicState::decode`).
+ *   same (`shared/linkctl/src/lib.rs`, `CyclicState::decode`).
  * - All four families are best-effort / latest-wins: no seq, no ack, no retransmit. A rejected
  *   payload is dropped, not raised, which is why every `decode` here returns null rather than
  *   throwing.
  *
  * These opcodes are NOT the L3 opcodes in [com.hoverboard.protocol.l3.Opcode] and must never be
  * merged with them: `0x10` is a valid, forwardable L3 opcode byte that L3 deliberately does not
- * interpret (`crates/net/src/pdu.rs`, `Opcode::from_u8`).
+ * interpret (`shared/net/src/pdu.rs`, `Opcode::from_u8`).
  *
  * **Citations here name a FILE and a SYMBOL, never a line number.** Every declaration below points
  * at the Rust it mirrors, and this file carried 43 `file:line` citations that had rotted where they
@@ -45,28 +45,28 @@ package com.hoverboard.protocol.linkctl
  * worktree, not in a clean clone, not on CI. This file cites none today; WireDriftTest cites three.
  */
 
-/** `CYCLIC_STATE`: board state broadcast. `crates/linkctl/src/lib.rs`, `OP_CYCLIC_STATE`. */
+/** `CYCLIC_STATE`: board state broadcast. `shared/linkctl/src/lib.rs`, `OP_CYCLIC_STATE`. */
 const val OP_CYCLIC_STATE: Int = 0x10
 
-/** `DRIVE_CMD`: controller -> board drive reference. `crates/linkctl/src/lib.rs`, `OP_DRIVE_CMD`. */
+/** `DRIVE_CMD`: controller -> board drive reference. `shared/linkctl/src/lib.rs`, `OP_DRIVE_CMD`. */
 const val OP_DRIVE_CMD: Int = 0x11
 
-/** `INPUTS`: controller/peer -> board input mirror. `crates/linkctl/src/lib.rs`, `OP_INPUTS`. */
+/** `INPUTS`: controller/peer -> board input mirror. `shared/linkctl/src/lib.rs`, `OP_INPUTS`. */
 const val OP_INPUTS: Int = 0x12
 
 /**
- * Peer-staleness trip in 250 Hz ticks (100 ms). `crates/linkctl/src/lib.rs`, `CYCLIC_TIMEOUT_TICKS`.
+ * Peer-staleness trip in 250 Hz ticks (100 ms). `shared/linkctl/src/lib.rs`, `CYCLIC_TIMEOUT_TICKS`.
  *
  * Mirrored for the controller's own staleness display; the firmware owns the actual supervision.
  */
 const val CYCLIC_TIMEOUT_TICKS: Int = 25
 
-/** Drive-staleness decay in 250 Hz ticks (200 ms). `crates/linkctl/src/lib.rs`, `DRIVE_TIMEOUT_TICKS`. */
+/** Drive-staleness decay in 250 Hz ticks (200 ms). `shared/linkctl/src/lib.rs`, `DRIVE_TIMEOUT_TICKS`. */
 const val DRIVE_TIMEOUT_TICKS: Int = 50
 
 /**
  * Remote-`INPUTS`-mirror staleness in 250 Hz ticks (1.5 s).
- * `crates/linkctl/src/lib.rs`, `INPUTS_TIMEOUT_TICKS`.
+ * `shared/linkctl/src/lib.rs`, `INPUTS_TIMEOUT_TICKS`.
  *
  * This is the window a controller's arm level survives in the firmware once the controller stops
  * being heard from: past it the mirror stops being a source at all, every level it carries reads as
@@ -123,11 +123,11 @@ private fun rdI32(b: ByteArray, at: Int): Int = rdU32(b, at).toInt()
 
 /**
  * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
- * Mirror of `crates/linkctl/src/lib.rs`, `ChipTag`.
+ * Mirror of `shared/linkctl/src/lib.rs`, `ChipTag`.
  *
  * The tags are the firmware's own allocation, not a silicon id: the GD32 parts carry no readable
  * part number, so the board derives the tag from what its detect probe MEASURED
- * (`crates/linkctl/src/lib.rs`, `ChipTag::from_detected`).
+ * (`shared/linkctl/src/lib.rs`, `ChipTag::from_detected`).
  *
  * [Unknown] is the fail-safe for a byte this build does not allocate, as [DriveKind.Neutral] is
  * for an unknown kind byte: a client that cannot name the part must say so rather than assume one.
@@ -151,17 +151,17 @@ enum class ChipTag(val value: Int) {
     companion object {
         /**
          * The tag a wire byte names; anything unallocated is [Unknown] (fail-safe).
-         * `crates/linkctl/src/lib.rs`, `ChipTag::from_u8`.
+         * `shared/linkctl/src/lib.rs`, `ChipTag::from_u8`.
          */
         fun fromU8(b: Int): ChipTag = entries.firstOrNull { it.value == b } ?: Unknown
     }
 }
 
 /**
- * The APPENDED observation block of a `CYCLIC_STATE`. Mirror of `crates/linkctl/src/lib.rs`,
+ * The APPENDED observation block of a `CYCLIC_STATE`. Mirror of `shared/linkctl/src/lib.rs`,
  * `CyclicObs`.
  *
- * Wire layout, 12 bytes from offset 15 (`crates/linkctl/src/lib.rs`, `CyclicObs`):
+ * Wire layout, 12 bytes from offset 15 (`shared/linkctl/src/lib.rs`, `CyclicObs`):
  * ```
  * off 15..17  i16 LE  phasePeak   window peak phase-current magnitude, stock current counts
  * off 17..19  i16 LE  phaseMean   the SAME window's mean magnitude, same counts
@@ -187,7 +187,7 @@ enum class ChipTag(val value: Int) {
  * still held.
  *
  * [odometer] is this wheel's LIVE lifetime travel in absolute hall edges: the total the board's
- * store last recorded plus every edge counted since it booted (`crates/store/src/field.rs`,
+ * store last recorded plus every edge counted since it booted (`shared/store/src/field.rs`,
  * `MOTOR_ODOMETER`). Reversing adds, so it never winds back, and it is COUNTS rather than a
  * distance, because converting needs a pole-pair count and a wheel diameter
  * (`Fields.MOTOR_POLE_PAIRS` and `Fields.WHEEL_DIAMETER_MM`), both registered and both defaulting
@@ -219,7 +219,7 @@ data class CyclicObs(
     }
 
     companion object {
-        /** On-wire length of the appended block. `crates/linkctl/src/lib.rs`, `CyclicObs::LEN`. */
+        /** On-wire length of the appended block. `shared/linkctl/src/lib.rs`, `CyclicObs::LEN`. */
         const val LEN = 12
 
         /**
@@ -228,7 +228,7 @@ data class CyclicObs(
          *
          * Mirrored here because [dutyOn] means nothing without it: the word is a duty against this
          * period, and the DC-link current a consumer derives is `(phaseMean / cal) * (dutyOn /
-         * DUTY_FULL)`. `crates/commutation/src/lib.rs`, `ARR` owns the number and
+         * DUTY_FULL)`. `motorcontroller/commutation/src/lib.rs`, `ARR` owns the number and
          * `RustSourceDriftTest` pins this against it.
          */
         const val DUTY_FULL = 2_250
@@ -246,15 +246,15 @@ data class CyclicObs(
 }
 
 /**
- * Board state, emitted cyclically. Mirror of `crates/linkctl/src/lib.rs`, `CyclicState`.
+ * Board state, emitted cyclically. Mirror of `shared/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 32 bytes and only 32 (`crates/linkctl/src/lib.rs`, `CyclicState::encode`): the 16
+ * Wire layout, 32 bytes and only 32 (`shared/linkctl/src/lib.rs`, `CyclicState::encode`): the 16
  * committed words, the 12-byte appended [CyclicObs] block and the `i32` [wheelRate]:
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
  * off 4..6   i16 LE  wheelSpeed   raw hall edge count per window, see below
- * off 6..8   u16 LE  battery      CENTIVOLTS, 0 = unknown (crates/orchestrator/src/battery.rs, battery_source)
+ * off 6..8   u16 LE  battery      CENTIVOLTS, 0 = unknown (motorcontroller/orchestrator/src/battery.rs, battery_source)
  * off 8      u8      mode
  * off 9..11  u16 LE  fault        the gating-producer level mask, 0 = every producer clear
  * off 11     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit7 lockdown
@@ -265,28 +265,28 @@ data class CyclicObs(
  * ```
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
- * no rescaling: the `SPEED` cell saturated into an i16 (`crates/firmware/src/motor.rs`,
+ * no rescaling: the `SPEED` cell saturated into an i16 (`motorcontroller/firmware/src/motor.rs`,
  * `wheel_speed_word`, `SPEED`), so a stationary wheel reads exactly 0. It is not the stock speed
  * unit, and it is not a road speed: deriving one needs the motor's pole-pair count and a wheel
  * diameter (`Fields.MOTOR_POLE_PAIRS`, `Fields.WHEEL_DIAMETER_MM`), so this mirror reports the edge
  * count as it is. The rider's speed readout reads [wheelRate] instead.
  *
  * [fault] is the board's gating-producer LEVEL MASK as of the pass that built the frame
- * (`crates/orchestrator/src/dispatch.rs`, `cyclic_state`, from `crates/orchestrator/src/events.rs`,
+ * (`motorcontroller/orchestrator/src/dispatch.rs`, `cyclic_state`, from `motorcontroller/orchestrator/src/events.rs`,
  * `Levels`): one bit per producer, so a reader sees which producers are asserted right now rather
  * than a code it could miss between emissions. Not every bit is a fault: the mask also carries the
  * mode fault and the power request, and [FAULT_A_BITS] is the group that is. [faultA] applies it.
  *
  * [peerDemand] is the +-28500 stock-native torque a rigid-frame LEADER commands its peer to apply
- * (`crates/linkctl/src/lib.rs`, `CyclicState::peer_demand`), and 0 from every other board; [leader]
+ * (`shared/linkctl/src/lib.rs`, `CyclicState::peer_demand`), and 0 from every other board; [leader]
  * says which reading applies.
  *
  * [wheelPos] is the low 16 bits of the board's signed wheel position in hall edges
- * (`crates/linkctl/src/lib.rs`, `CyclicState::wheel_pos`; `specs/state-feedback.md` section 3), in
+ * (`shared/linkctl/src/lib.rs`, `CyclicState::wheel_pos`; `specs/state-feedback.md` section 3), in
  * the hall counter's own sense and not mirrored to forward, wrapping. A rigid leader unwraps it by
  * delta; the telemetry model shows nothing for it.
  *
- * [wheelRate] is the board's period-measured wheel rate (`crates/linkctl/src/lib.rs`,
+ * [wheelRate] is the board's period-measured wheel rate (`shared/linkctl/src/lib.rs`,
  * `CyclicState::wheel_rate`; `specs/link-control.md`, `CYCLIC_STATE`), unscaled: Q12 of
  * [wheelSpeed]'s unit, so 4096 is one hall edge per 320-period (20 ms) window, in the hall
  * counter's own sense. The rider's speed readout converts it (`specs/rider-ui.md` 3.1a).
@@ -311,27 +311,27 @@ data class CyclicState(
     val obs: CyclicObs,
     val wheelRate: Int,
 ) {
-    /** Rider-present flag, bit0. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
+    /** Rider-present flag, bit0. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
     fun riderPresent(): Boolean = flags and FLAG_RIDER != 0
 
-    /** Rigid-frame leader flag, bit1. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LEADER`. */
+    /** Rigid-frame leader flag, bit1. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_LEADER`. */
     fun leader(): Boolean = flags and FLAG_LEADER != 0
 
-    /** Rigid-frame follower flag, bit2. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
+    /** Rigid-frame follower flag, bit2. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
     fun follower(): Boolean = flags and FLAG_FOLLOWER != 0
 
     /**
      * Whether any FAULT-A producer is asserted: [fault] masked by [FAULT_A_BITS], which is what
-     * the firmware's own aggregate computes (`crates/orchestrator/src/events.rs`, `Levels::fault_a`).
+     * the firmware's own aggregate computes (`motorcontroller/orchestrator/src/events.rs`, `Levels::fault_a`).
      */
     fun faultA(): Boolean = fault and FAULT_A_BITS != 0
 
-    /** Lockdown flag, bit7. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
+    /** Lockdown flag, bit7. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
     fun lockdown(): Boolean = flags and FLAG_LOCKDOWN != 0
 
     /**
      * Encode: the committed words, then the appended block, [ENCODED_LEN] bytes.
-     * `crates/linkctl/src/lib.rs`, `CyclicState::encode`.
+     * `shared/linkctl/src/lib.rs`, `CyclicState::encode`.
      */
     fun encode(): ByteArray {
         val out = ByteArray(ENCODED_LEN)
@@ -352,29 +352,29 @@ data class CyclicState(
     companion object {
         /**
          * Length of the committed words, which is the offset the appended block sits at.
-         * `crates/linkctl/src/lib.rs`, `CyclicState::LEN`.
+         * `shared/linkctl/src/lib.rs`, `CyclicState::LEN`.
          */
         const val LEN = 16
 
         /**
          * The ONE on-wire length of a `CYCLIC_STATE` payload: what the firmware emits and the only
-         * length [decode] accepts. `crates/linkctl/src/lib.rs`, `CyclicState::ENCODED_LEN`.
+         * length [decode] accepts. `shared/linkctl/src/lib.rs`, `CyclicState::ENCODED_LEN`.
          */
         const val ENCODED_LEN = LEN + CyclicObs.LEN + Int.SIZE_BYTES
 
-        /** The offset of [wheelRate]. `crates/linkctl/src/lib.rs`, `CyclicState::WHEEL_RATE_OFF`. */
+        /** The offset of [wheelRate]. `shared/linkctl/src/lib.rs`, `CyclicState::WHEEL_RATE_OFF`. */
         const val WHEEL_RATE_OFF = LEN + CyclicObs.LEN
 
-        /** `flags` bit0: rider present. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
+        /** `flags` bit0: rider present. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
         const val FLAG_RIDER = 1 shl 0
 
-        /** `flags` bit1: rigid-frame leader. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LEADER`. */
+        /** `flags` bit1: rigid-frame leader. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_LEADER`. */
         const val FLAG_LEADER = 1 shl 1
 
-        /** `flags` bit2: rigid-frame follower. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
+        /** `flags` bit2: rigid-frame follower. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
         const val FLAG_FOLLOWER = 1 shl 2
 
-        /** [fault] bit 0: comms loss. `crates/orchestrator/src/events.rs`, `EV_COMMS_LOSS`. */
+        /** [fault] bit 0: comms loss. `motorcontroller/orchestrator/src/events.rs`, `EV_COMMS_LOSS`. */
         const val EV_COMMS_LOSS = 1 shl 0
 
         /** [fault] bit 1: latched stopped by the tilt cutout. `events.rs`, `EV_STOP_ALL`. */
@@ -409,7 +409,7 @@ data class CyclicState(
 
         /**
          * The FAULT-A group of the [fault] mask: comms loss, the tilt cutout, IMU loss, motor 0's
-         * latch and the four motor-side causes. `crates/orchestrator/src/events.rs`, `FAULT_A_BITS`
+         * latch and the four motor-side causes. `motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`
          * (bits 0, 1, 2, 4 and 8 to 11; bit 3 is retired).
          */
         const val FAULT_A_BITS =
@@ -419,7 +419,7 @@ data class CyclicState(
         /**
          * The bits of a board's own [fault] word that stop that board arming: Fault A and motor 1's
          * latch, which is Fault B alone. The mode machine holds a board in OFF while either is
-         * asserted (`crates/state/src/mode.rs`, `ModeMachine::tick`; `crates/orchestrator/src/events.rs`,
+         * asserted (`motorcontroller/state/src/mode.rs`, `ModeMachine::tick`; `motorcontroller/orchestrator/src/events.rs`,
          * `Levels::fault_a` and `Levels::fault_b`), so this is [FAULT_A_BITS] or [EV_LATCH_B]: bits
          * 0, 1, 2, 4, 5 and 8 to 11. The rider app's fault lamps and its fault disarm read this and
          * no literal (`specs/rider-ui.md` 3.1b).
@@ -427,12 +427,12 @@ data class CyclicState(
         const val ARM_BLOCKING_BITS = FAULT_A_BITS or EV_LATCH_B
 
 
-        /** `flags` bit7: lockdown. `crates/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
+        /** `flags` bit7: lockdown. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_LOCKDOWN`. */
         const val FLAG_LOCKDOWN = 1 shl 7
 
         /**
          * Decode a payload of exactly [ENCODED_LEN]; null for ANY other length, short or long.
-         * `crates/linkctl/src/lib.rs`, `CyclicState::decode`.
+         * `shared/linkctl/src/lib.rs`, `CyclicState::decode`.
          *
          * The exception to this file's committed-prefix rule, and the firmware's decoder makes the
          * same one. The committed prefix alone decoded here until 2026-10-10, for a board on an image from
@@ -463,7 +463,7 @@ data class CyclicState(
 
 // --- DRIVE_CMD (5 B) ----------------------------------------------------------------------------
 
-/** The `DRIVE_CMD.kind` discriminant. `crates/linkctl/src/lib.rs`, `DriveKind`. */
+/** The `DRIVE_CMD.kind` discriminant. `shared/linkctl/src/lib.rs`, `DriveKind`. */
 enum class DriveKind(val value: Int) {
     /** Reference zero; `value`/`steer` are not live. */
     Neutral(0),
@@ -475,16 +475,16 @@ enum class DriveKind(val value: Int) {
     companion object {
         /**
          * An unknown kind byte decodes as [Neutral], fail-safe.
-         * `crates/linkctl/src/lib.rs`, `DriveCmd::decode`.
+         * `shared/linkctl/src/lib.rs`, `DriveCmd::decode`.
          */
         fun fromU8(b: Int): DriveKind = if (b == Throttle.value) Throttle else Neutral
     }
 }
 
 /**
- * A controller's drive reference. Mirror of `crates/linkctl/src/lib.rs`, `DriveCmd`.
+ * A controller's drive reference. Mirror of `shared/linkctl/src/lib.rs`, `DriveCmd`.
  *
- * Wire layout, 5 bytes (`crates/linkctl/src/lib.rs`, `DriveCmd::encode`):
+ * Wire layout, 5 bytes (`shared/linkctl/src/lib.rs`, `DriveCmd::encode`):
  * ```
  * off 0      u8      kind
  * off 1..3   i16 LE  value
@@ -492,7 +492,7 @@ enum class DriveKind(val value: Int) {
  * ```
  */
 data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
-    /** Encode the committed prefix. `crates/linkctl/src/lib.rs`, `DriveCmd::encode`. */
+    /** Encode the committed prefix. `shared/linkctl/src/lib.rs`, `DriveCmd::encode`. */
     fun encode(): ByteArray {
         val out = ByteArray(LEN)
         out[0] = kind.value.toByte()
@@ -502,38 +502,38 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
     }
 
     companion object {
-        /** On-wire length of the committed prefix. `crates/linkctl/src/lib.rs`, `DriveCmd::LEN`. */
+        /** On-wire length of the committed prefix. `shared/linkctl/src/lib.rs`, `DriveCmd::LEN`. */
         const val LEN = 5
 
         /**
          * Full-scale magnitude of [value] and [steer]: the demand word is a fraction of this,
-         * not an engineering unit. `crates/control/src/config.rs`, `FRAME_IN_MAX`.
+         * not an engineering unit. `motorcontroller/control/src/config.rs`, `FRAME_IN_MAX`.
          *
-         * `linkctl` itself carries no numbers (`DriveCmd.value` in `crates/linkctl/src/lib.rs` says only
+         * `linkctl` itself carries no numbers (`DriveCmd.value` in `shared/linkctl/src/lib.rs` says only
          * "`ControlDispatch::throttle_reference` input scale"), because the scale is established
-         * downstream at the frame-in adapter, `crates/control/src/throttle.rs`, `throttle_tick`:
+         * downstream at the frame-in adapter, `motorcontroller/control/src/throttle.rs`, `throttle_tick`:
          * ```rust
          * let speed_cmd = ((speed_in as i32) * (cfgc::CMD_LIMIT as i32) / cfgc::FRAME_IN_MAX) as i16;
          * ```
          * so `value` is mapped onto the EFeru command domain `+-CMD_LIMIT` (1000,
-         * `crates/control/src/config.rs`, `CMD_LIMIT`), which is the only hard saturation on the path. A
+         * `motorcontroller/control/src/config.rs`, `CMD_LIMIT`), which is the only hard saturation on the path. A
          * sender that treats `value` as if it were already in that 1000-domain therefore commands
          * a thirty-third of what it meant to.
          *
          * Two consequences a sender has to know, both arithmetic on the line above:
          * - The division truncates, so `|value| < 33` is indistinguishable from zero.
          * - The engagement gate needs a reference above `GATING_THRESHOLD` (500,
-         *   `crates/control/src/config.rs`, `GATING_THRESHOLD`, tested by the engage gate in
-         *   `crates/control/src/fsm.rs`, `idle`) to pick
+         *   `motorcontroller/control/src/config.rs`, `GATING_THRESHOLD`, tested by the engage gate in
+         *   `motorcontroller/control/src/fsm.rs`, `idle`) to pick
          *   up from idle, and the reference is `speed_cmd * 57 / 2`
-         *   (`crates/control/src/throttle.rs`, `throttle_tick`), so the smallest `value` that will ever start a
+         *   (`motorcontroller/control/src/throttle.rs`, `throttle_tick`), so the smallest `value` that will ever start a
          *   stopped machine is +-590.
          */
         const val FULL_SCALE = 32767
 
         /**
          * Decode the committed prefix, ignoring trailing bytes; null when shorter than [LEN].
-         * `crates/linkctl/src/lib.rs`, `DriveCmd::decode`.
+         * `shared/linkctl/src/lib.rs`, `DriveCmd::decode`.
          */
         fun decode(b: ByteArray): DriveCmd? {
             if (b.size < LEN) return null
@@ -550,9 +550,9 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
 
 /**
  * Remote input mirror: the LEVELS a controller asserts about itself. Mirror of
- * `crates/linkctl/src/lib.rs`, `Inputs`.
+ * `shared/linkctl/src/lib.rs`, `Inputs`.
  *
- * Wire layout, 2 bytes (`crates/linkctl/src/lib.rs`, `Inputs::encode`):
+ * Wire layout, 2 bytes (`shared/linkctl/src/lib.rs`, `Inputs::encode`):
  * ```
  * off 0      u8      buttons   bit0 power request
  * off 1      u8      rider     bit0 rider present
@@ -564,13 +564,13 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
  * Demand does not travel here at all: it is [DriveCmd].
  */
 data class Inputs(val buttons: Int, val rider: Int) {
-    /** Power-request level, `buttons` bit0. `crates/linkctl/src/lib.rs`, `Inputs::power_request`. */
+    /** Power-request level, `buttons` bit0. `shared/linkctl/src/lib.rs`, `Inputs::power_request`. */
     fun powerRequest(): Boolean = buttons and BUTTON_POWER != 0
 
-    /** Rider-present level, `rider` bit0. `crates/linkctl/src/lib.rs`, `Inputs::rider_present`. */
+    /** Rider-present level, `rider` bit0. `shared/linkctl/src/lib.rs`, `Inputs::rider_present`. */
     fun riderPresent(): Boolean = rider and RIDER_PRESENT != 0
 
-    /** Encode the committed prefix. `crates/linkctl/src/lib.rs`, `Inputs::encode`. */
+    /** Encode the committed prefix. `shared/linkctl/src/lib.rs`, `Inputs::encode`. */
     fun encode(): ByteArray {
         val out = ByteArray(LEN)
         out[0] = buttons.toByte()
@@ -579,18 +579,18 @@ data class Inputs(val buttons: Int, val rider: Int) {
     }
 
     companion object {
-        /** On-wire length of the committed prefix. `crates/linkctl/src/lib.rs`, `Inputs::LEN`. */
+        /** On-wire length of the committed prefix. `shared/linkctl/src/lib.rs`, `Inputs::LEN`. */
         const val LEN = 2
 
-        /** `buttons` bit0: power request. `crates/linkctl/src/lib.rs`, `Inputs::BUTTON_POWER`. */
+        /** `buttons` bit0: power request. `shared/linkctl/src/lib.rs`, `Inputs::BUTTON_POWER`. */
         const val BUTTON_POWER = 1 shl 0
 
-        /** `rider` bit0: rider present. `crates/linkctl/src/lib.rs`, `Inputs::RIDER_PRESENT`. */
+        /** `rider` bit0: rider present. `shared/linkctl/src/lib.rs`, `Inputs::RIDER_PRESENT`. */
         const val RIDER_PRESENT = 1 shl 0
 
         /**
          * Decode the committed prefix, ignoring trailing bytes; null when shorter than [LEN].
-         * `crates/linkctl/src/lib.rs`, `Inputs::decode`.
+         * `shared/linkctl/src/lib.rs`, `Inputs::decode`.
          */
         fun decode(b: ByteArray): Inputs? {
             if (b.size < LEN) return null
@@ -601,7 +601,7 @@ data class Inputs(val buttons: Int, val rider: Int) {
 
 // --- Dispatch -----------------------------------------------------------------------------------
 
-/** A decoded control-block payload, tagged by family. `crates/linkctl/src/lib.rs`, `Payload`. */
+/** A decoded control-block payload, tagged by family. `shared/linkctl/src/lib.rs`, `Payload`. */
 sealed class ControlPayload {
     data class Cyclic(val state: CyclicState) : ControlPayload()
 
@@ -612,7 +612,7 @@ sealed class ControlPayload {
 
 /**
  * Decode a delivered control-block PDU payload by opcode. Mirror of
- * `crates/linkctl/src/lib.rs`, `decode`.
+ * `shared/linkctl/src/lib.rs`, `decode`.
  *
  * Returns null for an opcode this file does not allocate, or a payload shorter than the family's
  * committed prefix: the delivery class is best-effort, so the PDU is simply dropped.

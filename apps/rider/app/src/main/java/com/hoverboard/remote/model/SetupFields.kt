@@ -26,7 +26,7 @@ enum class SetupGroup(@StringRes val title: Int) {
  * value takes effect: the arm-time re-read"), which is what a Setup row has to tell the operator.
  *
  * Two cases, where that decision names three groups. The arm path re-reads exactly one row of
- * fields (`crates/firmware/src/arm.rs`, `read_arm_values`); everything else is derived once in the
+ * fields (`motorcontroller/firmware/src/arm.rs`, `read_arm_values`); everything else is derived once in the
  * boot sequence, whether it configures a peripheral (the pins, the timer, `motor.dead_time`) or is
  * a value the boot path simply owns (`attitude.level_trim`, `board.battery.cal`, `imu.gyro_bias`,
  * `imu.model`, `link.link_set`). Those two groups differ in why they wait for a boot, not in what

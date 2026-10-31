@@ -19,8 +19,8 @@ import com.hoverboard.protocol.store.Value
 /**
  * Host-test mesh harness: an in-memory network of real [Link]s (over a mock datagram transport)
  * carrying the [Controller] and a [MockBoard] responder. The responder + forwarder mirror the
- * firmware (`crates/net/src/{walk,forward}.rs`); this is the controller-walk round-trip exactly the
- * way `crates/net/src/walk/tests.rs`, the Rust harness, drives it, so the Kotlin controller is
+ * firmware (`shared/net/src/{walk,forward}.rs`); this is the controller-walk round-trip exactly the
+ * way `shared/net/src/walk/tests.rs`, the Rust harness, drives it, so the Kotlin controller is
  * cross-checked against the
  * Rust on the same worked topologies.
  */
@@ -61,7 +61,7 @@ private class MockPort(private val tx: ArrayDeque<ByteArray>, private val rx: Ar
  *
  * [nodeClass] is the node's read-only `node.class` and [name] its `device.name` default: a registry
  * default each, served by a read and never stored, which is how a board answers them unwritten
- * (`crates/store/src/field.rs`, `NODE_CLASS` and `DEVICE_NAME`). A bridge is the same responder
+ * (`shared/store/src/field.rs`, `NODE_CLASS` and `DEVICE_NAME`). A bridge is the same responder
  * with class `0x02` (`specs/hoverboard-bridge.md`, "The bridge as a node").
  */
 private class MockStore(nodeClass: Int, name: String) {
@@ -97,7 +97,7 @@ val NODE_CLASS_KEY = Key(0x03, 0)
 /** The `device.name` key (field 0x10), mirror of `store::DEVICE_NAME`. */
 val DEVICE_NAME_KEY = Key(0x10, 0)
 
-/** Source-learned multi-hop forwarder, a mirror of `crates/net/src/forward.rs`'s `Forwarder`. */
+/** Source-learned multi-hop forwarder, a mirror of `shared/net/src/forward.rs`'s `Forwarder`. */
 private class Forwarder(var addr: Int, val nPorts: Int) {
     private val table = IntArray(256) { NO_PORT }
 
@@ -146,7 +146,7 @@ private class Probe(val replyTo: Int, val nPorts: Int) {
 }
 
 /**
- * The board-side walk responder, a mirror of `crates/net/src/walk.rs`'s `Responder` (wrapping the
+ * The board-side walk responder, a mirror of `shared/net/src/walk.rs`'s `Responder` (wrapping the
  * [Forwarder]). It answers NODE_HELLO, probes its ports on PROBE_PORTS and reports PORTS, takes an
  * ASSIGN (persisting node_address) or relays a directed ASSIGN, and serves CONFIG_READ/WRITE. It
  * never reads a hardware id - identity is positional during discovery, the persisted address after.
@@ -161,7 +161,7 @@ class MockBoard(
 ) {
     private val fwd = Forwarder(NO_ADDRESS, nPorts)
     private val store = MockStore(nodeClass, name)
-    /** The next grant's offset in this board's guest slice (`crates/net/src/walk.rs`, `guest_slice`). */
+    /** The next grant's offset in this board's guest slice (`shared/net/src/walk.rs`, `guest_slice`). */
     private var guestSlot = 0
     private var probe: Probe? = null
 

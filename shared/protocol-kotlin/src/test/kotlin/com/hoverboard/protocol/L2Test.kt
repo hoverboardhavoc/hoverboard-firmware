@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
-/** Mirror of `crates/link`'s framer/frag/reasm/link tests: the L2 wire form must match byte-for-byte. */
+/** Mirror of `shared/link`'s framer/frag/reasm/link tests: the L2 wire form must match byte-for-byte. */
 class L2Test {
 
     private fun runFramer(vararg chunks: ByteArray): List<ByteArray> {
