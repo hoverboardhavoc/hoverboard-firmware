@@ -1,0 +1,28 @@
+# The crates more than one build chain links: the GD32 firmware (../motorcontroller), the ESP32-C3
+# bridge (../bridge) and the host tools (../tools) reach them as path dependencies. This workspace
+# is where they are tested and linted on their own.
+#
+# `store`'s tests read `control` and `imu` from ../motorcontroller as dev-dependencies. A
+# dev-dependency of a path dependency is never compiled by the chains that link `store`, so this
+# pulls no GD32 crate into the bridge.
+[workspace]
+resolver = "2"
+members = [
+    "base",
+    "espsvc",
+    "link",
+    "linkctl",
+    "net",
+    "store",
+    "swd-bridge-core",
+    "swd-mailbox",
+]
+
+[workspace.package]
+license = "GPL-3.0-or-later"
+
+# The same declaration as ../motorcontroller/Cargo.toml's, character for character, so both
+# workspaces resolve one runtime-hal package (`store` names it, target-gated to the board). Cargo.lock
+# here pins the same commit as every other tracked lockfile; CI's lint job checks that they agree.
+[workspace.dependencies]
+runtime-hal = { git = "https://github.com/hoverboardhavoc/runtime-hal", branch = "main" }

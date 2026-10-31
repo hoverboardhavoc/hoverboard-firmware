@@ -1,0 +1,6 @@
+# The crates here are linked by the GD32 firmware (../motorcontroller, a pinned nightly) and by the
+# ESP32-C3 bridge (../bridge, 1.92 stable). The bridge already requires them to build on 1.92, so
+# this workspace's own tests and lints run there; the motorcontroller build covers the nightly side.
+[toolchain]
+channel = "1.92"
+components = ["rustfmt", "clippy"]

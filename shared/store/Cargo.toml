@@ -1,0 +1,55 @@
+[package]
+name = "store"
+version = "0.1.0"
+license.workspace = true
+edition = "2021"
+description = "Layer 1 flash key-value config store: log-structured, wear-aware, host-tested over a mock flash. base-only core (the on-target FmcFlash adapter is added in Pass 2)."
+
+[dependencies]
+base = { path = "../base" }
+
+# The on-target FmcFlash adapter wraps runtime-hal's FMC primitive. It is the ONLY runtime-hal
+# dependency and is TARGET-GATED (thumbv7m only): the host `cargo test` build never links the HAL
+# (it uses MockFlash), so the store core + field set stay base-only on the host. The chip2k Tier-2
+# build needs the HAL's `detect-internals` feature (the public descriptors are both 1 KiB, so the
+# 2 KiB `Chip` comes from `synthesize`); store-test forwards it through this crate's `chip2k`
+# feature. runtime-hal is the workspace git dependency (root Cargo.toml).
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
+runtime-hal = { workspace = true }
+
+# HOST-TEST ONLY (no bytes in any image, and no runtime dependency: `store` does not depend on
+# `control`, and must not -- the cascade is pure math with no notion of persistence). It is here so
+# ONE test can assert the thing neither crate can state alone: the `CONTROL_GAIN_*` defaults ARE the
+# gain constants the control crate compiles in, index for index, so a fresh board runs exactly what
+# it ran before the gains became fields (`specs/rider-ui.md` section 4). Written in two places by
+# necessity; pinned in one.
+[dev-dependencies]
+control = { path = "../../motorcontroller/control" }
+# The IMU frame seam (IMU_AXIS_SIGN / IMU_GYRO_BIAS / IMU_AXIS_ROLE -> imu::Config::staged) is
+# round-tripped through a store here, the drive-lean precedent: imu does not depend on store.
+imu = { path = "../../motorcontroller/imu" }
+
+[features]
+# Forwarded by the store-test firmware crate so the 2 KiB-page Chip can be synthesized from the HAL's
+# detection internals (there is no public 2 KiB descriptor). OFF by default; pulls in no HAL code on
+# the host (the runtime-hal dep itself is target-gated above).
+chip2k = ["runtime-hal/detect-internals"]
+
+# The reserved store-test fields (T_KEY/T_BLOB), their value consts, the scenario ids, and the
+# `run`/`run_var` scenario dispatch. OFF by default so a production build's field set is exactly the
+# genuine tunables (DEVICE_NAME, MOTOR_CURRENT_LIMIT, MOTOR_METHOD, SOME_BLOB). Enabled by the
+# `store-test` firmware, the emulator-runner store scenarios, and the store's own host tests
+# (`cargo test -p store --features test-fields`; CI passes `-F store/test-fields`).
+test-fields = []
+
+# The host-only name table (`NAMES`, `specs/cli-config.md` section 3): every field's path, index kind
+# and display kind, for hoverboard-cli and the tools that take their names from it. OFF by default,
+# so the firmware image carries no name. The store's own tests compile the table without it.
+names = []
+
+# The crafted-region dump tool for the silicon bench oracle (it uses `store::scenarios`, behind
+# `test-fields`). `required-features` keeps a plain `cargo test -p store` from trying to compile it
+# without the feature (it would fail on the gated scenario ids).
+[[example]]
+name = "craft_region"
+required-features = ["test-fields"]

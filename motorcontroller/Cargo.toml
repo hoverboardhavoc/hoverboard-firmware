@@ -1,0 +1,236 @@
+# The GD32 workspace: the firmware image, the crates only it links, and its test and bench images.
+# The crates the bridge or the host tools also link live in ../shared (their own workspace); they
+# reach this build as path dependencies, and the `[profile.*.package.<name>]` overrides below apply
+# to them all the same (cargo applies a package override to any package in the graph, member or not).
+[workspace]
+resolver = "2"
+members = [
+    "attitude",
+    "board",
+    "commutation",
+    "control",
+    "dummy-test",
+    "firmware",
+    "imu",
+    "imu-bench",
+    "inputs",
+    "l2-uart-bench",
+    "orchestrator",
+    "scheduler",
+    "state",
+    "store-test",
+    "test-shared",
+    "vectors",
+    "wdg-bench",
+]
+
+# The licence every workspace member inherits (`license.workspace = true`), so the string lives in
+# one place per workspace (../shared and ../tools carry the same one).
+[workspace.package]
+license = "GPL-3.0-or-later"
+
+# runtime-hal is a git dependency, declared here and, identically, in ../shared/Cargo.toml (whose
+# `store` names it); every consumer names it with `workspace = true` (adding its own `features`).
+# `branch = "main"` is what `cargo update -p runtime-hal` moves to; the commit every build uses is
+# the one Cargo.lock pins, so a runtime-hal push does not reach this repo until a commit bumps the
+# lockfiles (CI's lint job checks that every tracked lockfile pins the same commit). A plain build uses the pinned
+# commit, locally and in CI; a build against the ~/dev/runtime-hal checkout adds a per-command
+# `--config` patch (CLAUDE.md, "Running the checks").
+[workspace.dependencies]
+runtime-hal = { git = "https://github.com/hoverboardhavoc/runtime-hal", branch = "main" }
+
+[profile.release]          # the embedded profile: small + linkable
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = true               # keep DWARF for SWD/nm; it never reaches flash
+
+[profile.dev]
+panic = "abort"
+# NO debug checks in the dev IMAGE (owner-accepted 2026-10-08, specs/decision-flash-budget.md, "The
+# dev-profile link"). Nothing flashes the dev image (every tool reads release/firmware and `cargo image`
+# is the shipping build), so overflow checks and debug assertions in it never fire on silicon; what they
+# did was cost flash in the one profile whose link is the nearer wall. Measured on main 829906f as the
+# objcopy span of the debug ELF against the 63,488 B region: 62,840 B as was (648 B spare), 61,796 with
+# overflow checks off, 60,288 with debug assertions off, 58,456 with both off (5,032 B spare). Every
+# linked crate was already at opt-level "z", and build-std bought only 408 B here, so the checks were
+# the whole remaining gap to release. The HOST TESTS keep both checks: `[profile.test]` below turns
+# them back on, so the arithmetic in control/orchestrator/firmware is still checked where it is run.
+debug-assertions = false
+overflow-checks = false
+# ONE codegen unit in dev, as `[profile.release]` above already uses, and for the same reason the
+# dev profile already sets `lto = true`: dev links the same integrated image into the same 62 KiB
+# FLASH region with little headroom, so a dev-only codegen artifact can fail the build outright. 62 KiB
+# and not 64: `crates/firmware/memory.x` links `LENGTH = 64K - 2K` = 63,488 B on every part, because the
+# store's two pages sit ABOVE the linked region (written by the FMC at absolute detected-top-of-flash
+# addresses) and the image is linked to the smallest part, so the 12-FET's 256 KiB is headroom the
+# image does not use. Every figure below is against that 62 KiB.
+#
+# It is not a size win on the current image (measured: 62,388 -> 62,472 B of FLASH, +84 B). What it
+# removes is DUPLICATION ACROSS UNITS, which is what actually costs: adding the BLE port's DMA-ring
+# receiver (`crates/firmware/src/ble_carrier.rs`) made the dev image grow **3,160 B** at the default
+# partitioning and **460 B** at one unit, because `RingBufferedRx::new`, the `SplitSerial` adapter
+# impls and the per-instance ISR bodies stop being emitted per-unit. The first of those overflowed
+# FLASH; the second is what the change actually costs.
+#
+# Costs dev build time and nothing else: dev bytes never ship (`cargo image` is the shipping build,
+# and `[profile.release]` was already at one unit, so the flashed span is untouched by this line).
+codegen-units = 1
+# FULL LTO in dev (slice 7): the integrated image links the whole control stack, and thin LTO's
+# weaker cross-crate DCE leaves ~55 KiB of dev-only dead formatting machinery in the link (the
+# `fixed` Display/Debug paths + core flt2dec reachable through panic sites that full LTO
+# const-folds away), overflowing the F130's 62 KiB linked region (dev measured 119 KiB thin vs 48.7 KiB
+# full). Cost: a deep host-test rebuild goes ~19 s -> ~30 s (measured, store-touch cascade);
+# accepted so BOTH build profiles link the shipping image.
+lto = true
+
+# The host tests inherit `dev` and RESTORE the debug checks the dev image drops (above). Verified at the
+# landing by `cargo test -v`: the test harness and its workspace deps compile with `-C debug-assertions=on
+# -C overflow-checks=on` while the dev firmware image compiles with both off.
+[profile.test]
+debug-assertions = true
+overflow-checks = true
+
+# Optimize DEPENDENCIES in dev (the firmware bin and the other thumbv7m images link into a 62 KiB
+# FLASH region; the unoptimized `net`/`link`/`store`/HAL deps overflow it in a debug `cargo build`). Workspace
+# crates keep the default opt-level 0 (debuggable); only the path/third-party deps are size-optimized,
+# which both fits the embedded images and keeps host-test builds fast. (CI's `cargo build` is dev.)
+[profile.dev.package."*"]
+opt-level = "z"
+
+# The firmware bin's own (monomorphized) code also has to fit the 62 KiB FLASH region in a debug build; it
+# ships as a release image, so size-optimizing it in dev too is harmless.
+[profile.dev.package.firmware]
+opt-level = "z"
+
+# The integrated control stack's workspace crates (slice 7): the `"*"` wildcard above does NOT
+# cover workspace members (cargo's rule), so the math-heavy crates the firmware image now links
+# (control/attitude at opt 0 overflowed the imu-bench image by ~87 KiB .text, and overflow the
+# integrated dev image by ~92 KiB) get explicit dev size-optimization. Host tests of these crates
+# just run a little faster-built; debuggability on target was never at opt 0 anyway (the shipped
+# image is release).
+[profile.dev.package.attitude]
+opt-level = "z"
+[profile.dev.package.control]
+opt-level = "z"
+[profile.dev.package.imu]
+opt-level = "z"
+[profile.dev.package.inputs]
+opt-level = "z"
+[profile.dev.package.linkctl]
+opt-level = "z"
+[profile.dev.package.orchestrator]
+opt-level = "z"
+[profile.dev.package.scheduler]
+opt-level = "z"
+[profile.dev.package.state]
+opt-level = "z"
+# The REST of the workspace members the firmware image links. Same rule as the block above and the
+# `"*"` wildcard before it (which cargo applies to path/registry deps only, never to workspace
+# members): dev links the same integrated image into the same 62 KiB FLASH, so an unoptimized
+# workspace crate is spent headroom. These were left at opt 0 while there was room; on 2026-08-13
+# the dev image was within 104 B of the region and the next feature could not link. Dev bytes never
+# ship (`cargo image` is the shipping build), so this changes the flashed span by exactly nothing.
+[profile.dev.package.base]
+opt-level = "z"
+[profile.dev.package.board]
+opt-level = "z"
+[profile.dev.package.commutation]
+opt-level = "z"
+[profile.dev.package.link]
+opt-level = "z"
+[profile.dev.package.net]
+opt-level = "z"
+[profile.dev.package.store]
+opt-level = "z"
+[profile.dev.package.swd-mailbox]
+opt-level = "z"
+
+# Speed-optimize the control-math crates in release while the shell stays size-optimized
+# (specs/integration.md, "Size and RAM budget"; the 2026-07-18 control-run cost defect). At
+# opt-"z" the integrated image's out-of-line Mahony::update measured 4+ ms per 250 Hz tick (the
+# fixed-point cordic/I64 math dominates the 4 ms budget); O3 on just these crates halves it for
+# ~+7 KiB of image. imu-bench had masked this: full LTO inlined + const-folded the same math
+# against its literal config, so the small image was fast at "z" while the big one was not.
+[profile.release.package.attitude]
+opt-level = 3
+[profile.release.package.imu]
+opt-level = 3
+[profile.release.package.base]
+opt-level = 3
+[profile.release.package.fixed]
+opt-level = 3
+[profile.release.package.cordic]
+opt-level = 3
+
+# The commutation math runs in the 16 kHz PERIOD ISR, the tightest budget in the image (4,500 cycles
+# at 72 MHz), on parts that run 2 flash wait states with NO prefetch or cache -- so instructions are
+# memory traffic and the "z" base profile's out-of-line, size-first codegen is the expensive choice
+# there, exactly as it was for runtime-hal's I2C burst (round 12: "z" -> O3 took that path 1.8 ms ->
+# 0.40 ms). Speed-optimize it with the other math crates.
+[profile.release.package.commutation]
+opt-level = 3
+
+# The LEAF crate's opt-level sets the fat-LTO pass pipeline for the WHOLE merged module, so a
+# "z" leaf re-pessimizes everything, including the O3 math crates above (silicon-measured
+# 2026-07-18: leaf "z" -> the 250 Hz pipeline cost 8.7 ms; leaf "s" -> 0.91 ms, a ~10x swing for
+# +1.3 KiB of image; leaf O3 overflows the 62 KiB region by ~9 KiB). "s" is the fit-and-fast point.
+[profile.release.package.firmware]
+opt-level = "s"
+
+# Speed-optimize runtime-hal (the polled I2C burst path lives here). Round-12 codegen fix
+# (specs/integration.md "IMU burst"; bench-evidence/2026-07-21/round12/): runtime-hal compiled at
+# the base release opt-level ("z") inside the fat-LTO merge -- the exact code class the leaf-opt
+# swings above hit. That "z" codegen made the SAME clone's byte-identical 400 kHz I2C burst take
+# ~1.8-2.0 ms on the integrated image vs 0.40 ms in imu-bench (rounds 8/9/11b), which was the 250 Hz
+# BINDING constraint (burst alone 51% CPU at 250 Hz). Setting runtime-hal to opt 3 restored the
+# unflooded 250 Hz + 4:1 gate: control:tick 0.88 -> 1.0000 (round-13 tear-guarded settled window,
+# 22848/22848 exact over 90 s; the round-12 "0.983 episodic slip" was a tick-word read tear,
+# retired by the round-13 audit), control
+# 221.6 -> 251.7 Hz (the tick runs 251.7-251.9 Hz on this IRC8M part), control:input exactly
+# 4.00:1 (round12/02 + the round-12 audit's tick-staleness correction). FREE on image size:
+# .text 50748 -> 50416 B (LTO inlining wins post-merge), well inside the 62 KiB budget. (Flooded
+# is still drain-bound at ~184 Hz, control:tick 0.726, round12/03; that is the poll_recv
+# per-call drain, a separate track.) Note: a per-package opt demonstrably still matters
+# post-merge (this line = a ~12% control-rate swing), so the leaf-opt rule above sets the pass
+# pipeline but does NOT make per-package levels irrelevant.
+[profile.release.package.runtime-hal]
+opt-level = 3
+# The pin is per PACKAGE, so it also compiled runtime-hal's once-per-boot bring-up (the detect probe,
+# the USART/DMA/I2C/PWM/ADC constructors, the vector-table install) at opt 3: about 4.5 KB of cold
+# code on the speed pipeline. Since shrink round 7 (2026-10-27, specs/decision-flash-budget.md)
+# runtime-hal marks those functions `#[optimize(size)]` on a nightly compiler (its build.rs sets a
+# cfg from the channel; the attribute is nightly-only and the HAL's own checks stay on stable), which
+# puts them back on the size pipeline INSIDE this O3 package: -288 B of flashed span, the burst and
+# the ISRs untouched. Nothing here changes for it; it is recorded so the pin's cost is understood.
+
+# core and compiler_builtins are compiled FROM SOURCE for the shipping image (`cargo image` =
+# -Z build-std, see .cargo/config.toml), which means they stop being distributed rlibs built at the
+# upstream's own settings and start inheriting THIS profile: `[profile.release]` opt-level "z". Left
+# there they are a codegen regression, not a saving, and it is the same class the runtime-hal pin
+# above records. Measured on silicon 2026-07-26, F130 slave, settled windows: with core at the base
+# "z" the 250 Hz gate went to control:tick 0.5240 and reproduced at 0.5219 / 0.5228 across an
+# independent rail POR, i.e. build-std HALVED the F130's control rate, while the F103 master stayed
+# 1.0000 exact throughout (the both-family rule again). Pinning both to opt 3 restores control:tick
+# 1.0000 exact with the tick/control offset constant, on both families.
+#
+# The pins are also SMALLER, not a size/speed trade: 58,868 -> 58,628 B of flashed span (-240 B), fat
+# LTO recovering more than the opt level costs, exactly as it did for runtime-hal at opt 3.
+#
+# Inert on any build that does not use build-std (the plain `cargo build`, the host tests, swd-bridge,
+# the emulator runner): core and compiler_builtins are prebuilt rlibs there, so the pins change nothing.
+#
+# EXPECT A WARNING, ON EVERY BUILD INCLUDING `cargo image`:
+#   warning: profile package spec `core` in profile `release` did not match any packages
+#   warning: profile package spec `compiler_builtins` in profile `release` did not match any packages
+# It is emitted even when the pins ARE taking effect, because cargo matches profile specs against the
+# workspace resolve graph, which never contains the build-std units. Do not "fix" it by deleting the
+# pins: measured here 2026-07-26 with the pins removed and nothing else changed, the same `cargo image`
+# produced .text 54,848 / span 58,868 against 54,616 / 58,628 with them, so the specs demonstrably
+# reach the std units the warning claims not to see. It is a cargo diagnostic, not a rustc lint, so it
+# trips no `-D warnings` gate. There is no narrower place to put them either: profiles are
+# workspace-global.
+[profile.release.package.core]
+opt-level = 3
+[profile.release.package.compiler_builtins]
+opt-level = 3

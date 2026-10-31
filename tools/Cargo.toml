@@ -1,0 +1,15 @@
+# The host-target programs: the laptop CLI for the bridge (hoverboard-cli), the SWD mailbox bridge
+# (swd-bridge), the Unicorn emulator runner (emulator-runner) and the probe-driven hardware runner
+# (hardware-runner). They read crates from ../shared, ../motorcontroller and ../bridge as path
+# dependencies. The scripts beside them in this folder are not part of any build.
+[workspace]
+resolver = "2"
+members = [
+    "emulator-runner",
+    "hardware-runner",
+    "hoverboard-cli",
+    "swd-bridge",
+]
+
+[workspace.package]
+license = "GPL-3.0-or-later"

@@ -1,0 +1,80 @@
+[package]
+name = "firmware"
+version = "0.1.0"
+license.workspace = true
+edition = "2021"
+description = "The universal firmware binary: one thumbv7m image that detects which GD32 it is on at boot (runtime-hal detect_chip), mounts the flash store at the detected top-of-flash, and runs the bare housekeeping loop. The shipping image: `cargo image` (the build-std alias in .cargo/config.toml) -> the universal `firmware` ELF -> `.bin`, valid on every part (memory.x sized to the smallest, the F130)."
+
+[dependencies]
+# The libraries firmware assembles; it owns no behavior of its own. `base` is pulled in transitively
+# by `store`; firmware names `store` (the flash KV store + FmcFlash) directly.
+store = { path = "../../shared/store" }
+# The board-layout boot validator (specs/board-model.md): at boot the firmware computes the
+# reserved set (its compiled allowlist + the persisted LINK_SET, through the plumbing helper),
+# reads the layout fields, validates them over the HalCaps adapter (runtime-hal's R-CAP queries),
+# and records the outcome in the SWD-readable BOARD_OBS block. HAL-free, no_std.
+board = { path = "../board" }
+# The SWD mailbox: the firmware carves its fixed RAM region (memory.x) and inits the header at boot,
+# and services it from the loop (specs/swd-mailbox.md). HAL-free, no_std.
+swd-mailbox = { path = "../../shared/swd-mailbox" }
+# L3 (the `net` Responder, serviced over the mailbox L2 link) + L2 (the `Link`/`SerialTransport` the
+# mailbox rides on). HAL-free, no_std.
+net = { path = "../../shared/net" }
+link = { path = "../../shared/link" }
+# The integration stack (specs/integration.md, slice 7): the ISR-safe scheduler, the pure
+# orchestrator core (which carries state/control/inputs/attitude-consumption internally), the
+# link-control payload codec (the 0x10..0x2F hand-back routing + the cyclic TX build), and the
+# IMU/attitude crates for the plan-gated bring-up + the attitude config seam. All HAL-free no_std.
+scheduler = { path = "../scheduler" }
+# The commutation math (specs/commutation.md): the period ISR steps its `Commutator` and lowers the
+# `MotorOutput` to the two register writes. HAL-free, no_std, and the single owner of the ARR/duty
+# scale the timer is brought up to.
+commutation = { path = "../commutation" }
+orchestrator = { path = "../orchestrator" }
+# The control cascade, named directly for ONE thing: the live gain shadow (`specs/rider-ui.md`
+# section 4). The boot seam builds it from the store's `CONTROL_GAIN_*` fields and the loop's tune
+# lane writes it, and both of those sit in this crate, beside the store and the responder. The
+# cascade itself stays the orchestrator's to drive. Already linked transitively; no new bytes.
+control = { path = "../control" }
+# The input lines' polarity mapping (`inputs::asserted`): the firmware samples the three pins and
+# this is where the level code becomes assertions, against `store::BOARD_INPUT_POLARITY`. The
+# crate is already linked through the orchestrator, which owns the debouncers it feeds; no new
+# bytes, and naming it here keeps the mapping out of this file as three literals.
+inputs = { path = "../inputs" }
+linkctl = { path = "../../shared/linkctl" }
+imu = { path = "../imu" }
+attitude = { path = "../attitude" }
+# The device-driver seam for the inter-board UART adapter (UsartSerial: embedded-io over runtime-hal's
+# Usart + RingBufferedRx), which link's SerialTransport drives.
+embedded-io = "0.6"
+# `OutputPin` for the SELF_HOLD (PB12) power-latch assertion at boot; matches runtime-hal's version.
+embedded-hal = "1.0"
+# The bounded Vec runtime-hal's InjectedAdcConfig carries (same version, so the channel list the
+# motor bring-up builds IS the type the HAL consumes).
+heapless = "0.8"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+
+# Host-test only (no bytes in the image). The `arm` tests mount a REAL `Store` over a small
+# in-RAM `Flash` (`crate::test_flash`), and implementing `store::Flash` means naming `base::error::FlashError`, which
+# `store` does not re-export (the `net` walk tests take the same path). `store` pulls `base` in
+# transitively either way, so this adds no new crate to the graph.
+[dev-dependencies]
+base = { path = "../../shared/base" }
+# The mode machine, for the one arm test that asserts the OFF gate itself opens after a shutdown
+# taken at speed (`crates/firmware/src/arm.rs`). The claim is "the machine can leave OFF", so the
+# test drives the REAL machine rather than restating its gate. Already in the graph through
+# `orchestrator`, which does not re-export it; host-test only, no bytes in the image.
+state = { path = "../state" }
+
+# The HAL providing the runtime `detect_chip()` and the FMC flash driver. Target-gated exactly like
+# the store's dependency: the host build of this crate degrades to an empty `main`, so it never links
+# the HAL. runtime-hal is the workspace git dependency (root Cargo.toml).
+[target.'cfg(target_arch = "arm")'.dependencies]
+runtime-hal = { workspace = true }
+# The workspace flash vector table (crates/vectors): once ANY crate enables cortex-m-rt's
+# `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
+# one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
+# `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.
+vectors = { path = "../vectors" }

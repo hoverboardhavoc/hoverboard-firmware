@@ -19,4 +19,4 @@ include(":app")
 
 // The Kotlin mirror of the firmware wire protocol.
 // Standalone Gradle build (pure Kotlin/JVM); Gradle substitutes com.hoverboard:protocol onto it.
-includeBuild("../../protocol-kotlin")
+includeBuild("../../shared/protocol-kotlin")
