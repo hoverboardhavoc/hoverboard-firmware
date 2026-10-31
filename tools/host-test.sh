@@ -21,8 +21,8 @@
 # one invocation. An alias additionally cannot interpolate anything, and the host triple has to be
 # resolved here rather than hardcoded (this repo is driven from an arm64 Mac and from a Pi, and CI's
 # runners are x86_64 Linux). Each run is made from inside its workspace, so that workspace's
-# rust-toolchain.toml picks the compiler (the pinned nightly in motorcontroller/ and tools/, 1.92 in
-# shared/).
+# rust-toolchain.toml picks the compiler (the pinned nightly in motorcontroller/, shared/ and
+# tools/).
 #
 # CI's host-tests job RUNS THIS SCRIPT, so the flags cannot drift from the flags a local pass means.
 set -euo pipefail

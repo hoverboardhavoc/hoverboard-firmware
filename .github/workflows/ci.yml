@@ -12,8 +12,8 @@ name: CI
 #
 # The repository holds four Cargo workspaces, one per build chain (specs/repo-layout.md):
 # motorcontroller/ (the GD32 image, pinned nightly, thumbv7m by default), shared/ (the crates more
-# than one chain links, 1.92), tools/ (the host programs, pinned nightly) and bridge/ (the ESP32-C3
-# image, 1.92). Each cargo step runs from inside its workspace, so that workspace's
+# than one chain links, pinned nightly), tools/ (the host programs, pinned nightly) and bridge/ (the
+# ESP32-C3 image, 1.92). Each cargo step runs from inside its workspace, so that workspace's
 # rust-toolchain.toml and .cargo/ apply; the root holds no Cargo workspace.
 #
 # Eight checks:
@@ -36,9 +36,10 @@ name: CI
 #
 # TOOLCHAIN: every CARGO job runs the PINNED NIGHTLY nightly-2026-07-20, not stable
 # (motorcontroller/rust-toolchain.toml carries the why: the shipping image is built with -Z
-# build-std, worth -2,408 B of flashed span, and build-std is nightly-only). The exceptions are the
-# shared/ and bridge/ workspaces, which pin 1.92; the lint and host-test jobs install both. Three
-# consequences this file has to honour, in every job:
+# build-std, worth -2,408 B of flashed span, and build-std is nightly-only). shared/ is on it too,
+# because its crates are compiled into the image by that compiler. The exception is the bridge/
+# workspace, which pins 1.92; its job is the one that compiles the shared crates it links on stable.
+# Three consequences this file has to honour, in every job:
 #   - `dtolnay/rust-toolchain@<ref>` takes the toolchain from its REF, and that argument OVERRIDES
 #     rust-toolchain.toml. A job left on `@1.96.0` would silently keep building on stable while the
 #     repo believes it is on nightly, so all five jobs use `@master` with an explicit `toolchain:`
@@ -74,9 +75,8 @@ jobs:
   #     skips all test code), with the same -F store/test-fields the host-test job compiles with.
   # Clippy lints workspace MEMBERS only, never a path dependency, so the shared crates are linted
   # in shared/ and not by the motorcontroller run. Their thumbv7m surface (store's FmcFlash,
-  # swd-mailbox's board-only code) is the code the motorcontroller build compiles into the image on
-  # the pinned nightly, so that run uses the nightly too; their host surface runs on shared/'s own
-  # 1.92.
+  # swd-mailbox's board-only code) is the code the motorcontroller build compiles into the image;
+  # both surfaces run on the pinned nightly that shared/rust-toolchain.toml names.
   # The tools/ workspace: rustfmt covers every member here; swd-bridge is clippy'd here;
   # emulator-runner is clippy'd in the emulator-tests job (its unicorn native build needs cmake,
   # installed there); hoverboard-cli in its own job, per platform; hardware-runner is ONLY
@@ -100,14 +100,6 @@ jobs:
           toolchain: nightly-2026-07-20
           targets: thumbv7m-none-eabi, x86_64-unknown-linux-gnu
           components: rustfmt, clippy, rust-src
-
-      # shared/'s toolchain (shared/rust-toolchain.toml).
-      - name: Install Rust (1.92, for shared/) + rustfmt/clippy
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.92"
-          targets: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -194,11 +186,9 @@ jobs:
           -F store/test-fields
           -- -D warnings
 
-      # On the pinned nightly, overriding shared/rust-toolchain.toml: this is the surface the image
-      # build compiles, and that is the toolchain it compiles it on.
-      - name: clippy (shared, thumbv7m build surface, the image's nightly)
+      - name: clippy (shared, thumbv7m build surface)
         working-directory: hoverboard-firmware/shared
-        run: cargo +nightly-2026-07-20 clippy --target thumbv7m-none-eabi -- -D warnings
+        run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
 
       - name: clippy (shared, host-test surface, all targets)
         working-directory: hoverboard-firmware/shared
@@ -560,14 +550,6 @@ jobs:
           targets: x86_64-unknown-linux-gnu
           components: rustfmt, clippy, rust-src
 
-      # shared/'s toolchain (shared/rust-toolchain.toml), for the shared suite.
-      - name: Install Rust (1.92, for shared/) + host target
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.92"
-          targets: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
@@ -917,7 +899,9 @@ jobs:
 
   # The hoverboard bridge (bridge/): its own workspace on its own toolchain, the 1.92 stable its
   # rust-toolchain.toml pins with the riscv32imc target (the esp-hal fork it patches in is not built
-  # on the motorcontroller workspace's nightly). The hardware-free core's host tests and clippy
+  # on the motorcontroller workspace's nightly). This job is also the check that the shared/ crates
+  # the bridge links compile on stable 1.92, at the versions bridge/Cargo.lock pins; the shared
+  # workspace itself runs on the nightly. The hardware-free core's host tests and clippy
   # (all targets) first, then the firmware's release build with no Wi-Fi variables set (the network
   # is a store field, specs/bridge-onboarding.md section 2), then the two images with a pinned
   # espflash binary release: the merged install image for install-esp (bootloader/bootloader.bin,
