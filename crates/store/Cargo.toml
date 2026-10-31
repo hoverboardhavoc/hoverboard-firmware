@@ -13,9 +13,9 @@ base = { path = "../base" }
 # (it uses MockFlash), so the store core + field set stay base-only on the host. The chip2k Tier-2
 # build needs the HAL's `detect-internals` feature (the public descriptors are both 1 KiB, so the
 # 2 KiB `Chip` comes from `synthesize`); store-test forwards it through this crate's `chip2k`
-# feature. runtime-hal lives as a sibling checkout (../../../runtime-hal); CI clones it alongside.
+# feature. runtime-hal is the workspace git dependency (root Cargo.toml).
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
-runtime-hal = { path = "../../../runtime-hal" }
+runtime-hal = { workspace = true }
 
 # HOST-TEST ONLY (no bytes in any image, and no runtime dependency: `store` does not depend on
 # `control`, and must not -- the cascade is pure math with no notion of persistence). It is here so

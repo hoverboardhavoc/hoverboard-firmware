@@ -14,6 +14,15 @@ exclude = ["crates/emulator-runner", "crates/hardware-runner", "crates/swd-bridg
 [workspace.package]
 license = "GPL-3.0-or-later"
 
+# runtime-hal is a git dependency, declared once here; every consumer names it with
+# `workspace = true` (adding its own `features`). `branch = "main"` is what `cargo update -p
+# runtime-hal` moves to; the commit every build uses is the one Cargo.lock pins, so a runtime-hal
+# push does not reach this repo until a commit bumps the lockfile. A plain build uses the pinned
+# commit, locally and in CI; a build against the ~/dev/runtime-hal checkout adds a per-command
+# `--config` patch (CLAUDE.md, "Running the checks").
+[workspace.dependencies]
+runtime-hal = { git = "https://github.com/hoverboardhavoc/runtime-hal", branch = "main" }
+
 [profile.release]          # the embedded profile: small + linkable
 opt-level = "z"
 lto = true
