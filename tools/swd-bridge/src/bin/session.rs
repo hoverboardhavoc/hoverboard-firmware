@@ -11,7 +11,7 @@
 //! the code rather than the spec:** three mechanisms are in play, and the first explanation given
 //! (that `attach()` invalidates the earlier producer's session) was wrong.
 //!
-//! - `EpochWatch::poll` (`crates/swd-mailbox/src/lib.rs`) flushes the inbound ring ONCE on a
+//! - `EpochWatch::poll` (`shared/swd-mailbox/src/lib.rs`) flushes the inbound ring ONCE on a
 //!   changed `epoch` and tracks no producer identity, and the host's `produce` re-reads `h2t_head`
 //!   on every send and never looks at the epoch. So the first producer's LATER frames are consumed
 //!   normally. What the flush does kill is whatever was in flight at that instant.

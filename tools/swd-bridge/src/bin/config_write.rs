@@ -10,10 +10,10 @@
 //!
 //! - `FIELD` is a `0x`-hex or decimal store field id (e.g. `0x48` = `imu.scl_pin`).
 //! - `INDEX` (optional, default 0) is the per-motor / per-gain index (`0x79:1` = the gain `gr`).
-//! - `VALUE` is parsed against the field's REGISTERED type (`crates/store`; a packed `port|pin`
+//! - `VALUE` is parsed against the field's REGISTERED type (`shared/store`; a packed `port|pin`
 //!   byte such as `0x16` = PB6 is a `u8` field). No board-model validation happens here: a
 //!   duplicate pin or a gate-capable pin in a LED field is a well-typed write this tool passes
-//!   through, so the FIRMWARE's boot validator (`crates/board`) is what judges the layout after a
+//!   through, so the FIRMWARE's boot validator (`motorcontroller/board`) is what judges the layout after a
 //!   reboot.
 //! - `--dst` picks the board: `attached` (the default) resolves the board this host's mailbox
 //!   link lands on from the walk; an address reaches a board THROUGH it (the two-hop case).

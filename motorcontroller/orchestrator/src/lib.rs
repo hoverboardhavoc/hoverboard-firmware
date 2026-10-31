@@ -40,7 +40,7 @@
 //!   `INPUTS` or `DRIVE_CMD` from the node that stated it, [`LinkInbox::refreshes_mirror`]), so
 //!   the one release path a departed controller cannot take is taken for it here.
 //!
-//! `crates/control` / `crates/state` stay link-agnostic (`specs/link-control.md`, "Crate
+//! `motorcontroller/control` / `motorcontroller/state` stay link-agnostic (`specs/link-control.md`, "Crate
 //! placement"): `linkctl` types stop at this crate's inbox; the mode machine consumes plain
 //! levels.
 //!
@@ -586,7 +586,7 @@ pub struct OrchestratorState {
     /// The boot outcome: plan-present AND probe-ok (`specs/integration.md`, boot delta step 1).
     /// Fixed at construction; every failure is fail-soft (link-only-plus-throttle boot).
     pub imu_configured: bool,
-    /// Did the staging ASK for an IMU (`crates/board/src/lib.rs`, `Validated::imu_staged`)?
+    /// Did the staging ASK for an IMU (`motorcontroller/board/src/lib.rs`, `Validated::imu_staged`)?
     /// Fixed at construction, published and nothing else: no control decision reads it, because every one of them turns
     /// on whether an IMU actually ANSWERS, which is `imu_configured`.
     ///
@@ -802,7 +802,7 @@ impl OrchestratorState {
     /// the resolution table of `specs/rover-one-imu.md` section 2, where pivoting Balance
     /// demotes to Throttle with the mode fault when the IMU is absent and rigid Balance leads
     /// with one and follows without). `imu_configured` comes from the boot path (plan-present AND probe-ok);
-    /// `imu_staged` comes from the validator (`crates/board/src/lib.rs`, `Validated::imu_staged`)
+    /// `imu_staged` comes from the validator (`motorcontroller/board/src/lib.rs`, `Validated::imu_staged`)
     /// and is published only, so the observation block can tell an unstaged board from a failed bring-up;
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
     /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries

@@ -33,13 +33,13 @@ runner = "../tools/board-target-runner.sh"
 # flash, the flag belongs to that build alone.
 #
 # It is an ALIAS and not a bare `[unstable] build-std = [...]` key on purpose: an unstable key here
-# applies to EVERY cargo invocation in this repo, so the host tests, the swd-bridge suite and the
-# emulator runner would all start rebuilding std for the host target, paying minutes per run to change
-# nothing about the image. The alias scopes build-std to the build that ships.
+# applies to EVERY cargo invocation in this workspace, so the host tests and the test-image builds the
+# emulator runner makes here would all start rebuilding std, paying minutes per run to change nothing
+# about the image. The alias scopes build-std to the build that ships.
 #
 # `--target` is spelled out even though [build] target already selects it: build-std wants the target
 # explicit, and CI's release step and tools/flash.sh both read the ELF from the path this produces
-# (target/thumbv7m-none-eabi/release/firmware). CI runs this same alias, so the local image and the CI
-# image come out of the same invocation.
+# (motorcontroller/target/thumbv7m-none-eabi/release/firmware). CI runs this same alias, so the local
+# image and the CI image come out of the same invocation.
 [alias]
 image = ["build", "--release", "-p", "firmware", "--target", "thumbv7m-none-eabi", "-Z", "build-std=core,compiler_builtins"]

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! L3: the network layer (`specs/l3.md`) on top of L2 (`crates/link`).
+//! L3: the network layer (`specs/l3.md`) on top of L2 (`shared/link`).
 //!
 //! It adds node **addressing** (`src`/`dst`), the **controller-driven discovery + address-assignment
 //! walk**, **source-learned multi-hop forwarding**, the **two delivery classes**, and `CONFIG_*` (the
@@ -7,7 +7,7 @@
 //! them** - L3 is addressing and routing only.
 //!
 //! HAL-free, and L2-free: this crate depends on `store` and `heapless` only. It hands PDUs up and
-//! down as byte slices, and the CALLER does the L2 `send` / `poll_recv` (`crates/link`'s `Link`, a
+//! down as byte slices, and the CALLER does the L2 `send` / `poll_recv` (`shared/link`'s `Link`, a
 //! dev-dependency here) around it - the firmware from its cooperative scheduler, the Tier-1 host
 //! tests over an in-memory mesh of mock L2 links.
 //!

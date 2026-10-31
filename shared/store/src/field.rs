@@ -401,7 +401,7 @@ pub const NODE_CLASS: Field<u8> = Field::new(0x03, 0x01);
 // The board-layout fields (`specs/board-model.md`): the per-pin store fields (packed
 // `(port << 4) | pin` bytes, `0xFF` = unset = function absent) plus the non-pin board facts the
 // boot validator consumes. Registered here per the spec's registered-at-landing decision: the
-// validator (`crates/board`) is their first consumer; motor.current_sense/direction/align_offset
+// validator (`motorcontroller/board`) is their first consumer; motor.current_sense/direction/align_offset
 // are now registered too (the `board::MotorPlan` fold-back of `specs/motor-integration.md` carries
 // them at boot for the motor bring-up). motor.pole_pairs and wheel.diameter_mm are registered too,
 // both defaulting to UNSET: they are the two facts a controller needs to turn counted hall edges
@@ -567,7 +567,7 @@ pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x66, 0);
 ///
 /// **Why a field.** It is a property of the shunt and amplifier chain fitted to a particular board,
 /// the [`BOARD_BATTERY_CAL`] class, and it was the only analog scale left in a `const`:
-/// `COUNTS_PER_AMP = 800` in `crates/firmware/src/motor.rs`, EFeru's `A2BIT_CONV = 50` ADC LSB per
+/// `COUNTS_PER_AMP = 800` in `motorcontroller/firmware/src/motor.rs`, EFeru's `A2BIT_CONV = 50` ADC LSB per
 /// amp times 16 counts per LSB, written for a class of mainboard and measured on none of ours.
 ///
 /// **The default is 455**, the safer end of the 2026-10-09 energised bench gate
@@ -628,7 +628,7 @@ pub const MOTOR_NOISE_FLOOR: Field<u16> = Field::new(0x6B, 2_100);
 ///
 /// **The only field here the FIRMWARE writes to on its own.** Every other record is a config
 /// change somebody typed; this one is appended once per ride, on a service-loop pass that finds
-/// the board disarmed and the wheel stopped (`crates/firmware/src/odometer.rs`). The store carries
+/// the board disarmed and the wheel stopped (`motorcontroller/firmware/src/odometer.rs`). The store carries
 /// no arm state and never will (`specs/storage-layer.md`, "Who enforces writes only while
 /// disarmed"), so that gate is the caller's, exactly as it is for the L3 `CONFIG_WRITE` path.
 ///
@@ -726,7 +726,7 @@ pub const BOARD_BATTERY_CHEMISTRY: Field<u8> = Field::new(0x7F, 0);
 /// masks the word to the three lines, so a stray bit cannot quietly acquire a meaning later.
 ///
 /// **A property of the input wiring fitted, not of the firmware**, and a compiled literal until
-/// now: `crates/inputs/src/debounce.rs` has always said that "which pin / polarity each line maps
+/// now: `motorcontroller/inputs/src/debounce.rs` has always said that "which pin / polarity each line maps
 /// to is board data resolved by the caller", and the caller resolved the PIN from a field
 /// ([`BOARD_BUTTON`], [`PAD_A`], [`PAD_B`]) and the polarity from a literal. ONE packed field
 /// rather than three, by the owner's choice: one id, one seam, one editor row, and the three are
@@ -742,7 +742,7 @@ pub const BOARD_BATTERY_CHEMISTRY: Field<u8> = Field::new(0x7F, 0);
 /// Getting it wrong is visible rather than silent on the button, and NOT silent-safe on the pads:
 /// an inverted pad reads "rider on both pads" on an empty machine, which steps the balance loop
 /// from the standby gains to the RUN set, about 120x the proportional authority
-/// (`crates/inputs/src/pad.rs`).
+/// (`motorcontroller/inputs/src/pad.rs`).
 pub const BOARD_INPUT_POLARITY: Field<u8> = Field::new(0x6C, 0b110);
 
 /// Per-board attitude LEVEL TRIM, centidegrees, indexed `0 = pitch`, `1 = roll`
@@ -781,7 +781,7 @@ pub const ATTITUDE_LEVEL_TRIM: Field<i16> = Field::new(0x70, 0);
 /// because a step in differential torque is a yaw impulse and on a rigid frame a yaw impulse
 /// reaches the pitch loop as a disturbance through the steel.
 ///
-/// Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`), so a write
+/// Read at boot and again at every arm (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`), so a write
 /// applies from the next arm and costs no power-cycle. NOT on the live tune lane: a bound on how
 /// much authority the stick has is not changed under a moving machine, and a config write is
 /// refused while armed. The rider app offers it on the Tune screen all the same
@@ -818,7 +818,7 @@ pub const CONTROL_SF_GAINS: IndexedField<i16, 4> = IndexedField::new(0x79, [0, 0
 /// A field rather than a constant because the LQR's torque scale (assumption A1) is uncertain by a
 /// factor near one, so the owner may need to move the maxima. The defaults ARE
 /// `control::DEFAULT_GAIN_MAX` (pinned by `store`'s tests), four to ten times above the start
-/// gains. Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`) into
+/// gains. Read at boot and again at every arm (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`) into
 /// `control::GainShadow` (each index taken as `max(0, value)`; a live gain above a shrunk maximum
 /// clamps). NOT on the live tune lane.
 ///
@@ -844,7 +844,7 @@ pub const CONTROL_REFERENCE: IndexedField<i16, 2> = IndexedField::new(0x7B, [0, 
 /// bound on the position error, so a machine pushed further than this comes back exactly this far
 /// and no further. **Default 45** (0.26 m on the rover's wheel); 0 disables the position term.
 ///
-/// Read at boot and again at every arm (`crates/firmware/src/arm.rs`, `ARM_ROW`), so a write
+/// Read at boot and again at every arm (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`), so a write
 /// applies from the next arm. NOT on the live tune lane: a bound on how much correction a held
 /// push can wind is not changed under a moving machine. Range enforcement is NOT here: the seam
 /// (`control::sf::pos_clamp`) clamps it to `0..=450` (`control::sf::POS_CLAMP_MAX`).
@@ -1318,9 +1318,9 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
 /// It scans [`REGISTRY`] **by reference** and builds a [`FieldDef`] from the one matching 8 B row.
 /// Iterating by value (`REGISTRY.into_iter()`, or the old `registry()` call) would first copy the
 /// whole table into this frame, which is the regression this shape exists to prevent. The gate on that is
-/// `dynamic_config_write_costs_no_extra_stack_chip1k` in `crates/emulator-runner`, which measures the
+/// `dynamic_config_write_costs_no_extra_stack_chip1k` in `tools/emulator-runner`, which measures the
 /// real image's stack excursion under Unicorn; there is no host-side gate, and
-/// `crates/store/src/tests.rs` records why one is not possible.
+/// `shared/store/src/tests.rs` records why one is not possible.
 pub fn lookup(field_id: u8) -> Option<FieldDef> {
     lookup_key(Key { field_id, index: 0 })
 }

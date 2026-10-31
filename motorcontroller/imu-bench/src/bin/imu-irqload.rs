@@ -43,7 +43,7 @@ mod firmware {
     use cortex_m::peripheral::syst::SystClkSource;
     use cortex_m_rt::{entry, exception};
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
+    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
     // which cortex-m-rt no longer provides once its `device` feature is on.
     use vectors as _;
 

@@ -3,7 +3,7 @@
  * (contrib/loaders/flash/stm32/stm32f1x.S): the bridge streams halfwords into a ring in SRAM over
  * SWD, and this programs them in ascending order while the bridge writes the next chunk.
  *
- * Assembled, from apps/hoverboard-bridge, with:
+ * Assembled, from bridge/, with:
  *
  *   mkdir -p target/loader
  *   arm-none-eabi-as -mcpu=cortex-m3 -mthumb -o target/loader/f1x.o loader/f1x.S

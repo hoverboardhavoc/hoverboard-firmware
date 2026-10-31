@@ -1,7 +1,7 @@
 # Mahony attitude filter (roadmap Layer 6, specs/attitude.md). Pure fixed-point Q math, no_std,
 # no alloc, host-testable. No peripheral access: the filter consumes conditioned gyro (rad/s) +
 # accel (direction-only) vectors and publishes a unit quaternion plus fused pitch and roll in
-# degrees. The sensor, bus, bias subtraction, and IIR pre-filter belong to crates/imu.
+# degrees. The sensor, bus, bias subtraction, and IIR pre-filter belong to motorcontroller/imu.
 [package]
 name = "attitude"
 version = "0.1.0"

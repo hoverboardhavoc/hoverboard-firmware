@@ -8,7 +8,7 @@
 //! as a configurator would push it. Type SAFETY is honored (a value that cannot parse as the
 //! field's registered type is rejected with a clear error), but there is NO board-model semantic
 //! validation here: a duplicate pin, or a gate-capable pin in a LED field, is a well-typed write
-//! that this tool passes through unchanged. The FIRMWARE's boot validator (`crates/board`) is the
+//! that this tool passes through unchanged. The FIRMWARE's boot validator (`motorcontroller/board`) is the
 //! thing under test, so staging a deliberately-invalid layout must succeed at this layer.
 
 use std::fmt;

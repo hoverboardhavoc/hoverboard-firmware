@@ -9,7 +9,7 @@ what comes back.
 the two bench boards had staged on a particular afternoon. A table like that is a second copy of
 state the boards themselves answer in one command, and it was wrong within days of each capture,
 twice. The live values are on the boards; dated captures belong in `specs/bench-evidence/<date>/`
-with the session that took them; the compiled defaults are in `crates/store/src/field.rs` and
+with the session that took them; the compiled defaults are in `shared/store/src/field.rs` and
 change with the tree. What is below is the part that does not rot.
 
 ## Reading and writing a value
@@ -17,7 +17,7 @@ change with the tree. What is below is the part that does not rot.
 Host tool, from the repo root on the Mac that owns the bench:
 
 ```
-crates/swd-bridge/target/<host-triple>/release/swd-mailbox-config <ocd-host:port> FIELD[:INDEX] ...
+tools/target/<host-triple>/release/swd-mailbox-config <ocd-host:port> FIELD[:INDEX] ...
 ```
 
 Add `=VALUE` to write, and the tool reads the value back and confirms it. `--dst ADDR` reaches a
@@ -64,7 +64,7 @@ attached node from what the walk reports, never from a convention, and `--dst` t
   under them; nothing registered reads them, and a `CONFIG_READ` of one is an unknown key.
 - **`imu.axis_sign` (0x65)**: indices 0..5 = `[ax, ay, az, gx, gy, gz]`. **0 means unset**, and that
   index then falls back to the compiled reference map `[-1, 1, -1, -1, 1, -1]`
-  (`crates/imu/src/lib.rs`).
+  (`motorcontroller/imu/src/lib.rs`).
 - **`imu.axis_role` (0x68)**: index 0 = which chip axis is UP, index 1 = which is PITCH_RATE,
   1 = X, 2 = Y, 3 = Z. 0 = unset, falling back to UP = Z, PITCH_RATE = Y. The roles are a second
   field beside the sign map because a board standing on edge is a 90 degree rotation from the flat
@@ -104,7 +104,7 @@ afternoon, next to the run that depended on it.
 
 ## Source of truth in the repo
 
-- `crates/store/src/field.rs`: every field id, its type, its compiled default, and the prose
+- `shared/store/src/field.rs`: every field id, its type, its compiled default, and the prose
   explaining why it exists. The `REGISTRY` array at the bottom is the complete list.
-- `crates/swd-bridge/src/bin/config_write.rs`: the reader/writer tool used here.
+- `tools/swd-bridge/src/bin/config_write.rs`: the reader/writer tool used here.
 - `tools/flash.sh`: the probe table, which board runs on which host, and the flash guards.

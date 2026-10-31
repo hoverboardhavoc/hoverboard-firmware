@@ -1,5 +1,5 @@
 # The hoverboard bridge's command set (specs/hoverboard-bridge.md, "ESP commands"): the opcodes 0x80..0x9F and
-# their payload layouts, shared by the bridge firmware (apps/hoverboard-bridge) and the terminal tool
+# their payload layouts, shared by the bridge firmware (bridge/) and the terminal tool
 # (tools/hoverboard-cli) so the two cannot disagree about a byte.
 [package]
 name = "espsvc"

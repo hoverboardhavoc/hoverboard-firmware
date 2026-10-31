@@ -11,7 +11,7 @@
 //! `store::BOARD_INPUT_POLARITY` through [`asserted`], the one mapping this crate does hold);
 //! here the count of debounced lines and the combo memberships are parameters, and the machine is
 //! replicated per line. Recovered from the archived implementation
-//! (`archive/accumulated-build:crates/inputs`, commit `74b7773`) per `specs/integration.md`'s
+//! (`archive/accumulated-build:motorcontroller/inputs`, commit `74b7773`) per `specs/integration.md`'s
 //! sources section.
 //!
 //! Everything here runs at 16 ms (every 4th scheduler tick), and is pure integer/boolean: no-FPU by
@@ -21,7 +21,7 @@
 //! board's own hardware produces. It is DELETED (`specs/link-control.md`, "`INPUTS` (2 B): remote input mirror"): the only thing that ever
 //! fed it was the remote `INPUTS.throttle` mirror, no board here has a physical throttle, and
 //! nothing read its output. Demand arrives as `DRIVE_CMD` and is conditioned by
-//! `crates/control/src/throttle.rs`, which is a different filter on a different field.
+//! `motorcontroller/control/src/throttle.rs`, which is a different filter on a different field.
 //!
 //! The reference constants are preserved exactly.
 

@@ -53,7 +53,7 @@ const N_PORTS: u8 = 3;
 const PORT_KINDS: [u8; MAX_PORTS] = [PORT_BLE, PORT_SWD, PORT_UART, 0];
 
 /// How long a `PROBE_PORTS` waits for the neighbours' answers before `PORTS` goes out: the
-/// boards' window (`POLL_WINDOW_TICKS`, 125 ticks at 250 Hz in `crates/firmware`).
+/// boards' window (`POLL_WINDOW_TICKS`, 125 ticks at 250 Hz in `motorcontroller/firmware`).
 pub const PROBE_WINDOW_US: u64 = 500_000;
 
 /// The most replies one command produces (a final chunk: its acknowledgement and the status).

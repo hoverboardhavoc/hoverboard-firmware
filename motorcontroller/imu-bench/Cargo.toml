@@ -8,7 +8,7 @@
 #
 # BUILD (the queued Phase-A IMU gate image; specs/silicon-queue.md section 2):
 #   cargo build --release --features hardware -p imu-bench
-#   -> target/thumbv7m-none-eabi/release/imu-bench  (~13 KiB, fits the F130's 64 KiB FLASH)
+#   -> motorcontroller/target/thumbv7m-none-eabi/release/imu-bench  (~13 KiB, fits the F130's 64 KiB FLASH)
 #
 # The `imu-bench` bin is `required-features = ["hardware"]` (below) so a bare `cargo build` (the
 # CI build job, DEV profile) SKIPS it. That is deliberate: the Mahony/CORDIC math is ~87 KiB of
@@ -60,10 +60,10 @@ panic-halt = "1"
 
 # The HAL: detect_chip(), the GPIO split, hardware I2C (I2c0 on PB6/PB7), the SysTick Delay.
 # Target-gated exactly like firmware / ble-loopback / l2-uart-bench; the host build degrades to an
-# empty main and never links the HAL. runtime-hal is the workspace git dependency (root Cargo.toml).
+# empty main and never links the HAL. runtime-hal is the workspace git dependency (motorcontroller/Cargo.toml).
 [target.'cfg(target_arch = "arm")'.dependencies]
 runtime-hal = { workspace = true }
-# The workspace flash vector table (crates/vectors): once ANY crate enables cortex-m-rt's
+# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
 # `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
 # one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
 # `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.

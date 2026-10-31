@@ -454,7 +454,7 @@ pub(crate) fn peer_down_level(state: &OrchestratorState) -> bool {
 ///
 /// # Placement
 ///
-/// Linked into `.hotcode` (`crates/firmware/memory.x`, "Hot-path flash placement"): on the
+/// Linked into `.hotcode` (`motorcontroller/firmware/memory.x`, "Hot-path flash placement"): on the
 /// GD32F1x0 only the first 32 KiB of flash is zero-wait, and this is the 250 Hz control tick's
 /// engagement machine. Before this function existed, the shell body was placed by the
 /// `*(.text.*fsm_step*)` NAME ANCHOR in memory.x; introducing a wrapper inlined `fsm_step` into it

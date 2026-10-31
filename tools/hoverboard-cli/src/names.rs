@@ -1,6 +1,6 @@
 //! The name table's rules (`specs/cli-config.md` sections 2.1 and 2.2): the path a key goes by on
 //! the command line and in a file, and the form a value takes in a file. The table itself is the
-//! store's (`store::NAMES`, `crates/store/src/field.rs`); this module only applies it.
+//! store's (`store::NAMES`, `shared/store/src/field.rs`); this module only applies it.
 
 use net::walk::{CONFIG_RESP_VALUE_MAX, CONFIG_WRITE_VALUE_MAX};
 use serde_json::{Map, Value as Json};

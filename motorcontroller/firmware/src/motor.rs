@@ -20,7 +20,7 @@
 //! # What runs where
 //!
 //! - **The period ISR (16 kHz, highest priority)**: reads the injected currents, reads the halls,
-//!   steps `crates/commutation`, applies duties + channel enables, re-arms the ADC trigger,
+//!   steps `motorcontroller/commutation`, applies duties + channel enables, re-arms the ADC trigger,
 //!   publishes the handoff words. Nothing else runs there: no allocation, no blocking, no link
 //!   work, no flash.
 //! - **The 250 Hz control task**: writes the demand word and reads back angle / speed / period
@@ -151,7 +151,7 @@ pub const FAULT_INIT_CAL: u32 = 1 << 3;
 /// Deliberately NOT a [`motor_fault_level`] producer. The board is running six-step, which is what
 /// a six-step-configured board runs, so demoting and then refusing to drive would make a FOC
 /// request a brick. It is the READBACK: the same shape as the control dispatch demoting Balance to
-/// Throttle and raising the mode fault on a board with no IMU (`crates/orchestrator`,
+/// Throttle and raising the mode fault on a board with no IMU (`motorcontroller/orchestrator`,
 /// `EV_MODE_FAULT`). The refused-cal half of the demotion keeps its own teeth, because
 /// [`FAULT_INIT_CAL`] IS a producer, so that board does not arm at all.
 pub const FAULT_METHOD: u32 = 1 << 4;
@@ -210,11 +210,11 @@ pub fn obs_torque_is_current(state: u32) -> bool {
 /// SATURATING, not a cast, and that is a safety property rather than tidiness: the cell is an
 /// `i32`, the block row an `i16`, and a wrapping narrowing lands on exactly 0 every 65,536 edges.
 /// Zero is the one value the step-off latch's health rule reads as "the wheel is not moving"
-/// (`crates/state/src/fault.rs`, `FaultLatch::is_healthy` tests `b_motion != 0`), so a wrap could
+/// (`motorcontroller/state/src/fault.rs`, `FaultLatch::is_healthy` tests `b_motion != 0`), so a wrap could
 /// report a turning wheel as stationary. A clamp can only ever land on the rails, which are
 /// nonzero. The saturation is unreachable on the real plant (a 20 ms window of hall edges is tens,
 /// not tens of thousands); it is here so the narrowing is a stated fact rather than luck, the way
-/// the shell's own `i16` narrowings in `crates/orchestrator/src/dispatch.rs` are.
+/// the shell's own `i16` narrowings in `motorcontroller/orchestrator/src/dispatch.rs` are.
 ///
 /// Plain `i16` bounds, NOT `commutation::foc::sat16`: that one saturates to the symmetric
 /// [-32767, +32767] because the FOC domain reserves the `-0x8000` sentinel, and the block row
@@ -2572,7 +2572,7 @@ pub mod hw {
     /// phases drive.
     /// Linked into `.hotcode`, at the bottom of flash: on the GD32F1x0 only the first 32 KiB of
     /// flash is zero-wait, and this ISR measured 17,166 cycles per period above that line against
-    /// **596 below it** (F103, same binary: 600). `crates/firmware/memory.x` owns the placement and
+    /// **596 below it** (F103, same binary: 600). `motorcontroller/firmware/memory.x` owns the placement and
     /// asserts the window at link time.
     #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
     extern "C" fn period_isr() {
@@ -2825,7 +2825,7 @@ mod tests {
 
     /// A STATIONARY WHEEL READS EXACTLY 0 on the control block's row, with no floor, no offset and
     /// nothing added on the way: the step-off latch's health rule tests `b_motion != 0`
-    /// (`crates/state/src/fault.rs`, `FaultLatch::is_healthy`), so any nonzero the conversion
+    /// (`motorcontroller/state/src/fault.rs`, `FaultLatch::is_healthy`), so any nonzero the conversion
     /// invented would report a parked vehicle as rolling for as long as it sat there.
     #[test]
     fn a_stationary_wheel_reads_exactly_zero() {

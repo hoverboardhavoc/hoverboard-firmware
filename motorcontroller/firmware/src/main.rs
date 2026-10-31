@@ -76,7 +76,7 @@ mod firmware {
         InputSample, Obs, OrchestratorState,
     };
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (crates/vectors),
+    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
     // which cortex-m-rt no longer provides once its `device` feature is on.
     use runtime_hal::clock::{self, ClockConfig};
     use runtime_hal::descriptor::ClockPath;
@@ -1358,7 +1358,7 @@ mod firmware {
         let now_tick = TICK_COUNT.load(Ordering::Relaxed);
         // The ticks that ACTUALLY elapsed since the last control run, and ZERO is the normal
         // reading on a CATCH-UP RUN. The scheduler accrues missed slots in its `runcount` and
-        // `dispatch()` drains them one per main-loop pass (`crates/scheduler`), so after the main
+        // `dispatch()` drains them one per main-loop pass (`motorcontroller/scheduler`), so after the main
         // thread has been away this callback runs several times inside one SysTick tick: measured
         // on the offroad pair 2026-10-22, bursts of up to 294 runs at 13,889 runs/s. Those runs
         // are ONE service opportunity, and every consumer here that measures time is gated on it
@@ -1608,7 +1608,7 @@ mod firmware {
     /// when it was given a bias. So there is no applicable apply this can skip.
     ///
     /// `#[inline(never)]` with NO `#[link_section]`, deliberately: it must stay OUT of `.hotcode`,
-    /// the F1x0 zero-wait first 32 KiB (`crates/firmware/memory.x`). It runs once per arm rather
+    /// the F1x0 zero-wait first 32 KiB (`motorcontroller/firmware/memory.x`). It runs once per arm rather
     /// than once per pass, so window space spent on it would be taken from the 16 kHz and 250 Hz
     /// paths that need it; and `inline(never)` is what stops the body being inlined into
     /// `control_task_cb`, which IS placed in the window.
@@ -1875,7 +1875,7 @@ mod firmware {
     /// posture).
     ///
     /// Returned WITH the plan: whether the staging ASKED for an IMU
-    /// (`crates/board/src/lib.rs`, `Validated::imu_staged`), which the boot publishes as the
+    /// (`motorcontroller/board/src/lib.rs`, `Validated::imu_staged`), which the boot publishes as the
     /// `CTRL_OBS` flags byte b6. It cannot be derived from the plan on the way out: a refused
     /// layout carries no plan at all, and that is one of the cases the bit has to tell apart from
     /// a board with no IMU fitted. It rides out of the validator rather than off a second store

@@ -1,6 +1,6 @@
 //! The bridge end (this crate) and the firmware end (`swd_mailbox`'s pointer `Mailbox` /
 //! `MailboxSerial` / `EpochWatch`) over ONE shared buffer, so the SPSC mailbox is exercised end to
-//! end with no silicon. `crates/swd-bridge` keeps its own suite over the same code through its
+//! end with no silicon. `tools/swd-bridge` keeps its own suite over the same code through its
 //! re-exports; this one pins the `no_std` crate on its own, with a typed backend error and the
 //! injected delay.
 

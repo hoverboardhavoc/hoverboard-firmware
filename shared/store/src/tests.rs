@@ -1365,7 +1365,7 @@ mod dynamic {
     // from inside safe Rust on the host: the frame is gone by the time any code the test controls
     // runs. So the ONLY gate on this is tier 2, where the emulator owns memory and can measure the
     // real image's stack pointer excursion directly:
-    // `dynamic_config_write_costs_no_extra_stack_chip1k` in crates/emulator-runner. A green host tick
+    // `dynamic_config_write_costs_no_extra_stack_chip1k` in tools/emulator-runner. A green host tick
     // that catches nothing is worse than no host test, because it stops the next person looking.
 
     #[cfg(feature = "test-fields")]

@@ -1,7 +1,7 @@
 //! A host-test [`store::Flash`]: the one in-RAM flash the crate's tests mount a REAL store over.
 //!
 //! The store's own `MockFlash` is `#[cfg(test)]`-internal to that crate, so every consumer has to
-//! bring its own (`crates/net`'s walk tests do the same). This module is that one: it was three
+//! bring its own (`shared/net`'s walk tests do the same). This module is that one: it was three
 //! copies in this crate before the arm-time re-read's tests needed a fourth (the `ble_name` tests,
 //! the `ble_bringup` tests, and now `arm`'s `read_arm_values` tests), so the model lives here once
 //! and each test module borrows it.

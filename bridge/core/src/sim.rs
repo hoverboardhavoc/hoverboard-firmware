@@ -1413,7 +1413,7 @@ impl Firmware {
     }
 }
 
-/// A board behind the bridge: its `net` responder over its own store, as `crates/firmware` builds it
+/// A board behind the bridge: its `net` responder over its own store, as `motorcontroller/firmware` builds it
 /// (port 0 the mailbox, port 1 the inter-board UART; no BLE module).
 pub struct SimBoard {
     /// The board's walk responder.

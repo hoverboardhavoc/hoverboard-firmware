@@ -210,7 +210,7 @@ fn constants_reproduced_in_q() {
 
 #[test]
 fn gyro_scale_is_full_scale_relation() {
-    // 0.000266316114 == (500/32768) * (pi/180); the constant's single owner is crates/imu.
+    // 0.000266316114 == (500/32768) * (pi/180); the constant's single owner is motorcontroller/imu.
     let expect = (500.0 / 32768.0) * (core::f64::consts::PI / 180.0);
     assert!((GYRO_SCALE - expect).abs() < 1e-9);
 }

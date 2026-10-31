@@ -57,7 +57,7 @@ const fn feed(crc: u16, byte: u8) -> u16 {
 /// the walk payloads. One shared body is the whole saving; the call costs a handful of cycles and
 /// leaves the per-byte work (two table lookups) unchanged.
 ///
-/// It belongs in the GD32F1x0's zero-wait first 32 KiB, and `crates/firmware/memory.x` puts it
+/// It belongs in the GD32F1x0's zero-wait first 32 KiB, and `motorcontroller/firmware/memory.x` puts it
 /// there by NAME (`*(.text.*4base5crc16*)`), not by a `link_section` attribute here. Before this
 /// was outlined, the link framer's CRC was inlined into `link` and that script's
 /// `*(.text.*_4link*)` anchor placed it in the window; a shared body above the boundary would
@@ -66,7 +66,7 @@ const fn feed(crc: u16, byte: u8) -> u16 {
 ///
 /// The attribute is the mechanism that script PREFERS, because it travels with the item instead of
 /// going stale on a rename, and it is what `fixed::div` carries. It cannot be used here: `base` is
-/// linked by the bench and emulator images too (`crates/store-test`, `crates/l2-uart-bench`, ...),
+/// linked by the bench and emulator images too (`motorcontroller/store-test`, `motorcontroller/l2-uart-bench`, ...),
 /// whose own `memory.x` files declare no `.hotcode` output section, so the attribute makes
 /// `.hotcode` an orphan section in each of them. That still LINKS, and the store-test image then
 /// fails under the emulator with every scenario reading a zero result word.
