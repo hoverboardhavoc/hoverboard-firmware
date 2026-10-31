@@ -137,8 +137,8 @@ jobs:
       # workspace dependency (store names it) and pins the same commit; tools/ and bridge/ record
       # runtime-hal through their path dependencies (store among them) without compiling it, and pin
       # the same commit so that no lockfile in the tree names a different one. Each must carry the
-      # git source: a local build with the `--config` runtime-hal patch (CLAUDE.md, "Running the
-      # checks") rewrites the entry to the patched path package, which has no source line, and a
+      # git source: a local build with the `--config` runtime-hal patch (README.md, "Building
+      # and testing") rewrites the entry to the patched path package, which has no source line, and a
       # lockfile committed that way leaves cargo here to re-resolve runtime-hal's main at run time.
       # Pure source, no toolchain.
       - name: runtime-hal pin agrees across the tracked lockfiles
