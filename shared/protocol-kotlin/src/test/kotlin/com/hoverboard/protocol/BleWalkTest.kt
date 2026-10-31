@@ -298,7 +298,7 @@ class BleWalkTest {
 
     @Test
     fun theConfigRespAnsweringATuneRequestDisarmsItsRetransmit() {
-        // The tune lane replies with CONFIG_RESP too (`specs/rider-ui.md` section 4). An answered
+        // The tune lane replies with CONFIG_RESP too (`specs/remote-ui.md` section 4). An answered
         // TUNE_WRITE left armed would be re-sent by the session loop after the client had already
         // moved on: a stale write repeated on a running loop.
         var now = 0L
@@ -506,7 +506,7 @@ class BleWalkTest {
     }
 
     /**
-     * A caller that walks on a link it keeps using (the rider app's discovery) gives up on a walk
+     * A caller that walks on a link it keeps using (the remote app's discovery) gives up on a walk
      * that did not finish with [BleWalkEngine.abandonWalk]: the walk's retransmit is disarmed, and a
      * walk reply arriving afterwards neither resumes the walk nor disarms a CONFIG request that is
      * now outstanding on the same engine.

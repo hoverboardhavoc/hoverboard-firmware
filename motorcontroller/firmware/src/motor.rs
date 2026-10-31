@@ -749,7 +749,7 @@ pub fn unpack_peak(w: u32) -> i16 {
 /// It is the duty of the conducting leg. In six-step one phase pair conducts, the source leg at
 /// the commanded duty and the sink at compare 0, so the maximum over the enabled channels IS the
 /// on-duty, and the consumer's `(mean / cal) * (duty_on / ARR)` is the DC-link current a bench
-/// PSU displays (`specs/rider-ui.md` 3.6).
+/// PSU displays (`specs/remote-ui.md` 3.6).
 ///
 /// A period whose channels are all floated reads 0, which is the physical truth rather than a
 /// sentinel: a coasting period (a stale demand, or the soft current limit chopping this one) has
@@ -907,7 +907,7 @@ impl CurrentLimit {
     ///
     /// ONE call closes the whole window, which is a correctness property rather than convenience:
     /// the peak and the mean are compared against each other by the consumer
-    /// (`specs/rider-ui.md` 3.6), so they must come from the same 64 periods, and two separate
+    /// (`specs/remote-ui.md` 3.6), so they must come from the same 64 periods, and two separate
     /// closers could be called in different passes or one of them forgotten.
     ///
     /// The mean is a SHIFT, not a divide: the ISR closes the window every
@@ -4512,7 +4512,7 @@ mod tests {
     }
 
     /// The window's MEAN, which is the word a calibration cross-check compares
-    /// (`specs/rider-ui.md` 3.6): the sum of the window's magnitudes over the window's length,
+    /// (`specs/remote-ui.md` 3.6): the sum of the window's magnitudes over the window's length,
     /// and it comes out of the SAME close as the peak.
     #[test]
     fn the_window_mean_is_the_average_of_its_periods() {

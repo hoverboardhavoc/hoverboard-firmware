@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Check that cross-file citations in the Kotlin protocol mirror and the rider app resolve.
+"""Check that cross-file citations in the Kotlin protocol mirror and the remote app resolve.
 
 The mirror in shared/protocol-kotlin/ documents, next to almost every declaration, the Rust it
-mirrors, and the rider app does the same for the firmware behaviour its screens describe. Those
+mirrors, and the remote app does the same for the firmware behaviour its screens describe. Those
 citations name a FILE and a SYMBOL (`shared/linkctl/src/lib.rs, CyclicState::LEN`) rather than a
 file and a line.
 This script is what makes that claim true rather than aspirational.
@@ -77,15 +77,15 @@ import re
 import sys
 
 # The scope is DISCOVERED, not listed. It was a hand-written list of nine files, which made the rule
-# opt-in: a tenth mirror file, or the whole rider app, could carry a `file:line` citation and no gate
+# opt-in: a tenth mirror file, or the whole remote app, could carry a `file:line` citation and no gate
 # would look at it, which is exactly what `model/RiderCommand.kt` did (it cited a field that had not
 # existed for months, in the present tense, by line number). Discovery means a file added to either
 # tree is inside the rule the moment it exists.
 #
-# Both trees state the rule and are checked the same way. `apps/rider` is not a mirror of the Rust,
+# Both trees state the rule and are checked the same way. `apps/remote` is not a mirror of the Rust,
 # but it makes the same kind of claim about it (what a board does with a value, when a value takes
 # effect), and a claim about another file is a citation whoever writes it.
-SCOPE_ROOTS = ("shared/protocol-kotlin/src", "apps/rider")
+SCOPE_ROOTS = ("shared/protocol-kotlin/src", "apps/remote")
 
 # Files inside those roots that the rule does not reach. Empty, and a name goes in here only with
 # the reason beside it; a growing list is the hand-written SCOPE coming back through the side door.
@@ -128,7 +128,7 @@ PATH_THEN_PARENS = re.compile(rf"{Q}({PATH}){Q}\s*\(([^)]*)\)")
 # path then its own possessive: `link.rs`'s `Transport`. The same claim as `<Symbol>` in `<path>`,
 # written the way the sentence runs, and the symbol is checked the same way.
 PATH_POSSESSIVE_SYM = re.compile(rf"{Q}({PATH}){Q}'s\s+{Q}({SYM}){Q}")
-# path then a SECTION anchor: `specs/rider-ui.md` section 3.4, `specs/todo.md` part 5. A numbered
+# path then a SECTION anchor: `specs/remote-ui.md` section 3.4, `specs/todo.md` part 5. A numbered
 # anchor inside a document, which is a file-level citation here: the path is checked and the anchor
 # is not, because the anchor belongs to a file this script is not allowed to read (every one in
 # this repo is under specs/, which is gitignored and absent on CI).

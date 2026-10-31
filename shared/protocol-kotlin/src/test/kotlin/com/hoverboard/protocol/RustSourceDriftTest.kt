@@ -163,7 +163,7 @@ class RustSourceDriftTest {
     /**
      * Source belonging to an in-tree CONSUMER of this protocol, read the same way the Rust is.
      *
-     * The rider app is not built by this module (it needs the Android SDK) and cannot be depended
+     * The remote app is not built by this module (it needs the Android SDK) and cannot be depended
      * on from here (it depends on this module, not the other way round), but one of its numbers is
      * half of a contract this protocol states: the cadence it sends `INPUTS` on, against the window
      * the firmware holds that mirror for. Reading it as text is the same trick this whole file
@@ -854,7 +854,7 @@ class RustSourceDriftTest {
     /**
      * Field ORDER and width, read out of the Rust struct declarations.
      *
-     * This is the pin that catches the exact break the retired rider protocol had: a `battery` u16
+     * This is the pin that catches the exact break the remote app's retired protocol had: a `battery` u16
      * inserted mid-struct in CyclicState. Every field keeps its name and every length stays the
      * same under a reorder, so only order-aware comparison sees it.
      *
@@ -1003,7 +1003,7 @@ class RustSourceDriftTest {
 
     /**
      * `CyclicState.ARM_BLOCKING_BITS` is Fault A and Fault B: `FAULT_A_BITS | EV_LATCH_B`, as the
-     * Rust declares them (`motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`). The rider app's
+     * Rust declares them (`motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`). The remote app's
      * fault lamps and fault disarm read it, so a bit the firmware adds to either group has to reach
      * the app or fail here.
      */
@@ -1057,7 +1057,7 @@ class RustSourceDriftTest {
      * - the tick itself, from `motorcontroller/scheduler/src/lib.rs` (`TICK_HZ`), which is what turns ticks
      *   into milliseconds (`TICK_MS` is `1000 / TICK_HZ` there, an expression, so the rate is what
      *   gets read and the division is done here);
-     * - the keepalive, from the rider app's `LinkConfig` (`SEND_INTERVAL_MS` x
+     * - the keepalive, from the remote app's `LinkConfig` (`SEND_INTERVAL_MS` x
      *   `INPUTS_KEEPALIVE_TICKS`), which is the app's send cadence for `INPUTS`.
      *
      * [KEEPALIVE_MARGIN] is the stated margin: the window must span at least that many keepalive
@@ -1083,18 +1083,18 @@ class RustSourceDriftTest {
             )
         val windowMs = windowTicks * 1000 / tickHz
 
-        val linkConfig = app("apps/rider/app/src/main/java/com/hoverboard/remote/ble/LinkConfig.kt")
+        val linkConfig = app("apps/remote/app/src/main/java/com/hoverboard/remote/ble/LinkConfig.kt")
         fun appConst(name: String, suffix: String) = literal(
             name,
-            findOne(linkConfig, """^\s*const val $name: \w+ = (\d+)$suffix$""", "rider app $name")
+            findOne(linkConfig, """^\s*const val $name: \w+ = (\d+)$suffix$""", "remote app $name")
                 .groupValues[1],
-            "rider app link config",
+            "remote app link config",
         )
         val keepaliveMs = appConst("SEND_INTERVAL_MS", "L") * appConst("INPUTS_KEEPALIVE_TICKS", "")
 
         assertTrue(
             windowMs >= keepaliveMs * KEEPALIVE_MARGIN,
-            "the firmware holds a controller's arm mirror for ${windowMs}ms but the rider app only " +
+            "the firmware holds a controller's arm mirror for ${windowMs}ms but the remote app only " +
                 "re-sends INPUTS every ${keepaliveMs}ms; the window must span at least " +
                 "$KEEPALIVE_MARGIN keepalive periods, so this build can disarm a board mid-ride on " +
                 "ordinary frame loss. Move the timeout (shared/linkctl) or the cadence " +
@@ -1398,7 +1398,7 @@ class RustSourceDriftTest {
      * re-reads when a board arms, and therefore which ones a client must NOT tell its operator to
      * restart a board for.
      *
-     * This pin exists because the class has gone stale twice, both times in the rider app and both
+     * This pin exists because the class has gone stale twice, both times in the remote app and both
      * times for days. The class is a firmware fact that never reaches the wire, so no client can
      * read it off a board; it is copied, and a copy with no gate is a copy that drifts. When
      * `motor.direction` and `motor.align_offset` moved into this row (2026-10-20), the Setup screen
@@ -1466,7 +1466,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The Setup screen's fields (`specs/rider-ui.md` section 3.4): each [Fields.ALL] entry's id,
+     * The Setup screen's fields (`specs/remote-ui.md` section 3.4): each [Fields.ALL] entry's id,
      * storage type and default, against the `Field<T>` / `StrField` handle of the same name
      * (`shared/store/src/field.rs`, the handles).
      *
@@ -1744,7 +1744,7 @@ class RustSourceDriftTest {
         )
 
         // The turn bounds' two seam clamps, which the Machine section offers as the ranges of its
-        // rows (`specs/rider-ui.md` 3.7b). The seam (`motorcontroller/control/src/drive.rs`,
+        // rows (`specs/remote-ui.md` 3.7b). The seam (`motorcontroller/control/src/drive.rs`,
         // `DriveTurn::new`) bounds each word as it reads it, at boot and again at every arm, and
         // the store validates type only, so a client offering a wider range offers values the board
         // will silently narrow. Mirrored on `Fields.NOISE_FLOOR`'s precedent, and pinned here the
@@ -1838,7 +1838,7 @@ class RustSourceDriftTest {
 
     /**
      * The orientation rule the Setup screen enforces before staging `IMU_AXIS_SIGN`
-     * (`specs/rider-ui.md` section 3.4, D7), against `imu::Config` in motorcontroller/imu/src/lib.rs, which
+     * (`specs/remote-ui.md` section 3.4, D7), against `imu::Config` in motorcontroller/imu/src/lib.rs, which
      * since `IMU_AXIS_ROLE` (0x68) judges a frame by the signs AND the axis roles
      * (`specs/imu.md`, the role model).
      *
@@ -2202,7 +2202,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * [DEAD_TIME_MIN_DTG], against the Rust that owns it and against the two rider-app editors
+     * [DEAD_TIME_MIN_DTG], against the Rust that owns it and against the two remote-app editors
      * that offer `motor.dead_time`.
      *
      * The floor is a SAFETY number, not a preference: below it both FETs of a leg conduct through
@@ -2239,9 +2239,9 @@ class RustSourceDriftTest {
         )
         // Both app rows take their lower bound FROM the constant above, imported from this module.
         for ((path, pattern) in listOf(
-            "apps/rider/app/src/main/java/com/hoverboard/remote/model/LayoutRows.kt" to
+            "apps/remote/app/src/main/java/com/hoverboard/remote/model/LayoutRows.kt" to
                 """LayoutEditor\.Number\(\s*DEAD_TIME_MIN_DTG\b""",
-            "apps/rider/app/src/main/java/com/hoverboard/remote/model/SetupFields.kt" to
+            "apps/remote/app/src/main/java/com/hoverboard/remote/model/SetupFields.kt" to
                 """Editor\.Range\(\s*DEAD_TIME_MIN_DTG\b""",
         )) {
             val source = app(path)

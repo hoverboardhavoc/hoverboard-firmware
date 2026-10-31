@@ -1942,7 +1942,7 @@ mod firmware {
     }
 
     /// Serve one `TUNE_READ` / `TUNE_WRITE` against the live gain shadow and reply `CONFIG_RESP`
-    /// (`specs/rider-ui.md` section 4, the live tune lane).
+    /// (`specs/remote-ui.md` section 4, the live tune lane).
     ///
     /// This is the whole reason the lane is a separate opcode pair rather than an armed-goes-to-RAM
     /// mode of `CONFIG_WRITE`: the values it moves live HERE, in the control block's RAM, and no
@@ -1960,7 +1960,7 @@ mod firmware {
         // SAFETY: main-thread context (the loop's drain), the same discipline as the hand-back's
         // inbox write above. The 250 Hz control pass READS this shadow (once per balance pass); a
         // row written across two passes is transiently mixed, which is bounded by the ranges and
-        // accepted for tuning (`specs/rider-ui.md`, "Cross-thread and mid-loop discipline"). No
+        // accepted for tuning (`specs/remote-ui.md`, "Cross-thread and mid-loop discipline"). No
         // torque step can come of it: in RUN the law ramps its live gains toward the shadow under
         // fixed per-pass caps (`control::config::sf::RAMP_CAPS`), which the control tests pin.
         let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
@@ -1983,7 +1983,7 @@ mod firmware {
     }
 
     /// Re-read the stored gains into the live shadow after a `CONFIG_WRITE` persisted
-    /// (`specs/rider-ui.md` section 4: a disarmed `CONFIG_WRITE` to a live-lane field also
+    /// (`specs/remote-ui.md` section 4: a disarmed `CONFIG_WRITE` to a live-lane field also
     /// refreshes the shadow, so flash and RAM converge on save without a reboot; the fields are
     /// 0x79 and 0x7B, `specs/state-feedback.md` section 6).
     ///
@@ -2306,7 +2306,7 @@ mod firmware {
         // advanced-timer count. Unlike `mcu` above it is not informational: a controller uses it
         // to pick the capability table that predicts this board's layout verdict, which is why
         // the app has had to ask an operator which part it is talking to
-        // (`specs/rider-ui.md` 3.5). Read once, here, where the detect result is.
+        // (`specs/remote-ui.md` 3.5). Read once, here, where the detect result is.
         let chip_tag = ChipTag::from_detected(
             matches!(chip.clock(), ClockPath::F10xRcc),
             chip.descriptor().adv_timers,
@@ -2898,7 +2898,7 @@ mod firmware {
             }
 
             // 2c. If either drain PERSISTED a config write, re-read the fields the
-            //     control block shadows (`specs/rider-ui.md` section 4). Once per pass rather than
+            //     control block shadows (`specs/remote-ui.md` section 4). Once per pass rather than
             //     per drain, on a level the responder raises, so the store scan is paid on a config
             //     write and never in the steady loop.
             // SAFETY: main-thread context; the borrow ends with this statement, well before

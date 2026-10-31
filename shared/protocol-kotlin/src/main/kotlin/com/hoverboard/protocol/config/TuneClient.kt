@@ -14,7 +14,7 @@ sealed interface TuneWriteResult
 /**
  * The board's STAGED value for the key: its RAM gain shadow, as `TUNE_READ` reported it. Not the
  * flash value (a `CONFIG_READ` of the same key) and not what the balance loop is multiplying now,
- * which converges to this through the firmware's ramp (`specs/rider-ui.md` section 4) and is not
+ * which converges to this through the firmware's ramp (`specs/remote-ui.md` section 4) and is not
  * readable over the link.
  */
 data class StagedValue(val value: Int) : TuneReadResult
@@ -35,7 +35,7 @@ data class TuneMismatch(val wrote: Int, val staged: Int?) : TuneWriteResult
 
 /**
  * The request/response layer over the live tune lane, `TUNE_READ` / `TUNE_WRITE`
- * (`specs/rider-ui.md` section 4): the [ConfigClient]'s shape (one operation in flight, on the SAME
+ * (`specs/remote-ui.md` section 4): the [ConfigClient]'s shape (one operation in flight, on the SAME
  * [ConfigExchange], to a named board, typed results) over a different contract.
  *
  * - A write lands in the board's RAM shadow only. It never touches flash, so the firmware never

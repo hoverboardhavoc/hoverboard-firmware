@@ -194,7 +194,7 @@ pub const CFG_TYPE_MISMATCH: u8 = 3;
 /// `CONFIG_RESP` status: the store write failed (flash full / error).
 pub const CFG_STORE_ERR: u8 = 4;
 /// `TUNE_WRITE`: set one live-tunable value in RAM and reply `CONFIG_RESP`
-/// (`specs/rider-ui.md` section 4, the live tune lane). Payload is `CONFIG_WRITE`'s
+/// (`specs/remote-ui.md` section 4, the live tune lane). Payload is `CONFIG_WRITE`'s
 /// `[field_id, index, type_tag, value...]`.
 ///
 /// It is declared here, beside the `CFG_*` statuses it answers with, but it is NOT handled here:
@@ -498,7 +498,7 @@ impl Responder {
     }
 
     /// Whether a `CONFIG_WRITE` / `_MULTI` entry has persisted since this was last called, and
-    /// clear it (`specs/rider-ui.md` section 4: the live gain shadow re-reads the store on this
+    /// clear it (`specs/remote-ui.md` section 4: the live gain shadow re-reads the store on this
     /// signal, so a Save converges without a reboot).
     ///
     /// A LEVEL rather than a key: `_MULTI` can persist several fields in one PDU, and a single-key
@@ -833,7 +833,7 @@ impl Responder {
     }
 
     /// Reply to a `TUNE_READ` / `TUNE_WRITE` the caller served out of its own RAM
-    /// (`specs/rider-ui.md` section 4): the echoed key, the `CFG_*` status, and the live value on
+    /// (`specs/remote-ui.md` section 4): the echoed key, the `CFG_*` status, and the live value on
     /// success. The reply is an ordinary `CONFIG_RESP` out the same emitter every other config
     /// reply uses, so the two lanes are one thing to route and one thing to parse; only the memory
     /// that answered differs.

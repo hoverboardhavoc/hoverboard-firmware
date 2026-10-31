@@ -121,7 +121,7 @@ const MINIMA: [i16; TUNED] = [
 /// The live tunable words in RAM, as the running law sees them: the gain row (`CONTROL_SF_GAINS`,
 /// 0x79) and the reference row (`CONTROL_REFERENCE`, 0x7B), flat in that order.
 ///
-/// **The write policy** (`specs/rider-ui.md` D3, the Betaflight model): a tune write changes the
+/// **The write policy** (`specs/remote-ui.md` D3, the Betaflight model): a tune write changes the
 /// running value immediately and touches NO flash, so it is exempt from the armed refusal by
 /// construction rather than by an exception in the armed check; an explicit Save is a plain
 /// disarmed `CONFIG_WRITE` through the ordinary store path, and a reboot without one reverts,
@@ -211,7 +211,7 @@ impl GainShadow {
     /// A residual: `stored` is still a CLAMPED record in the other two writers, so a gain whose
     /// flash value sits above a maximum that later GROWS can be moved by a later `reconcile`.
     /// Closing it changes what the `stored()` readback means, which is the tune lane's model in
-    /// `specs/rider-ui.md` section 4, so it is a spec-level decision and not this seam's to take.
+    /// `specs/remote-ui.md` section 4, so it is a spec-level decision and not this seam's to take.
     ///
     /// The reference row is not in it: its maxima are compiled, so there is nothing to re-read.
     pub fn re_apply_max(&mut self, gain_max: [i16; sf::GAINS]) {
@@ -299,7 +299,7 @@ const fn clamp_all(mut t: [i16; TUNED], max: &[i16; TUNED]) -> [i16; TUNED] {
 // ----- Fixed constants used across the cascade (the contract values). -----
 
 pub mod ramp {
-    //! The engagement machine's gain RAMP (`specs/rider-ui.md` section 4, "Cross-thread and
+    //! The engagement machine's gain RAMP (`specs/remote-ui.md` section 4, "Cross-thread and
     //! mid-loop discipline"): on every RUN pass the machine steps each word of its live triple
     //! TOWARD the profile it was handed by at most a cap.
     //!

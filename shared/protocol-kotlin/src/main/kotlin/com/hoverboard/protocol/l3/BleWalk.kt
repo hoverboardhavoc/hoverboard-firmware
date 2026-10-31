@@ -243,7 +243,7 @@ class BleWalkEngine(
     /**
      * Stop the walk where it stands: no further walk request is sent, and an outstanding walk
      * request's retransmit is disarmed. For a caller that walks on a link it then keeps using for
-     * other traffic (the rider app learns the slave's address this way, `specs/rider-ui.md`
+     * other traffic (the remote app learns the slave's address this way, `specs/remote-ui.md`
      * section 2) and gives up on a walk that did not complete: without this, a walk reply arriving
      * late would resume the walk in the middle of that traffic. What the walk had already addressed
      * stays in [addressedBoards].
@@ -321,7 +321,7 @@ class BleWalkEngine(
 
     /**
      * Send a `TUNE_WRITE` to [dst]: change one live gain in the board's RAM NOW, persisting
-     * nothing (`specs/rider-ui.md` section 4). Allowed armed or disarmed. The reply arrives via
+     * nothing (`specs/remote-ui.md` section 4). Allowed armed or disarmed. The reply arrives via
      * [takeConfigResp] like any config reply.
      */
     fun sendTuneWrite(dst: Int, key: Key, value: Int) =

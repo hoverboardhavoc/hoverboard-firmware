@@ -2152,7 +2152,7 @@ fn a_board_never_sets_the_link_group_bit() {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// The live tune lane (specs/rider-ui.md section 4, prerequisite P1): the wire codec, and the two
+// The live tune lane (specs/remote-ui.md section 4, prerequisite P1): the wire codec, and the two
 // properties the walk layer itself is responsible for -- that a tune PDU reaches the caller who owns
 // the RAM, and that persisting is reported so a shadow can re-read.
 // ---------------------------------------------------------------------------------------------------

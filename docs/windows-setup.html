@@ -31,9 +31,9 @@
 
 <h1>hoverboard-firmware on a Windows machine</h1>
 <p class="lede">Written 2026-10-20 from this repo's actual build configuration (<code>motorcontroller/rust-toolchain.toml</code>,
-<code>motorcontroller/.cargo/config.toml</code>, <code>.github/workflows/ci.yml</code>, <code>apps/rider/app/build.gradle.kts</code>),
+<code>motorcontroller/.cargo/config.toml</code>, <code>.github/workflows/ci.yml</code>, <code>apps/remote/app/build.gradle.kts</code>),
 and moved to the per-chain layout on 2026-10-31.
-Three tracks are independent: the Rust firmware, the Android rider app, and the Python tooling. Pick the ones you need.</p>
+Three tracks are independent: the Rust firmware, the Android remote app, and the Python tooling. Pick the ones you need.</p>
 
 <nav>
 <ol>
@@ -41,7 +41,7 @@ Three tracks are independent: the Rust firmware, the Android rider app, and the 
   <li><a href="#git">Git for Windows, and the line-ending trap</a></li>
   <li><a href="#rust">Rust: the pinned nightly and the firmware build</a></li>
   <li><a href="#bin">Making the flashable .bin</a></li>
-  <li><a href="#android">The rider app and the Kotlin mirror</a></li>
+  <li><a href="#android">The remote app and the Kotlin mirror</a></li>
   <li><a href="#python">Python tools</a></li>
   <li><a href="#wont">What does not work on Windows</a></li>
   <li><a href="#check">Verification checklist</a></li>
@@ -147,7 +147,7 @@ download the artifact CI already built: the
 <a href="https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware.zip">latest main
 firmware.zip</a> needs no toolchain at all.</p>
 
-<h2 id="android">5. The rider app and the Kotlin mirror</h2>
+<h2 id="android">5. The remote app and the Kotlin mirror</h2>
 <h3>Install</h3>
 <ul>
   <li><b>JDK 17</b>, Temurin, the version CI uses and the level the app compiles to:
@@ -158,17 +158,17 @@ firmware.zip</a> needs no toolchain at all.</p>
     <code>compileSdk 35</code>, <code>targetSdk 35</code>, <code>minSdk 26</code>, <code>jvmTarget 17</code>.</li>
 </ul>
 <p>Point the build at the SDK, either with an <code>ANDROID_HOME</code> environment variable or by writing
-<code>apps\rider\local.properties</code> (gitignored):</p>
+<code>apps\remote\local.properties</code> (gitignored):</p>
 <pre><code>sdk.dir=C\:\\Users\\&lt;you&gt;\\AppData\\Local\\Android\\Sdk</code></pre>
 <p>Gradle itself needs no install. The wrapper fetches Gradle 8.14.</p>
 
 <h3>Build and test</h3>
-<p>From <code>apps\rider</code>:</p>
+<p>From <code>apps\remote</code>:</p>
 <pre><code>.\gradlew.bat --console=plain --continue --no-build-cache :app:testDebugUnitTest --rerun :app:testReleaseUnitTest --rerun detekt --rerun
 .\gradlew.bat assembleDebug</code></pre>
-<p>That first line is CI's rider job verbatim. Both variants run the same sources and must report the same
+<p>That first line is CI's remote-app job verbatim. Both variants run the same sources and must report the same
 non-zero case count; the current suite is 359 cases per variant with 0 detekt findings. The debug APK comes out
-at <code>apps\rider\app\build\outputs\apk\debug\app-debug.apk</code>.</p>
+at <code>apps\remote\app\build\outputs\apk\debug\app-debug.apk</code>.</p>
 <p>The wire-protocol mirror is a separate Gradle build. From <code>shared\protocol-kotlin</code>:</p>
 <pre><code>.\gradlew.bat test --rerun --no-build-cache --console=plain</code></pre>
 <p>Its drift test parses the Rust under <code>shared/</code> and <code>motorcontroller/</code> as text and exact-set compares it against the Kotlin, so
@@ -216,11 +216,11 @@ should finish without error.</p>
   <tr><td><code>./tools/host-test.sh</code> (Git Bash)</td><td>the host suite actually runs</td></tr>
   <tr><td><code>cargo fmt --all --check</code></td><td>CI's first gate, and that line endings are sane</td></tr>
   <tr><td><code>python tools\panic-reach.py --selftest</code></td><td>Python side alive</td></tr>
-  <tr><td><code>.\gradlew.bat :app:testDebugUnitTest</code> in <code>apps\rider</code></td><td>JDK, SDK 35 and the app build</td></tr>
+  <tr><td><code>.\gradlew.bat :app:testDebugUnitTest</code> in <code>apps\remote</code></td><td>JDK, SDK 35 and the app build</td></tr>
 </table>
 
 <footer>
 Source of truth, if any of this drifts: <code>motorcontroller/rust-toolchain.toml</code>, <code>motorcontroller/.cargo/config.toml</code>,
-<code>tools/host-test.sh</code>, <code>.github/workflows/ci.yml</code>, <code>apps/rider/app/build.gradle.kts</code>.
+<code>tools/host-test.sh</code>, <code>.github/workflows/ci.yml</code>, <code>apps/remote/app/build.gradle.kts</code>.
 CI is the arbiter: every command above is the one CI runs, or its exact Windows equivalent.
 </footer>

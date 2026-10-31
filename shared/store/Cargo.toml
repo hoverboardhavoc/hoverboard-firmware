@@ -21,7 +21,7 @@ runtime-hal = { workspace = true }
 # `control`, and must not -- the cascade is pure math with no notion of persistence). It is here so
 # ONE test can assert the thing neither crate can state alone: the `CONTROL_GAIN_*` defaults ARE the
 # gain constants the control crate compiles in, index for index, so a fresh board runs exactly what
-# it ran before the gains became fields (`specs/rider-ui.md` section 4). Written in two places by
+# it ran before the gains became fields (`specs/remote-ui.md` section 4). Written in two places by
 # necessity; pinned in one.
 [dev-dependencies]
 control = { path = "../../motorcontroller/control" }

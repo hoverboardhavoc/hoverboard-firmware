@@ -29,7 +29,7 @@
 //! bounded for the same reason; there is no "hold forever" mode.
 //!
 //! `--period-ms` sets the re-send period (default 100 ms, the hold's own cadence; 50 ms is the
-//! rider app's 20 Hz pump). It is capped so two sends always fit inside the decay window, which
+//! remote app's 20 Hz pump). It is capped so two sends always fit inside the decay window, which
 //! is what makes a held demand a demand. `--trace` prints one line per frame with the wall-clock
 //! time (UNIX ns) just before and just after the mailbox write, so a second observer sampling the
 //! destination's `drive_age` over SWD can put a latency on the relayed path
@@ -43,7 +43,7 @@
 //! This tool's demand does NOT extend that hold, and should not be expected to. The firmware
 //! refreshes the mirror on any `INPUTS` or `DRIVE_CMD` **from the node that stated the level**,
 //! and each of these tools walks its own first contact and is granted its own guest address, so
-//! to the board they are two different controllers. The rider app is one process holding one
+//! to the board they are two different controllers. The remote app is one process holding one
 //! address, which is the case the rule is for; the bench pair is deliberately two, and the
 //! `inputs --hold` side is what keeps the arm alive on its own re-sends.
 

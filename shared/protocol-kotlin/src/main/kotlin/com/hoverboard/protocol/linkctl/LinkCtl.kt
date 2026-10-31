@@ -76,7 +76,7 @@ const val DRIVE_TIMEOUT_TICKS: Int = 50
  *
  * Mirrored here so both halves of that contract are pinned in one place. The firmware owns the
  * supervision; `RustSourceDriftTest` pins this value against the Rust AND checks that it still
- * outlasts the rider app's keepalive period by the stated margin, so moving either side fails.
+ * outlasts the remote app's keepalive period by the stated margin, so moving either side fails.
  */
 const val INPUTS_TIMEOUT_TICKS: Int = 375
 
@@ -179,7 +179,7 @@ enum class ChipTag(val value: Int) {
  * The two current words describe ONE 64-period window (the firmware closes both in one call), so
  * they are comparable: [phasePeak] is a maximum over ADC samples and reads high near the noise
  * floor, which is why a calibration cross-check compares [phaseMean]
- * (`specs/rider-ui.md`, "Current in the panel, and the live calibration cross-check"). The
+ * (`specs/remote-ui.md`, "Current in the panel, and the live calibration cross-check"). The
  * DC-link current a bench PSU displays is
  * `(phaseMean / cal) * (dutyOn / ARR)`, where `cal` is the board's own `MOTOR_CURRENT_CAL`.
  *
@@ -289,7 +289,7 @@ data class CyclicObs(
  * [wheelRate] is the board's period-measured wheel rate (`shared/linkctl/src/lib.rs`,
  * `CyclicState::wheel_rate`; `specs/link-control.md`, `CYCLIC_STATE`), unscaled: Q12 of
  * [wheelSpeed]'s unit, so 4096 is one hall edge per 320-period (20 ms) window, in the hall
- * counter's own sense. The rider's speed readout converts it (`specs/rider-ui.md` 3.1a).
+ * counter's own sense. The rider's speed readout converts it (`specs/remote-ui.md` 3.1a).
  *
  * [battery] and [mode] are held as unsigned values in an Int, since Kotlin's Byte/Short are signed.
  *
@@ -421,8 +421,8 @@ data class CyclicState(
          * latch, which is Fault B alone. The mode machine holds a board in OFF while either is
          * asserted (`motorcontroller/state/src/mode.rs`, `ModeMachine::tick`; `motorcontroller/orchestrator/src/events.rs`,
          * `Levels::fault_a` and `Levels::fault_b`), so this is [FAULT_A_BITS] or [EV_LATCH_B]: bits
-         * 0, 1, 2, 4, 5 and 8 to 11. The rider app's fault lamps and its fault disarm read this and
-         * no literal (`specs/rider-ui.md` 3.1b).
+         * 0, 1, 2, 4, 5 and 8 to 11. The remote app's fault lamps and its fault disarm read this and
+         * no literal (`specs/remote-ui.md` 3.1b).
          */
         const val ARM_BLOCKING_BITS = FAULT_A_BITS or EV_LATCH_B
 

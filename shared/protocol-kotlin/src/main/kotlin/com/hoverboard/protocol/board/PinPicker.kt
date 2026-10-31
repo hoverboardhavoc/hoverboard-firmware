@@ -3,7 +3,7 @@ package com.hoverboard.protocol.board
 /**
  * Which pins a client may offer for one layout slot: the pins that are free and capability-eligible
  * for that function, so an invalid layout is hard to EXPRESS rather than merely refused
- * (`specs/rider-ui.md`, section 3.5, "THE PIN GRID").
+ * (`specs/remote-ui.md`, section 3.5, "THE PIN GRID").
  *
  * This is deliberately a SECOND implementation of rules [validate] owns, not a shortcut past it. The
  * picker narrows what a user can reach; the validator still judges the result, because the two can

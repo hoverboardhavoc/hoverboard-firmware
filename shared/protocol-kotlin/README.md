@@ -2,10 +2,10 @@
 
 The single Kotlin mirror of the firmware's wire protocol, living beside the Rust it mirrors.
 
-The rider app (`apps/rider/`, `com.hoverboard.remote`) depends on it.
+The remote app (`apps/remote/`, `com.hoverboard.remote`) depends on it.
 
 It exists because there used to be two hand-written Kotlin copies of the protocol, and they had
-drifted apart: the rider's copy expected a version byte where the current framing carries a length,
+drifted apart: the remote app's copy expected a version byte where the current framing carries a length,
 had three of four opcodes wrong, discarded the one message the board actually emits, and modelled
 `CyclicState` as 7 bytes against the firmware's 11.
 

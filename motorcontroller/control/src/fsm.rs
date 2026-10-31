@@ -10,7 +10,7 @@
 //! on the next PID tick. The torque envelope mirrors the SMOOTHED reference (@0xa4), never the
 //! raw PID output.
 //!
-//! One job is not the binary's: the live gain RAMP (`specs/rider-ui.md` section 4). On every RUN
+//! One job is not the binary's: the live gain RAMP (`specs/remote-ui.md` section 4). On every RUN
 //! pass the triple steps toward the selected profile (read from the live gain shadow) by at most
 //! the [`ramp`] cap, so a tune write reaches the running loop without a torque
 //! step. The seeds the machine writes on engage, on the promote to sub-state 2 and on wind-down
@@ -303,7 +303,7 @@ fn arming(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
         } else {
             // sub-state <- 3 (RUN); base <- the @0x48 copy; kp <- coeff1, bk <- coeff2. The
             // binary also installs pr <- coeff3 here; `pr` is left to the RUN ramp instead, so it
-            // converges from the engage seed's 0 (`specs/rider-ui.md` section 4, the PROMOTE
+            // converges from the engage seed's 0 (`specs/remote-ui.md` section 4, the PROMOTE
             // hazard).
             st.sub_state = SubState::Run;
             st.base_coeff = Fix::from_num(0.4); // FLAGGED: the @0x48 0.4f copy -> Q
@@ -351,7 +351,7 @@ fn alt_engaged(inp: &FsmInputs, profile: &GainProfile, st: &mut FsmState) {
     // promote to RUN: base <- the @0x48 copy, env reseeded from the just-written reference
     // magnitude (NOT the cap), the wind-down counter @0x94 cleared, and kp <- coeff1, bk <-
     // coeff2. The binary also installs pr <- coeff3; here `pr` is left to the RUN ramp, which
-    // carries it from the standby seed's 0 to the profile (`specs/rider-ui.md` section 4).
+    // carries it from the standby seed's 0 to the profile (`specs/remote-ui.md` section 4).
     if inp.promote_condition {
         if st.promote_counter < fsmc::DEBOUNCE_CAP {
             st.promote_counter += 1;

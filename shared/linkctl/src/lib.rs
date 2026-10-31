@@ -87,7 +87,7 @@ pub const DRIVE_TIMEOUT_TICKS: u32 = 50;
 ///   safe to drop early: the wheels simply stop.
 /// - This mirror arrives over the BLE hop, where neither the sender's cadence nor the delivery is
 ///   a fixed frame period. Two figures set the floor. The SLOWEST REFRESH anyone plans to send:
-///   the committed rider app streams `DRIVE_CMD` every 50 ms while connected and re-states the
+///   the committed remote app streams `DRIVE_CMD` every 50 ms while connected and re-states the
 ///   level every 500 ms (`LinkConfig`), but a keepalive-only holder is legitimate and
 ///   `swd-mailbox-inputs --hold` is one, so the floor is still set by a bare repeat cadence, not
 ///   by the demand stream. And the observed DELIVERY PAUSES: phone-side connection-parameter
@@ -249,7 +249,7 @@ pub struct CyclicObs {
     pub phase_peak: i16,
     /// The SAME window's MEAN magnitude, same counts. The peak is a maximum over ADC samples and
     /// so reads high near the noise floor, which is why a calibration cross-check compares the
-    /// mean (`specs/rider-ui.md` 3.6). Both words describe one window, so the two are comparable.
+    /// mean (`specs/remote-ui.md` 3.6). Both words describe one window, so the two are comparable.
     pub phase_mean: i16,
     /// The last applied on-duty, `0..ARR`, so a consumer can derive the DC-link current a bench
     /// PSU displays as `(mean / cal) * (duty_on / ARR)`. 0 for a period that coasted: no phase
@@ -368,7 +368,7 @@ pub struct CyclicState {
     /// (`specs/link-control.md`, `CYCLIC_STATE`): `motor::WHEEL_RATE_Q12` as the block carries
     /// it, unscaled, in Q12 of [`Self::wheel_speed`]'s unit (4096 = one hall edge per 320-period
     /// window), in the counter's own sense, decaying as `1/t` between edges and 0 across a
-    /// reversal. Consumer: the rider app's speed readout; the peer decodes it and nothing on it
+    /// reversal. Consumer: the remote app's speed readout; the peer decodes it and nothing on it
     /// reads it.
     pub wheel_rate: i32,
 }

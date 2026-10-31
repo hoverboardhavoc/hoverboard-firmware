@@ -76,7 +76,7 @@ class WireDriftTest {
      * L7 control block, `shared/linkctl/src/lib.rs` (`OP_CYCLIC_STATE`, `OP_DRIVE_CMD`,
      * `OP_INPUTS`), pinned on the Rust side by its own `opcode_allocation_pinned`.
      *
-     * These are the values the retired rider protocol got wrong: it had INPUTS at 0x50 and a
+     * These are the values the remote app's retired protocol got wrong: it had INPUTS at 0x50 and a
      * TELEMETRY opcode at 0x20 that does not exist in the firmware.
      */
     @Test
@@ -139,7 +139,7 @@ class WireDriftTest {
     /**
      * Pinned on the Rust side by `committed_lengths_pinned` in `shared/linkctl/src/lib.rs`.
      *
-     * CyclicState at 13 is the 11 the retired rider protocol had at 7 (it was missing the
+     * CyclicState at 13 is the 11 the remote app's retired protocol had at 7 (it was missing the
      * `battery` u16 inserted mid-struct, and had a single `status` byte where the firmware carries
      * `mode`, `fault` and `flags`) plus the `peerDemand` i16 the rover's rigid frame added at
      * offset 11 (`specs/rover-one-imu.md`, "What the wire carries"), plus the `wheelPos` i16 at
@@ -420,7 +420,7 @@ class WireDriftTest {
      * [ SOF 1 = 0x5A ][ len 1 ][ frag-hdr 1 ][ chunk len-1 ][ CRC-lo 1 ][ CRC-hi 1 ]
      * ```
      *
-     * The header is TWO bytes and the second one is the LENGTH. The retired rider framer expected
+     * The header is TWO bytes and the second one is the LENGTH. The remote app's retired framer expected
      * a version byte 0x01 at offset 1 (a six-byte SOF/ver/opcode/src/dst/len header), which is the
      * single break that made every current frame unparseable to it.
      *

@@ -14,7 +14,7 @@ import com.hoverboard.protocol.store.Key
  * the detected chip's capability answers, and the reserved pin set the caller computes. A client
  * that holds all three can predict the boot verdict EXACTLY rather than heuristically, which is
  * what lets a layout editor refuse a layout before it is written instead of discovering the refusal
- * as a board that booted link-only (`specs/rider-ui.md`, section 3.5). `RustSourceDriftTest` pins
+ * as a board that booted link-only (`specs/remote-ui.md`, section 3.5). `RustSourceDriftTest` pins
  * this file against the Rust it mirrors, the same discipline the wire and registry mirrors run
  * under.
  *

@@ -1,0 +1,766 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hoverboard Remote</string>
+
+    <!-- Permission rationale -->
+    <string name="permission_title">Bluetooth Permission</string>
+    <string name="permission_description">Hoverboard Remote needs Bluetooth access to scan for and connect to your board. This is required to drive the vehicle. No location data is collected.</string>
+    <string name="permission_continue">Continue</string>
+    <string name="permission_skip">Skip</string>
+
+    <!-- Connect screen -->
+    <string name="connect_title">Hoverboard Remote</string>
+    <!-- %1$s is the configured board name (LinkSettings.deviceName). -->
+    <string name="connect_scan">Scan for %1$s</string>
+    <string name="connect_stop_scan">Stop scan</string>
+    <string name="connect_connect">Connect</string>
+    <string name="connect_disconnect">Disconnect</string>
+    <string name="connect_status_idle">Not connected</string>
+    <string name="connect_status_scanning">Scanning for %1$s…</string>
+    <string name="connect_status_found">Found %1$s</string>
+    <string name="connect_status_connecting">Connecting…</string>
+    <string name="connect_status_attaching">Attaching to the board…</string>
+    <string name="connect_status_connected">Connected</string>
+    <string name="connect_status_disconnected">Disconnected</string>
+    <string name="connect_status_attach_failed">The board would not attach. It may be armed; power-cycle it and try again.</string>
+    <string name="connect_status_error">Connection error</string>
+    <string name="connect_no_device">No %1$s found yet</string>
+    <string name="connect_device_name_label">Board name</string>
+    <!-- %1$s is the picked board's name, or its address when it advertises none. -->
+    <string name="connect_connect_to">Connect to %1$s</string>
+    <string name="connect_find_boards">Find boards</string>
+    <string name="connect_stop_find">Stop looking</string>
+    <string name="connect_finding">Looking for boards nearby…</string>
+    <string name="connect_nothing_seen">No boards found yet</string>
+    <string name="connect_unnamed_board">Unnamed device</string>
+    <string name="connect_board_picked">Picked</string>
+    <!-- %1$d is the advertisement's signal strength, which is negative. -->
+    <string name="connect_rssi">%1$d dBm</string>
+    <string name="connect_by_name_caption">Not in the list? Reach a board by name.</string>
+
+    <!-- Ride screen, Setup's machine status section -->
+
+    <!-- Drive mode (specs/remote-ui.md 3.2): a machine setting stored on the motor controllers
+         (machine.drive_mode), edited under Machine on Setup. Setup's machine status section shows the one in force. -->
+    <string name="drive_mode_single">Single board</string>
+    <string name="drive_mode_bound">Bound (both boards)</string>
+    <string name="drive_mode_differential">Differential (steer)</string>
+    <string name="drive_mode_rigid">Rigid body (one machine)</string>
+    <string name="drive_mode_rigid_not_leading">Both boards are set to one rigid machine, but neither is running as its leader yet. Set both to Balance under Drive on the Setup tab, and arm once so a new setting takes hold.</string>
+
+    <!-- Per-board chips. %1$s is the board's label (its name and address), %2$s what that board
+         says about itself. Never the word ARMED here: the arm control is the one armed statement on
+         the screen. -->
+    <string name="board_chip">%1$s · %2$s</string>
+    <string name="board_state_quiet">SILENT</string>
+    <string name="board_state_off">OFF</string>
+    <string name="board_state_starting">STARTING UP</string>
+    <string name="board_state_live">MOTORS LIVE</string>
+    <string name="board_state_stopping">SHUTTING DOWN</string>
+    <string name="board_state_fault">FAULT</string>
+    <string name="board_state_lockdown">HELD STOPPED</string>
+    <string name="board_state_unrecognised">UNKNOWN STATE</string>
+
+    <!-- Arm control. The one tappable arm surface; there is no separate armed banner. -->
+    <string name="arm_action">ARM</string>
+    <string name="arm_disarm_action">ARMED · tap to disarm</string>
+    <!-- Shown on the arm control when the board runs with CONTROL_RIDER_REQUIRED at 0 (specs/control.md (i)). -->
+    <string name="arm_rider_waived">Rider requirement waived: in balance mode, arming engages. Hold the frame upright when arming.</string>
+    <!-- Shown instead when the app cannot tell what the board runs (written this session, link dropped since) and the value it last ran or stores is 0. -->
+    <string name="arm_rider_maybe_waived">Rider requirement may be waived: the app cannot tell what the board is running. In balance mode, arming may engage. Hold the frame upright when arming.</string>
+    <!-- The arm refusal and the two warnings of specs/remote-ui.md 3.7a. Only the frame refuses. -->
+    <!-- %1$s lists each board's address and frame (setup_choice_frame_pivoting or _rigid). -->
+    <string name="arm_frames_differ">The boards are set to different frames (%1$s). One wheel would try to balance the machine and the other would freewheel. Set them the same under Machine on the Setup tab.</string>
+    <string name="arm_frame_unread">The app has not read the frame setting on both boards, so it cannot tell whether they match. Open Setup and tap Read again.</string>
+    <string name="arm_frame_no_peer">Only one board has been found, so the app cannot tell whether this machine\'s two boards are set to the same frame. If it has a second board, power it and reconnect.</string>
+    <string name="arm_side_none_right">Neither board is set as the right wheel, so a turn would come out mirrored. Pick the right wheel under Machine on the Setup tab.</string>
+    <string name="arm_side_both_right">Both boards are set as the right wheel, so a turn would come out wrong. Pick one of them under Machine on the Setup tab.</string>
+    <string name="arm_side_unknown">The app has not read which board is the right wheel on both boards. Open Setup and tap Read again.</string>
+    <string name="throttle_label_forward">FWD</string>
+    <string name="throttle_label_reverse">REV</string>
+    <string name="throttle_label_zero">0</string>
+
+    <!-- The drive pad's direction words (`specs/remote-ui.md` 3.1). -->
+    <string name="pad_forward">forward</string>
+    <string name="pad_reverse">reverse</string>
+    <!-- Bench affordance: stand in for foot pads the board does not have wired. Debug builds
+         only, and a long press rather than a tap, so the label has to say so. -->
+    <string name="sim_rider_label">SIMULATE RIDER · HOLD</string>
+    <string name="sim_rider_on">ON</string>
+    <string name="sim_rider_off">OFF</string>
+
+    <!-- Telemetry -->
+    <string name="telemetry_link_a">Wheel A</string>
+    <string name="telemetry_link_b">Wheel B</string>
+    <string name="telemetry_link_alive">LINK</string>
+    <string name="telemetry_link_dead">DOWN</string>
+    <!-- One line per set fault bit of CYCLIC_STATE.fault: %1$s is the board's label, %2$s the cause. -->
+    <string name="telemetry_fault_cause">FAULT %1$s: %2$s</string>
+    <string name="fault_cause_comms_loss">peer link lost</string>
+    <string name="fault_cause_tilt_stop">stopped by the tilt cutout</string>
+    <string name="fault_cause_imu_loss">IMU lost</string>
+    <string name="fault_cause_latch_a">motor 0 fault latch</string>
+    <string name="fault_cause_latch_b">motor 1 fault latch</string>
+    <string name="fault_cause_motor_hall">hall sensor dwell</string>
+    <string name="fault_cause_motor_cal">current calibration refused</string>
+    <string name="fault_cause_motor_period">motor period lost</string>
+    <string name="fault_cause_motor_arm">arm aborted</string>
+
+    <!-- Current (specs/remote-ui.md 3.6), on Setup's machine status section. TWO figures per board,
+         because the board measures the PHASE current the motor feels and a bench supply reads the DC
+         LINK, and taking one for the other cost a morning on 2026-10-09. One row per board, because
+         two wheels pulling differently is worth seeing and each board carries its own calibration.
+         The note states the footing: the scale has not been checked against a meter, and the
+         figure is the bridge's share alone. -->
+    <string name="telemetry_current_value">%1$.1f A motor \u00B7 %2$.1f A supply</string>
+    <!-- The sum of the two boards' supply figures, which is what the bench supply's own reading
+         can be compared against: one board's figure is only a share of it. Drawn for a pair only,
+         and never silently equal to one board's figure. -->
+    <string name="telemetry_current_machine">MACHINE</string>
+    <string name="telemetry_current_machine_value">%1$.1f A from the supply</string>
+    <string name="telemetry_current_machine_incomplete">no total while a board is not reporting</string>
+    <!-- The four ways there is no figure, each a different fact about the machine. A stale number
+         is not among them: the board stops refreshing the current window when its motor path goes
+         down, so a board that is off says so instead of showing the last window it ran. -->
+    <string name="telemetry_current_silent">no current reading</string>
+    <string name="telemetry_current_motors_off">motors off, no current to measure</string>
+    <string name="telemetry_current_coasting">coasting, no current driven</string>
+    <string name="telemetry_current_unscaled">waiting for this board\'s calibration</string>
+    <string name="telemetry_current_note">Figures rest on each board\'s own calibration, which has not been checked against a meter yet, and leave out the 0.08 A each board draws for itself.</string>
+
+    <!-- Overflow menu (specs/remote-ui.md section 2a) -->
+    <string name="nav_ride">Ride</string>
+    <string name="nav_tune">Tune</string>
+    <string name="nav_setup">Setup</string>
+    <string name="nav_layout">Board layout</string>
+    <string name="nav_open">Open the menu</string>
+    <string name="nav_up">Back to Ride</string>
+    <string name="nav_title_armed">%1$s. The board is ARMED.</string>
+
+    <!-- Tune screen (specs/remote-ui.md section 3.3) -->
+    <string name="tune_title">Tune</string>
+    <!-- The board selector Tune and Setup share (specs/remote-ui.md 3.7). %1$s is the board's L3
+         address, e.g. 0x01, as the session learned it: the numbering is the pair's, not the role's. -->
+    <string name="tune_stale_title">Not reachable: last-read values</string>
+    <string name="tune_stale_body">These are the values last read from this board. Writes are off until it is read again.</string>
+    <string name="tune_reading">Reading the board…</string>
+    <string name="tune_writing">Writing…</string>
+    <string name="tune_refresh">Read again</string>
+    <string name="tune_dismiss">Dismiss</string>
+    <string name="tune_staged">Staged</string>
+    <string name="tune_flash">Flash %1$s</string>
+    <!-- %1$s is the upper bound this board accepts, read from it (CONTROL_GAIN_MAX). -->
+    <string name="tune_range">0 to %1$s on this board</string>
+    <string name="tune_unread">\?</string>
+    <!-- A value sent to the board and not yet reported back by it: the dragged slider position, a
+         step, or a typed value. %1$s is that value. -->
+    <string name="tune_pending">→ %1$s</string>
+    <!-- %1$s is the top of the gain's slider, below the board's maximum. -->
+    <string name="tune_back_off">Back off to %1$d%%</string>
+    <string name="tune_slider_span">The slider covers 0 to %1$s; the buttons and the typed entry reach the board\'s maximum.</string>
+    <!-- What each state-feedback gain multiplies (specs/state-feedback.md section 2). A numerator
+         count is the law's unit of torque before the battery scaling. -->
+    <string name="tune_gain_gp_unit">Pitch: counts per degree of lean (the stock kp\'s unit, so a kp of 3000 is a gp of 3000).</string>
+    <string name="tune_gain_gr_unit">Pitch rate: counts per 0.1 rad/s (ten times the stock bk for the same torque).</string>
+    <string name="tune_gain_gx_unit">Position: counts per hall edge of position error; one edge is 5.76 mm on the rover\'s wheel.</string>
+    <string name="tune_gain_gv_unit">Speed: counts per sixteenth of a count of speed error, which is 18 mm/s.</string>
+    <string name="tune_converging_mark">~</string>
+    <string name="tune_unsaved_mark">*</string>
+    <!-- %1$s is a duration in seconds, e.g. 0.4. -->
+    <string name="tune_converging_row">~ converging: the law reaches the staged value within %1$s s of the change, while it runs</string>
+    <string name="tune_legend_staged">Staged: the board\'s RAM value as the board last reported it, read back after every change and once a second while this screen is open. The sliders write it; the running law ramps to it.</string>
+    <string name="tune_legend_engaged">Engaged: what the balance law is using now. The board does not report it. Each engage starts at staged; while the machine balances it converges to a new staged value and never jumps.</string>
+    <string name="tune_legend_flash">Flash: what a reboot restores. Only Save writes it.</string>
+    <string name="tune_legend_converging">~ converging: the ramp\'s bound since the last change has not elapsed. A bound, not a reading.</string>
+    <string name="tune_legend_unsaved">* unsaved: staged differs from flash. A reboot reverts to flash.</string>
+    <plurals name="tune_unsaved_count">
+        <item quantity="one">%d value unsaved</item>
+        <item quantity="other">%d values unsaved</item>
+    </plurals>
+    <string name="tune_revert">Revert to flash</string>
+    <string name="tune_save">Save</string>
+    <string name="tune_save_armed">Save (disarm first)</string>
+    <string name="tune_save_armed_note">Save writes flash, which the board refuses while armed. The sliders above and Revert work armed.</string>
+    <string name="tune_notice_save_armed">Save is refused while armed. Disarm first.</string>
+    <!-- %1$s is a row's name (e.g. gp, speed_max, or a drive bound's label). -->
+    <string name="tune_notice_refused_bad">The board refused %1$s: outside the range it accepts.</string>
+    <string name="tune_notice_refused_unknown">The board does not know %1$s as a tunable value (its firmware may predate it).</string>
+    <string name="tune_notice_refused_other">The board refused %1$s.</string>
+    <!-- %1$s row name, %2$s value written, %3$s value echoed. -->
+    <string name="tune_notice_mismatch">%1$s: wrote %2$s, the board reports %3$s. Read again.</string>
+    <string name="tune_notice_unanswered">No answer about %1$s. The board may be out of reach, or its firmware may predate the tune lane.</string>
+    <string name="tune_notice_slot_busy">The link is busy with another read; try again.</string>
+    <string name="tune_retry">Try again</string>
+    <string name="tune_notice_garbled">The board\'s answer about %1$s was not understood.</string>
+    <string name="tune_notice_not_attached">No board attached; nothing was sent.</string>
+
+    <!-- The reference row (specs/state-feedback.md sections 4 and 10): the two words of
+         CONTROL_REFERENCE, written over the gains' RAM lane. -->
+    <string name="tune_reference_title">Stick reference</string>
+    <string name="tune_reference_body">What the stick asks the balance law for: a target speed, slewed, whose running total is the position the law holds. These two are RAM values like the gains, so Save is what keeps them; without it a power cycle brings back the flash value each row shows.</string>
+    <string name="tune_reference_dead">Stick dead: speed_max is 0, so the stick does nothing and the machine holds position.</string>
+    <string name="tune_reference_live">The stick asks for a speed: full stick is speed_max, reached at the rate speed_slew sets, and centre stick stops and holds position.</string>
+    <string name="tune_reference_unread">Not read from this board yet.</string>
+    <string name="tune_reference_armed">Armed: these two work armed, like the gains, and the law uses a new value on its next step.</string>
+    <string name="tune_reference_speed_max">speed_max (sixteenths of a count at full stick)</string>
+    <string name="tune_reference_speed_max_note">How fast a full stick asks to go. One count is one hall edge per 20 ms, about 0.29 m/s on the rover\'s 165 mm wheel, so 16 is one count and 80 is 1.4 m/s. 0 is a working setting and not a broken one: the stick does nothing and the machine holds position.</string>
+    <string name="tune_reference_speed_slew">speed_slew (1/4096 count per control step)</string>
+    <string name="tune_reference_speed_slew_note">How fast the target speed may change: the stick\'s acceleration, and the stop ramp when the stick centres or the link goes quiet. 41 is 2.5 counts a second, about 0.72 m/s², which the body holds at about 4 degrees of lean.</string>
+    <!-- %1$s and %2$s are the compiled bounds of the word. -->
+    <string name="tune_reference_range">%1$s to %2$s, the same on every board: this limit is built into the firmware rather than stored on the board.</string>
+    <string name="tune_reference_entry_invalid">Type a whole number from %1$s to %2$s.</string>
+
+    <!-- The drive bounds (specs/remote-ui.md 3.3b): the turn limit and its rate and the position
+         clamp, on the Tune screen by the owner's decision, written to flash and taken up at the
+         next arm. -->
+    <string name="tune_bounds_title">Turn limits and position clamp</string>
+    <string name="tune_bounds_body">How hard the stick may turn the machine, and how far the balance law pulls it back to where it was. These are stored on the board, unlike the values above, so each one is written when you let go of its slider and the board starts using it the next time it is armed.</string>
+    <string name="tune_bounds_armed">Armed: these are stored values and the board refuses to store anything while armed. Disarm below to change them, then arm again.</string>
+    <string name="tune_bound_turn_max">Turn limit (torque counts)</string>
+    <string name="tune_bound_turn_max_note">How hard the two wheels are driven apart with the stick all the way over, in the counts the wheels take torque in, where the top of the range below is everything one wheel has. 0 drives straight and ignores steering. Only a machine set to one rigid frame steers at all.</string>
+    <string name="tune_bound_turn_slew">Turn rate (torque counts per step)</string>
+    <string name="tune_bound_turn_slew_note">How far the turn may move in one control step. The boards take %1$d steps a second, so against a 12000 turn limit, 240 reaches full lock in a fifth of a second and 24 takes two seconds.</string>
+    <string name="tune_bound_pos_clamp">Position clamp (hall edges)</string>
+    <string name="tune_bound_pos_clamp_note">How far the position term pulls the machine back: pushed further than this, it returns exactly this far and no further. One edge is 5.76 mm on the rover\'s wheel, so 45 is 0.26 m. 0 turns the position term off.</string>
+    <string name="tune_bound_unread">Not read from this board.</string>
+    <string name="tune_notice_bound_armed">A stored limit cannot be written while armed. Disarm first.</string>
+    <string name="tune_notice_bound_range">%1$s is outside what the board keeps, so nothing was sent.</string>
+
+    <!-- The ride controls on Tune: the same stick and arm control the Ride screen carries, so a
+         machine can be ridden, stopped and adjusted without leaving the screen. -->
+    <string name="tune_ride_title">Ride from here</string>
+    <string name="tune_ride_body">The same stick and arm control as the Ride screen, on the same board.</string>
+
+    <!-- Setup screen (specs/remote-ui.md sections 3.4 and 3.6a: writes on change, no Apply) -->
+    <string name="setup_title">Setup</string>
+    <string name="setup_locked_title">Armed: read only</string>
+    <string name="setup_locked_body">The board refuses every settings write while it is armed. Disarm on the Ride tab to edit.</string>
+    <string name="setup_reading">Reading the board…</string>
+    <string name="setup_writing">Writing…</string>
+    <string name="setup_refresh">Read again</string>
+    <string name="setup_dismiss">Dismiss</string>
+    <string name="setup_advanced_show">Show advanced</string>
+    <string name="setup_advanced_hide">Hide advanced</string>
+
+    <!-- %1$s is the stored value. -->
+    <string name="setup_stored">Stored: %1$s</string>
+    <string name="setup_default">Default: %1$s</string>
+    <string name="setup_unread">Not read</string>
+    <!-- The board replied and the reply did not decode, which is NOT the same as no reply and must
+         not be worded as one. Two things reach it: a text field holding bytes that are not text,
+         which the board stores and serves as written and this app has no way to show, and a
+         refusal this app's vocabulary does not have. -->
+    <string name="setup_garbled">The board answered with something this app could not read.</string>
+    <string name="setup_not_read_yet">…</string>
+    <!-- The standing take-effect line, on every row that can be written, before and after the edit. -->
+    <string name="setup_effect_arm">Takes effect the next time the board is armed.</string>
+    <string name="setup_effect_boot">Takes effect the next time the board starts up.</string>
+    <string name="setup_effect_app">Takes effect here at once. The board stores this one for the app and never acts on it itself.</string>
+    <string name="setup_set">Set</string>
+    <string name="setup_invalid">Not a value this field takes</string>
+    <string name="setup_too_long">Too long: at most %1$d bytes fit one write</string>
+    <!-- %1$s is a byte value that matches none of the choices. -->
+    <string name="setup_choice_unknown">Stored byte %1$s is none of these</string>
+
+    <!-- What one row says about the app's own write of that field. -->
+    <string name="setup_row_armed">Armed: read only. The board refuses a write to this field.</string>
+    <string name="setup_write_written">Written.</string>
+    <string name="setup_write_awaiting_restart">Written. The board has not restarted since, so it is still running the old value.</string>
+    <string name="setup_write_refused_armed">The board refused this write: it is armed.</string>
+    <string name="setup_write_refused_bad">The board refused this write as malformed.</string>
+    <string name="setup_write_refused_unknown">The board does not know this field.</string>
+    <string name="setup_write_refused_type">The board stores this field as a different type.</string>
+    <string name="setup_write_refused_store">The board could not store this (flash full or failed).</string>
+    <string name="setup_write_refused_no_space">The board is out of space for configuration, so this was not stored.</string>
+    <string name="setup_write_refused_read_only">The board refused this write: the field is read-only.</string>
+    <string name="setup_write_refused_commit">The board could not commit its compacted configuration page, so this was not stored.</string>
+    <string name="setup_write_refused_secret">The board does not give this field\'s value back.</string>
+    <!-- %1$s is the value written, %2$s the value the board echoed. -->
+    <string name="setup_write_mismatch">Wrote %1$s but the board stores %2$s.</string>
+    <string name="setup_write_unanswered">No answer from the board. It was read again to see what it holds.</string>
+    <string name="setup_write_garbled">The answer from the board could not be understood.</string>
+    <string name="setup_write_slot_busy">The link was busy with another request, so nothing was written.</string>
+    <string name="setup_write_not_sent">No board attached, so nothing was written.</string>
+    <string name="setup_write_skipped">Not written: the other board had to be set to the left wheel first, and that write did not land.</string>
+    <string name="setup_frame_incomplete_title">The stored orientation is not whole</string>
+    <string name="setup_frame_incomplete_body">The stored IMU orientation is not a proper rotation, or part of it cannot be read while some of it was just written. That happens when writing a frame stopped part way, and a board can also hold such a frame from before this session. The board refuses to arm on it, and started up on it does not bring its IMU up at all, so it cannot balance either way. Pick a pose below: the whole frame is written again, and this warning goes once the stored frame is whole.</string>
+    <!-- A field and its value on one line: %1$s is a field label, %2$s its value. -->
+    <string name="setup_change_line">%1$s: %2$s</string>
+    <string name="setup_frame_writing">Writing the orientation: eight fields, one write each. Between the two axis-role writes the board can hold the same chip axis twice, which it refuses; an arm attempted in that moment is refused once, and the arm after it takes the new frame.</string>
+
+    <string name="setup_group_identity">Identity</string>
+    <string name="setup_group_drive">Drive</string>
+    <string name="setup_group_imu">IMU and attitude</string>
+    <string name="setup_group_calibration">Board calibration</string>
+    <string name="setup_group_tuning">Tuning</string>
+
+    <string name="setup_field_device_name">Device name</string>
+    <string name="setup_field_node_class">Node class</string>
+    <string name="setup_field_drive_mode">Drive mode (every board must match)</string>
+    <string name="setup_field_node_address">Node address</string>
+    <string name="setup_field_link_set">Link set</string>
+    <string name="setup_field_control_mode">Control mode</string>
+    <string name="setup_field_rider_required">Rider required (balance mode)</string>
+    <string name="setup_field_battery_floor">Low-battery floor (cV)</string>
+    <string name="setup_field_pack_cells">Battery cells in series</string>
+    <string name="setup_field_battery_chemistry">Battery chemistry</string>
+    <string name="setup_choice_li_ion">Li-ion (NMC)</string>
+    <string name="setup_choice_lev50">LEV50</string>
+    <string name="setup_choice_lto">LTO</string>
+    <string name="setup_field_gain_max_gp">Gain maximum, gp</string>
+    <string name="setup_field_gain_max_gr">Gain maximum, gr</string>
+    <string name="setup_field_gain_max_gx">Gain maximum, gx</string>
+    <string name="setup_field_gain_max_gv">Gain maximum, gv</string>
+    <string name="setup_field_vbatt_slope">Battery sense slope (µV per count)</string>
+    <string name="setup_field_vbatt_offset">Battery sense offset (centivolts)</string>
+    <string name="setup_field_motor_method">Commutation method</string>
+    <string name="setup_field_motor_direction">Motor direction</string>
+    <string name="setup_field_align_offset">Align offset</string>
+    <string name="setup_field_dead_time">Dead time (raw DTG)</string>
+    <string name="setup_field_current_limit">Current limit (mA)</string>
+    <string name="setup_field_imu_model">IMU model</string>
+    <string name="setup_field_control_frame">Frame (both boards must match)</string>
+    <string name="setup_field_control_side">Wheel side (this board)</string>
+    <string name="setup_field_trim_pitch">Level trim, pitch (centidegrees)</string>
+    <string name="setup_field_trim_roll">Level trim, roll (centidegrees)</string>
+    <string name="setup_field_gyro_bias_x">Gyro bias X (counts)</string>
+    <string name="setup_field_gyro_bias_y">Gyro bias Y (counts)</string>
+    <string name="setup_field_gyro_bias_z">Gyro bias Z (counts)</string>
+    <string name="setup_field_sign_ax">Sign, accel X</string>
+    <string name="setup_field_sign_ay">Sign, accel Y</string>
+    <string name="setup_field_sign_az">Sign, accel Z</string>
+    <string name="setup_field_sign_gx">Sign, gyro X</string>
+    <string name="setup_field_sign_gy">Sign, gyro Y</string>
+    <string name="setup_field_sign_gz">Sign, gyro Z</string>
+    <string name="setup_field_role_up">Axis role, UP (chip axis 1 to 3)</string>
+    <string name="setup_field_role_pitch">Axis role, PITCH_RATE (chip axis 1 to 3)</string>
+
+    <string name="setup_choice_throttle">Throttle</string>
+    <string name="setup_choice_balance">Balance</string>
+    <string name="setup_choice_required">Required</string>
+    <string name="setup_choice_not_required">Not required</string>
+    <string name="setup_choice_six_step">Six-step</string>
+    <string name="setup_choice_sine">Sine</string>
+    <string name="setup_choice_foc">FOC</string>
+    <string name="setup_choice_forward">Forward</string>
+    <string name="setup_choice_reverse">Reverse</string>
+    <string name="setup_choice_imu_none">None fitted</string>
+    <string name="setup_choice_imu_mpu6050">MPU-6050</string>
+    <string name="setup_choice_imu_clone">MPU-6050 clone</string>
+    <string name="setup_choice_frame_pivoting">Pivoting platforms</string>
+    <string name="setup_choice_frame_rigid">Rigid body</string>
+    <string name="setup_choice_side_left">Left wheel</string>
+    <string name="setup_choice_side_right">Right wheel</string>
+
+    <!-- The range a numeric row offers, which is the clamp the firmware applies as it reads the
+         value: a word outside it is stored as written and narrowed on the way into the loop. -->
+    <string name="setup_range">Takes %1$s to %2$s.</string>
+    <string name="setup_range_unset">Takes %1$s to %2$s, or %3$s.</string>
+    <string name="setup_note_device_name">The Bluetooth module takes a new name only after it is power-cycled out of data mode.</string>
+    <string name="setup_note_node_class">1 = motor controller, 2 = bridge. The node\'s own firmware reports it; it cannot be written.</string>
+    <string name="setup_note_drive_mode">The raw byte behind the Drive mode control under Machine, for a bench with only one board powered. Set it the same on every board. Nothing on the board reads it: the app drives by it.</string>
+    <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
+    <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control drives a current instead of a voltage and has not been proven on a wheel yet; set both boards of a machine to the same method. A board whose current sensing was not calibrated at start-up falls back to six-step.</string>
+    <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
+    <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
+    <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Any byte but 0 reads as required.</string>
+    <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
+    <string name="setup_note_battery_chemistry">Picks the resting-voltage table the Ride screen\'s percentage reads. Set the same on both boards.</string>
+    <string name="setup_floor_above_full">This floor is at or above the stated pack\'s full voltage, so every balance engage is refused.</string>
+    <string name="setup_floor_below_empty">This floor is below the stated pack\'s empty voltage, so it refuses no engage before the pack is flat.</string>
+    <string name="setup_note_pack_cells">0 = not set, and then the Ride screen shows pack volts with no percentage. Set the same count on both boards: one pack feeds them both. The chemistry below sets what a full and an empty cell are.</string>
+    <string name="setup_note_gain_max">The largest value the Tune sliders and the board accept for this gain; the minimum is 0. A gain above it is clamped down to it.</string>
+    <string name="setup_note_vbatt_cal">Rail centivolts = count × slope / 10000 + offset.</string>
+    <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>
+    <string name="setup_note_control_frame">The raw byte behind the Frame control under Machine, for a bench with only one board powered. Set it the same on both boards.</string>
+    <string name="setup_note_control_side">The raw byte behind the Right wheel control under Machine. Exactly one board of a pair is the right wheel.</string>
+    <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Written only by the orientation pose picker above, together with the axis roles, because one sign on its own cannot make a rotation.</string>
+
+    <!-- The Machine section (specs/remote-ui.md 3.7 and 3.7a): settings that belong to the machine
+         rather than to one board, so they are written to both. -->
+    <!-- Travel, the odometer, on Setup (specs/remote-ui.md 3.6c). What the board records is a
+         COUNT OF HALL EDGES and nothing else. Turning one into a distance takes two facts
+         measured on the machine and written at a bench, the motor's pole-pair count and the
+         wheel's rolling diameter, so a board told both shows a distance and a board told neither
+         or only one shows the count. A number captioned as a distance that is really a count
+         reads as authoritative and is wrong by whatever factor the wheel happens to be, so every
+         value string below carries its own unit and the note states which case the block is in.
+         The edge counts keep thousands separators because they run into the millions and are
+         unreadable without them. The machine figure is the MEAN of the two wheels, not their sum,
+         because both wheels cover the same ground; the Ride panel's current rows sum because two
+         draws from one pack do add. It is here and not on the Ride panel because that screen has
+         no room left: its drive control must stay on screen without scrolling. -->
+    <string name="setup_travel_title">Travel</string>
+    <string name="setup_travel_value">%1$,d edges</string>
+    <!-- Two units, because neither reads well over a lifetime counter's whole range: fifty metres
+         shown as 0.05 km throws away what the counter knows, and four hundred kilometres shown in
+         metres is unreadable. Whole metres under a kilometre, two decimals from there up. -->
+    <string name="setup_travel_metres">%1$,d m</string>
+    <string name="setup_travel_kilometres">%1$.2f km</string>
+    <string name="setup_travel_silent">waiting for this board</string>
+    <!-- The two wheels averaged, and the words that stand there when a board has not reported: a
+         one-wheel average is not a machine's travel. Averaged in the unit BOTH wheels could give,
+         since two rows in different units cannot be averaged into one number. -->
+    <string name="setup_travel_machine">MACHINE</string>
+    <string name="setup_travel_machine_value">%1$,d edges, averaged</string>
+    <string name="setup_travel_machine_metres">%1$,d m, averaged</string>
+    <string name="setup_travel_machine_kilometres">%1$.2f km, averaged</string>
+    <string name="setup_travel_machine_incomplete">no average while a board is not reporting</string>
+    <string name="setup_travel_note">Travel is counted in hall edges. A distance needs the wheel\'s size, which the board has not been told.</string>
+    <string name="setup_travel_note_converted">Travel is counted in hall edges and converted here using the wheel size each board has been told.</string>
+
+    <string name="setup_machine_title">Machine</string>
+    <string name="setup_machine_body">These settings describe the whole machine rather than one board, so picking one here writes it to every motor controller.</string>
+    <string name="setup_machine_no_peer">Only one motor controller was found this session, so a write reaches only that board and the frame and the right wheel stay unknown.</string>
+    <string name="setup_machine_order">Set a new machine up in this order: the right wheel, then the frame, then the control mode under Drive below, then the lean and turn limits on the Tune screen. Each one does nothing until the next is set, and the machine neither leans nor steers while those two limits are 0.</string>
+    <string name="setup_machine_frame">Frame</string>
+    <string name="setup_machine_frame_body">Pivoting platforms: each board balances the platform it sits under, using its own sensor. That is how a hoverboard works, and it is what a board does out of the box. Rigid body: the two wheels are bolted into one frame, the board that has the sensor balances the whole machine and tells the other wheel what to do.</string>
+    <string name="setup_machine_side">Right wheel</string>
+    <string name="setup_machine_side_body">Which board drives the right-hand wheel, looking the way the machine drives forward. Picking one makes the other board the left wheel, and that board is written first, so if the second write fails neither board is left on the right. Nothing is picked for you: the answer is different from machine to machine.</string>
+    <!-- %1$s is a frame name (setup_choice_frame_pivoting or _rigid). -->
+    <string name="setup_machine_frame_agree">Both boards: %1$s</string>
+    <!-- %1$s is a board label, %2$s its frame; %3$s and %4$s the other board's. -->
+    <!-- One board's value in a disagreement: %1$s the board's label, %2$s its value. -->
+    <string name="setup_machine_value">%1$s: %2$s.</string>
+    <string name="setup_machine_mode">Drive mode</string>
+    <string name="setup_machine_mode_body">How the app drives this machine. Single board: the stick drives the board picked at the top of Tune or Setup. Bound: both boards get the same demand. Differential: the stick steers by driving the two wheels apart, which needs the right wheel set below. Rigid body: one command to the board leading the rigid frame. Every board stores the same value, so the setting travels with the machine.</string>
+    <string name="setup_machine_mode_unknown">Not read on every board.</string>
+    <!-- A stored byte that names no drive mode this app knows. -->
+    <string name="setup_machine_mode_raw">unknown (%1$d)</string>
+    <!-- The one-tap write of one value to every board. %1$s is a drive mode label. -->
+    <string name="setup_machine_mode_use">Use %1$s on every board</string>
+    <string name="setup_machine_unknown">Not read on both boards.</string>
+    <!-- %1$s is a board label: its name and address. -->
+    <string name="setup_machine_side_right">Right wheel: %1$s</string>
+    <string name="setup_machine_side_none">Neither board is the right wheel. Both are set to the left, which is how a board leaves the factory.</string>
+    <string name="setup_machine_side_both">Both boards are set to the right wheel.</string>
+    <string name="setup_machine_disagree">The two boards do not agree. Fix it here before riding.</string>
+    <!-- One board's line under a Machine row: %1$s names the board, %2$s is what came of its write. -->
+    <string name="setup_machine_board_line">%1$s: %2$s</string>
+
+    <string name="setup_level_title">Set level</string>
+    <string name="setup_level_body">Stand the frame level, then set. The trims that zero the current pitch and roll are written to the board.</string>
+    <!-- %1$s pitch, %2$s roll, both in degrees. -->
+    <string name="setup_attitude_now">Now: pitch %1$s°, roll %2$s°</string>
+    <string name="setup_attitude_none">No attitude from the board yet</string>
+    <string name="setup_level_action">Set level from current attitude</string>
+
+    <string name="setup_orientation_title">IMU orientation</string>
+    <string name="setup_orientation_body">Pick how the board sits in the machine: which face points up, then what points forward. The app writes both orientation fields from that choice: the axis roles (which chip axis is up, which measures the pitch rate) and the six signs. Every pose is a proper rotation; a board refuses to arm on any other frame, and one started up on such a frame does not bring its IMU up at all.</string>
+    <string name="setup_orientation_family">The poses assume the standard board family\'s chip mount (the measured yaw, not the firmware\'s compiled fallback). A board of another family needs its chip mount measured before these poses are right for it.</string>
+    <!-- %1$s is the six signs, e.g. [-1, 1, -1, -1, 1, -1]. -->
+    <string name="setup_orientation_stored">Stored map: %1$s</string>
+    <string name="setup_orientation_stored_unread">Stored map: not read</string>
+    <!-- %1$s is the chip axis playing UP, %2$s the one playing PITCH_RATE, e.g. Z and Y. -->
+    <string name="setup_orientation_roles">Stored roles: UP = %1$s, PITCH_RATE = %2$s</string>
+    <string name="setup_orientation_roles_unread">Stored roles: not read</string>
+    <!-- %1$s is a pose name (setup_pose_name) or a custom frame (setup_pose_custom). -->
+    <string name="setup_orientation_runs">Runs as: %1$s</string>
+    <string name="setup_orientation_stored_as">Stored as: %1$s. The board takes the stored map the next time it is armed, not now.</string>
+    <string name="setup_orientation_unset">Unset signs and roles run the firmware fallback.</string>
+    <string name="setup_orientation_mirrored">The stored frame is not a proper rotation (mirrored, or an invalid pair of roles). The board refuses to arm on it, and started up on it does not bring its IMU up at all. Pick a pose below.</string>
+    <string name="setup_pose_face_title">Which face points up</string>
+    <string name="setup_pose_heading_title">What points forward</string>
+    <string name="setup_pose_drawing">Drawn with the machine\'s forward to the right and up at the top; the component side is shaded and the arrow marks the stock-forward edge.</string>
+    <!-- %1$s is a face (setup_face_*), %2$s a heading (setup_heading_*). -->
+    <string name="setup_pose_name">%1$s, %2$s</string>
+    <!-- %1$s is a face (setup_face_*): the pose the firmware fallback is on this board family. -->
+    <string name="setup_pose_unset">unset (firmware fallback; reads as %1$s on this family)</string>
+    <!-- %1$s is the stored roles, %2$s the stored signs, both as lists. -->
+    <string name="setup_pose_custom">custom (roles %1$s, signs %2$s)</string>
+    <string name="setup_face_component_up">component side up</string>
+    <string name="setup_face_component_down">component side down</string>
+    <string name="setup_face_forward_edge_down">stock-forward edge down</string>
+    <string name="setup_face_rear_edge_down">stock-rear edge down</string>
+    <string name="setup_face_left_edge_down">stock-left edge down</string>
+    <string name="setup_face_right_edge_down">stock-right edge down</string>
+    <string name="setup_heading_forward">stock-forward edge forward</string>
+    <string name="setup_heading_rear">stock-rear edge forward</string>
+    <string name="setup_heading_left">stock-left edge forward</string>
+    <string name="setup_heading_right">stock-right edge forward</string>
+    <string name="setup_heading_component">component side forward</string>
+    <string name="setup_heading_back">back side forward</string>
+    <string name="setup_model_title">The board as it runs now</string>
+    <string name="setup_model_body">Side view (forward to the right) and view from behind, tilted by the pitch and roll the board reports. Tilt the board: the drawing should tilt the same way. It shows the frame the board is running, not one that has been stored since.</string>
+    <string name="setup_model_side">side</string>
+    <string name="setup_model_behind">from behind</string>
+
+    <string name="setup_check_title">Rotation check</string>
+    <string name="setup_check_body">Run on the assembled frame, after the arm that applies the orientation. A pass means the pitch and roll the board reports agree with its map. The up-axis gravity sign and the pitch-rate sign are not sent over Bluetooth; they need the bench check.</string>
+    <string name="setup_check_level">Check level</string>
+    <string name="setup_check_lean">Check forward lean</string>
+    <string name="setup_check_level_hint">Frame level: pitch and roll within 10° of zero.</string>
+    <string name="setup_check_lean_hint">Hold the frame leaning forward more than 10°: pitch reads negative.</string>
+    <string name="setup_check_pass">Pass</string>
+    <string name="setup_check_fail">Fail</string>
+    <string name="setup_check_inconclusive">Lean further</string>
+    <string name="setup_check_not_run">Not run</string>
+    <string name="setup_check_blocked">The orientation was written this session. The board re-reads the frame when it arms, so arm it once before running this check.</string>
+
+    <string name="setup_retry">Try again</string>
+    <string name="setup_notice_not_a_sign">A sign must be -1, 0 (unset) or +1. Nothing was written.</string>
+    <string name="setup_notice_accel_mirrored">The accelerometer signs would form a mirrored frame (determinant -1). Nothing was written.</string>
+    <string name="setup_notice_gyro_mirrored">The gyro signs would form a mirrored frame (determinant -1). Nothing was written.</string>
+    <string name="setup_notice_roles">The axis roles would name one chip axis twice or a value outside 0 to 3. Nothing was written.</string>
+    <!-- %1$s is a field label. -->
+    <string name="setup_notice_out_of_range">%1$s does not take that value.</string>
+    <string name="setup_notice_no_telemetry">This board has not reported its attitude.</string>
+    <string name="setup_notice_not_read">The stored values this needs have not been read.</string>
+    <string name="setup_notice_awaiting_arm">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up at its next arm.</string>
+    <string name="setup_notice_awaiting_restart">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up when it restarts.</string>
+    <!-- %1$s is the previous board's address. -->
+
+    <!-- Board layout editor (specs/remote-ui.md section 3.5) -->
+    <string name="layout_title">Board layout</string>
+    <!-- %1$s is the board\'s L3 address, e.g. 0x01. -->
+    <string name="layout_target">Target: board %1$s</string>
+    <string name="layout_no_board">No board attached.</string>
+    <string name="layout_locked_title">Armed: read-only</string>
+    <string name="layout_locked_body">A layout is written to flash, which the board refuses while armed. Disarm to edit it.</string>
+    <string name="layout_reading">Reading the layout…</string>
+    <string name="layout_writing">Writing the layout…</string>
+    <string name="layout_refresh">Read again</string>
+    <string name="layout_not_read">The layout has not been read yet.</string>
+    <!-- %1$d is how many of the layout\'s fields could not be read. -->
+    <string name="layout_unread">%1$d of the layout\'s fields could not be read, so there is no layout to judge. Read again.</string>
+
+    <!-- %1$s is the part the board reports, e.g. GD32F103C8 (6-FET, 48-pin). -->
+    <string name="layout_part">Part: %1$s, as the board reports it.</string>
+    <string name="layout_part_unknown_title">Part not known</string>
+    <string name="layout_part_unsent">This board has not sent its part yet. It arrives with the board\'s state, a few times a second.</string>
+    <string name="layout_part_unnamed">This board reports a part this app does not know.</string>
+    <string name="layout_part_unknown_body">A layout is only valid or invalid ON a part: pins that one part bonds the next one does not. So there is no verdict here, and nothing can be changed.</string>
+
+    <string name="layout_verdict_valid">This layout validates. The board would accept it and bring up what it describes.</string>
+    <!-- %1$s is the field\'s name, %2$s the reason it was refused. -->
+    <string name="layout_verdict_invalid">Refused: %1$s. %2$s</string>
+    <string name="layout_verdict_unknown">The layout has not been read, so there is nothing to judge.</string>
+    <string name="layout_verdict_title">Verdict</string>
+    <string name="layout_verdict_exact">The board\'s boot validator is a pure function of these fields, this part and the reserved pins, and this is that function\'s answer.</string>
+    <string name="layout_verdict_after_boot">What only a reboot can tell: whether the hardware behaves, so whether the IMU answers on the staged bus, the halls read and the motors turn. The board\'s own verdict is not readable over the link either, so a clean apply is confirmed by the board behaving on reconnect.</string>
+    <string name="layout_verdict_reachable">A wrong layout disables the affected function until it is corrected and re-booted; the board stays reachable. The link\'s own pins are not layout fields and cannot be claimed by one.</string>
+    <!-- %1$s is the field the stored layout is refused on. -->
+    <string name="layout_stored_invalid">The board currently STORES a layout it would refuse, on %1$s. A layout is one object, so this is an invalid board rather than a board half-way to a new layout. Finish applying the changes below.</string>
+
+    <string name="layout_delta_title">Changes to write</string>
+    <!-- %1$s is the field, %2$s what the board holds, %3$s what would be written. -->
+    <string name="layout_delta_line">%1$s: %2$s → %3$s</string>
+    <string name="layout_apply">Apply</string>
+    <string name="layout_apply_blocked">Apply is disabled while the verdict is a refusal. There is no override: the board would refuse this layout at boot and come up link-only.</string>
+    <string name="layout_revert">Revert</string>
+    <string name="layout_revert_all">Revert all</string>
+    <string name="layout_no_changes">No changes staged. Edits here are local until Apply writes them.</string>
+    <string name="layout_retry">Apply again</string>
+    <string name="layout_dismiss">Dismiss</string>
+
+    <!-- %1$d is how many fields were written. -->
+    <string name="layout_power_cycle">Power-cycle the board to apply %1$d field(s). The layout is read once at boot.</string>
+    <string name="layout_power_cycle_watch">The app is watching for the restart and clears this by itself, so there is nothing to confirm. The Bluetooth module goes down with the board, so the link drops and comes back.</string>
+    <string name="layout_written_mark">Written, not applied: runs from the next power-up.</string>
+
+    <string name="layout_group_board">Board</string>
+    <string name="layout_group_imu">IMU bus</string>
+    <!-- %1$d is the motor index. -->
+    <string name="layout_group_motor">Motor %1$d</string>
+    <string name="layout_add_motor">Add a second motor</string>
+    <string name="layout_motor_caption">Direction and align offset are the Setup screen\'s rows. They are read here because a layout is one object, and they do not change the verdict.</string>
+
+    <string name="layout_field_self_hold">Power latch</string>
+    <string name="layout_field_vbatt">Battery sense</string>
+    <string name="layout_field_buzzer">Buzzer</string>
+    <string name="layout_field_led_green">LED, green</string>
+    <string name="layout_field_led_orange">LED, orange</string>
+    <string name="layout_field_led_red">LED, red</string>
+    <string name="layout_field_pad_a">Foot pad A</string>
+    <string name="layout_field_pad_b">Foot pad B</string>
+    <string name="layout_field_button">Power button</string>
+    <string name="layout_field_imu_scl">IMU SCL</string>
+    <string name="layout_field_imu_sda">IMU SDA</string>
+    <string name="layout_field_imu_model">IMU model</string>
+    <string name="layout_field_hall_a">Hall A</string>
+    <string name="layout_field_hall_b">Hall B</string>
+    <string name="layout_field_hall_c">Hall C</string>
+    <string name="layout_field_gate_hi_a">Gate, high side A</string>
+    <string name="layout_field_gate_hi_b">Gate, high side B</string>
+    <string name="layout_field_gate_hi_c">Gate, high side C</string>
+    <string name="layout_field_gate_lo_a">Gate, low side A</string>
+    <string name="layout_field_gate_lo_b">Gate, low side B</string>
+    <string name="layout_field_gate_lo_c">Gate, low side C</string>
+    <string name="layout_field_dead_time">Dead time (DTG)</string>
+    <string name="layout_field_current_sense">Phase-current sense</string>
+    <string name="layout_field_phase_a">Phase A sense</string>
+    <string name="layout_field_phase_b">Phase B sense</string>
+
+    <string name="layout_note_self_hold">Set from hoverboard-cli when the board is onboarded, not in this app. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
+    <string name="layout_note_imu">Both pins and a model, or none: a half-staged IMU is a refused layout, not an absent IMU.</string>
+    <string name="layout_note_gates">All six gates with a dead time at or above the floor, or none. The picker offers only this part\'s advanced-timer pins, and the six still have to form one timer\'s complementary set.</string>
+    <string name="layout_note_halls">All three halls, or none.</string>
+    <string name="layout_note_phase">Both pins exactly when the sense is declared present, and both on an analog pin.</string>
+    <string name="layout_note_dead_time">%1$d DTG ticks or more once the gates are configured; 0 only with them unset. A shorter one lets both FETs of a leg conduct.</string>
+
+    <string name="layout_absent">not set</string>
+    <string name="layout_field_unread">This field could not be read.</string>
+    <string name="layout_change">Change</string>
+    <string name="layout_cancel">Cancel</string>
+    <string name="layout_set">Set</string>
+    <string name="layout_unset">Not set</string>
+    <string name="layout_row_part_unknown">Not editable: the board\'s part is not known.</string>
+    <string name="layout_no_candidates">No pin on this part is free and eligible for this function.</string>
+    <string name="layout_choice_imu_none">None fitted</string>
+    <string name="layout_choice_imu_mpu6050">MPU-6050</string>
+    <string name="layout_choice_imu_clone">MPU-6050 clone</string>
+    <string name="layout_choice_sense_absent">None</string>
+    <string name="layout_choice_sense_present">Present</string>
+
+    <string name="layout_reason_bad_encoding">That byte is not a pin this encoding defines.</string>
+    <string name="layout_reason_incomplete">The function\'s fields are all-or-none and only some are set.</string>
+    <string name="layout_reason_dead_time">The gates are configured, so the dead time must be %1$d DTG ticks or more. Anything shorter is shoot-through.</string>
+    <!-- %1$s is a pin name. -->
+    <string name="layout_reason_duplicate">%1$s is already claimed by another function.</string>
+    <string name="layout_reason_reserved">%1$s belongs to a live link port or to SWD.</string>
+    <string name="layout_reason_unknown_pin">%1$s is not bonded on this part.</string>
+    <string name="layout_reason_gate_capable">%1$s drives an advanced timer, so only a gate may claim it.</string>
+    <string name="layout_reason_invalid_gate_set">These six pins are not one advanced timer\'s complementary set.</string>
+    <string name="layout_reason_not_adc">%1$s has no ADC channel behind it.</string>
+    <string name="layout_reason_not_i2c">Those two pins are not a hardware I2C bus. A software bus is not built.</string>
+    <string name="layout_reason_imu_frame">The stored IMU orientation is not a rotation. The Setup screen owns it.</string>
+
+    <string name="layout_notice_armed">The board is armed. A layout is written to flash, which it refuses while armed.</string>
+    <string name="layout_notice_not_attached">No board is attached, so nothing was sent.</string>
+    <string name="layout_notice_part_unknown">The board\'s part is not known, so there is no verdict to apply against.</string>
+    <string name="layout_notice_not_clean">That layout is one the board would refuse, so it was not written.</string>
+    <string name="layout_notice_slot_busy">The link was busy with another request, so nothing was sent.</string>
+    <!-- %1$s is the field\'s name. -->
+    <string name="layout_notice_unanswered">The write to %1$s went unanswered. The board may or may not hold it; the field was read back.</string>
+    <string name="layout_notice_garbled">The board answered the write to %1$s with something the protocol does not define.</string>
+    <!-- %1$s is the field, %2$s what was written, %3$s what the board stored. -->
+    <string name="layout_notice_mismatch">%1$s: wrote %2$s, the board stored %3$s.</string>
+    <!-- %1$s is the field\'s name. -->
+    <string name="layout_notice_refused">The board refused the write to %1$s.</string>
+    <!-- %1$s is the previous board\'s address. -->
+    <string name="layout_notice_board_changed">A different board attached. The layout read from board %1$s was dropped: pins are a fact about one board.</string>
+
+    <!-- The fault lamp grid and each lamp's sheet (`specs/remote-ui.md` 3.1b), verbatim from what the firmware does. -->
+    <string name="lamp_link_title">Board link lost</string>
+    <string name="lamp_link_when">This board has had no state frame from the other board for 0.1 s. It counts only once the other board has been heard since power-up, so a board that never heard its partner shows nothing here. It goes out when a frame arrives.</string>
+    <string name="lamp_link_blocks">Arming. An armed board shuts down, and on a rigid machine the other board stops its wheel too. The app disarms; tap ARM once the link returns.</string>
+    <string name="lamp_link_fix">Check the cable between the two boards, and that the other board has power.</string>
+    <string name="lamp_tilt_title">Tilted past 45°</string>
+    <string name="lamp_tilt_when">This board\'s pitch or roll passed 45° either way. The board checks this whenever its IMU is working, armed or not, in Throttle as in Balance. The app disarms when it lights, and the lamp goes out once the machine is upright.</string>
+    <string name="lamp_tilt_blocks">Arming. An armed board shuts down at once, and on a rigid machine the other board stops its wheel too.</string>
+    <string name="lamp_tilt_fix">Stand the machine upright, then tap ARM. A machine that has fallen cannot right itself and drive off, because the app has disarmed.</string>
+    <string name="lamp_imu_title">IMU not answering</string>
+    <string name="lamp_imu_when">Five reads of this board\'s IMU in a row failed (20 ms). It goes out after 25 good reads in a row (0.1 s); while it is lit, the board tries the IMU once a second. Only a board whose IMU answered at power-up can show it.</string>
+    <string name="lamp_imu_blocks">Arming. An armed board shuts down and the app disarms. Tap ARM once the IMU answers.</string>
+    <string name="lamp_imu_fix">Check the IMU\'s connector and wiring on this board.</string>
+    <string name="lamp_latch_title">Motor fault latched</string>
+    <string name="lamp_latch_when">One of two trips while armed. The phase current reached twice the current limit, or stayed over the limit for 64 PWM periods in a row (4 ms). Or the board was armed for 10 minutes without its balance loop in its run state, which in Throttle mode is any 10 minutes armed. The board clears the latch as it reaches OFF, about 8 ms later; the app keeps the lamp lit until you tap ARM.</string>
+    <string name="lamp_latch_blocks">Nothing once the board is at OFF. An armed board shuts down when it trips, and the app disarms. Tapping ARM clears the lamp and arms.</string>
+    <string name="lamp_latch_fix">After a current trip, check for a stalled wheel or a short on the phase wires. The 10-minute trip is the stock idle timeout and needs no fix.</string>
+    <string name="lamp_latch2_title">Second motor fault latched</string>
+    <string name="lamp_latch2_when">The second motor\'s latch, with the same two trips as LATCH. This firmware drives one motor per board, so here it lights only with LATCH, from the 10-minute idle timeout.</string>
+    <string name="lamp_latch2_blocks">Nothing once the board is at OFF. An armed board shuts down when it trips, and the app disarms. Tapping ARM clears the lamp and arms.</string>
+    <string name="lamp_latch2_fix">None: the 10-minute idle timeout needs no fix.</string>
+    <string name="lamp_hall_title">Hall sensor fault</string>
+    <string name="lamp_hall_when">The motor\'s hall sensors read all three low or all three high for more than 64 PWM periods in a row (4 ms). It stays lit until the board is powered off and on.</string>
+    <string name="lamp_hall_blocks">Arming, for the rest of this power-up. An armed board shuts down.</string>
+    <string name="lamp_hall_fix">Check the hall connector and its wires (5 V, ground and the three signals), then power the board off and on.</string>
+    <string name="lamp_cal_title">Current calibration refused</string>
+    <string name="lamp_cal_when">At power-up the board measures its two phase-current sensors with the bridge off. The zero it measured was outside the accepted window, or the measurement did not complete. This is decided once per power-up.</string>
+    <string name="lamp_cal_blocks">Arming, for the rest of this power-up. Without a trusted zero the board cannot hold its current limit.</string>
+    <string name="lamp_cal_fix">Power the board off and on with the wheel at rest. If it is refused again, the current-sense circuit on this board needs checking.</string>
+    <string name="lamp_period_title">Motor timer stalled</string>
+    <string name="lamp_period_when">The motor\'s PWM interrupt, which runs the commutation 16,000 times a second, fell below half its rate for five control ticks in a row (20 ms). It goes out after 25 good ticks in a row (0.1 s).</string>
+    <string name="lamp_period_blocks">Arming. An armed board shuts down and the app disarms. Tap ARM once it goes out.</string>
+    <string name="lamp_period_fix">Power the board off and on. If it comes back, note when it happened and report it: the firmware\'s motor timer stopped.</string>
+    <string name="lamp_arm_title">Arm aborted</string>
+    <string name="lamp_arm_when">An arm stopped before the bridge was switched on. Every arm first re-reads the stored settings and refuses one the board cannot use, for example an IMU orientation that is not a rotation, then checks that the motor interrupt is running.</string>
+    <string name="lamp_arm_blocks">Arming. The app disarms when it lights, which releases a refused setting\'s lamp. A motor interrupt that was not running holds it until the board is powered off and on.</string>
+    <string name="lamp_arm_fix">If the IMU orientation was just changed, set it again on Setup, then tap ARM. If the lamp comes back with nothing changed, power the board off and on.</string>
+
+    <!-- The Ride screen, 8a (`specs/remote-ui.md` 3.1). -->
+    <string name="ride_slot_left">L</string>
+    <string name="ride_slot_right">R</string>
+    <string name="ride_lamp_test">LAMP TEST</string>
+    <string name="ride_battery_low">BATTERY LOW</string>
+    <string name="ride_kmh">km/h</string>
+    <string name="ride_figure_none">--</string>
+    <string name="ride_no_board_reporting">no board reporting</string>
+    <string name="ride_reverse">R</string>
+    <string name="ride_pack">"%1$.1f V   %2$d %%"</string>
+    <string name="ride_pack_volts">%1$.1f V</string>
+    <string name="ride_no_pack_voltage">no pack voltage</string>
+    <string name="ride_pitch">pitch %1$s°</string>
+    <string name="ride_roll">roll %1$s°</string>
+    <string name="ride_pitch_none">pitch --</string>
+    <string name="ride_roll_none">roll --</string>
+    <string name="ride_no_imu">no IMU</string>
+    <string name="ride_phase_amps">%1$.1f A</string>
+    <string name="ride_phase_none">-- A</string>
+    <string name="ride_phase_off">off</string>
+    <string name="ride_phase_word">phase</string>
+    <string name="ride_trip">"Trip %1$s km     Total %2$s km"</string>
+    <!-- The Ride statements under the ARM control, one line each (`specs/remote-ui.md` 3.1). -->
+    <string name="ride_disarmed_fault">Disarmed: %1$s, %2$s.</string>
+    <string name="ride_board_left_inline">left board</string>
+    <string name="ride_board_right_inline">right board</string>
+    <string name="ride_self_disarmed">Disarmed by the app when it left the screen.</string>
+    <string name="ride_frames_differ">Cannot arm: the boards are set to different frames.</string>
+    <string name="ride_no_board">No motor controller found yet.</string>
+    <string name="ride_rider_waived">Rider waived: arming engages balance. Hold it upright.</string>
+    <string name="ride_rider_maybe_waived">Rider may be waived: hold it upright when arming.</string>
+    <string name="ride_frame_unread">Frame not read from both boards yet.</string>
+    <string name="ride_frame_no_peer">Only one board found: frames cannot be compared.</string>
+    <string name="ride_side_none_right">Neither board is set as the right wheel.</string>
+    <string name="ride_side_both_right">Both boards are set as the right wheel.</string>
+    <string name="ride_side_unknown">Right wheel not read from both boards yet.</string>
+    <string name="ride_not_turning">%1$s is not turning.</string>
+    <string name="ride_lamp_lit_armed">%1$s on %2$s.</string>
+    <!-- The missing-settings statements (`specs/remote-ui.md` 3.1, "Missing settings, in plain words"). -->
+    <string name="ride_need_wheel_size">Speed needs the wheel size.</string>
+    <string name="ride_reading_wheel">Reading the wheel settings for speed.</string>
+    <string name="ride_need_cells" formatted="false">Battery % needs the cell count.</string>
+    <string name="ride_reading_chemistry" formatted="false">Reading the pack chemistry for battery %.</string>
+    <string name="ride_need_chemistry" formatted="false">Battery % needs a chemistry this app knows.</string>
+    <string name="ride_need_current_cal">Phase current needs the current calibration, set by the host config tool.</string>
+    <string name="ride_reading_current_cal">Reading the current calibration for phase current.</string>
+    <string name="ride_set_it">Set it ›</string>
+    <!-- The motor-controller-off card (`specs/remote-ui.md` 3.1). -->
+    <string name="ride_off_title">Motor controller off</string>
+    <string name="ride_off_action">Switch it on.</string>
+    <string name="ride_off_waiting">Connected to %1$s, waiting for the boards…</string>
+    <!-- The drive refusal (`specs/remote-ui.md` 3.1c): the Ride statement, then Setup's line. -->
+    <string name="drive_refusal_unread">Reading the drive mode from every board.</string>
+    <string name="drive_refusal_disagree">Cannot arm: the boards store different drive modes.</string>
+    <string name="drive_refusal_unknown_mode">Cannot arm: the boards store an unknown drive mode.</string>
+    <string name="drive_refusal_not_two">Cannot arm: %1$s needs two boards, %2$d found.</string>
+    <string name="drive_refusal_no_leader">Cannot arm: no single board leads the rigid frame.</string>
+    <string name="drive_refusal_no_right">Cannot arm: no single board is the right wheel.</string>
+    <string name="drive_refusal_unread_long">Cannot arm yet: the drive mode has not been read from every board.</string>
+    <string name="drive_refusal_disagree_long">Cannot arm: the boards store different drive modes. Pick one under Machine.</string>
+    <string name="drive_refusal_unknown_mode_long">Cannot arm: the boards store a drive mode this app does not know.</string>
+    <string name="drive_refusal_not_two_long">Cannot arm: %1$s needs two boards and %2$d were found.</string>
+    <string name="drive_refusal_no_leader_long">Cannot arm: RIGID needs exactly one board leading the rigid frame, and none is (or both are). A board takes a new frame or control mode when it arms or powers up, and arming is refused here, so power the boards off and on.</string>
+    <string name="drive_refusal_no_right_long">Cannot arm: DIFFERENTIAL needs exactly one board set as the right wheel. Pick it under Machine.</string>
+    <!-- A fault lamp's sheet (`specs/remote-ui.md` 3.1b). -->
+    <string name="lamp_where">%1$s · %2$s</string>
+    <string name="lamp_not_lit">Not lit</string>
+    <string name="lamp_board_left">Left board</string>
+    <string name="lamp_board_right">Right board</string>
+    <string name="lamp_boards_both">Left and right boards</string>
+    <string name="lamp_boards_and">%1$s and %2$s</string>
+    <string name="lamp_head_when">When it shows</string>
+    <string name="lamp_head_blocks">What it blocks</string>
+    <string name="lamp_head_fix">Fix</string>
+    <string name="lamp_close">Close</string>
+    <!-- Setup's machine status section (`specs/remote-ui.md` 3.1c). -->
+    <string name="status_title">Machine status</string>
+    <string name="status_drive">Drive: %1$s, %2$s</string>
+    <string name="status_drive_none">Drive: no motor controller found yet.</string>
+    <string name="status_and">%1$s and %2$s</string>
+    <string name="status_rider">Rider</string>
+    <string name="status_no_rider">No rider</string>
+    <string name="status_lockdown">LOCKDOWN</string>
+    <string name="status_not_turning">Not turning: the app has asked for drive for 1 s and the wheel reports no rotation.</string>
+    <string name="board_mode_demoted">MODE %1$s: the board is not running the control mode it stores (Balance with no working IMU runs Throttle), or both boards claim the rigid lead.</string>
+</resources>

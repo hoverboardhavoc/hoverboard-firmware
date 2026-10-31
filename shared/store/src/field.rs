@@ -709,7 +709,7 @@ pub const BOARD_BATTERY_CAL: IndexedField<i16, 2> = IndexedField::new(0x69, [252
 /// to turn it into and says so instead of drawing a gauge at an assumed pack.
 pub const BOARD_BATTERY_CELLS: Field<u8> = Field::new(0x6A, 0);
 
-/// What KIND of cell the pack is (`specs/rider-ui.md` 3.6d): `0` = li_ion (Li-ion NMC, the
+/// What KIND of cell the pack is (`specs/remote-ui.md` 3.6d): `0` = li_ion (Li-ion NMC, the
 /// hoverboard 18650; the default), `1` = lev50 (Lithium Energy Japan LEV50), `2` = lto (lithium
 /// titanate). It picks the resting-voltage table a client reads a state of charge from, per cell,
 /// and [`BOARD_BATTERY_CELLS`] multiplies it.
@@ -784,8 +784,8 @@ pub const ATTITUDE_LEVEL_TRIM: Field<i16> = Field::new(0x70, 0);
 /// Read at boot and again at every arm (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`), so a write
 /// applies from the next arm and costs no power-cycle. NOT on the live tune lane: a bound on how
 /// much authority the stick has is not changed under a moving machine, and a config write is
-/// refused while armed. The rider app offers it on the Tune screen all the same
-/// (`specs/rider-ui.md` 3.3b).
+/// refused while armed. The remote app offers it on the Tune screen all the same
+/// (`specs/remote-ui.md` 3.3b).
 /// Range enforcement is NOT here (the store validates type only): the seam
 /// (`control::DriveTurn::new`) clamps `turn_max` to 0..28500 and `turn_slew` to 1..1000. An
 /// [`IndexedField`] because its two indices default differently.
@@ -850,7 +850,7 @@ pub const CONTROL_REFERENCE: IndexedField<i16, 2> = IndexedField::new(0x7B, [0, 
 /// (`control::sf::pos_clamp`) clamps it to `0..=450` (`control::sf::POS_CLAMP_MAX`).
 pub const CONTROL_POS_CLAMP: Field<i16> = Field::new(0x7C, 45);
 
-/// How the rider app drives this machine (`specs/rider-ui.md` 3.2, "The drive mode is a setting of
+/// How the remote app drives this machine (`specs/remote-ui.md` 3.2, "The drive mode is a setting of
 /// the machine"): `0` = SINGLE (the default), `1` = BOUND, `2` = DIFFERENTIAL, `3` = RIGID. Written
 /// with the same value to every motor controller of a machine, so the setting travels with the
 /// machine rather than living on a phone.
@@ -1820,7 +1820,7 @@ mod registry_tests {
 
     #[test]
     fn battery_chemistry_is_a_u8_enum_defaulting_to_li_ion() {
-        // `specs/rider-ui.md` 3.6d: stored, never read by the firmware, `li_ion` by default.
+        // `specs/remote-ui.md` 3.6d: stored, never read by the firmware, `li_ion` by default.
         let c = lookup(BOARD_BATTERY_CHEMISTRY.id()).unwrap();
         assert_eq!(BOARD_BATTERY_CHEMISTRY.id(), 0x7F);
         assert_eq!(c.kind, Type::U8);
@@ -1836,7 +1836,7 @@ mod registry_tests {
 
     #[test]
     fn machine_drive_mode_is_a_u8_defaulting_to_single() {
-        // The app's drive mode (`specs/rider-ui.md` 3.2): stored, never read by the firmware, and
+        // The app's drive mode (`specs/remote-ui.md` 3.2): stored, never read by the firmware, and
         // 0 (SINGLE) on a board nobody has told otherwise.
         let m = lookup(MACHINE_DRIVE_MODE.id()).unwrap();
         assert_eq!(MACHINE_DRIVE_MODE.id(), 0x78);

@@ -318,7 +318,7 @@ relay.
   stale `DRIVE_CMD`, a reference-zeroing and never a fault. **The mirror expiry.**
   `INPUTS_TIMEOUT_TICKS` = 375 (1.5 s): `power_request` and `rider` read released once the
   controller that stated them has gone that long unheard.
-- **App-side differential**, `DriveMode.DIFFERENTIAL` (`apps/rider`, `DriveMix`, merged to main at
+- **App-side differential**, `DriveMode.DIFFERENTIAL` (`apps/remote`, `DriveMix`, merged to main at
   `a88d602`): the app mixes `left = v + s/2`, `right = v - s/2`, brings the pair into range with a
   shared OFFSET so the two demands still differ by exactly `s`, and sends each board its own wheel's
   number with `steer = 0`. **It is a THROTTLE-mode mechanism end to end**, and the saturation rule it
@@ -387,7 +387,7 @@ its own freshness check to catch it is the same check that, in this design, simp
 avoid it.** `ControlCtl` holds a complete per-board cascade: its own `ShapingState`, `IirCarry`,
 `SpeedState` and engagement FSM. Feeding both boards the same pitch does not give them the same
 state: the integrators step on each board's own tick against inputs held for different fractions of
-a cyclic period, the gains are two store copies that the live tune lane (`specs/rider-ui.md`
+a cyclic period, the gains are two store copies that the live tune lane (`specs/remote-ui.md`
 section 4, `CONTROL_GAIN_A`/`CONTROL_GAIN_B` at 0x71/0x72) writes one board at a time and P1's ramp
 converges independently, and each board's engagement machine makes its own engage, promote and
 wind-down decisions with its own soft-start envelope. Any difference between the two outputs is
@@ -630,7 +630,7 @@ construction and `own = peer = T`, so every existing test passes unchanged.
 mixer does the opposite on purpose: `DriveMix` brings the pair into range with a shared OFFSET so
 the two demands still differ by exactly `s`, because "a steering command that quietly straightens
 out at full deflection is the dangerous surprise and a machine that runs slower than asked is not"
-(`specs/rider-ui.md` 3.2). That reasoning is correct for a speed demand and exactly inverted for a
+(`specs/remote-ui.md` 3.2). That reasoning is correct for a speed demand and exactly inverted for a
 balance torque. A shared offset changes `(left + right)`, which IS the fore-aft torque on the body,
 which IS what holds the machine up. Giving up turn authority makes a balancing rover go straighter
 than asked. Giving up common torque makes it fall. The two rules must not be confused, and because
@@ -785,7 +785,7 @@ power model in `specs/todo.md` Part Two) is a separate owner decision.
 Note what does NOT stop the follower here: `peer_down` tests the fault mask, and a released
 `power_request` is not a fault (`EV_POWER_REQUEST` is excluded from `FAULT_A_BITS` by construction).
 Two other mechanisms cover it, which is why the row below is still a stop. The app sends `INPUTS` to
-both nodes when it arms (`specs/rider-ui.md` 3.2), so the follower's own mirror expires on the same
+both nodes when it arms (`specs/remote-ui.md` 3.2), so the follower's own mirror expires on the same
 1.5 s clock. And the leader's mode byte leaves RUN, which clears the follower's engagement gate.
 
 **`FAULT` with `action = STOP_ALL`.** Unchanged and still useful: a board that latches sets the

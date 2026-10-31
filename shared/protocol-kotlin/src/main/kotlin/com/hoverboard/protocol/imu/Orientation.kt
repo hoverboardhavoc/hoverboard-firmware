@@ -16,7 +16,7 @@ package com.hoverboard.protocol.imu
  * roles.
  *
  * The two fields together express the 24 proper rotations, and a user names one as a [Pose] of the
- * board in its machine (`specs/rider-ui.md` 3.4, the orientation picker): [frameOf] composes a pose
+ * board in its machine (`specs/remote-ui.md` 3.4, the orientation picker): [frameOf] composes a pose
  * into the two fields and [poseOf] reads two stored fields back as a pose.
  */
 object Orientation {
@@ -201,7 +201,7 @@ object Orientation {
 
     /**
      * The standard board family's chip-to-board map, one sign per chip axis under [DEFAULT_ROLES]:
-     * the yaw `[-1, -1, +1]` (a half turn about board Z), the MEASURED constant (`specs/rider-ui.md`
+     * the yaw `[-1, -1, +1]` (a half turn about board Z), the MEASURED constant (`specs/remote-ui.md`
      * 3.4, "The family constant is the MEASURED one, not the compiled fallback"; `specs/imu.md`, the
      * `IMU_AXIS_ROLE` entry). Not [REFERENCE]: the compiled fallback is the stock image's map for the
      * stock chip placement and reads boards of this family upside down ([fallbackPose]).
