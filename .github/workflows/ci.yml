@@ -1,13 +1,14 @@
 name: CI
 
-# Layer 1 (storage) CI. From Layer 0 the `base` crate was HAL-independent, but Layer 1 adds the
-# `store` / `store-test` crates whose on-target `FmcFlash` adapter depends on the sibling runtime-hal
-# (a target-gated path dep `../../../runtime-hal`). Cargo loads a path dependency's manifest during
-# workspace resolution REGARDLESS of the build target, so EVERY job that runs cargo over the workspace
-# (build, host-tests, emulator-tests) must check runtime-hal out as a sibling of the repo, even the
-# host-target test job where the HAL is not actually linked. So each cargo job checks the two repos out
-# into sibling subdirectories and runs from the firmware one. runtime-hal is a public repo; we pin its
-# default branch (main).
+# runtime-hal is a git dependency (the root Cargo.toml's `[workspace.dependencies]`), pinned by
+# commit in Cargo.lock. Cargo fetches it from the public hoverboardhavoc/runtime-hal repository
+# itself, so no job checks it out, and every cargo job builds the commit the lockfile names rather
+# than whatever runtime-hal's main is at run time: a runtime-hal push cannot break this CI, a commit
+# here that bumps the pin can. Cargo resolves a target-gated dependency on every target, so the host
+# jobs (host tests, swd-bridge, the CLI, the bridge) fetch it too without compiling it; the cargo
+# caches keep ~/.cargo/git, so a warm run does not fetch it again. Every job still checks the
+# firmware out into a `hoverboard-firmware/` subdirectory, the layout the sibling checkout once
+# needed, because every path below is written against it.
 #
 # Eight checks:
 #   - lint: rustfmt over everything CI builds, then clippy over BOTH build surfaces (thumbv7m and
@@ -76,13 +77,6 @@ jobs:
         with:
           path: hoverboard-firmware
 
-      - name: Checkout runtime-hal (sibling, main)
-        uses: actions/checkout@v4
-        with:
-          repository: hoverboardhavoc/runtime-hal
-          ref: main
-          path: runtime-hal
-
       - name: Install Rust (pinned nightly) + targets + rustfmt/clippy
         uses: dtolnay/rust-toolchain@master
         with:
@@ -118,6 +112,34 @@ jobs:
       - name: panic-reach parser tests (fixtures, no toolchain)
         run: python3 tools/panic-reach.py --selftest
 
+      # The runtime-hal pin agrees across the three tracked lockfiles. The root one names the commit
+      # the image builds against; tools/hoverboard-cli and apps/hoverboard-bridge record runtime-hal
+      # through their path dependencies (store among them) without compiling it, and pin the same
+      # commit so that no lockfile in the tree names a different one. Each must carry the git source:
+      # a local build with the `--config` runtime-hal patch (CLAUDE.md, "Running the checks")
+      # rewrites the entry to the patched path package, which has no source line, and a lockfile
+      # committed that way leaves cargo here to re-resolve runtime-hal's main at run time. Pure
+      # source, no toolchain.
+      - name: runtime-hal pin agrees across the tracked lockfiles
+        run: |
+          pin() {
+            grep -A2 '^name = "runtime-hal"$' "$1" \
+              | grep -oE '^source = "git\+https://github\.com/hoverboardhavoc/runtime-hal[^"]*"' || true
+          }
+          root=$(pin Cargo.lock)
+          fail=0
+          for f in Cargo.lock tools/hoverboard-cli/Cargo.lock apps/hoverboard-bridge/Cargo.lock; do
+            p=$(pin "$f")
+            echo "$f: ${p:-no runtime-hal git source}"
+            if [ -z "$p" ] || [ "$p" != "$root" ]; then fail=1; fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "FAIL: every tracked lockfile must pin runtime-hal at the same git commit. A lockfile" >&2
+            echo "  written by a --config patched build loses the source line. Restore it with" >&2
+            echo "  git checkout <lockfile>; a plain build re-resolves runtime-hal's main instead." >&2
+            exit 1
+          fi
+
       - name: rustfmt (workspace)
         run: cargo fmt --all --check
 
@@ -147,8 +169,8 @@ jobs:
           -- -D warnings
 
   # Embedded build for the real target. A bare `cargo build` uses the thumbv7m-none-eabi default from
-  # .cargo/config.toml and builds the workspace images (dummy-test, store-test), so it needs the
-  # sibling runtime-hal checked out (store/store-test's target-gated FmcFlash dep).
+  # .cargo/config.toml and builds the workspace images (dummy-test, store-test), which compile the
+  # pinned runtime-hal (store/store-test's target-gated FmcFlash dep).
   #
   # The upper flashed-span size gate (against the 62 KiB no-bootloader region) is enforced below,
   # after objcopy (specs/decision-flash-budget.md); the LTO-gutted floor guard is its lower companion.
@@ -163,13 +185,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: hoverboard-firmware
-
-      - name: Checkout runtime-hal (sibling, main)
-        uses: actions/checkout@v4
-        with:
-          repository: hoverboardhavoc/runtime-hal
-          ref: main
-          path: runtime-hal
 
       # rust-src is load-bearing in THIS job: the release image step is `cargo image`, which is
       # -Z build-std and compiles core from source.
@@ -411,7 +426,7 @@ jobs:
       # the ~2,100 B BLE descope) is now spent as a possibility: BLE is the robot's control link.
       #
       # RATCHET FROM THIS JOB'S NUMBER, NOT A LOCAL ONE. The span is reproducible for a given build
-      # LOCATION and only for that: the same commit, same toolchain, same sibling runtime-hal, built
+      # LOCATION and only for that: the same commit, same toolchain, same runtime-hal, built
       # at two different filesystem paths, measured 56,712 B and 56,728 B (2026-08-13), and identical
       # content at a THIRD path returned 56,712 B again. Each path repeats its own number, so the span
       # is deterministic per build location and varies across them. The 16 B is accounted for to the
@@ -469,8 +484,9 @@ jobs:
             hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware
 
   # Host tests. Run with an explicit host target so they neither inherit the thumbv7m default nor the
-  # link.x flag scoped to it in .cargo/config.toml. Even though the HAL is not linked on the host
-  # target, cargo still loads its manifest during resolution, so runtime-hal must be present.
+  # link.x flag scoped to it in .cargo/config.toml. The HAL is not linked on the host target; cargo
+  # still resolves (and fetches) the pinned runtime-hal, since it resolves target-gated dependencies
+  # on every target.
   host-tests:
     name: Host tests
     runs-on: ubuntu-latest
@@ -482,13 +498,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: hoverboard-firmware
-
-      - name: Checkout runtime-hal (sibling, main)
-        uses: actions/checkout@v4
-        with:
-          repository: hoverboardhavoc/runtime-hal
-          ref: main
-          path: runtime-hal
 
       - name: Install Rust (pinned nightly) + host target
         uses: dtolnay/rust-toolchain@master
@@ -614,7 +623,7 @@ jobs:
   # workspace host-test job never compiles it. Its unit suite is the ONLY agreement check between the
   # host `HostMailbox` and the firmware `Mailbox` (ring layout, ABI constants, framing), so it runs
   # here via its own manifest on the host target. The tests are pure host unit tests (no openocd, no
-  # probe); like every job, the sibling runtime-hal checkout is needed for path-dep resolution.
+  # probe).
   swd-bridge-tests:
     name: swd-bridge tests (HostMailbox <-> Mailbox agreement)
     runs-on: ubuntu-latest
@@ -626,13 +635,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: hoverboard-firmware
-
-      - name: Checkout runtime-hal (sibling, main)
-        uses: actions/checkout@v4
-        with:
-          repository: hoverboardhavoc/runtime-hal
-          ref: main
-          path: runtime-hal
 
       - name: Install Rust (pinned nightly) + host target
         uses: dtolnay/rust-toolchain@master
@@ -685,15 +687,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: hoverboard-firmware
-
-      # The CLI's path dependencies (store among them) declare a target-gated runtime-hal dependency
-      # that cargo still resolves on the host, so the sibling checkout is needed here as in host-tests.
-      - name: Checkout runtime-hal (sibling, main)
-        uses: actions/checkout@v4
-        with:
-          repository: hoverboardhavoc/runtime-hal
-          ref: main
-          path: runtime-hal
 
       - name: Install Rust (pinned nightly) + host target
         uses: dtolnay/rust-toolchain@master
@@ -784,9 +777,9 @@ jobs:
   # The CLI for the bench Pi (a Raspberry Pi Model B, armv6l: arm-unknown-linux-gnueabihf), so
   # install-esp can reinstall a bench bridge on the Pi's USB (specs/bridge-onboarding.md section 4.2).
   # Built with cargo-zigbuild, which links with zig against an armv6 glibc 2.36 (the Pi runs 2.41;
-  # Ubuntu's gnueabihf toolchain is armv7). It builds on the runner itself, so the sibling
-  # runtime-hal checkout resolves as in every other job; `cross` built inside Docker, which did not
-  # mount it. The `ble` feature is off: it drops btleplug and its D-Bus dependency, and the Pi has
+  # Ubuntu's gnueabihf toolchain is armv7). It builds on the runner itself; `cross`, which builds
+  # inside Docker, was dropped when it could not see the sibling runtime-hal checkout this workflow
+  # then used. The `ble` feature is off: it drops btleplug and its D-Bus dependency, and the Pi has
   # no Bluetooth adapter. Nothing here runs the binary; the bench gate does.
   hoverboard-cli-pi:
     name: hoverboard-cli (bench Pi, arm-unknown-linux-gnueabihf, no BLE)
@@ -801,13 +794,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: hoverboard-firmware
-
-      - name: Checkout runtime-hal (sibling, main)
-        uses: actions/checkout@v4
-        with:
-          repository: hoverboardhavoc/runtime-hal
-          ref: main
-          path: runtime-hal
 
       - name: Install Rust (pinned nightly) + the Pi's target
         uses: dtolnay/rust-toolchain@master
@@ -872,7 +858,8 @@ jobs:
   # espflash binary release: the merged install image for install-esp (bootloader/bootloader.bin,
   # partitions.csv, the app in ota_0, padded to 4 MB) and the app image for update-esp. The core's
   # path dependencies (store among them) declare a target-gated runtime-hal dependency that cargo
-  # still resolves, so the sibling checkout is needed here as in host-tests.
+  # still resolves and fetches, at the commit apps/hoverboard-bridge/Cargo.lock pins, without
+  # compiling it.
   bridge:
     name: Hoverboard bridge (core tests + clippy, release images)
     runs-on: ubuntu-latest
@@ -886,13 +873,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: hoverboard-firmware
-
-      - name: Checkout runtime-hal (sibling, main)
-        uses: actions/checkout@v4
-        with:
-          repository: hoverboardhavoc/runtime-hal
-          ref: main
-          path: runtime-hal
 
       - name: Install Rust (the bridge's 1.92) + riscv32imc and host targets
         uses: dtolnay/rust-toolchain@master
@@ -989,13 +969,6 @@ jobs:
         with:
           path: hoverboard-firmware
 
-      - name: Checkout runtime-hal (sibling, main)
-        uses: actions/checkout@v4
-        with:
-          repository: hoverboardhavoc/runtime-hal
-          ref: main
-          path: runtime-hal
-
       - name: Install Rust (pinned nightly) + host and thumbv7m targets + clippy
         uses: dtolnay/rust-toolchain@master
         with:
@@ -1045,7 +1018,7 @@ jobs:
   # catching nothing, which reads as coverage while providing none. This workflow has no path filters
   # at all, so an unfiltered job is both the correct behaviour and free.
   #
-  # No sibling runtime-hal checkout and no cargo: the module is pure Kotlin/JVM (kotlin.jvm +
+  # No cargo: the module is pure Kotlin/JVM (kotlin.jvm +
   # java-library; its only dependencies are kotlinx-coroutines and JUnit 5, nothing android.* or
   # androidx.*) and it READS the Rust as text rather than building it. No Android build happens
   # here: com.android.application resolves the Android SDK at CONFIGURATION time, so every task in
@@ -1141,7 +1114,7 @@ jobs:
   # assuming it: if a future runner image drops the platform this app compiles against, the job must
   # say so in one line instead of failing somewhere inside AGP's configuration.
   #
-  # No sibling runtime-hal checkout and no cargo: the app is Kotlin, and the one thing it builds
+  # No cargo: the app is Kotlin, and the one thing it builds
   # besides itself is protocol-kotlin, which its settings.gradle.kts pulls in as an included build
   # from this same checkout.
   #

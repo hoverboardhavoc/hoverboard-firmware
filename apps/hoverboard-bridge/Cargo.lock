@@ -1798,6 +1798,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 [[package]]
 name = "runtime-hal"
 version = "0.1.0"
+source = "git+https://github.com/hoverboardhavoc/runtime-hal?branch=main#2cd8864cfe786c2c513f94813053c699258c4616"
 dependencies = [
  "cortex-m",
  "embedded-hal 1.0.0",

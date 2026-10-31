@@ -26,5 +26,5 @@ base = { path = "../base" }
 # every vector, so the mock the validator logic was proven against and the real implementation
 # cannot drift. Dev-only (never shipped; the lib stays HAL-free): `mock` is the HAL's host
 # register backend, `detect-internals` exposes `synthesize` for the 12-FET GD32F103RC
-# descriptor shape. Sibling checkout like the firmware's target-gated dep; CI clones it.
-runtime-hal = { path = "../../../runtime-hal", features = ["mock", "detect-internals"] }
+# descriptor shape. The workspace git dependency (root Cargo.toml), as for the firmware.
+runtime-hal = { workspace = true, features = ["mock", "detect-internals"] }

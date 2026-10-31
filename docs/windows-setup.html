@@ -36,7 +36,7 @@ Three tracks are independent: the Rust firmware, the Android rider app, and the 
 
 <nav>
 <ol>
-  <li><a href="#layout">Repo layout: two clones, side by side</a></li>
+  <li><a href="#layout">Repo layout, and runtime-hal</a></li>
   <li><a href="#git">Git for Windows, and the line-ending trap</a></li>
   <li><a href="#rust">Rust: the pinned nightly and the firmware build</a></li>
   <li><a href="#bin">Making the flashable .bin</a></li>
@@ -47,19 +47,18 @@ Three tracks are independent: the Rust firmware, the Android rider app, and the 
 </ol>
 </nav>
 
-<h2 id="layout">1. Repo layout: two clones, side by side</h2>
-<p>The firmware depends on the sibling HAL repo <b>by relative path</b>. In
-<code>crates/firmware/Cargo.toml</code>: <code>runtime-hal = { path = "../../../runtime-hal" }</code>. Cargo reads a
-path dependency's manifest while loading the workspace, for <i>every</i> cargo command and every target, so a
-missing sibling breaks even the host tests, not just the embedded build. The two directories must sit next to
-each other:</p>
-<pre><code>C:\dev\
-  hoverboard-firmware\
-  runtime-hal\</code></pre>
+<h2 id="layout">1. Repo layout, and runtime-hal</h2>
+<p>The firmware depends on the HAL repo as a <b>git dependency</b>: the root <code>Cargo.toml</code> names
+<code>https://github.com/hoverboardhavoc/runtime-hal</code>, and <code>Cargo.lock</code> pins the commit. Cargo
+fetches it on the first build (it is public, so no credentials are needed), which also clones its
+<code>third_party/GD32Firmware</code> submodule, about 23 MB, once. One clone is enough:</p>
 <pre><code>cd C:\dev
-git clone https://github.com/hoverboardhavoc/hoverboard-firmware.git
-git clone https://github.com/hoverboardhavoc/runtime-hal.git</code></pre>
-<p>Both repos are public, so no credentials are needed to read them. <code>runtime-hal</code> keeps its own
+git clone https://github.com/hoverboardhavoc/hoverboard-firmware.git</code></pre>
+<p>To build against a local runtime-hal checkout instead (to change the HAL and the firmware together), clone it
+beside the firmware and patch that one command, from <code>C:\dev\hoverboard-firmware</code> in Git Bash:</p>
+<pre><code>cargo --config 'patch."https://github.com/hoverboardhavoc/runtime-hal".runtime-hal.path="../runtime-hal"' image</code></pre>
+<p>A patched build rewrites the runtime-hal entry in <code>Cargo.lock</code>; restore it afterwards with
+<code>git checkout Cargo.lock</code> (the repo's <code>CLAUDE.md</code>, "Running the checks"). <code>runtime-hal</code> keeps its own
 stable toolchain pin, which never governs this build: rustup resolves the toolchain from the directory cargo
 runs in, and every firmware build runs in <code>hoverboard-firmware</code>.</p>
 
@@ -197,7 +196,7 @@ Which brings up the next point.</p>
 <table>
   <tr><th>Command</th><th>Proves</th></tr>
   <tr><td><code>rustc -vV</code></td><td>pinned nightly installed, host triple is windows-msvc</td></tr>
-  <tr><td><code>cargo build</code></td><td>embedded build, so the sibling runtime-hal resolved</td></tr>
+  <tr><td><code>cargo build</code></td><td>embedded build, so the pinned runtime-hal fetched and compiled</td></tr>
   <tr><td><code>cargo image</code></td><td>build-std works, the shipping image links</td></tr>
   <tr><td><code>./tools/host-test.sh</code> (Git Bash)</td><td>the host suite actually runs</td></tr>
   <tr><td><code>cargo fmt --all --check</code></td><td>CI's first gate, and that line endings are sane</td></tr>

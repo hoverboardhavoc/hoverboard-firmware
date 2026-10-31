@@ -17,4 +17,4 @@ cortex-m-rt = { version = "0.7", features = ["device"] }
 # table length is read from it rather than re-stated here. Target-gated like every other consumer:
 # on a host build this crate is empty.
 [target.'cfg(target_arch = "arm")'.dependencies]
-runtime-hal = { path = "../../../runtime-hal" }
+runtime-hal = { workspace = true }
