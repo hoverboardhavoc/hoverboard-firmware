@@ -8,7 +8,7 @@
 # DISARMED: this only READS, and it NEVER HALTS the core, so the standing armed-halt rule
 # (tools/swd-disarm-halt.sh) has nothing to bite on here. The firmware it reads CAN arm a bridge
 # since slice 5, but only when the mode machine allows MOE, which needs a held power request; the
-# arming surface is confined to crates/firmware/src/arm.rs and a host test enforces that. Read CCHP
+# arming surface is confined to motorcontroller/firmware/src/arm.rs and a host test enforces that. Read CCHP
 # (0x4001_2C44, bit 15) if you want the hardware's own answer. Bench rule stands: wheel free, never
 # load-bearing.
 #
@@ -24,7 +24,7 @@ set -euo pipefail
 BOARD=master
 KEEP_RAIL=0
 ADDR=""
-ELF="target/thumbv7m-none-eabi/release/firmware"
+ELF="motorcontroller/target/thumbv7m-none-eabi/release/firmware"
 while [ $# -gt 0 ]; do
   case "$1" in
     --board) BOARD="${2:?--board needs master|slave}"; shift 2 ;;
@@ -85,7 +85,7 @@ sleep 12   # boot + IMU settle; the motor bring-up runs late in boot (after the 
 # Word map (specs/motor-integration.md "Observation"): w19 periods, w20 state, w22 duty2_angle,
 # w23 fault. NOTE the off-by-one: `set -- $WORDS` makes $1 the FIRST word (w0, the magic), so
 # CTRL_OBS word N is positional $((N+1)) -- w19 is $20, not $19. Verified against the `CtrlObs`
-# struct in crates/firmware/src/main.rs (repr(C), 29 words as of the balance-era append: the
+# struct in motorcontroller/firmware/src/main.rs (repr(C), 29 words as of the balance-era append: the
 # gating row + pre-envelope torque at w26 and the transition counters at w27/w28). This script
 # reads 25 words because w23 is the last one it needs; the appended words are imu-tilt.py's.
 cat <<'EOT'

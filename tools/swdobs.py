@@ -23,11 +23,11 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PI = os.environ.get("PI_HOST", "pi@192.168.0.248")
-DEFAULT_ELF = os.path.join(REPO, "target/thumbv7m-none-eabi/release/firmware")
+DEFAULT_ELF = os.path.join(REPO, "motorcontroller/target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in crates/firmware/src/main.rs (#[repr(C)], 50 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in motorcontroller/firmware/src/main.rs (#[repr(C)], 50 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
@@ -41,7 +41,7 @@ W_ENACT_INITS = 9
 W_ENACT_SHUTDOWNS = 10
 W_TORQUE_MODE = 11      # torque i16 | mode_byte << 16 | moe_bits << 24
 W_SUB_FLAGS = 12        # sub_state | control_mode << 8 | flags << 16 | event_levels << 24
-#                         flags bits (crates/orchestrator/src/lib.rs, Obs::flags_byte): b0
+#                         flags bits (motorcontroller/orchestrator/src/lib.rs, Obs::flags_byte): b0
 #                         imu_configured, b1 imu_live, b2 comms_loss, b3 mode_fault, b4 imu_loss,
 #                         b5 motor_fault, b6 imu_staged, b7 free. b0 and b6 are read as a PAIR: b6
 #                         is whether the layout ASKED for an IMU, so b6=1 with b0=0 is a staged
@@ -138,7 +138,7 @@ MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
 # so the level is gone by the time a bench read looks: a board refused for a bad axis frame and then
 # left disarmed reads like a board that was never engaged.
 #
-# The cause byte mirrors crates/firmware/src/main.rs `imu_frame_cause_byte`: bit 7 = a cause is
+# The cause byte mirrors motorcontroller/firmware/src/main.rs `imu_frame_cause_byte`: bit 7 = a cause is
 # present (the accel refusal encodes field and index both as 0, so the flag is what tells it from
 # "no frame refusal"), bit 2 = the refusal names IMU_AXIS_ROLE rather than IMU_AXIS_SIGN, bits 0..1 =
 # the refused triple's first IMU_AXIS_SIGN index, 0 = accel and 3 = gyro, exactly as BOARD_OBS's
@@ -198,7 +198,7 @@ def decode_reset_cause(word):
 # --------------------------------------------------------------------------------------------------
 # The current-sense calibration: what a `peak` count means in amps.
 #
-# This is BOARD data, not a tool constant: crates/store/src/field.rs MOTOR_CURRENT_CAL (0x67, u16
+# This is BOARD data, not a tool constant: shared/store/src/field.rs MOTOR_CURRENT_CAL (0x67, u16
 # stock current counts per amp, per-motor via the key's index, default 455 from the 2026-10-09
 # energised gate). It replaced the compiled COUNTS_PER_AMP = 800 this module used to carry, for the
 # reason this module exists at all: one owner per fact, and the owner of a per-board fact is the
@@ -210,14 +210,14 @@ CURRENT_CAL_FIELD = 0x67
 # for a report that says it could not read the board, never as a silent substitute for the read.
 CURRENT_CAL_DEFAULT = 455
 # The firmware's boot seam clamps the stored word before converting anything against it
-# (crates/firmware/src/motor.rs CURRENT_CAL_MIN / CURRENT_CAL_MAX), so a tool reporting what the
+# (motorcontroller/firmware/src/motor.rs CURRENT_CAL_MIN / CURRENT_CAL_MAX), so a tool reporting what the
 # board will DO applies the same clamp to what it read.
 CURRENT_CAL_MIN, CURRENT_CAL_MAX = 100, 819
 
 # --------------------------------------------------------------------------------------------------
 # The phase-current NOISE FLOOR: the smallest soft limit this board's sense chain can be held to.
 #
-# BOARD data for the same reason and in the same units as the scale above: crates/store/src/field.rs
+# BOARD data for the same reason and in the same units as the scale above: shared/store/src/field.rs
 # MOTOR_NOISE_FLOOR (0x6B, u16 stock current counts, per-motor via the key's index, default 2,100).
 # It replaced a compiled firmware constant measured on ONE board in ONE session, whose five
 # rest-floor reads that day spanned 1,444 to 2,097 counts; one number for every chain chops on noise
@@ -230,7 +230,7 @@ NOISE_FLOOR_FIELD = 0x6B
 # for a report that says it could not read the board, never as a silent substitute for the read.
 NOISE_FLOOR_DEFAULT = 2_100
 # The firmware's boot seam clamps the stored word into this plausibility band before the limit is
-# floored at it (crates/firmware/src/motor.rs, noise_floor_counts: NOISE_FLOOR_MIN up to
+# floored at it (motorcontroller/firmware/src/motor.rs, noise_floor_counts: NOISE_FLOOR_MIN up to
 # MAX_LIMIT_COUNTS), so a tool reporting what the board will DO applies the same clamp.
 NOISE_FLOOR_MIN, NOISE_FLOOR_MAX = 1_000, 16_383
 
@@ -253,9 +253,9 @@ def host_target():
 
 
 def mailbox_bin(name):
-    """The path of one built mailbox tool (crates/swd-bridge is outside the workspace, so it has its
-    own target directory)."""
-    return os.path.join(REPO, "crates", "swd-bridge", "target", host_target(), "release", name)
+    """The path of one built mailbox tool (tools/swd-bridge, built by the tools/ workspace into
+    tools/target)."""
+    return os.path.join(REPO, "tools", "target", host_target(), "release", name)
 
 
 def parse_config_read(text, field):
@@ -277,7 +277,7 @@ def clamp_current_cal(raw):
 
 def clamp_noise_floor(raw):
     """What the firmware's boot seam will FLOOR the limit at, given the stored word
-    (crates/firmware/src/motor.rs, noise_floor_counts)."""
+    (motorcontroller/firmware/src/motor.rs, noise_floor_counts)."""
     return min(max(raw, NOISE_FLOOR_MIN), NOISE_FLOOR_MAX)
 
 
@@ -344,7 +344,7 @@ def s32(v):
 
 
 def i16_pair(word):
-    """(low, high) of a CTRL_OBS word packed as two i16 (crates/firmware/src/motor.rs
+    """(low, high) of a CTRL_OBS word packed as two i16 (motorcontroller/firmware/src/motor.rs
     pack_i16_pair), each with its sign."""
     return s16(word & 0xFFFF), s16((word >> 16) & 0xFFFF)
 

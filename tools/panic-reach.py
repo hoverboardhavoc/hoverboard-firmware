@@ -76,7 +76,7 @@ TOOL = "panic-reach"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ELF = os.path.join(
-    os.path.dirname(_HERE), "target", "thumbv7m-none-eabi", "release", "firmware"
+    os.path.dirname(_HERE), "motorcontroller", "target", "thumbv7m-none-eabi", "release", "firmware"
 )
 OBJDUMP_CANDIDATES = ("arm-none-eabi-objdump", "llvm-objdump", "rust-objdump", "objdump")
 
@@ -349,7 +349,7 @@ def parse_disassembly(text, sizes=None):
             # The operand is read as HEX, which is what every disassembler here prints. A
             # disassembler that printed a PC-relative DECIMAL immediate instead (`bl #131072`)
             # would be misread as hex, and what makes that loud rather than quiet is only the link
-            # address: this image lives at 0x08000000 (crates/firmware/memory.x), so a small
+            # address: this image lives at 0x08000000 (motorcontroller/firmware/memory.x), so a small
             # decimal read as hex lands far below every function, resolves to nothing, and is
             # reported as an unresolvable target. A LOW link origin would put such a misread value
             # inside a real function instead, and the gate would follow a fabricated edge in

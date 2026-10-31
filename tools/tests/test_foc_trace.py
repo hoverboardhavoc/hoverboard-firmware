@@ -6,7 +6,7 @@ Run: python3 tools/tests/test_foc_trace.py
 Covers specs/foc-torque.md section 9, "tools": the decode of CTRL_OBS words 47 to 49 (and the other
 words the sampler prints) out of `hoverboard-cli read`'s hexdump, the word map against the
 firmware's own offset pins, the 0x67 read, and the host-side frame arithmetic of `--frame`
-(Clarke, forward Park, the sine table and `angle_path_offset`) against crates/commutation's check
+(Clarke, forward Park, the sine table and `angle_path_offset`) against motorcontroller/commutation's check
 values. stdlib only, no hardware.
 """
 
@@ -46,7 +46,7 @@ def to_bytes(words):
 
 
 def pair(lo, hi):
-    """crates/firmware/src/motor.rs `pack_i16_pair`."""
+    """motorcontroller/firmware/src/motor.rs `pack_i16_pair`."""
     return (lo & 0xFFFF) | ((hi & 0xFFFF) << 16)
 
 
@@ -101,11 +101,11 @@ def ram_of(addr, words):
 
 class WordMap(unittest.TestCase):
     def test_the_foc_words_are_where_the_firmware_pins_them(self):
-        """words 47 to 50 at the byte offsets crates/firmware/src/main.rs asserts, and the count
+        """words 47 to 50 at the byte offsets motorcontroller/firmware/src/main.rs asserts, and the count
         its size pin asserts: the map and the struct are one statement."""
         self.assertEqual((swdobs.W_FOC_PHASE_MEAN, swdobs.W_FOC_DQ_MEAN, swdobs.W_FOC_REF_VQ,
                           swdobs.W_FOC_HOLD), (47, 48, 49, 50))
-        with open(os.path.join(_REPO, "crates", "firmware", "src", "main.rs")) as fh:
+        with open(os.path.join(_REPO, "motorcontroller", "firmware", "src", "main.rs")) as fh:
             src = fh.read()
         for field, word in (("foc_phase_mean", swdobs.W_FOC_PHASE_MEAN),
                             ("foc_dq_mean", swdobs.W_FOC_DQ_MEAN),
@@ -120,7 +120,7 @@ class WordMap(unittest.TestCase):
     def test_i16_pair_is_the_inverse_of_the_pack(self):
         for lo, hi in ((0, 0), (300, -120), (-1, 0), (0, -1), (-32768, 32767), (2450, -7)):
             self.assertEqual(swdobs.i16_pair(pair(lo, hi)), (lo, hi))
-        # crates/firmware/src/motor.rs i16_pair_packing_round_trips' pinned word.
+        # motorcontroller/firmware/src/motor.rs i16_pair_packing_round_trips' pinned word.
         self.assertEqual(swdobs.i16_pair(0xFFF9_0992), (2450, -7))
 
     def test_parse_nm_keeps_foc_gains_and_does_not_require_it(self):
@@ -154,7 +154,7 @@ class Decode(unittest.TestCase):
                   peak=1500, chopped=2, trips=1, ia=-1200, ib=410, id=-37, iq=688, iq_ref=688, vq=-31_999,
                   hold=0x2A05_1B12)
         r = ft.decode(w, 455)
-        # The hold word: crates/firmware/src/motor.rs the_hold_word_packs_the_windows_counts_and_causes'
+        # The hold word: motorcontroller/firmware/src/motor.rs the_hold_word_packs_the_windows_counts_and_causes'
         # pinned word: phase a held 18 periods, phase b 27, 5 floated, the freshness guard and a
         # both-held period seen, two calibration block pairs this boot.
         self.assertEqual((r["held_a"], r["held_b"], r["coasted"], r["cause"]), (18, 27, 5, 0x2A))
@@ -208,10 +208,10 @@ class Decode(unittest.TestCase):
 
 
 class HostFrame(unittest.TestCase):
-    """The --frame arithmetic, against crates/commutation."""
+    """The --frame arithmetic, against motorcontroller/commutation."""
 
     def test_the_sine_table_is_the_crates_literal(self):
-        with open(os.path.join(_REPO, "crates", "commutation", "src", "sin_table.rs")) as fh:
+        with open(os.path.join(_REPO, "motorcontroller", "commutation", "src", "sin_table.rs")) as fh:
             body = re.search(r"=\s*\[(.*?)\];", fh.read(), re.S).group(1)
         literal = [int(v) for v in re.findall(r"-?\d+", body)]
         self.assertEqual(len(literal), 256)
@@ -245,7 +245,7 @@ class HostFrame(unittest.TestCase):
         self.assertEqual(ft.clarke(5000, 1234)[0], 5000)
 
     def test_the_chain_matches_the_crate(self):
-        """Clarke then forward Park over a spread of pairs and angles, the values crates/commutation's
+        """Clarke then forward Park over a spread of pairs and angles, the values motorcontroller/commutation's
         `clarke` and `park_forward` produce for the same inputs (including both saturations)."""
         for ia, ib, theta, beta, iq, i_d in (
             (1200, -700, 0x2345, 115, 685, 987),

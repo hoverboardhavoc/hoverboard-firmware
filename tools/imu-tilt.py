@@ -7,7 +7,7 @@ tool is the "agent drives SWD" half: a human tilts the board and the firmware's 
 degrees) streams to the terminal so orientation/sign checks are readable in real time.
 
 WHAT IT READS
-  The integrated firmware (crates/firmware/src/main.rs) publishes a whole-struct CTRL_OBS record
+  The integrated firmware (motorcontroller/firmware/src/main.rs) publishes a whole-struct CTRL_OBS record
   into RAM every 250 Hz control pass. This tool reads the two words it needs out of that block over
   OpenOCD's memory-read (`mdw`), non-intrusively, on the RUNNING target (no halt -- halting would
   freeze the control loop the operator is tilting against).
@@ -63,7 +63,7 @@ CONNECTION (OpenOCD TCL RPC)
 
 USAGE
   # live streaming readout (default):
-  tools/imu-tilt.py --elf target/thumbv7m-none-eabi/release/firmware
+  tools/imu-tilt.py --elf motorcontroller/target/thumbv7m-none-eabi/release/firmware
   # append a self-describing evidence CSV (schema v3: unix_time,pitch_mdeg,roll_mdeg,flags,label):
   tools/imu-tilt.py --record specs/bench-evidence/<date>/imu-tilt.csv
   #   while recording live, type a word + Enter to drop a `# marker <text>` row in the CSV.
@@ -123,7 +123,7 @@ def tool_commit():
     return "unknown"
 
 # --------------------------------------------------------------------------------------------------
-# CTRL_OBS layout (word indices into `mdw <CTRL_OBS> N`). Derived from crates/firmware/src/main.rs
+# CTRL_OBS layout (word indices into `mdw <CTRL_OBS> N`). Derived from motorcontroller/firmware/src/main.rs
 # `struct CtrlObs` (#[repr(C)]); cross-checked vs specs/bench-evidence/2026-07-22/round17/.
 # --------------------------------------------------------------------------------------------------
 CTRL_OBS_MAGIC = 0x4C525443  # "CTRL" little-endian, word 0
@@ -332,7 +332,7 @@ def flags_str(flags_byte):
     The first token is the IMU bring-up read as the PAIR b0/b6: configured, or staged and not up
     (a finding: the layout asked for an IMU and none answered), or no IMU staged at all (nothing
     to diagnose). Reading b0 alone could not tell the last two apart, which is what this bit is
-    for (crates/orchestrator/src/lib.rs, Obs::flags_byte).
+    for (motorcontroller/orchestrator/src/lib.rs, Obs::flags_byte).
     """
     d = decode_flags(flags_byte)
     parts = []
@@ -1286,7 +1286,7 @@ def selftest():
     dw.step_end("lean_forward", -10110, "negative", "PASS", 2)
     dw.summary(
         [("level", -2109, "baseline~0", "INFO"), ("lean_forward", -10110, "negative", "PASS")],
-        [("elf", "target/thumbv7m-none-eabi/release/firmware"), ("ctrl_obs", "0x20000c40"),
+        [("elf", "motorcontroller/target/thumbv7m-none-eabi/release/firmware"), ("ctrl_obs", "0x20000c40"),
          ("tool", TOOL_VERSION), ("commit", "abc1234")],
     )
     for line in demo.getvalue().splitlines():
@@ -1299,7 +1299,7 @@ def selftest():
 # --------------------------------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------------------------------
-DEFAULT_ELF = "target/thumbv7m-none-eabi/release/firmware"
+DEFAULT_ELF = "motorcontroller/target/thumbv7m-none-eabi/release/firmware"
 
 
 def build_parser():

@@ -125,7 +125,7 @@ class Parsers(unittest.TestCase):
         self.assertEqual(s["mailbox_drops"], 7)
 
     def test_mailbox_drops_round_trip(self):
-        """CTRL_OBS word 34 (crates/firmware/src/main.rs `mailbox_drops`): L2 frames the board could
+        """CTRL_OBS word 34 (motorcontroller/firmware/src/main.rs `mailbox_drops`): L2 frames the board could
         not place on its SWD mailbox ring. Per boot, nothing clears it, so the tool reads it as an
         absolute count. It is reported during stand-up only when non-zero, because on a MASTER - the
         board a session attaches to - its ring has a consumer (this tool), so a non-zero count means
@@ -139,7 +139,7 @@ class Parsers(unittest.TestCase):
         self.assertEqual((s["chopped"], s["trips"], s["duty_on"], s["latch_a"]), (64, 2, 1956, 5))
 
     def test_decode_arm_refusals(self):
-        """CTRL_OBS word 33 (crates/firmware/src/main.rs `arm_refusals` + `imu_frame_cause_byte`):
+        """CTRL_OBS word 33 (motorcontroller/firmware/src/main.rs `arm_refusals` + `imu_frame_cause_byte`):
         the two per-boot counts in their own byte lanes, and the three frame checks the cause byte
         can name."""
         self.assertEqual(swdobs.decode_arm_refusals(0), (0, 0, "no frame refusal"))
@@ -181,7 +181,7 @@ class Parsers(unittest.TestCase):
 
 class Rules(unittest.TestCase):
     def test_limit_counts(self):
-        # BOTH board facts are arguments now, not constants: crates/store/src/field.rs
+        # BOTH board facts are arguments now, not constants: shared/store/src/field.rs
         # MOTOR_CURRENT_CAL (0x67) and MOTOR_NOISE_FLOOR (0x6B), read off the board at stand-up.
         # 455 and 2,100 are their registered defaults.
         cpa, floor = cs.CURRENT_CAL_DEFAULT, cs.NOISE_FLOOR_DEFAULT
@@ -593,7 +593,7 @@ GOLDEN = """\
 # Current-limit session, 2026-10-09
 
 Tool `tools/climit-session.py` (climit-session/1), board master, attached node 0x02 (operator confirmed).
-ELF `target/thumbv7m-none-eabi/release/firmware`, HEAD `abc123`. Evidence CSV `climit-101500.csv`.
+ELF `motorcontroller/target/thumbv7m-none-eabi/release/firmware`, HEAD `abc123`. Evidence CSV `climit-101500.csv`.
 
 ## Parameters
 
@@ -644,7 +644,7 @@ class Record(unittest.TestCase):
             "date": "2026-10-09",
             "params": {"board": "master", "limit_ma": 2500, "cal_demand": 3000, "trip_demand": 32767,
                        "skip": [2]},
-            "node_txt": "0x02 (operator confirmed)", "elf": "target/thumbv7m-none-eabi/release/firmware",
+            "node_txt": "0x02 (operator confirmed)", "elf": "motorcontroller/target/thumbv7m-none-eabi/release/firmware",
             "head": "abc123", "csv": "climit-101500.csv",
             "outcome": "ABORTED: the operator read 3.8 A on the PSU, above the 3.5 A limit they declared",
             "gates": [{"name": "Gate 1, rest floor", "verdict": "INFO", "lines": ["peak max 1300 counts"]}],

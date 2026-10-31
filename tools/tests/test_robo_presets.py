@@ -109,7 +109,7 @@ class PinEncoding(unittest.TestCase):
 
 class GateColourOrder(unittest.TestCase):
     #: The bench pair's pin map (`specs/board-model.md` section 4, carried as preset data there, and
-    #: mirrored in `protocol-kotlin/.../LayoutPresets.kt`, `LayoutPresets.splitMotor`). This is the
+    #: mirrored in `shared/protocol-kotlin/.../LayoutPresets.kt`, `LayoutPresets.splitMotor`). This is the
     #: ORACLE for decision 1: `defines_2-2-20.h` (the F103 master) and `defines_2-1-20.h` (the F130
     #: slave) are the files our working pin map came from, so a generated preset for those two
     #: layouts must equal it. A mapping that swapped two colours would swap two phases, which on a
@@ -371,7 +371,7 @@ class LinkSet(unittest.TestCase):
         self.assertEqual(mask, 0)
 
     def test_the_allowlist_mirrors_the_firmwares_one_wiring(self):
-        # protocol-kotlin/.../ReservedPins.kt, SAFE_LINK_USARTS: the inter-board link.
+        # shared/protocol-kotlin/.../ReservedPins.kt, SAFE_LINK_USARTS: the inter-board link.
         self.assertEqual([(e["bit"], e["pins"]) for e in rp.ALLOWLIST], [(1, ("PA2", "PA3"))])
 
 
@@ -425,7 +425,7 @@ class KeyList(unittest.TestCase):
     def test_the_carried_but_unjudged_motor_facts_are_not_preset_data(self):
         # direction (0x62), align_offset (0x63) and current.cal (0x67) are not
         # facts a pin map can state, so a preset must not carry them
-        # (protocol-kotlin/.../LayoutPresets.kt, LayoutPreset.applyTo).
+        # (shared/protocol-kotlin/.../LayoutPresets.kt, LayoutPreset.applyTo).
         self.assertFalse({f["id"] for f in rp.FIELDS} & {0x62, 0x63, 0x67})
 
     def test_only_the_calibration_is_withheld_from_the_validator(self):

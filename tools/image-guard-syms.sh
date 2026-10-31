@@ -68,7 +68,7 @@ IMAGE_GUARD_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,B 
 # shrink-round-4 lever. Drop the attribute and LLVM re-inlines a ~200 B Newton iteration at both.
 #
 # `4base5crc16` is here for the MECHANISM rather than a measurement. The L2 framer's CRC fold is
-# outlined and placed in the zero-wait window by a NAME anchor in crates/firmware/memory.x
+# outlined and placed in the zero-wait window by a NAME anchor in motorcontroller/firmware/memory.x
 # (`*(.text.*4base5crc16*)`), and a name anchor goes stale silently on a rename. Without an entry
 # here the fold drifts above the boundary and refetches per byte at 2 wait states, with nothing
 # failing. This is the entry CI had and flash.sh did not.
