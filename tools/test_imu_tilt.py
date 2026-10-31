@@ -21,7 +21,7 @@ imu_tilt = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(imu_tilt)
 
 REAL_ELF = os.path.join(
-    _HERE, "..", "target", "thumbv7m-none-eabi", "release", "firmware"
+    _HERE, "..", "motorcontroller", "target", "thumbv7m-none-eabi", "release", "firmware"
 )
 
 

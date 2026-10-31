@@ -66,24 +66,24 @@ M32 = 0xFFFFFFFF
 # --------------------------------------------------------------------------------------------------
 # Firmware facts, each cited to its owner.
 # --------------------------------------------------------------------------------------------------
-# mode_byte: crates/state/src/mode.rs, Mode (Off = 0 .. Shutdown = 4). MOE is set on the INIT pass
+# mode_byte: motorcontroller/state/src/mode.rs, Mode (Off = 0 .. Shutdown = 4). MOE is set on the INIT pass
 # and cleared on the SHUTDOWN pass (the same file's tests), so MOE with INIT or READY is legitimate.
 MODE_OFF, MODE_INIT, MODE_READY, MODE_RUN, MODE_SHUTDOWN = 0, 1, 2, 3, 4
 MODE_NAMES = {0: "OFF", 1: "INIT", 2: "READY", 3: "RUN", 4: "SHUTDOWN"}
-# sub_state: crates/control/src/fsm.rs, SubState (Idle = 0).
+# sub_state: motorcontroller/control/src/fsm.rs, SubState (Idle = 0).
 SUB_IDLE = 0
 SUB_ARMING = 1                # the soft start: where a trip re-enters while the arm is still held
-# event_counts index of latch A: crates/orchestrator/src/events.rs, EV_LATCH_A (1 << 4).
+# event_counts index of latch A: motorcontroller/orchestrator/src/events.rs, EV_LATCH_A (1 << 4).
 EV_LATCH_A_INDEX = 4
-# motor_state flags byte (bits 24..31): crates/firmware/src/motor.rs, OBS_CONFIGURED / OBS_CAL_ACCEPTED.
+# motor_state flags byte (bits 24..31): motorcontroller/firmware/src/motor.rs, OBS_CONFIGURED / OBS_CAL_ACCEPTED.
 OBS_CONFIGURED = 1 << 0
 OBS_CAL_ACCEPTED = 1 << 7
-# motor_fault: FAULT bits in 0..15, the invalid-hall dwell in 16..31 (crates/firmware/src/main.rs).
+# motor_fault: FAULT bits in 0..15, the invalid-hall dwell in 16..31 (motorcontroller/firmware/src/main.rs).
 FAULT_BITS = 0xFFFF
 # The PWM period (ARR) the duty compares are against; the +-28500 clamp maps to 1956
 # (specs/motor-integration.md, "The current limit").
 PWM_PERIOD = 2250
-# crates/firmware/src/motor.rs, limit_counts: the converted limit's window, BOTH ends in COUNTS.
+# motorcontroller/firmware/src/motor.rs, limit_counts: the converted limit's window, BOTH ends in COUNTS.
 # The floor is the sense chain's noise, a count-domain fact, so with a per-board counts-per-amp a
 # milliamp floor would mean a different current on every board; the ceiling is half the comparison's
 # full scale, the largest limit whose 2x hard trip is still expressible, which a milliamp ceiling
@@ -96,9 +96,9 @@ PWM_PERIOD = 2250
 # the real window is the board's at both ends: at 455 counts per amp the ceiling is 36.0 A (20.5 A
 # at 800, 20.0 A at the top of the calibration seam) and the floor is what that chain measures,
 # 4.6 A at 0x6B's registered default.
-MAX_LIMIT_COUNTS = 16_383     # crates/firmware/src/motor.rs: i16::MAX // 2, and the top of 0x6B's
+MAX_LIMIT_COUNTS = 16_383     # motorcontroller/firmware/src/motor.rs: i16::MAX // 2, and the top of 0x6B's
                               # own plausibility band (swdobs.NOISE_FLOOR_MAX)
-# crates/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x20, u32 mA, default 10_000).
+# shared/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x20, u32 mA, default 10_000).
 LIMIT_FIELD = 0x20
 
 # --------------------------------------------------------------------------------------------------
@@ -214,7 +214,7 @@ class SessionEnd(Exception):
 # Pure arithmetic and parameter rules.
 # --------------------------------------------------------------------------------------------------
 def limit_counts(ma, staged_cpa, staged_floor):
-    """crates/firmware/src/motor.rs, limit_counts: ma * clamp(cal, 100, 819) / 1000, clamped into
+    """motorcontroller/firmware/src/motor.rs, limit_counts: ma * clamp(cal, 100, 819) / 1000, clamped into
     clamp_noise_floor(floor)..MAX_LIMIT_COUNTS.
 
     `staged_cpa` is the board's own counts per amp (0x67) and `staged_floor` its own sense-chain
@@ -227,7 +227,7 @@ def limit_counts(ma, staged_cpa, staged_floor):
 
 
 def hard_trip_counts(lc):
-    """crates/firmware/src/motor.rs, hard_trip_counts: 2x, saturated at 32767."""
+    """motorcontroller/firmware/src/motor.rs, hard_trip_counts: 2x, saturated at 32767."""
     return min(2 * lc, 32767)
 
 
@@ -1513,7 +1513,7 @@ class Session:
         self.csv = EvidenceCsv(csv_fh)
         self.record_dir = record_dir
         self.owner = os.environ.get("BENCH_OWNER", "claude-climit")
-        self.bin_dir = os.path.join(REPO, "crates", "swd-bridge", "target", host_target(), "release")
+        self.bin_dir = os.path.join(REPO, "tools", "target", host_target(), "release")
         self.reader = None
         self.addrs = None
         self.inputs = None            # the one session owner (arm and demand), or None
@@ -1916,8 +1916,9 @@ class Session:
         r = self.sh.run(f"git -C {shlex.quote(REPO)} rev-parse HEAD")
         self.rec["head"] = r.stdout.strip() or "unknown"
         if not all(self.sh.exists(self.bin(b)) for b in BINS):
-            manifest = shlex.quote(os.path.join(REPO, "crates/swd-bridge/Cargo.toml"))
-            self.sh.run(f"cargo build --release --manifest-path {manifest} --target {host_target()}")
+            # From tools/, so its rust-toolchain.toml picks the toolchain the tools workspace builds on.
+            tools = shlex.quote(os.path.join(REPO, "tools"))
+            self.sh.run(f"cd {tools} && cargo build --release -p swd-bridge --target {host_target()}")
             if not all(self.sh.exists(self.bin(b)) for b in BINS):
                 raise SessionAbort(f"the mailbox tools are missing from {self.bin_dir} after the build")
         r = self.sh.run(f"{shlex.quote(os.path.join(REPO, 'tools', 'bench-lock.sh'))} acquire {self.owner} "

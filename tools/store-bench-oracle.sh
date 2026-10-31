@@ -13,7 +13,7 @@
 # e.g.
 #   store-bench-oracle.sh 12fet          /tmp/store-test-chip2k.elf 0x0803F000 2048 /tmp/store-regions/2k
 #   store-bench-oracle.sh master         /tmp/store-test-chip1k.elf 0x0800F800 1024 /tmp/store-regions/1k
-#   store-bench-oracle.sh offroad-slave  target/thumbv7m-none-eabi/release/store-test 0x0800F800 1024 bench-work/regions/1k
+#   store-bench-oracle.sh offroad-slave  motorcontroller/target/thumbv7m-none-eabi/release/store-test 0x0800F800 1024 bench-work/regions/1k
 #
 # The offroad presets resolve the probe's current address from its MAC through
 # target/bench/probe-addr.sh (DHCP drifts; the MAC does not). They need the probe to themselves, so

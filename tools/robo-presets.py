@@ -56,7 +56,7 @@ never silently dropped.
 
 THE VERDICT. The generator finishes by running every preset through the board validator and
 recording the verdict per preset. It asks the Kotlin mirror
-(`protocol-kotlin/.../board/PresetVerdicts.kt`, which explains the choice) rather than the Rust:
+(`shared/protocol-kotlin/.../board/PresetVerdicts.kt`, which explains the choice) rather than the Rust:
 `validate` is a pure function of the fields, the part's capabilities and the reserved set, and the
 Kotlin module holds all three in ordinary code, while the Rust capability tables for the fleet's
 parts are `#[cfg(test)]`-private. Using them from the host would mean writing a second capability
@@ -70,7 +70,7 @@ Usage:
   tools/robo-presets.py --clone reference/robo-gd32 --sha <40 hex> [--out FILE] [--no-verdicts]
   tools/robo-presets.py --selftest
 
-stdlib only; `cc` for the expansion and `protocol-kotlin/gradlew` for the verdicts.
+stdlib only; `cc` for the expansion and `shared/protocol-kotlin/gradlew` for the verdicts.
 """
 
 import argparse
@@ -185,7 +185,7 @@ SYMBOLIC_TOKENS = [
 #:      `defines_2-2-20.h` (the F103 master) and `defines_2-1-20.h` (the F130 slave) are the files our
 #:      working pin map came from, and both read `BLDC_YH PA8`, `BLDC_BH PA9`, `BLDC_GH PA10` with
 #:      `BLDC_YL PB13`, `BLDC_BL PB14`, `BLDC_GL PB15`. Our map for those boards
-#:      (`specs/board-model.md` section 4, mirrored in `protocol-kotlin/.../LayoutPresets.kt`) is
+#:      (`specs/board-model.md` section 4, mirrored in `shared/protocol-kotlin/.../LayoutPresets.kt`) is
 #:      `gate.hi_a PA8`, `gate.hi_b PA9`, `gate.hi_c PA10`, `gate.lo_a PB13`, `gate.lo_b PB14`,
 #:      `gate.lo_c PB15`. So A = yellow, B = blue, C = green.
 #:   2. HIS OWN CHANNEL CONVENTION. `HoverBoardGigaDevice/Inc/defines.h` fixes
@@ -273,7 +273,7 @@ IMU_ABSENT_REASON = (
 # --------------------------------------------------------------------------------------------------
 
 #: `gate.dead_time` is required at or above `DEAD_TIME_MIN_DTG` (18) wherever a gate group is
-#: configured (`crates/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`), so a preset that omitted it would be
+#: configured (`motorcontroller/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`), so a preset that omitted it would be
 #: refused on the dead time before any check that could say something about HIS file: the group
 #: completeness check runs before the capability stage, and the first failure wins. Every preset with
 #: gates would read `DeadTimeBelowFloor` and the exercise would report nothing.
@@ -316,7 +316,7 @@ def dead_time_dtg(his_ticks):
 #: not facts a pin map can state: the drive direction is a hall-and-phase wiring fact, the align
 #: offset is bench-swept, and the calibration belongs to the shunt chain fitted. The existing
 #: hand-written presets take them from the board for the same reason
-#: (`protocol-kotlin/.../LayoutPresets.kt`, `LayoutPreset.applyTo`).
+#: (`shared/protocol-kotlin/.../LayoutPresets.kt`, `LayoutPreset.applyTo`).
 FIELDS = [
     {"id": 0x40, "key": "board.self_hold", "kind": "pin", "frm": "SELF_HOLD"},
     {"id": 0x41, "key": "board.battery.pin", "kind": "pin", "frm": "VBATT"},
@@ -348,7 +348,7 @@ FIELDS = [
 
 #: The one field above the board validator does not judge, so it is not sent to the verdict oracle:
 #: `board.battery.cal` is a calibration the sensing producer owns, not a layout slot
-#: (`protocol-kotlin/.../LayoutSlots.kt`, `Layout`).
+#: (`shared/protocol-kotlin/.../LayoutSlots.kt`, `Layout`).
 NOT_VALIDATED = {VBATT_CAL_FIELD}
 
 #: The keys of his we ASK ABOUT and do not consume, each with why. Recording them is half the point
@@ -454,7 +454,7 @@ def asked_keys():
 # --------------------------------------------------------------------------------------------------
 
 #: The compiled safe-USART allowlist as the firmware declares it, mirrored from
-#: `protocol-kotlin/.../ReservedPins.kt`: each wiring's `LINK_SET` bit and its two pins. The link's
+#: `shared/protocol-kotlin/.../ReservedPins.kt`: each wiring's `LINK_SET` bit and its two pins. The link's
 #: own pins are deliberately NOT layout fields (the allowlist is what lets a BLANK board probe for a
 #: controller before any field can exist), so this is how a layout is kept off them.
 #:
@@ -694,7 +694,7 @@ def gates_complete(values):
 
     The dead time is only emitted where it is, because a CONFIGURED gate group is what the floor
     applies to and zero is the correct dead time for a board with no motor
-    (`crates/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`).
+    (`motorcontroller/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`).
     """
     macros = [
         "BLDC_%s%s" % (GATE_COLOUR_FOR_PHASE[p], s) for s in ("H", "L") for p in ("a", "b", "c")
@@ -902,11 +902,11 @@ def layout_notes(values, target):
 # --------------------------------------------------------------------------------------------------
 
 #: Where the Kotlin mirror lives, relative to the repository root, and the Gradle task that runs it.
-GRADLE_DIR = "protocol-kotlin"
+GRADLE_DIR = "shared/protocol-kotlin"
 GRADLE_TASK = "presetVerdicts"
 
 #: The JDK this machine has when `JAVA_HOME` is unset: Android Studio's bundled JBR, which
-#: `protocol-kotlin/build.gradle.kts` already names as the only one here.
+#: `shared/protocol-kotlin/build.gradle.kts` already names as the only one here.
 FALLBACK_JAVA_HOME = "/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 
 

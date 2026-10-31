@@ -16,7 +16,7 @@ Usage:
 Ctrl-C to stop. It takes no bench lock: it touches no probe, only the bridge, and the gate
 session it samples for holds the lock (specs/foc-torque.md section 10).
 
-What it prints, per sample (words of crates/firmware/src/main.rs `CtrlObs`, through the
+What it prints, per sample (words of motorcontroller/firmware/src/main.rs `CtrlObs`, through the
 tools/swdobs.py word map, which owns the indices):
 
 - word 11, the torque word the demand produced (the throttle conditioner sits between
@@ -34,12 +34,12 @@ The CSV adds word 11's mode byte.
 With --frame DIRECTION ALIGN_OFFSET (the board's staged `motor.direction` 0x62 and
 `motor.align_offset` 0x63), it also runs the crate's own Clarke and forward Park on this host over
 word 47 at `angle + angle_path_offset(direction, align_offset)`, bit-exact to
-crates/commutation (`clarke`, `park_forward`, `lookup_sincos`, `angle_path_offset`): gate O2's
+motorcontroller/commutation (`clarke`, `park_forward`, `lookup_sincos`, `angle_path_offset`): gate O2's
 reading, in sine, with the rotor held. The angle is word 22's instantaneous one and the currents a
 window mean, which agree only while the rotor does not move; that is the gate's condition.
 
 The CTRL_OBS address and the `FOC_GAINS` address (the current loops' live gain knob,
-crates/commutation/src/foc.rs) both come from the ELF's symbol table, never from a constant, and
+motorcontroller/commutation/src/foc.rs) both come from the ELF's symbol table, never from a constant, and
 the block's size is checked against the word map: a stale address reads plausible rubbish. The
 magic word ("CTRL") is checked on the first read for the same reason.
 """
@@ -62,13 +62,13 @@ from swdobs import (
 )
 
 TOOL = "foc-trace"
-# The built CLI (tools/hoverboard-cli is its own workspace, built for the host:
-# `cargo build --release --manifest-path tools/hoverboard-cli/Cargo.toml`), unless --cli says
+# The built CLI (tools/hoverboard-cli, a member of the tools/ workspace, built for the host with
+# `cargo build --release -p hoverboard-cli` in tools/, so into tools/target), unless --cli says
 # otherwise or it is on PATH.
-CLI_DIR = os.path.join(REPO, "tools", "hoverboard-cli", "target")
+CLI_DIR = os.path.join(REPO, "tools", "target")
 
 # --------------------------------------------------------------------------------------------------
-# The frame, bit-exact to crates/commutation/src/foc.rs and lib.rs.
+# The frame, bit-exact to motorcontroller/commutation/src/foc.rs and lib.rs.
 # --------------------------------------------------------------------------------------------------
 # Quarter-wave sine table: round(32767 * sin((i/256) * pi/2)), i = 0..255, as the crate's
 # sin_table.rs literal (the test checks every entry against that file). Half-away-from-zero rounding,

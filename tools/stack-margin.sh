@@ -3,7 +3,7 @@
 #
 # The firmware paints the free stack with a known word at boot and publishes, as CTRL_OBS word 30,
 # how much of that paint is still intact (`specs/firmware.md`, "RAM/stack budget";
-# `crates/firmware/src/main.rs`, `mod stack_paint`). This reads it. The number it prints is the gap
+# `motorcontroller/firmware/src/main.rs`, `mod stack_paint`). This reads it. The number it prints is the gap
 # between the deepest word the running image has ever touched and the top of `.uninit`, i.e. how
 # close the board has come to overwriting CTRL_OBS itself with a stack frame.
 #

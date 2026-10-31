@@ -32,7 +32,7 @@ IMU_TILT="$SCRIPT_DIR/imu-tilt.py"
 PI="${PI_HOST:-pi@192.168.0.248}"
 PORT="${TILT_PORT:-6666}"
 OWNER="${BENCH_OWNER:-${USER:-hoverboardhavoc}}"
-ELF_REL="target/thumbv7m-none-eabi/release/firmware"
+ELF_REL="motorcontroller/target/thumbv7m-none-eabi/release/firmware"
 ELF="$REPO_DIR/$ELF_REL"
 
 BOARD="slave"
@@ -160,13 +160,14 @@ cmd "sleep 3   (rail settle)"
 # --------------------------------------------------------------------------------------------------
 log "ensure local firmware ELF"
 # cargo build is incremental (a no-op when already current), so this also covers the 'stale' case.
-# `cargo image` (the .cargo/config.toml alias) and NOT a plain `cargo build --release`: the shipping
-# image is the build-std build, and this ELF is what imu-tilt.py resolves symbol ADDRESSES from before
+# `cargo image` (the motorcontroller/.cargo/config.toml alias) and NOT a plain
+# `cargo build --release`: the shipping image is the build-std build, and this ELF is what imu-tilt.py resolves symbol ADDRESSES from before
 # reading them over SWD. A non-build-std ELF links the same source at different addresses, so the
 # readout would silently target the wrong words on a board carrying the real image.
-# Run from the repo dir: the alias, the default target and the -Tlink.x flag all live in the repo's
-# .cargo/config.toml, which cargo discovers from the working directory, not from --manifest-path.
-sh_run bash -c "cd \"$REPO_DIR\" && cargo image"
+# Run from motorcontroller/: the alias, the default target and the -Tlink.x flag all live in
+# motorcontroller/.cargo/config.toml, which cargo discovers from the working directory, not from
+# --manifest-path.
+sh_run bash -c "cd \"$REPO_DIR/motorcontroller\" && cargo image"
 if [ "$DRY_RUN" = 0 ] && [ ! -f "$ELF" ]; then
   echo "tilt-session: build did not produce $ELF" >&2
   exit 1
