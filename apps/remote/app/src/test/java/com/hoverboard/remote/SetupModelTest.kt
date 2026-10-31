@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.Malformed
 import com.hoverboard.protocol.config.TimedOut
@@ -54,9 +55,9 @@ class SetupModelTest {
      * What an attach reads before the screen is ever shown: what the node is and what it is called
      * (`specs/remote-ui.md` section 2), then, because it is a motor controller, the machine facts
      * (the drive mode, the two Machine fields the arm control states, the pack and the rider
-     * requirement), the counts per amp the Ride screen's current display needs (3.6) and the two
-     * facts the Travel section converts hall edges with (3.6c). With one node in the session they
-     * are read on the attached board alone.
+     * requirement), the counts per amp the Ride screen's current display needs (3.6), the two
+     * facts the Travel section converts hall edges with (3.6c) and the board's `board.status`
+     * (3.1c). With one node in the session they are read on the attached board alone.
      */
     private val rideFacts = SetupFields.IDENTITY.map { board to it.key } +
         SetupFields.MOTOR_FACTS.map { board to it.key } +
@@ -64,6 +65,7 @@ class SetupModelTest {
             board to Fields.MOTOR_CURRENT_CAL.key(),
             board to Fields.MOTOR_POLE_PAIRS.key(),
             board to Fields.WHEEL_DIAMETER_MM.key(),
+            board to Fields.BOARD_STATUS.key(),
         )
 
     @Test
@@ -131,6 +133,42 @@ class SetupModelTest {
         runCurrent()
 
         assertNull(rig.state.countsPerAmpOf(board))
+    }
+
+    /**
+     * 3.1c: each board's `board.status` is read on attach with the ride facts and decoded into its
+     * entries, per board, apart from the Setup rows; an empty one is a board whose functions all
+     * came up, and one that could not be read is unread rather than empty.
+     */
+    @Test
+    fun `each board's status is read on attach and decoded`() = runTest {
+        val rig = SetupRig(this)
+        val status = Fields.BOARD_STATUS.key()
+        rig.transport.store[other to status] = Value.Bytes(byteArrayOf(0x4D, 0, 5, 10, 0x56, 1, 3, 0x16))
+
+        rig.transport.setAttachedBoard(board, other)
+        runCurrent()
+
+        assertEquals(emptyList<BoardStatus.Entry>(), rig.state.setupOf(board).status, "everything came up")
+        assertEquals(
+            listOf(
+                BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.DEAD_TIME.code, 10),
+                BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED.code, 0x16),
+            ),
+            rig.state.setupOf(other).status,
+        )
+        assertFalse(status in rig.state.setupOf(other).values, "a field with no row is not a Setup value")
+    }
+
+    @Test
+    fun `a status read that fails leaves the status unread`() = runTest {
+        val rig = SetupRig(this)
+        rig.transport.unreadable += Fields.BOARD_STATUS.key()
+
+        rig.transport.setAttachedBoard(board)
+        runCurrent()
+
+        assertNull(rig.state.setupOf(board).status)
     }
 
     /** 3.6a: there is no Apply. An edit is a write of its own field, once its settle window closes. */

@@ -6,12 +6,15 @@ import com.hoverboard.remote.R
 
 /**
  * One lamp of the Ride screen's fault grid (`specs/remote-ui.md` 3.1b): one per cause that stops a
- * board arming, which is one bit of [CyclicState.ARM_BLOCKING_BITS], in the grid's order.
+ * board arming, which is one bit of [CyclicState.ARM_BLOCKING_BITS], in the grid's order, and
+ * CONFIG last.
  *
- * A board's own `CYCLIC_STATE.fault` word blocks its arm when it carries any of these bits: the
- * mode machine holds a board in OFF while Fault A or Fault B is asserted, and Fault B is motor 1's
- * latch alone. Bit 6 (the mode fault, a readback) and bit 7 (the power request itself) are in the
- * word and are not lamps; bit 3 and bits 12 to 15 name nothing.
+ * A board's own `CYCLIC_STATE.fault` word blocks its arm when it carries any of the first nine
+ * bits: the mode machine holds a board in OFF while Fault A or Fault B is asserted, and Fault B is
+ * motor 1's latch alone. CONFIG is bit 12 ([CyclicState.EV_CONFIG]): a configured function did not
+ * come up at boot. It blocks nothing ([blocksArm] false), so it never draws the grid by itself and
+ * never disarms. Bit 6 (the mode fault, a readback) and bit 7 (the power request itself) are in the
+ * word and are not lamps; bit 3 and bits 13 to 15 name nothing.
  *
  * @param bit the lamp's bit mask in the fault word.
  * @param label the name the lamp carries in the grid.
@@ -73,6 +76,11 @@ enum class FaultLamp(
         "ARM",
         R.string.lamp_arm_title, R.string.lamp_arm_when, R.string.lamp_arm_blocks, R.string.lamp_arm_fix,
     ),
+    CONFIG(
+        CyclicState.EV_CONFIG,
+        "CONFIG",
+        R.string.lamp_config_title, R.string.lamp_config_when, R.string.lamp_config_blocks, R.string.lamp_config_fix,
+    ),
     ;
 
     /** The lamp's code on the sheet: "F" and the bit's number, "F8" for HALL. */
@@ -81,9 +89,15 @@ enum class FaultLamp(
     /** Whether the app holds this lamp lit after its bit clears, until the next ARM tap. */
     val held: Boolean get() = bit and LATCH_BITS != 0
 
+    /** Whether this lamp's bit stops a board arming: every lamp but CONFIG. */
+    val blocksArm: Boolean get() = bit and CyclicState.ARM_BLOCKING_BITS != 0
+
     companion object {
         /** The two latch bits the app holds lit ([held]): the board clears a latch about 8 ms after it trips. */
         const val LATCH_BITS = CyclicState.EV_LATCH_A or CyclicState.EV_LATCH_B
+
+        /** Every bit a lamp draws: the arm-blocking ones and CONFIG. */
+        const val LAMP_BITS = CyclicState.ARM_BLOCKING_BITS or CyclicState.EV_CONFIG
 
         /** The lamp for one bit mask of the fault word, or null for a bit that is not a lamp. */
         fun of(bit: Int): FaultLamp? = entries.firstOrNull { it.bit == bit }
@@ -113,6 +127,8 @@ data class LampFacts(val address: Int, val imuModel: Int?) {
  * - TILT and IMU apply on a board whose IMU is fitted ([LampFacts.imuFitted]): the cutout and the
  *   loss level run only on a board whose IMU answered at power-up, in Throttle as in Balance.
  * - LATCH 2 never applies: no board drives a second motor, so it shows only while its bit is set.
+ * - CONFIG never applies either: it shows only on a board whose boot left a configured function
+ *   down, which is its bit.
  * - LATCH and the four motor causes apply on every motor controller: the motor bring-up they gate
  *   on is not visible over the link.
  *
@@ -130,13 +146,14 @@ fun shownLamps(facts: List<LampFacts>, words: Map<Int, Int>): List<FaultLamp> {
 private fun applies(lamp: FaultLamp, facts: List<LampFacts>): Boolean = when (lamp) {
     FaultLamp.LINK -> facts.size == 2
     FaultLamp.TILT, FaultLamp.IMU -> facts.any { it.imuFitted }
-    FaultLamp.LATCH_2 -> false
+    FaultLamp.LATCH_2, FaultLamp.CONFIG -> false
     FaultLamp.LATCH, FaultLamp.HALL, FaultLamp.CAL, FaultLamp.PERIOD, FaultLamp.ARM -> facts.isNotEmpty()
 }
 
 /**
- * The grid's column count for [shown] lamps: four, or five when nine are shown, so the grid is
- * never more than two rows (the fleet's fullest machine applies eight; the ninth is LATCH 2 lit).
+ * The grid's column count for [shown] lamps: four, or five when nine or ten are shown, so the grid
+ * is never more than two rows (the fleet's fullest machine applies eight; the ninth and tenth are
+ * LATCH 2 and CONFIG lit).
  */
 fun lampColumns(shown: Int): Int = if (shown > FOUR_COLUMN_MAX) FIVE_COLUMNS else FOUR_COLUMNS
 

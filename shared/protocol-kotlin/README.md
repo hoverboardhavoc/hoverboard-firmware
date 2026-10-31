@@ -21,10 +21,11 @@ shared/protocol-kotlin/
     linkctl/              the four L7 control payload families              (shared/linkctl)
     store/                CONFIG_* value type tags and encoding             (shared/store)
     imu/                  the frames a staged IMU orientation may hold      (motorcontroller/imu)
-    board/                the board-layout boot validator                   (motorcontroller/board)
+    board/                pins, the layout field set, board.status          (motorcontroller/board)
   src/test/kotlin/com/hoverboard/protocol/
     L2Test, PduTest, StoreWireTest, WalkTest, BleWalkTest    behaviour, ported with the code
-    OrientationTest, BoardLayoutTest, PinPickerTest          the Rust's own vectors, ported
+    OrientationTest, BoardLayoutTest, BoardStatusTest        the Rust's own vectors, ported
+    PinPickerTest, ChipFamilyTest                            the layout editor's pin offers
     WireDriftTest                                            hand-copied wire pins
     RustSourceDriftTest                                      reads the Rust and compares
 ```
@@ -80,16 +81,15 @@ compares it to the Kotlin:
 - `shared/link/src/framer.rs`, `frag.rs`: framing and fragmentation constants
 - `shared/store/src/key.rs`: value type tags
 - `shared/base/src/crc16.rs`: the CRC algorithm the firmware instantiates
-- `motorcontroller/board/src/lib.rs`, `plumbing.rs`, `tests.rs`: the board-layout validator's field set, its
-  refusal kinds and their `BOARD_OBS` codes, the order it takes its fields in, the per-chip
-  capability tables, and the reserved-set rule that keeps a layout off the link's pins
+- `motorcontroller/board/src/lib.rs`, `status.rs`: the pin sentinel and the dead-time floor, and
+  the boot status record `board.status` carries (its reasons, entry size and cap), with the
+  `store::NAMES` paths an entry is printed through
+- `motorcontroller/orchestrator/src/events.rs`: the `fault` word's bits
 
-The board mirror's purpose is a prediction rather than a decode: `board::validate` is a pure
-function, so a client holding the staged fields, the chip's capability answers and the reserved set
-can state the boot verdict exactly instead of guessing at it. What it cannot reach is runtime-hal's
-real capability queries, which live in another repository this module deliberately does not check
-out; the Kotlin mirrors `motorcontroller/board/src/tests.rs`'s `MockChip` tables instead, and the cargo-side
-`rcap_agreement` suite is what holds those equal to the real ones.
+There is no layout verdict to mirror: the firmware brings up each function from its own fields and
+lists what did not come up in `board.status` (`specs/configured-links.md`), which a client reads
+after the board boots. The board mirror is the vocabulary to name and pick pins with, and the decode
+of that record.
 
 Where the Rust enumerates something, the comparison is an **exact set comparison**, so a firmware
 change that *adds* a fifth control opcode also fails, rather than passing quietly and leaving this

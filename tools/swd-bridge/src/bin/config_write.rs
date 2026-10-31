@@ -26,16 +26,16 @@
 //! differs from what was written counts as a failure for the exit code, but every argument is
 //! still attempted, because a bench gate wants to see each refusal, not stop at the first.
 //!
-//! Example (the silicon-queue section-6 VALID-layout case: the standard-family IMU on PB6/PB7,
-//! then reboot to have the board validate it):
+//! Example (the inter-board link on PA2/PA3 and the standard-family IMU on PB6/PB7, then reboot to
+//! have the board bring them up):
 //!
 //! ```text
-//! swd-mailbox-config 127.0.0.1:6666 0x02=0x02 0x48=0x16 0x49=0x17 0x60=2
-//! #   LINK_SET(0x02)=0b010 (the inter-board link live)
-//! #   imu.scl_pin(0x48)=PB6  imu.sda_pin(0x49)=PB7  imu.model(0x60)=2
-//! # then REBOOT the board (bench: power-cycle via the relay, or the L3 REBOOT opcode once it
-//! # exists) and read BOARD_OBS: expect magic "BRDV", result 0 (OBS_OK). Result 11 with a
-//! # working layout = IMU frame refused (IMU_AXIS_SIGN / IMU_AXIS_ROLE not a rotation).
+//! swd-mailbox-config 127.0.0.1:6666 0x56=0x02 0x57=0x03 0x48=0x16 0x49=0x17 0x60=2
+//! #   link.tx[0](0x56)=PA2  link.rx[0](0x57)=PA3
+//! #   imu.scl(0x48)=PB6  imu.sda(0x49)=PB7  imu.model(0x60)=2
+//! # then REBOOT the board (bench: power-cycle via the relay) and read board.status (0x05, or the
+//! # BOARD_OBS record over SWD): no entries = everything configured came up. An entry with reason 7
+//! # = the IMU frame was refused (IMU_AXIS_SIGN / IMU_AXIS_ROLE not a rotation).
 //! ```
 //!
 //! A wrong-type value, an unknown field id, or a bad argument is rejected before any session

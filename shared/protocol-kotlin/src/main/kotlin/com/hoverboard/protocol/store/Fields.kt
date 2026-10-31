@@ -47,8 +47,7 @@ data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value
  * Not every registered field is here: `SOME_BLOB` and the test fields belong to nobody. The live
  * tune lane's keys, ranges and ramp are in [Gains]. A field is added when a client exercises it,
  * which is why the board-layout block (0x40-0x55 plus the per-motor facts) is here now: the layout
- * editor's mirrored validator reads it (`specs/remote-ui.md` section 3.5,
- * [com.hoverboard.protocol.board.validate]).
+ * editor reads and writes it (`specs/remote-ui.md` section 3.5, [com.hoverboard.protocol.board.Layout]).
  */
 object Fields {
     /** The board's persistent L3 node address (walk-owned; displayed, never edited). */
@@ -245,8 +244,8 @@ object Fields {
 
     /**
      * Per-motor phase-current sense DECLARATION: 0 = none. The capability half of the
-     * phase-current group, which the boot validator holds to agreeing with [MOTOR_PHASE_A] /
-     * [MOTOR_PHASE_B], so a board cannot declare current sense with no channels behind it.
+     * phase-current group: nonzero brings up [MOTOR_PHASE_A] / [MOTOR_PHASE_B], and a declaration
+     * with either pin unset is recorded in `board.status` as incomplete.
      */
     val MOTOR_CURRENT_SENSE = FieldDef(0x66, Type.U8, Value.U8(0))
 

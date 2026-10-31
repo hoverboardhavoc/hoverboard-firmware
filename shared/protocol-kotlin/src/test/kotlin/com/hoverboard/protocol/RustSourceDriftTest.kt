@@ -21,19 +21,10 @@ import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_INPUTS
-import com.hoverboard.protocol.board.BoardErrorKind
-import com.hoverboard.protocol.board.BoardField
 import com.hoverboard.protocol.board.BoardFields
-import com.hoverboard.protocol.board.ChipFamily
+import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
-import com.hoverboard.protocol.board.Layout
-import com.hoverboard.protocol.board.NET_PORT_UART
 import com.hoverboard.protocol.board.PIN_ABSENT
-import com.hoverboard.protocol.board.Pin
-import com.hoverboard.protocol.board.SWD_PINS
-import com.hoverboard.protocol.board.allowlistFor
-import com.hoverboard.protocol.board.reservedSet
-import com.hoverboard.protocol.board.validate
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
@@ -121,9 +112,8 @@ import java.io.File
  * Those are now sets with a census of their own: the payload bit constants ([rustPayloadBits],
  * eight `u8` constants looked up one by one before), the `u8` wire constants whose type narrowing
  * nothing checked ([wireConstants] against [MODULE_CONST_LINE]), the L2 framing and
- * fragment-header constants ([moduleConstNames], which asks what else the file declares), and the
- * capability queries the mirror answers ([theCapabilityTablesAgreeWithTheRustMockTables] censuses
- * the trait). Each is proven by a negative fixture that injects the unseen shape into the real Rust
+ * fragment-header constants ([moduleConstNames], which asks what else the file declares). Each is
+ * proven by a negative fixture that injects the unseen shape into the real Rust
  * text and asserts the reader fails by name or that the item reaches the comparison, so the proof
  * runs on every build rather than living in a session log.
  *
@@ -216,11 +206,9 @@ class RustSourceDriftTest {
      * passed the whole suite green.
      *
      * The price is a false-red surface, and it is worth naming in full rather than by its one
-     * famous case. Five censuses look for their token ANYWHERE on the line, so a block comment
-     * opening with that token in it is demanded as an item: [ARM_LINE] (any `=>`),
-     * [FIELD_TAKE_LINE], [MOTOR_TAKE_LINE], [STORE_READ_LINE] and [REGISTRY_ROW_LINE]'s second
-     * branch. A commented-out read inside `read_fields` fails
-     * [theLayoutIsTheFieldSetTheFirmwareReads] exactly this way. The other four censuses
+     * famous case. Two censuses look for their token ANYWHERE on the line, so a block comment
+     * opening with that token in it is demanded as an item: [ARM_LINE] (any `=>`) and
+     * [REGISTRY_ROW_LINE]'s second branch. The other four censuses
      * ([FIELD_LINE], [VARIANT_LINE], [TIMEOUT_DECL_LINE], [OPCODE_DECL_LINE]) anchor the shape at
      * the start of the line and cannot be reached by a comment opener at all. In every case the
      * `//` form is unaffected, so the escape hatch is one character, and the red that does happen
@@ -631,24 +619,6 @@ class RustSourceDriftTest {
         assertTrue(
             "ESCAPE" in moduleConstNames(grownFramer, "fixture"),
             "a new framing constant must reach the set the mirror is compared against",
-        )
-    }
-
-    /**
-     * A sixth query on the `Capabilities` trait reaches the set
-     * [theCapabilityTablesAgreeWithTheRustMockTables] compares, so the mirror has to answer it or
-     * say why it does not. The five body pins there are by name and cannot notice one.
-     */
-    @Test
-    fun aCapabilityQueryThisMirrorDoesNotModelReachesTheComparison() {
-        val grownTrait = grown(
-            boardLib,
-            "    fn i2c_pair(&self, scl: Pin, sda: Pin) -> Option<u8>;",
-            "    fn dac_capable(&self, pin: Pin) -> bool;",
-        )
-        assertTrue(
-            "dac_capable" in capabilityQueries(grownTrait),
-            "a new capability query must reach the set the mirror is compared against",
         )
     }
 
@@ -2030,13 +2000,12 @@ class RustSourceDriftTest {
         )
     }
 
-    // --- the board-layout validator mirror -------------------------------------------------------
+    // --- the board crate: the pin vocabulary, the dead-time floor and the status record ----------
 
     private val boardLib by lazy { rust("motorcontroller/board/src/lib.rs") }
-    private val boardPlumbing by lazy { rust("motorcontroller/board/src/plumbing.rs") }
-    private val boardTests by lazy { rust("motorcontroller/board/src/tests.rs") }
+    private val boardStatus by lazy { rust("motorcontroller/board/src/status.rs") }
 
-    /** `SelfHold` -> `SELF_HOLD`: a Rust variant name as the Kotlin enum spells it. */
+    /** `NotAPin` -> `NOT_A_PIN`: a Rust variant name as the Kotlin enum spells it. */
     private fun camelToScreaming(s: String): String =
         s.replace(Regex("""(?<!^)([A-Z])"""), "_$1").uppercase()
 
@@ -2045,9 +2014,7 @@ class RustSourceDriftTest {
      *
      * Censused, because a variant this does not recognise (a trailing comment after the comma, a
      * payload wrapped across lines, a struct variant) would otherwise leave the Rust side one
-     * short and agree with a mirror that never carried it. `MockChip`'s own `F103RC, // the 12-FET
-     * part` is exactly that shape, and it is why the three hand-rolled variant readers this
-     * replaced each took a different pattern.
+     * short and agree with a mirror that never carried it.
      */
     private fun rustVariants(text: String, name: String): List<String> =
         findAllClaiming(
@@ -2056,15 +2023,6 @@ class RustSourceDriftTest {
             VARIANT_LINE,
             "$name variants",
         ).map { it.groupValues[1] }
-
-    /** Every query the `Capabilities` trait declares, by name; see the census in its test. */
-    private fun capabilityQueries(text: String): Set<String> {
-        val start = text.indexOf("pub trait Capabilities {")
-        check(start >= 0) { "No `pub trait Capabilities {` in motorcontroller/board/src/lib.rs" }
-        return findAll(text.substring(start, text.indexOf("\n}", start)), CAPABILITY_QUERY, "the Capabilities trait's queries")
-            .map { it.groupValues[1] }
-            .toSet()
-    }
 
     /**
      * A function body from [signature] to [close], comments dropped and whitespace collapsed.
@@ -2088,123 +2046,23 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The field set a layout IS, against `board::BoardFields` and `board::MotorFields`.
-     *
-     * A member the Rust grows and this mirror does not is a field the board validates and a client's
-     * prediction ignores, which turns an exact verdict into a guess. The expected lists are the
-     * Kotlin data classes' own property names, so a red here is answered by editing them together.
+     * The absent sentinel both sides spell (the crate's `ABSENT` and the registry's `PIN_ABSENT`,
+     * which are one value), and the motor count the layout's field set carries (`store::MOTORS`).
      */
     @Test
-    fun theBoardFieldStructsAgreeWithTheRustSource() {
-        assertEquals(
-            listOf(
-                "selfHold" to "u8", "vbatt" to "u8", "buzzer" to "u8", "ledGreen" to "u8",
-                "ledOrange" to "u8", "ledRed" to "u8", "padA" to "u8", "padB" to "u8",
-                "button" to "u8", "imuScl" to "u8", "imuSda" to "u8", "imuModel" to "u8",
-                "motors" to "[MotorFields; store::MOTORS as usize]",
-            ),
-            members(boardLib, "BoardFields"),
-            "board::BoardFields drifted from BoardFields",
-        )
-
-        assertEquals(
-            listOf(
-                "hallA" to "u8", "hallB" to "u8", "hallC" to "u8",
-                "gateHiA" to "u8", "gateHiB" to "u8", "gateHiC" to "u8",
-                "gateLoA" to "u8", "gateLoB" to "u8", "gateLoC" to "u8",
-                "deadTime" to "u8", "direction" to "u8", "alignOffset" to "u8",
-                "currentSense" to "u8", "currentCal" to "u16", "phaseA" to "u8", "phaseB" to "u8",
-            ),
-            members(boardLib, "MotorFields"),
-            "board::MotorFields drifted from MotorFields",
-        )
-        // The absent sentinel both sides spell: the crate's and the registry's, which are one value.
+    fun theAbsentSentinelAndTheMotorCountAgreeWithTheRustSource() {
         val absent = literal("ABSENT", findOne(boardLib, """^pub\s+const\s+ABSENT\s*:\s*u8\s*=\s*([^;]+);""", "ABSENT").groupValues[1], "ABSENT")
         assertEquals(PIN_ABSENT, absent, "board::ABSENT drifted")
+        val field = rust("shared/store/src/field.rs")
         assertEquals(
             PIN_ABSENT,
-            literal("PIN_ABSENT", findOne(rust("shared/store/src/field.rs"), """^pub\s+const\s+PIN_ABSENT\s*:\s*u8\s*=\s*([^;]+);""", "PIN_ABSENT").groupValues[1], "PIN_ABSENT"),
+            literal("PIN_ABSENT", findOne(field, """^pub\s+const\s+PIN_ABSENT\s*:\s*u8\s*=\s*([^;]+);""", "PIN_ABSENT").groupValues[1], "PIN_ABSENT"),
             "store::PIN_ABSENT drifted",
         )
-        // The board crate sizes its per-motor arrays by `store::MOTORS` (checked in the member list
-        // above), so the count is read where it is declared.
         assertEquals(
             BoardFields.MOTORS,
-            literal("MOTORS", findOne(rust("shared/store/src/field.rs"), """^pub\s+const\s+MOTORS\s*:\s*u8\s*=\s*([^;]+);""", "store::MOTORS").groupValues[1], "motor count"),
+            literal("MOTORS", findOne(field, """^pub\s+const\s+MOTORS\s*:\s*u8\s*=\s*([^;]+);""", "store::MOTORS").groupValues[1], "motor count"),
             "the number of motors a field set carries drifted",
-        )
-    }
-
-    /**
-     * [BoardField], against the Rust enum and against `plumbing::field_id`, which is what gives each
-     * variant the registry id a `BOARD_OBS` record names it by.
-     *
-     * An exact ORDERED comparison: a variant the Rust adds fails here rather than leaving the mirror
-     * silently short of a field a refusal can name, and the id mapping is read out of the firmware's
-     * own match rather than copied, so a field repointed at another registry entry fails too.
-     */
-    @Test
-    fun theBoardFieldEnumAgreesWithTheRustSource() {
-        assertEquals(
-            rustVariants(boardLib, "BoardField").map(::camelToScreaming),
-            BoardField.entries.map { it.name },
-            "board::BoardField drifted from BoardField",
-        )
-        val ids = findAll(boardPlumbing, """BoardField::(\w+)\s*=>\s*store::(\w+)\.id\(\)""", "field_id arms")
-            .associate { camelToScreaming(it.groupValues[1]) to it.groupValues[2] }
-        assertEquals(
-            BoardField.entries.map { it.name }.toSet(),
-            ids.keys,
-            "plumbing::field_id names a different field set than BoardField",
-        )
-        for (field in BoardField.entries) {
-            val handle = checkNotNull(ids[field.name])
-            val def = checkNotNull(Fields.ALL[handle] ?: Fields.INDEXED[handle]?.at(0)) {
-                "plumbing::field_id maps ${field.name} to store::$handle, which Fields does not mirror"
-            }
-            assertEquals(def.id, field.def.id, "${field.name} points at the wrong registry field")
-        }
-    }
-
-    /**
-     * [BoardErrorKind], against `board::BoardErrorKind` and the result codes
-     * `plumbing::BoardObs::failure` reports each one as.
-     *
-     * The codes are the verdict a client renders: the whole claim of the mirror is that the refusal
-     * it predicts is the record the board would write, so a code that moves on one side and not the
-     * other makes a client describe a failure as some other failure.
-     */
-    @Test
-    fun theValidatorRefusalsAndObsCodesAgreeWithTheRustSource() {
-        val kinds: Map<String, BoardErrorKind> = listOf(
-            BoardErrorKind.BadEncoding(0x40),
-            BoardErrorKind.IncompleteGroup,
-            BoardErrorKind.DeadTimeBelowFloor,
-            BoardErrorKind.DuplicatePin(Pin.byName("PB3")!!),
-            BoardErrorKind.ReservedPin(Pin.byName("PA2")!!),
-            BoardErrorKind.UnknownPin(Pin.byName("PF15")!!),
-            BoardErrorKind.GateCapableMisused(Pin.byName("PA8")!!),
-            BoardErrorKind.InvalidGateSet,
-            BoardErrorKind.NotAdcCapable(Pin.byName("PC13")!!),
-            BoardErrorKind.NotI2cPair,
-            BoardErrorKind.ImuFrame(3),
-        ).associateBy { checkNotNull(it::class.simpleName) }
-        assertEquals(
-            rustVariants(boardLib, "BoardErrorKind").toSet(),
-            kinds.keys,
-            "board::BoardErrorKind drifted from BoardErrorKind",
-        )
-        val codes = findAll(boardPlumbing, """BoardErrorKind::(\w+)(?:\([^)]*\))?\s*=>\s*\((\d+),""", "BoardObs failure arms")
-            .associate { it.groupValues[1] to it.groupValues[2].toInt() }
-        assertEquals(kinds.keys, codes.keys, "BoardObs::failure covers a different refusal set")
-        for ((name, kind) in kinds) {
-            assertEquals(codes[name], kind.obsResult, "$name's BOARD_OBS result code drifted")
-        }
-        // The success code, which is the other half of the same record.
-        assertEquals(
-            0,
-            literal("OBS_OK", findOne(boardPlumbing, """^pub\s+const\s+OBS_OK\s*:\s*u8\s*=\s*([^;]+);""", "OBS_OK").groupValues[1], "OBS_OK"),
-            "OBS_OK is no longer 0, so a clean verdict no longer reads as clean",
         )
     }
 
@@ -2258,301 +2116,82 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The ORDER `validate` takes its fields in, which decides which of several planted mistakes a
-     * client reports (first failure wins, in field order).
-     *
-     * The Rust order is read from its own call sites, in all three shapes it uses: the power latch,
-     * which is taken on its own and first because taking it is what reserves its pin; the remaining
-     * single-pin fields, which the Rust takes through a loop over a table of
-     * `(fields.field, BoardField::Variant)` rows; and each motor's hall, gate and phase arrays,
-     * through a loop over tuples of `(mf.field, BoardField::Variant)`. The Kotlin order is then
-     * MEASURED rather than restated: a bad encoding is planted in every pin field at once, the
-     * refused field must be the first in order, and that field is then set absent and the probe
-     * repeated, which walks the whole set.
+     * [BoardStatus], against the record in `motorcontroller/board/src/status.rs`: the reasons by
+     * name and code as an exact set both ways (a reason the firmware adds or renumbers fails here
+     * before the app words an entry wrongly), and the entry size and cap the decode reads by.
      */
     @Test
-    fun theValidatorTakesItsFieldsInTheRustsOrder() {
-        // ONE selector for every shape the Rust takes a single-pin field in, in source order, which
-        // is the order the validator runs them in. Censused on `fields.<name>,` alone, with no
-        // bracket, so a row wrapped across lines is still censused; a row in a shape the selector
-        // does not reach fails by name instead of shortening the Rust order silently and agreeing
-        // with a Layout that never carried it. Four shapes, three of them takes:
-        //
-        //  - the power latch's own `take(..)` call;
-        //  - a table row reading its field directly;
-        //  - a table row reading a `<field>_raw` local, which is how a field gated by another
-        //    field reaches the pass (the two IMU pins, handed in as ABSENT when `imu.model` is 0);
-        //  - the gate that produces those locals, `(fields.imu_scl, fields.imu_sda)`, which the
-        //    census sees and which is NOT a take. It is read here and dropped, rather than being
-        //    cut out of the census: the census stays as wide as it is and no take can hide behind
-        //    a shape nothing looks at.
-        val singles = findAllClaiming(
-            boardLib,
-            """take\(\s*fields\.(\w+)\s*,\s*single\(BoardField::(\w+)\)""" +
-                """|^\s+\(\s*fields\.(\w+)\s*,\s*BoardField::(\w+)\s*\)\s*,""" +
-                """|^\s+\(\s*(\w+)_raw\s*,\s*BoardField::(\w+)\s*\)\s*,""" +
-                """|\(\s*fields\.\w+\s*,\s*fields\.\w+\s*\)""",
-            FIELD_TAKE_LINE,
-            "the validator's single-pin takes",
-        ).mapNotNull { m ->
-            val g = m.groupValues
-            when {
-                g[1].isNotEmpty() -> g[1] to g[2]
-                g[3].isNotEmpty() -> g[3] to g[4]
-                g[5].isNotEmpty() -> g[5] to g[6]
-                else -> null // the inert-pin substitution, read and not a take
-            }
-        }
-        val perMotor = findAllClaiming(
-            boardLib,
-            """\(\s*mf\.(\w+)\s*,\s*BoardField::(\w+)\s*\)""",
-            MOTOR_TAKE_LINE,
-            "per-motor field tuples",
-        ).map { it.groupValues[1] to it.groupValues[2] }
-        for ((snake, variant) in singles + perMotor) {
-            assertEquals(
-                snake.uppercase(),
-                camelToScreaming(variant),
-                "the Rust pairs $snake with BoardField::$variant, which name different fields",
+    fun theStatusRecordAgreesWithTheRustSource() {
+        assertEquals(
+            discriminants(boardStatus, "Reason").mapKeys { (name, _) -> camelToScreaming(name) },
+            BoardStatus.Reason.entries.associate { it.name to it.code },
+            "status::Reason drifted from BoardStatus.Reason",
+        )
+        fun usize(name: String): Int = literal(
+            name,
+            findOne(boardStatus, """^pub\s+const\s+$name\s*:\s*usize\s*=\s*([^;]+);""", "status::$name").groupValues[1],
+            "status record constant",
+        )
+        assertEquals(usize("MAX_ENTRIES"), BoardStatus.MAX_ENTRIES, "status::MAX_ENTRIES drifted")
+        assertEquals(usize("ENTRY_LEN"), BoardStatus.ENTRY_LEN, "status::ENTRY_LEN drifted")
+    }
+
+    /**
+     * [BoardStatus.NAMES], against the store's name table (`store::NAMES` in
+     * `shared/store/src/field.rs`), which is what the CLI prints a status entry through: each row's
+     * path and index kind, looked up by the Rust handle whose id the Kotlin row is keyed by. A row
+     * the Rust renames or re-indexes fails here.
+     */
+    @Test
+    fun theStatusNamesAgreeWithTheStoreNameTable() {
+        val field = rust("shared/store/src/field.rs")
+        val start = field.indexOf("pub static NAMES: &[FieldName] = &[")
+        check(start >= 0) { "No `pub static NAMES: &[FieldName] = &[` in shared/store/src/field.rs" }
+        val table = field.substring(start, field.indexOf("\n    ];", start))
+        val handles = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
+        for ((id, name) in BoardStatus.NAMES) {
+            val handle = handles.entries.singleOrNull { it.value == id }?.key
+            checkNotNull(handle) { "BoardStatus.NAMES names id 0x%02X, which Fields does not mirror".format(id) }
+            val row = findOne(
+                table,
+                """FieldName::(\w+)\(\s*$handle\s*,(?:\s*\d+\s*,)?\s*"([^"]+)"""",
+                "the NAMES row of $handle",
             )
-        }
-        val expected = singles.map { BoardField.valueOf(camelToScreaming(it.second)) to null } +
-            (0 until BoardFields.MOTORS).flatMap { m ->
-                perMotor.map { (_, variant) -> BoardField.valueOf(camelToScreaming(variant)) to m }
+            val kind = when (row.groupValues[1]) {
+                "single" -> BoardStatus.IndexKind.SINGLE
+                "motor" -> BoardStatus.IndexKind.MOTOR
+                "family", "array" -> BoardStatus.IndexKind.ARRAY
+                else -> error("$handle's NAMES row is a `${row.groupValues[1]}` row, which no status entry names")
             }
-        assertEquals(
-            Layout.SLOTS.count { it.isPin },
-            expected.size,
-            "the Rust takes a different number of pin fields than the layout carries",
-        )
-
-        // Every pin field planted with a byte the encoding does not define (port E), and the IMU
-        // group ENABLED, because `imu.model` 0 makes its two pins inert and a pin that claims
-        // nothing can hold no planted mistake to be named for (`specs/board-model.md`, check 2).
-        // The model is turned off again the moment both of those pins are drained, since from
-        // there an enabled group with no pins is an `IncompleteGroup` refusal and the walk is
-        // measuring the order of a BadEncoding one.
-        var fields = Layout.SLOTS.filter { it.isPin }
-            .fold(BoardFields(imuModel = Fields.ImuModel.CLONE_2E)) { acc, slot -> slot.on(acc, 0x40) }
-        val measured = mutableListOf<Pair<BoardField, Int?>>()
-        repeat(expected.size) {
-            val err = checkNotNull(validate(fields, ChipFamily.F103C8, reservedSet(ChipFamily.F103C8, 0)).error) {
-                "expected a refusal with ${expected.size - measured.size} bad pins still planted"
-            }
-            assertEquals(BoardErrorKind.BadEncoding(0x40), err.kind, "at step ${measured.size}")
-            measured += err.field.field to err.field.motor
-            fields = checkNotNull(Layout.forField(err.field)).on(fields, PIN_ABSENT)
-            if (err.field.field == BoardField.IMU_SDA) fields = fields.copy(imuModel = 0)
+            assertEquals(BoardStatus.Name(row.groupValues[2], kind), name, "the NAMES row of $handle drifted")
         }
-        assertEquals(expected, measured, "the validator's field order drifted from the Rust's")
-        assertNull(
-            validate(fields, ChipFamily.F103C8, reservedSet(ChipFamily.F103C8, 0)).error,
-            "with every pin absent the layout is a valid empty one",
-        )
     }
 
     /**
-     * The layout's field set against `plumbing::read_fields`, the function that assembles the same
-     * struct from the same registered fields at boot.
-     *
-     * Compared as a set of (registry handle, per-motor) pairs: a field added to the firmware's read
-     * is a field the board validates, so a client that does not read it predicts from a layout that
-     * is not the board's.
+     * Every single-bit `EV_*` level against the `CyclicState.EV_*` mirror, as an exact set by name
+     * and value. The Rust is enumerated, so a bit the firmware adds to the `fault` word (bit 12,
+     * `EV_CONFIG` in `motorcontroller/orchestrator/src/events.rs`, was one) fails here until the
+     * Kotlin carries it. A composite mask (`EV_MOTOR_BITS`) is left out by its value, not its name.
      */
     @Test
-    fun theLayoutIsTheFieldSetTheFirmwareReads() {
-        val from = boardPlumbing.indexOf("pub fn read_fields")
-        check(from >= 0) { "No `pub fn read_fields` in motorcontroller/board/src/plumbing.rs" }
-        val to = boardPlumbing.indexOf("/// One safe-USART allowlist entry", from)
-        check(to > from) {
-            "The doc comment that bounds `read_fields` (\"One safe-USART allowlist entry\") moved or " +
-                "was reworded, so this gate cannot tell where the function ends"
-        }
-        val readFields = boardPlumbing.substring(from, to)
-        // Censused on `store::`, so a read written in a third shape fails by name rather than
-        // leaving the firmware's field set one short of what it really reads.
-        val rust = findAllClaiming(
-            readFields,
-            """store::(\w+)\.at\(m\)|get\(store::(\w+)\)""",
-            STORE_READ_LINE,
-            "the registered fields read_fields reads",
-        ).map { m ->
-            if (m.groupValues[1].isNotEmpty()) m.groupValues[1] to true else m.groupValues[2] to false
-        }.toSet()
-        val handleOf = Fields.ALL.entries.associate { (name, def) -> def.id to name }
-        val kotlin = Layout.SLOTS.map { slot ->
-            checkNotNull(handleOf[slot.def.id]) { "${slot.key} has no Fields entry" } to (slot.motor != null)
-        }.toSet()
-        assertEquals(rust, kotlin, "Layout.SLOTS is not the field set plumbing::read_fields reads")
-        assertEquals(
-            Layout.SLOTS.size,
-            Layout.SLOTS.map { it.key }.distinct().size,
-            "two layout slots name the same key",
+    fun theFaultWordBitsAgreeWithTheRustSource() {
+        val rust = rustLevelMasks().filter { (name, v) -> name.startsWith("EV_") && Integer.bitCount(v) == 1 }
+        val kotlin = mapOf(
+            "EV_COMMS_LOSS" to CyclicState.EV_COMMS_LOSS,
+            "EV_STOP_ALL" to CyclicState.EV_STOP_ALL,
+            "EV_IMU_LOSS" to CyclicState.EV_IMU_LOSS,
+            "EV_LATCH_A" to CyclicState.EV_LATCH_A,
+            "EV_LATCH_B" to CyclicState.EV_LATCH_B,
+            "EV_MODE_FAULT" to CyclicState.EV_MODE_FAULT,
+            "EV_POWER_REQUEST" to CyclicState.EV_POWER_REQUEST,
+            "EV_MOTOR_HALL" to CyclicState.EV_MOTOR_HALL,
+            "EV_MOTOR_CAL" to CyclicState.EV_MOTOR_CAL,
+            "EV_MOTOR_PERIOD" to CyclicState.EV_MOTOR_PERIOD,
+            "EV_MOTOR_ARM" to CyclicState.EV_MOTOR_ARM,
+            "EV_CONFIG" to CyclicState.EV_CONFIG,
         )
-    }
-
-    /**
-     * The capability tables, against `MockChip` in `motorcontroller/board/src/tests.rs`.
-     *
-     * Two things are pinned, and the second is the one that matters. The gate maps and the chip set
-     * are values, compared directly. The five query bodies are pinned as the Rust they are written
-     * in, normalised for whitespace with comments dropped, because the Kotlin mirrors a RULE rather
-     * than a number: the F130's PF6/PF7 bonding has already been corrected once in that table, and
-     * such a correction has to reach this mirror or the verdict is wrong on that part.
-     *
-     * What this does NOT pin is that `MockChip` equals the real silicon answers. That is the
-     * `rcap_agreement` module's job, against runtime-hal, in the cargo jobs; this mirror's chain of
-     * trust runs through it ([ChipFamily]).
-     */
-    @Test
-    fun theCapabilityTablesAgreeWithTheRustMockTables() {
-        fun gates(name: String): List<Int> =
-            findOne(boardTests, """const $name\s*:\s*\[u8;\s*3\]\s*=\s*\[([^\]]+)\];""", name)
-                .groupValues[1].split(",").map { literal(name, it.trim(), "gate pin") }
-        assertEquals(gates("GATES_T0_HI"), ChipFamily.GATES_T0_HI, "the TIMER0 high-side map drifted")
-        assertEquals(gates("GATES_T0_LO"), ChipFamily.GATES_T0_LO, "the TIMER0 low-side map drifted")
-        assertEquals(gates("GATES_T8_HI"), ChipFamily.GATES_T8_HI, "the TIM8 high-side map drifted")
-        assertEquals(gates("GATES_T8_LO"), ChipFamily.GATES_T8_LO, "the TIM8 low-side map drifted")
-
-        assertEquals(
-            rustVariants(boardTests, "MockChip"),
-            ChipFamily.entries.map { it.name },
-            "the fleet's modelled parts drifted",
-        )
-
-        // The five queries are pinned BY NAME below, which says nothing about a sixth. A capability
-        // the firmware starts asking the HAL about is one this mirror answers by not modelling it
-        // at all: the body pins stay green, the chip tables stay green, and a client predicts a
-        // verdict the board reaches by a rule the client has never heard of. So the trait that
-        // declares the queries is enumerated, and the pinned list has to be the whole of it.
-        assertEquals(
-            setOf("pin_exists", "gate_capable", "gate_set", "adc_channel", "i2c_pair"),
-            capabilityQueries(boardLib),
-            "board::Capabilities declares a different query set than this mirror models: a new " +
-                "capability changes which layouts the board accepts, so ChipFamily answers it or " +
-                "this gate says why it does not have to",
-        )
-
-        val impl = boardTests.substring(
-            boardTests.indexOf("impl Capabilities for MockChip {"),
-            boardTests.indexOf("\n}", boardTests.indexOf("impl Capabilities for MockChip {")),
-        )
-        fun query(signature: String) = rustBody(impl, signature, "\n    }")
-        assertEquals(
-            "let (port, n) = (pin.port(), pin.pin()); match self { " +
-                "MockChip::F103C8 => match port { 0 | 1 => true, 2 => n >= 13, 3 => n <= 1, _ => false, }, " +
-                "MockChip::F130C8 => match port { 0 | 1 => true, 2 => n >= 13, 5 => matches!(n, 0 | 1 | 6 | 7), _ => false, }, " +
-                "MockChip::F103RC => match port { 0..=2 => true, 3 => n <= 2, _ => false, }, }",
-            query("fn pin_exists("),
-            "the modelled pin bonding changed: review ChipFamily.pinExists",
-        )
-        assertEquals(
-            "let b = pin.packed(); let t0 = GATES_T0_HI.contains(&b) || GATES_T0_LO.contains(&b); match self { " +
-                "MockChip::F103C8 | MockChip::F130C8 => t0, " +
-                "MockChip::F103RC => t0 || GATES_T8_HI.contains(&b) || GATES_T8_LO.contains(&b), }",
-            query("fn gate_capable("),
-            "the gate-capable denylist changed: review ChipFamily.gateCapable",
-        )
-        assertEquals(
-            "if Self::set_matches(hi, lo, GATES_T0_HI, GATES_T0_LO) { return Some(0); } " +
-                "if matches!(self, MockChip::F103RC) && Self::set_matches(hi, lo, GATES_T8_HI, GATES_T8_LO) { return Some(1); } None",
-            query("fn gate_set("),
-            "the gate-set derivation changed: review ChipFamily.gateSet",
-        )
-        assertEquals(
-            "match (pin.port(), pin.pin()) { (0, n) if n <= 7 => Some(n), (1, n) if n <= 1 => Some(8 + n), " +
-                "(2, n) if n <= 5 && self.pin_exists(pin) => Some(10 + n), _ => None, }",
-            query("fn adc_channel("),
-            "the analog map changed: review ChipFamily.adcChannel",
-        )
-        assertEquals(
-            "let _ = self; match (scl.packed(), sda.packed()) { (0x16, 0x17) => Some(0), (0x1A, 0x1B) => Some(1), _ => None, }",
-            query("fn i2c_pair("),
-            "the I2C pair derivation changed: review ChipFamily.i2cPair",
-        )
-    }
-
-    /**
-     * The reserved set: the allowlist the firmware compiles, the SWD pins, the freeing rule, and
-     * that the inter-board link routes on every part.
-     *
-     * This is the mechanism that makes a layout which steals a link port impossible to EXPRESS, so a
-     * mirror that reserved a different set would let a client stage exactly the layout the board
-     * refuses. The allowlist entries come out of `SAFE_LINK_USARTS` and its `net` slot constants; the
-     * rule comes out of `claims_pins` verbatim; and the routability, which the firmware asks the HAL
-     * rather than writing down, comes out of the assertion
-     * `the_inter_board_link_routes_on_each_fleet_part` in `motorcontroller/board/src/tests.rs` makes against
-     * it.
-     */
-    @Test
-    fun theReservedSetRuleAgreesWithTheRustSource() {
-        val main = rust("motorcontroller/firmware/src/main.rs")
-        val slots = findAll(main, """^\s+const (PORT_IDX_\w+)\s*:\s*u8\s*=\s*([^;]+);""", "net port slots")
-            .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "net slot") }
-        assertEquals(slots["PORT_IDX_UART"], NET_PORT_UART, "the inter-board link's net slot drifted")
-
-        // The array's own declared length against the number of entries read: the one census that
-        // reaches inside a struct literal, where a line-based one cannot (a member reordered or
-        // added in the literal drops the whole entry out of this pattern).
-        val declared = literal(
-            "SAFE_LINK_USARTS",
-            findOne(main, """const SAFE_LINK_USARTS\s*:\s*\[SafeLinkUsart;\s*(\d+)\]""", "SAFE_LINK_USARTS length")
-                .groupValues[1],
-            "allowlist length",
-        )
-        val entries = findAll(
-            main,
-            """SafeLinkUsart\s*\{\s*link_set_bit:\s*([\w:]+),\s*pins:\s*\[([^\]]+)\]""",
-            "allowlist entries",
-        ).map { m ->
-            fun slot(v: String) = slots[v] ?: literal("link_set_bit", v, "allowlist bit")
-            slot(m.groupValues[1]) to m.groupValues[2].split(",").map { literal("pins", it.trim(), "allowlist pin") }
-        }
-        assertEquals(
-            declared,
-            entries.size,
-            "SAFE_LINK_USARTS declares $declared entries but this gate read ${entries.size} of them: " +
-                "one is written in a shape the selector does not reach, so the mirrored allowlist is " +
-                "being compared against part of the firmware's",
-        )
-        for (chip in ChipFamily.entries) {
-            assertEquals(
-                entries,
-                allowlistFor(chip).map { it.linkSetBit to it.pins },
-                "$chip: the mirrored allowlist drifted from SAFE_LINK_USARTS",
-            )
-        }
-        assertEquals(
-            findOne(boardPlumbing, """pub const SWD_PINS\s*:\s*\[u8;\s*2\]\s*=\s*\[([^\]]+)\];""", "SWD_PINS")
-                .groupValues[1].split(",").map { literal("SWD_PINS", it.trim(), "SWD pin") },
-            SWD_PINS,
-            "the SWD pins drifted",
-        )
-        assertEquals(
-            "port.routable && (link_set == 0 || (link_set & (1 << port.link_set_bit)) != 0)",
-            rustBody(boardPlumbing, "fn claims_pins(", "\n}"),
-            "the LINK_SET freeing rule changed: review claimsPins",
-        )
-        val reservedBody = rustBody(boardPlumbing, "pub fn reserved_set(", "\n}")
-        assertTrue(
-            reservedBody.contains("for p in SWD_PINS") && reservedBody.contains("if claims_pins(port, link_set)"),
-            "reserved_set is no longer SWD plus the claiming ports' pins: review reservedSet. Got: $reservedBody",
-        )
-
-        // The inter-board link routes on every part, as the agreement suite asserts it against
-        // runtime-hal's own pin model: PA2/PA3 (the allowlist's one entry) to USART1.
-        val agreement = rustBody(boardTests, "fn the_inter_board_link_routes_on_each_fleet_part(", "\n    }\n")
-        assertTrue(
-            agreement.contains("pincap::usart_pins(&chip, 0x02, 0x03)") &&
-                agreement.contains("PeriphLabel::Usart1") &&
-                agreement.contains("supports_rx"),
-            "the routability agreement no longer asserts PA2/PA3 -> USART1 on every part: review " +
-                "allowlistFor. Got: $agreement",
-        )
-        assertEquals(listOf(listOf(0x02, 0x03)), entries.map { it.second }, "the allowlist is no longer PA2/PA3 alone")
-        for (chip in ChipFamily.entries) {
-            assertTrue(allowlistFor(chip).all { it.routable }, "$chip: the inter-board link must route")
-        }
+        assertEquals(rust, kotlin, "the fault word's bits drifted from events.rs")
+        assertEquals(0, CyclicState.EV_CONFIG and CyclicState.ARM_BLOCKING_BITS, "EV_CONFIG blocks nothing")
     }
 
     private companion object {
@@ -2604,21 +2243,6 @@ class RustSourceDriftTest {
         const val OPCODE_DECL_LINE = """^\s*pub\b.*\bOP_\w+\s*:"""
 
         /**
-         * A single-pin take in the validator: any mention of a staged field as an argument, with no
-         * claim about the brackets around it, so a row wrapped across lines is still censused.
-         */
-        const val FIELD_TAKE_LINE = """\bfields\.\w+\s*,"""
-
-        /**
-         * A per-motor take. Unlike [FIELD_TAKE_LINE] this one keeps the opening bracket, because
-         * `mf.<field>` is also how the motor plan's own rows are built (`dead_time: mf.dead_time,`)
-         * and a census without it would demand those be read as takes. The cost is that a per-motor
-         * tuple wrapped across lines falls outside the census; what covers that is the count check
-         * below, against the number of pin slots the layout carries.
-         */
-        const val MOTOR_TAKE_LINE = """\(\s*mf\.\w+\s*,"""
-
-        /**
          * A row of a `field_ids!` block: a line that does not open with a comment, OR any line
          * carrying a hex literal and a comma anywhere in it. The block holds nothing but rows and
          * comments, so this is the strictest census in the file and the right one: the registry is
@@ -2637,9 +2261,6 @@ class RustSourceDriftTest {
          * do not add up.
          */
         const val REGISTRY_ROW_LINE = """^\s*[^/\s]|\w+\s*,"""
-
-        /** A registered-field read: any mention of a `store::` handle. */
-        const val STORE_READ_LINE = """store::\w+"""
 
         /**
          * A payload bit constant: a public declaration inside the impl whose type is `u8` and which
@@ -2674,12 +2295,6 @@ class RustSourceDriftTest {
 
         /** The payload types whose impl blocks carry the wire bits; see [rustPayloadBits]. */
         val PAYLOADS = listOf("CyclicState", "CyclicObs", "DriveCmd", "Inputs")
-
-        /**
-         * A method of the `Capabilities` trait: any `fn` inside its block, defaulted or not, with
-         * no claim about the signature after the name.
-         */
-        const val CAPABILITY_QUERY = """^\s+fn\s+(\w+)\s*\("""
 
         /** A module-level public constant, by name; see [moduleConstNames]. */
         const val MODULE_CONST = """^pub(?:\([^)]*\))?\s+const\s+(\w+)\s*:"""

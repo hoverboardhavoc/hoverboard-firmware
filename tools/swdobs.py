@@ -68,8 +68,8 @@ W_BATTERY = 32
 W_ARM_REFUSALS = 33     # ReReadValues refusals | ConfirmPeriodsLive << 8 | frame cause << 16
 W_MAILBOX_DROPS = 34    # SWD mailbox port: L2 frames dropped because the outbound ring had no room
 #                         (or no bridge was attached); read it against the mailbox `epoch`
-W_TX_TIMEOUTS = 35      # the inter-board port's ABANDONED writes in the low half (the high half was
-#                         the CC2541 port's and is zero): a write whose transmit flag did not come up
+W_TX_TIMEOUTS = 35      # the inter-board links' ABANDONED writes, link 0 in the low half and link 1 in
+#                         the high half: a write whose transmit flag did not come up
 #                         inside runtime_hal::serial's write budget, so the frame was dropped instead
 #                         of the main thread spinning on it. Expected ZERO.
 W_CYCLIC_AGE_PEAK = 36  # the LARGEST value the peer cyclic age (word 7) has reached since boot,
@@ -141,8 +141,8 @@ MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
 # The cause byte mirrors motorcontroller/firmware/src/main.rs `imu_frame_cause_byte`: bit 7 = a cause is
 # present (the accel refusal encodes field and index both as 0, so the flag is what tells it from
 # "no frame refusal"), bit 2 = the refusal names IMU_AXIS_ROLE rather than IMU_AXIS_SIGN, bits 0..1 =
-# the refused triple's first IMU_AXIS_SIGN index, 0 = accel and 3 = gyro, exactly as BOARD_OBS's
-# `detail` carries it.
+# the refused triple's first IMU_AXIS_SIGN index, 0 = accel and 3 = gyro, exactly as the boot status
+# record's IMU-frame entry carries it in its detail byte (`board.status`, BOARD_OBS).
 # --------------------------------------------------------------------------------------------------
 CAUSE_PRESENT = 0x80
 CAUSE_NAMES_ROLE = 0x04

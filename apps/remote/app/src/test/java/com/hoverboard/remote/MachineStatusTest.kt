@@ -19,6 +19,8 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.board.BoardStatus
+import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
@@ -34,6 +36,7 @@ import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.ui.screens.MachineStatusSection
 import com.hoverboard.remote.ui.screens.statusBoardTag
+import com.hoverboard.remote.ui.screens.statusEntryTag
 import com.hoverboard.remote.ui.screens.RIGID_NOT_LEADING_TAG
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
@@ -485,6 +488,96 @@ class MachineStatusTest {
         showState(pair(DriveInForce.NONE).copy(machine = pivoting))
         compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertDoesNotExist()
     }
+
+    // --- board.status: what each board's boot could not bring up ------------------------------
+
+    /**
+     * Each `board.status` entry is one warning line under its own board, named the way
+     * `hoverboard-cli status` names it (`specs/configured-links.md` section 5).
+     */
+    @Test
+    fun eachStatusEntryIsALineUnderItsBoard() {
+        val entries = listOf(
+            entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED, 0x16),
+            entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.DEAD_TIME, 10),
+        )
+        showState(pair(DriveInForce.NONE).copy(boardStatus = mapOf(0x01 to emptyList(), 0x02 to entries)))
+
+        val link = line(
+            context.getString(R.string.status_fn_link, 1),
+            context.getString(R.string.status_reason_link_not_routed, "PB6"),
+        )
+        val gate = line(
+            context.getString(R.string.status_fn_gate, 0),
+            context.getString(R.string.status_reason_dead_time, 10, DEAD_TIME_MIN_DTG),
+        )
+        assertEquals("link[1]: no USART routes this pair on this chip (PB6)", link)
+        assertEquals("motors[0] gate: dead time 10 is below the floor of 18", gate)
+        compose.onNodeWithText(link).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(gate).performScrollTo().assertIsDisplayed()
+        val right = compose.onNodeWithTag(statusBoardTag(0x02)).fetchSemanticsNode().boundsInRoot
+        val first = compose.onNodeWithTag(statusEntryTag(0x02, 0)).fetchSemanticsNode().boundsInRoot
+        assertTrue("under the second board's row", first.top > right.top)
+        compose.onNodeWithTag(statusEntryTag(0x01, 0)).assertDoesNotExist()
+    }
+
+    /** Every reason has its words, and the function is named by its field. */
+    @Test
+    fun everyReasonIsWorded() {
+        val entries = listOf(
+            entry(Fields.BOARD_BATTERY_PIN.id, 0, BoardStatus.Reason.NOT_A_PIN, 0x40),
+            entry(Fields.MOTOR_HALL_A.id, 0, BoardStatus.Reason.INCOMPLETE, Fields.MOTOR_HALL_C.id),
+            entry(Fields.MOTOR_PHASE_A.id, 0, BoardStatus.Reason.NOT_ROUTED, 0x2D),
+            entry(Fields.LED_GREEN.id, 0, BoardStatus.Reason.SWD_PIN, 0x0D),
+            entry(Fields.IMU_SCL_PIN.id, 0, BoardStatus.Reason.NOT_UP, 0),
+            entry(Fields.LINK_TX.id, 0, BoardStatus.Reason.NOT_UP, 7),
+            entry(Fields.IMU_AXIS_SIGN.id, 0, BoardStatus.Reason.IMU_FRAME, 3),
+            BoardStatus.Entry(0x99, 2, 9, 1),
+        )
+        showState(pair(DriveInForce.NONE).copy(boardStatus = mapOf(0x01 to entries)))
+
+        for (text in listOf(
+            "battery sense: stored byte 0x40 is not a pin",
+            "motors[0] hall: incomplete: hall.c is not set",
+            "motors[0] current sense: the chip does not route PC13",
+            "led.green: PA13 is an SWD pin",
+            "IMU: did not answer its probe",
+            "link[0]: did not come up (HAL error 7)",
+            "IMU: the IMU frame is not a rotation (axis_sign from index 3)",
+            "field 0x99[2]: reason 9, detail 1",
+        )) {
+            compose.onNodeWithText(text).performScrollTo().assertIsDisplayed()
+        }
+    }
+
+    /**
+     * A board whose live word carries CONFIG and whose list says nothing (unread, or read before a
+     * restart) says so in one line; a board with an empty list and no bit says nothing extra.
+     */
+    @Test
+    fun theConfigBitWithNoListSaysTheListIsNotRead() {
+        val unread = context.getString(R.string.status_config_unread)
+        showState(
+            pair(DriveInForce.NONE).copy(
+                telemetryByBoard = mapOf(
+                    0x01 to TelemetryUi().merge(cyclic()),
+                    0x02 to TelemetryUi().merge(cyclic(fault = CyclicState.EV_CONFIG)),
+                ),
+                boardStatus = mapOf(0x01 to emptyList()),
+            ),
+        )
+        compose.onAllNodesWithText(unread).assertCountEquals(1)
+        // CONFIG is not a fault cause: the row's word is not FAULT for it.
+        val fault = context.getString(R.string.board_chip, PEER, context.getString(R.string.board_state_fault))
+        compose.onNodeWithText(fault).assertDoesNotExist()
+        compose.onNodeWithTag(statusBoardTag(0x02)).assertExists()
+    }
+
+    private fun entry(field: Int, index: Int, reason: BoardStatus.Reason, detail: Int) =
+        BoardStatus.Entry(field, index, reason.code, detail)
+
+    private fun line(function: String, reason: String) =
+        context.getString(R.string.status_config_line, function, reason)
 
     /** Every state a board can report has a word on its row. */
     @Test

@@ -54,16 +54,14 @@ fun layoutDialogTag(key: Key): String = "layout_dialog_${key.fieldId}_${key.inde
 fun layoutOptionTag(key: Key, value: Int): String = "layout_option_${key.fieldId}_${key.index}_$value"
 
 /**
- * The pin picker: only the pins that are free and capability-eligible for this function, so an
- * invalid layout is hard to express rather than merely refused. It needs the part, because
- * eligibility is a fact about silicon.
+ * The pin picker: the pins this part bonds that no other field holds, less SWD
+ * ([candidatePins]). It needs the part, because which pins exist is a fact about silicon.
  */
 @Composable
 internal fun PinDialog(row: LayoutRow, state: LayoutState, onClose: () -> Unit, actions: LayoutActions) {
     val part = state.part ?: return
     val staged = state.staged ?: return
-    val reserved = state.reserved ?: return
-    val candidates = candidatePins(row.slot, staged, part, reserved)
+    val candidates = candidatePins(row.slot, staged, part)
     OptionDialog(row, onClose) {
         Option(layoutOptionTag(row.slot.key, PIN_ABSENT), stringResource(R.string.layout_unset)) {
             actions.stage(row.slot, PIN_ABSENT)

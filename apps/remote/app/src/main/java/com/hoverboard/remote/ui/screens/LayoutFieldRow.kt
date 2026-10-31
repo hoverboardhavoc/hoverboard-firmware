@@ -53,8 +53,8 @@ private data class LayoutTab(val group: LayoutGroup, val motor: Int? = null)
  * bus, and one per motor. Material Design 3 secondary tabs, which is the sub-sections-of-one-screen
  * case; one page of every field buries the motor behind the LEDs.
  *
- * A motor past the first gets a tab exactly when it holds a pin, which is the all-or-none rule the
- * validator enforces asked as a question ([LayoutState.motorHoldsAPin]). A bare 12-FET board being
+ * A motor past the first gets a tab exactly when it holds a pin, since a motor's groups are
+ * all-or-none ([LayoutState.motorHoldsAPin]). A bare 12-FET board being
  * configured from scratch holds none and never would, so [LAYOUT_ADD_MOTOR_TAG] is the only way
  * that tab can first appear.
  */
@@ -128,11 +128,9 @@ internal fun FieldRow(row: LayoutRow, state: LayoutState, editable: Boolean, act
 /**
  * The row's one control, and the dialog behind it.
  *
- * Nothing can be edited without the part: which pins are free and eligible is a fact about silicon,
- * and a value staged against no part could never be judged. The row SAYS so, in place of its
- * control: a row that renders no affordance and no reason is how the first build looked broken
- * (`specs/remote-ui.md` section 3.5a). The power latch is the exception, because it is never
- * editable and carries its own standing note.
+ * No pin can be picked without the part: which pins exist is a fact about silicon. A pin row SAYS
+ * so, in place of its control: a row that renders no affordance and no reason is how the first
+ * build looked broken (`specs/remote-ui.md` section 3.5a). The other rows do not need the part.
  */
 @Composable
 private fun Editor(
@@ -143,14 +141,14 @@ private fun Editor(
     actions: LayoutActions,
 ) {
     var open by rememberSaveable(key = "open_${row.slot.key}") { mutableStateOf(false) }
-    if (row.editor != LayoutEditor.ReadOnly && state.part == null) {
+    if (row.editor == LayoutEditor.Pin && state.part == null) {
         Caption(R.string.layout_row_part_unknown)
         return
     }
     when (val editor = row.editor) {
         LayoutEditor.ReadOnly -> Unit
         LayoutEditor.Pin -> {
-            Change(row, editable && state.reserved != null) { open = true }
+            Change(row, editable) { open = true }
             if (open) PinDialog(row, state, { open = false }, actions)
         }
         is LayoutEditor.Choices -> {

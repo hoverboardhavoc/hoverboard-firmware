@@ -17,6 +17,7 @@ use state::Mode;
 const TEST_IDENTITY: BoardIdentity = BoardIdentity {
     boot_tag: 0x2A,
     chip: ChipTag::F103C8,
+    config_fault: false,
 };
 
 fn fresh() -> OrchestratorState {
@@ -3227,6 +3228,41 @@ fn the_cyclic_fault_byte_is_this_passes_level_mask() {
 /// `FAULT_A_BITS` is exactly the group `Levels::fault_a` folds, producer by producer: each bit
 /// asserted alone is a Fault A if and only if the constant carries it, so the aggregate the mode
 /// machine consumes and the mask a peer applies to `CYCLIC_STATE.fault` cannot disagree.
+/// **`EV_CONFIG` is on the wire exactly when the boot status record has an entry**
+/// (`specs/configured-links.md` section 5), for the whole run, and gates nothing: a board whose
+/// configuration did not all come up still arms.
+#[test]
+fn ev_config_follows_the_boot_status_and_gates_nothing() {
+    for config_fault in [false, true] {
+        let mut s = OrchestratorState::new(
+            0,
+            0,
+            0,
+            false,
+            false,
+            attitude::Config::default(),
+            sf_start(),
+            None,
+            store::CONTROL_POS_CLAMP.default(),
+            control::DriveTurn::default(),
+            store::CONTROL_RIDER_REQUIRED.default(),
+            store::BOARD_BATTERY_FLOOR.default(),
+            BoardIdentity {
+                config_fault,
+                ..TEST_IDENTITY
+            },
+        );
+        for _ in 0..3 {
+            run_ticks(&mut s, 2);
+            let c = cyclic_tx(&s, true).expect("emits");
+            assert_eq!(c.fault & EV_CONFIG != 0, config_fault);
+            assert_eq!(c.fault & FAULT_A_BITS, 0, "not a fault");
+        }
+    }
+    assert_eq!(EV_CONFIG, 1 << 12);
+    assert_eq!(EV_CONFIG & FAULT_A_BITS, 0);
+}
+
 #[test]
 fn fault_a_bits_is_exactly_the_fault_a_group() {
     assert_eq!(
@@ -3250,9 +3286,10 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
             peer_down: false,
             // `EV_STOP_ALL`'s one producer (`specs/control.md` (l)).
             tilt: ev == EV_STOP_ALL,
+            config: ev == EV_CONFIG,
         };
-        // Bit 3 and bits 12..15 have no producer: nothing can set them.
-        let producer = bit != 3 && bit < 12;
+        // Bit 3 and bits 13..15 have no producer: nothing can set them.
+        let producer = bit != 3 && bit < 13;
         let want = if producer { ev } else { 0 };
         assert_eq!(levels.mask(), want, "bit {bit}: one producer, one bit");
         assert_eq!(levels.own_mask(), want, "and the wire word says the same");

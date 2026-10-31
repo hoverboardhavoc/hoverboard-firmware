@@ -282,6 +282,7 @@ class SetupRiderWaiverTest {
                     board to Fields.MOTOR_CURRENT_CAL.key(),
                     board to Fields.MOTOR_POLE_PAIRS.key(),
                     board to Fields.WHEEL_DIAMETER_MM.key(),
+                    board to Fields.BOARD_STATUS.key(),
                 ),
             rig.transport.reads.drop(readsBefore),
             "the ride facts were skipped",

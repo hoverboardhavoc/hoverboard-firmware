@@ -307,9 +307,6 @@ dependencies = [
 [[package]]
 name = "board"
 version = "0.1.0"
-dependencies = [
- "store",
-]
 
 [[package]]
 name = "bs58"
@@ -1442,6 +1439,7 @@ dependencies = [
 name = "hoverboard-cli"
 version = "0.1.0"
 dependencies = [
+ "board",
  "btleplug",
  "ctrlc",
  "embedded-io",
@@ -2838,7 +2836,6 @@ version = "0.1.0"
 dependencies = [
  "attitude",
  "base",
- "board",
  "embedded-io",
  "libc",
  "link",

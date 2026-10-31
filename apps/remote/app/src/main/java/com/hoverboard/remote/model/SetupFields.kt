@@ -351,9 +351,9 @@ object SetupFields {
     )
     /**
      * `motor.dead_time`, the SECOND editor of the field the layout screen also offers. The board
-     * refuses a configured gate group below [DEAD_TIME_MIN_DTG] (shoot-through), and 0 only with
-     * the gates unset, so this row offers exactly what the validator takes rather than the whole
-     * byte.
+     * does not bring up a configured gate group below [DEAD_TIME_MIN_DTG] (shoot-through), and 0
+     * means the gates are unset, so this row offers exactly what the motor bring-up takes rather
+     * than the whole byte.
      */
     val MOTOR_DEAD_TIME = SetupField(
         Fields.MOTOR_DEAD_TIME, 0, R.string.setup_field_dead_time, SetupGroup.DRIVE,

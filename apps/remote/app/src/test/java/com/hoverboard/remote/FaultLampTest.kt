@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test
 /**
  * The fault lamp grid's rules (`specs/remote-ui.md` 3.1b), on the pure model alone: which lamps
  * apply on which machine, that a set bit is never hidden, the column count, and the fault-to-sheet
- * mapping against `CyclicState.ARM_BLOCKING_BITS`.
+ * mapping against `CyclicState.ARM_BLOCKING_BITS` and CONFIG (`CyclicState.EV_CONFIG`).
  */
 class FaultLampTest {
 
@@ -37,6 +37,7 @@ class FaultLampTest {
                     assertTrue(lamp in shown, "$lamp on every motor controller")
                 }
                 assertFalse(FaultLamp.LATCH_2 in shown, "LATCH 2 never applies")
+                assertFalse(FaultLamp.CONFIG in shown, "CONFIG never applies")
             }
         }
     }
@@ -54,7 +55,16 @@ class FaultLampTest {
         assertTrue(FaultLamp.LATCH_2 in shownLamps(two(1), mapOf(0x01 to 0, 0x02 to CyclicState.EV_LATCH_B)))
     }
 
-    /** Every bit of ARM_BLOCKING_BITS, set on a board for which its lamp does not apply, shows the lamp. */
+    @Test
+    fun `config is absent until its bit is set, and blocks nothing`() {
+        assertFalse(FaultLamp.CONFIG in shownLamps(two(1), mapOf(0x01 to 0, 0x02 to 0)))
+        assertTrue(FaultLamp.CONFIG in shownLamps(two(1), mapOf(0x01 to 0, 0x02 to CyclicState.EV_CONFIG)))
+        assertEquals("F12", FaultLamp.CONFIG.code)
+        assertFalse(FaultLamp.CONFIG.blocksArm)
+        assertEquals(FaultLamp.entries - FaultLamp.CONFIG, FaultLamp.entries.filter { it.blocksArm })
+    }
+
+    /** Every lamp bit, set on a board for which its lamp does not apply, shows the lamp. */
     @Test
     fun `a set bit is never hidden`() {
         // One board with no IMU: LINK, TILT, IMU and LATCH 2 do not apply.
@@ -67,28 +77,33 @@ class FaultLampTest {
 
     @Test
     fun `the lamps keep the grid's order`() {
-        assertEquals(FaultLamp.entries.filter { it != FaultLamp.LATCH_2 }, shownLamps(two(1), emptyMap()))
+        assertEquals(
+            FaultLamp.entries.filter { it != FaultLamp.LATCH_2 && it != FaultLamp.CONFIG },
+            shownLamps(two(1), emptyMap()),
+        )
     }
 
-    /** Four columns for up to eight lamps and five for nine, so the grid is never more than two rows. */
+    /** Four columns for up to eight lamps and five for nine or ten, so the grid is never more than two rows. */
     @Test
-    fun `four columns, or five when nine lamps are shown`() {
+    fun `four columns, or five when nine or ten lamps are shown`() {
         for (n in 1..8) assertEquals(4, lampColumns(n), "$n lamps")
         assertEquals(5, lampColumns(9))
-        val all = shownLamps(two(1), mapOf(0x01 to CyclicState.EV_LATCH_B))
-        assertEquals(9, all.size)
+        assertEquals(5, lampColumns(10))
+        val all = shownLamps(two(1), mapOf(0x01 to CyclicState.EV_LATCH_B, 0x02 to CyclicState.EV_CONFIG))
+        assertEquals(10, all.size)
         assertTrue((all.size + lampColumns(all.size) - 1) / lampColumns(all.size) <= 2)
     }
 
     /**
-     * The fault-to-sheet mapping: every bit of ARM_BLOCKING_BITS maps to exactly one lamp and every
-     * lamp to one bit, each with a title, three bodies and the code "F" plus the bit; the bits that
-     * are not lamps map to none.
+     * The fault-to-sheet mapping: every bit of ARM_BLOCKING_BITS, and CONFIG, maps to exactly one
+     * lamp and every lamp to one bit, each with a title, three bodies and the code "F" plus the bit;
+     * the bits that are not lamps map to none.
      */
     @Test
-    fun `every arm-blocking bit is exactly one lamp with its sheet`() {
+    fun `every lamp bit is exactly one lamp with its sheet`() {
         assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS)
-        val blocking = (0 until 16).filter { CyclicState.ARM_BLOCKING_BITS and (1 shl it) != 0 }
+        assertEquals(CyclicState.ARM_BLOCKING_BITS or CyclicState.EV_CONFIG, FaultLamp.LAMP_BITS)
+        val blocking = (0 until 16).filter { FaultLamp.LAMP_BITS and (1 shl it) != 0 }
         assertEquals(blocking.size, FaultLamp.entries.size)
         for (n in blocking) {
             val lamp = FaultLamp.of(1 shl n)
@@ -99,8 +114,8 @@ class FaultLampTest {
             assertEquals(4, strings.toSet().size, "$lamp has four distinct strings")
             strings.forEach { assertNotEquals(0, it) }
         }
-        assertEquals(CyclicState.ARM_BLOCKING_BITS, FaultLamp.entries.fold(0) { acc, l -> acc or l.bit })
-        for (n in listOf(3, 6, 7, 12, 13, 14, 15)) assertNull(FaultLamp.of(1 shl n), "bit $n is not a lamp")
+        assertEquals(FaultLamp.LAMP_BITS, FaultLamp.entries.fold(0) { acc, l -> acc or l.bit })
+        for (n in listOf(3, 6, 7, 13, 14, 15)) assertNull(FaultLamp.of(1 shl n), "bit $n is not a lamp")
     }
 
     /** Only the two latches are held after their bit clears. */

@@ -170,7 +170,7 @@ private fun ridingStatements(state: UiState): List<Statement> = buildList {
     }
     if (state.armed) {
         for ((board, word) in state.lampWords.toSortedMap()) {
-            val lamp = FaultLamp.lit(word).firstOrNull() ?: continue
+            val lamp = FaultLamp.lit(word).firstOrNull { it.blocksArm } ?: continue
             val text = stringResource(
                 R.string.ride_lamp_lit_armed,
                 stringResource(lamp.title),

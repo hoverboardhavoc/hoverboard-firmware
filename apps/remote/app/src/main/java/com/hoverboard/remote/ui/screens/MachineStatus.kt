@@ -162,10 +162,11 @@ private fun rigidIsConfiguredButNotRunning(state: UiState): Boolean {
 }
 
 /**
- * One motor controller's row: its label and the state word its own frames give, then its own
- * lines: the rider flag, LOCKDOWN, one line per set fault cause, the bit-6 mode readback, which
- * is not a fault, and the app's own reading of a driven wheel that does not turn
- * (`specs/remote-ui.md` 3.1). A silent board has its word and nothing under it.
+ * One motor controller's row: its label and the state word its own frames give, then what its
+ * boot could not bring up ([ConfigLines]), then its own lines: the rider flag, LOCKDOWN, one line
+ * per set fault cause, the bit-6 mode readback, which is not a fault, and the app's own reading of
+ * a driven wheel that does not turn (`specs/remote-ui.md` 3.1). A silent board has its word and its
+ * status lines, and nothing else under it.
  */
 @Composable
 private fun BoardRow(state: UiState, address: Int, label: String) {
@@ -177,8 +178,9 @@ private fun BoardRow(state: UiState, address: Int, label: String) {
         style = MaterialTheme.typography.titleSmall,
         modifier = Modifier.padding(top = 6.dp).testTag(statusBoardTag(address)),
     )
-    if (telemetry == null || !telemetry.hasState) return
     val small = MaterialTheme.typography.bodySmall
+    ConfigLines(state, address, telemetry)
+    if (telemetry == null || !telemetry.hasState) return
     if (telemetry.riderPresent) {
         Text(stringResource(R.string.status_rider), style = small, color = Primary)
     } else {

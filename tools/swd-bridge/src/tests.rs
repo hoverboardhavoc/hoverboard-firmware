@@ -563,9 +563,8 @@ fn a_registry_mismatch_stops_the_unknown_field_message_blaming_the_board() {
 
 // ---------------------------------------------------------------------------------------------
 // General config-field write path (config.rs): the registry-sourced typed-value parser, the
-// shared payload encoder, and an end-to-end write -> read -> board::validate over a mock
-// responder + store (proving the tool can stage BOTH a valid and an invalid layout for the
-// firmware's boot validator to judge). The registry is the ONLY field-source (no second table).
+// shared payload encoder, and an end-to-end write -> read over a mock responder + store. The
+// registry is the ONLY field-source (no second table).
 // ---------------------------------------------------------------------------------------------
 
 mod config_tests {
@@ -574,13 +573,11 @@ mod config_tests {
         parse_value_as, FieldArgError,
     };
     use base::error::FlashError;
-    use board::plumbing::{read_fields, reserved_set, AllowlistPort};
-    use board::{validate, BoardErrorKind, BoardField, Capabilities, Pin};
     use net::walk::{Emits, CFG_OK, MAX_PDU};
     use net::{Opcode, Pdu, Responder};
     use store::{
         Flash, Store, Type, Value, ATTITUDE_LEVEL_TRIM, IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN,
-        LED_GREEN, LED_RED, MOTOR_CURRENT_LIMIT, MOTOR_HALL_A, NODE_ADDRESS,
+        LINK_RX, LINK_TX, MOTOR_CURRENT_LIMIT, MOTOR_HALL_A, NODE_ADDRESS,
     };
 
     // --- the registry-sourced parser -------------------------------------------------------
@@ -717,7 +714,7 @@ mod config_tests {
         assert_eq!(&p[3..], &22750u32.to_le_bytes());
     }
 
-    // --- end-to-end: config-write into a live responder+store, read back, then validate ----
+    // --- end-to-end: config-write into a live responder+store, read back ----
 
     /// A minimal in-RAM [`Flash`] for a board's store (the net walk-tests pattern; the store's own
     /// `MockFlash` is crate-internal).
@@ -768,39 +765,6 @@ mod config_tests {
             Ok(())
         }
     }
-
-    /// A permissive mock chip for the staged benign + standard-family-IMU layout: every pin exists,
-    /// nothing staged is gate-capable, PA4 is the vbatt ADC channel if a layout stages it (the blank
-    /// defaults no longer do), PB6/PB7 is I2C0. (Enough for the blank fleet defaults + the IMU group
-    /// to validate; no motor group is staged, so
-    /// `gate_set` is never reached.)
-    struct MockChip;
-    impl Capabilities for MockChip {
-        fn pin_exists(&self, _pin: Pin) -> bool {
-            true
-        }
-        fn gate_capable(&self, _pin: Pin) -> bool {
-            false
-        }
-        fn gate_set(&self, _hi: [Pin; 3], _lo: [Pin; 3]) -> Option<u8> {
-            None
-        }
-        fn adc_channel(&self, pin: Pin) -> Option<u8> {
-            (pin.packed() == 0x04).then_some(4) // PA4 = vbatt = channel 4
-        }
-        fn i2c_pair(&self, scl: Pin, sda: Pin) -> Option<u8> {
-            ((scl.packed(), sda.packed()) == (0x16, 0x17)).then_some(0) // PB6/PB7 = I2C0
-        }
-    }
-
-    /// The firmware's compiled safe-USART allowlist (specs/l3.md): PA2/PA3, `LINK_SET` bit 1, the
-    /// inter-board link. PB6/PB7 is no link port (the CC2541 wirings went,
-    /// `specs/decision-cc2541-removal.md`), so the IMU can claim it whatever `LINK_SET` says.
-    const ALLOWLIST: &[AllowlistPort] = &[AllowlistPort {
-        link_set_bit: 1,
-        pins: [0x02, 0x03],
-        routable: true,
-    }];
 
     /// A single board (responder + store) the config path drives; preassigned an address so it
     /// processes CONFIG_* addressed to it (the walk assigns this on silicon).
@@ -869,25 +833,27 @@ mod config_tests {
     }
 
     #[test]
-    fn stages_a_valid_layout_the_firmware_validator_accepts() {
-        // The silicon-queue section-6 VALID case: stage the inter-board link in LINK_SET, then write
-        // the standard-family IMU group. Each write is confirmed by a read-back over the wire path.
+    fn stages_the_link_and_imu_pins_the_firmware_brings_up() {
+        // The inter-board link on PA2/PA3 (`link.tx`/`link.rx`, link 0) and the standard-family
+        // IMU group, each write confirmed by a read-back over the wire path. The tool judges only
+        // the type; what comes up is the board's to report in `board.status` after a reboot.
         let mut b = BoardNode::booted(0x01);
+        b.stage(LINK_TX.id(), 0, "0x02"); // PA2
+        b.stage(LINK_RX.id(), 0, "0x03"); // PA3
         b.stage(IMU_SCL_PIN.id(), 0, "0x16"); // PB6
         b.stage(IMU_SDA_PIN.id(), 0, "0x17"); // PB7
         b.stage(IMU_MODEL.id(), 0, "2");
 
-        // Now run the SAME validator the firmware runs at boot over the staged store.
         let mut flash = b.flash;
         let s = Store::mount(&mut flash).unwrap();
-        let reserved = reserved_set(ALLOWLIST, 0x02);
-        let plan = validate(&read_fields(&s), &MockChip, reserved.as_slice())
-            .plan
-            .expect("the staged valid layout must validate");
-        let imu = plan.imu.expect("IMU group present");
         assert_eq!(
-            (imu.scl.packed(), imu.sda.packed(), imu.model, imu.bus),
-            (0x16, 0x17, 2, 0)
+            [
+                s.get(LINK_TX.at(0)),
+                s.get(LINK_RX.at(0)),
+                s.get(LINK_TX.at(1))
+            ],
+            [0x02, 0x03, store::PIN_ABSENT],
+            "link 1 stays unset"
         );
     }
 
@@ -950,28 +916,6 @@ mod config_tests {
             [0, 0]
         );
         assert_eq!(settled(Config::staged([0, 0])), (p_plain, r_plain));
-    }
-
-    #[test]
-    fn stages_an_invalid_layout_the_firmware_validator_rejects() {
-        // The section-6 INVALID case: a DUPLICATE pin. led.red is written to led.green's default
-        // pin (PB3 = 0x13), so two fields claim PB3 -- a well-typed write this tool passes through
-        // (no client-side board-model check), which the firmware's boot validator then rejects.
-        let mut b = BoardNode::booted(0x01);
-        assert_eq!(LED_GREEN.default(), 0x13); // led.green defaults to PB3
-        b.stage(LED_RED.id(), 0, "0x13"); // led.red := PB3 too -> a duplicate
-
-        let mut flash = b.flash;
-        let s = Store::mount(&mut flash).unwrap();
-        let reserved = reserved_set(ALLOWLIST, 0x02);
-        let err = validate(&read_fields(&s), &MockChip, reserved.as_slice())
-            .plan
-            .expect_err("the duplicate pin must be rejected");
-        assert_eq!(err.field.field, BoardField::LedRed);
-        match err.kind {
-            BoardErrorKind::DuplicatePin(p) => assert_eq!(p.packed(), 0x13),
-            other => panic!("expected DuplicatePin(PB3), got {other:?}"),
-        }
     }
 }
 

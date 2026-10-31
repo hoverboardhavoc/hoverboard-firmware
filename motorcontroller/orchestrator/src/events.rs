@@ -80,6 +80,12 @@ pub const EV_MOTOR_PERIOD: u16 = 1 << 10;
 /// Motor-side cause: an arm attempt aborted before MOE and is held (`crate::arm` in the firmware)
 /// (`fault_a`).
 pub const EV_MOTOR_ARM: u16 = 1 << 11;
+/// The board's configuration did not all come up: its boot status record has an entry
+/// (`specs/configured-links.md` section 5, `board.status` for the detail). Set for the whole run
+/// from the boot fact ([`crate::BoardIdentity::config_fault`]). Not in [`FAULT_A_BITS`], so it gates
+/// nothing: an absent LED does not stop a board arming, and an absent motor is already an
+/// unconfigured one. It is on the wire so every fault display shows a configuration problem live.
+pub const EV_CONFIG: u16 = 1 << 12;
 /// The four motor-side causes: the set `motor::motor_fault_level` returns.
 pub const EV_MOTOR_BITS: u16 = EV_MOTOR_HALL | EV_MOTOR_CAL | EV_MOTOR_PERIOD | EV_MOTOR_ARM;
 
@@ -151,6 +157,8 @@ pub struct Levels {
     /// There is no echo hazard in that direction, because the follower's own `peer_down` stays
     /// out of its own mask, so nothing comes back.
     pub tilt: bool,
+    /// [`EV_CONFIG`]: the boot status record has an entry. A level for the whole run.
+    pub config: bool,
 }
 
 impl Levels {
@@ -174,6 +182,7 @@ impl Levels {
             | bit(self.mode_fault, EV_MODE_FAULT)
             | bit(self.power_request, EV_POWER_REQUEST)
             | bit(self.tilt, EV_STOP_ALL)
+            | bit(self.config, EV_CONFIG)
     }
 
     /// The GATING mask this tick: [`own_mask`](Self::own_mask) with [`peer_down`](Self::peer_down)

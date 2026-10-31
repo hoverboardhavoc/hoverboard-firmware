@@ -70,9 +70,9 @@ pub use dispatch::{
     BLE_PEER_CYCLIC_TICKS, CYCLIC_EMIT_TICKS,
 };
 pub use events::{
-    counted, COUNTED_MOTOR, EV_COMMS_LOSS, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MODE_FAULT,
-    EV_MOTOR_ARM, EV_MOTOR_BITS, EV_MOTOR_CAL, EV_MOTOR_HALL, EV_MOTOR_PERIOD, EV_POWER_REQUEST,
-    EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
+    counted, COUNTED_MOTOR, EV_COMMS_LOSS, EV_CONFIG, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B,
+    EV_MODE_FAULT, EV_MOTOR_ARM, EV_MOTOR_BITS, EV_MOTOR_CAL, EV_MOTOR_HALL, EV_MOTOR_PERIOD,
+    EV_POWER_REQUEST, EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
 };
 
 /// The per-motor breadth of the orchestrator state: the control block's dual-motor shape
@@ -793,6 +793,9 @@ pub struct BoardIdentity {
     pub boot_tag: u8,
     /// The part `detect_chip` identified at boot.
     pub chip: ChipTag,
+    /// Whether the boot status record has an entry (`specs/configured-links.md` section 5): some
+    /// configured function did not come up. Published as [`events::EV_CONFIG`] for the whole run.
+    pub config_fault: bool,
 }
 
 impl OrchestratorState {
@@ -802,7 +805,7 @@ impl OrchestratorState {
     /// the resolution table of `specs/rover-one-imu.md` section 2, where pivoting Balance
     /// demotes to Throttle with the mode fault when the IMU is absent and rigid Balance leads
     /// with one and follows without). `imu_configured` comes from the boot path (plan-present AND probe-ok);
-    /// `imu_staged` comes from the validator (`motorcontroller/board/src/lib.rs`, `Validated::imu_staged`)
+    /// `imu_staged` is the staged `imu.model` being nonzero (the boot reads it)
     /// and is published only, so the observation block can tell an unstaged board from a failed bring-up;
     /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
     /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
@@ -1367,6 +1370,8 @@ pub fn control_task(
         // folds into `fault_a` on `EV_COMMS_LOSS`'s bit and is the one level NOT published on
         // this board's own wire byte below.
         peer_down: dispatch::peer_down_level(state),
+        // A boot fact: some configured function did not come up (`board.status`).
+        config: state.identity.config_fault,
     };
     state.events.tick(levels.mask());
     state.own_levels = levels.own_mask();

@@ -110,7 +110,8 @@ class FakeHoverboardTransport(
      *
      * Every node starts out answering what every board running this firmware answers unwritten:
      * `node.class` motor controller, its default `device.name`, `machine.drive_mode` SINGLE and
-     * `board.battery.chemistry` li_ion. A test about a bridge or a stored mode says so in [store].
+     * `board.battery.chemistry` li_ion, and an empty `board.status` (everything configured came
+     * up). A test about a bridge, a stored mode or a status entry says so in [store].
      */
     val store: MutableMap<Pair<Int, Key>, Value> = mutableMapOf()
     val defaults: MutableMap<Key, Value> = mutableMapOf(
@@ -118,6 +119,7 @@ class FakeHoverboardTransport(
         Fields.DEVICE_NAME.key() to Fields.DEVICE_NAME.default,
         Fields.MACHINE_DRIVE_MODE.key() to Fields.MACHINE_DRIVE_MODE.default,
         Fields.BOARD_BATTERY_CHEMISTRY.key() to Fields.BOARD_BATTERY_CHEMISTRY.default,
+        Fields.BOARD_STATUS.key() to Fields.BOARD_STATUS.default,
     )
 
     /** Whether the fake board refuses writes with `CFG_ARMED`, as a real one does while armed. */

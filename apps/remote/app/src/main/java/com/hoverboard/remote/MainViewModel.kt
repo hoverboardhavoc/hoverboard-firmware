@@ -2,6 +2,7 @@ package com.hoverboard.remote
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.ble.BoardScanner
 import com.hoverboard.remote.ble.HoverboardTransport
@@ -118,6 +119,8 @@ import kotlinx.coroutines.launch
  * @param batteryFloor each board's `board.battery.floor`, centivolts, from the same read: where the
  *   Ride ring turns caution ([batteryLow]).
  * @param imuModel each board's `imu.model`, from the same read: 0 is no IMU fitted.
+ * @param boardStatus each board's `board.status` entries, from the same read: the functions its
+ *   last boot configured and could not bring up; empty when they all came up, absent while unread.
  * @param currentLimit each board's `motors.0.current.limit`, milliamps, from the same read: what a
  *   Ride phase bar is full at.
  * @param faultDisarm why the app dropped the arm level by itself for a board fault, kept until the
@@ -163,6 +166,7 @@ data class UiState(
     val sides: Map<Int, Int> = emptyMap(),
     val batteryFloor: Map<Int, Int> = emptyMap(),
     val imuModel: Map<Int, Int> = emptyMap(),
+    val boardStatus: Map<Int, List<BoardStatus.Entry>> = emptyMap(),
     val currentLimit: Map<Int, Int> = emptyMap(),
     val faultDisarm: FaultDisarm? = null,
     val latchHeld: Map<Int, Int> = emptyMap(),
@@ -251,18 +255,26 @@ data class UiState(
     val armBlocked: Boolean get() = driving.boards.any { blockingOf(it) != 0 }
 
     /**
-     * Each reporting board's fault word as the grid draws it: its live arm-blocking bits and the
-     * latch bits the app holds for it ([latchHeld]). A silent board has left the inbox, and its
-     * lamps with it.
+     * Each reporting board's fault word as the grid draws it: its live lamp bits
+     * ([FaultLamp.LAMP_BITS]: the arm-blocking ones and CONFIG) and the latch bits the app holds for
+     * it ([latchHeld]). A silent board has left the inbox, and its lamps with it.
      */
-    val lampWords: Map<Int, Int> get() = reporting.associateWith { blockingOf(it) or (latchHeld[it] ?: 0) }
+    val lampWords: Map<Int, Int>
+        get() = reporting.associateWith {
+            ((telemetryByBoard[it]?.cyclic?.fault ?: 0) and FaultLamp.LAMP_BITS) or (latchHeld[it] ?: 0)
+        }
 
     /** The lamps the grid shows ([shownLamps]). */
     val lamps: List<FaultLamp>
         get() = shownLamps(motorControllers.map { LampFacts(it.address, imuModel[it.address]) }, lampWords)
 
-    /** Whether the fault grid is drawn: a lamp is lit, or the lamp test is on (`specs/remote-ui.md` 3.1b). */
-    val gridShows: Boolean get() = lampTest || lampWords.values.any { it != 0 }
+    /**
+     * Whether the fault grid is drawn: an arm-blocking lamp is lit, or the lamp test is on
+     * (`specs/remote-ui.md` 3.1b). CONFIG alone does not draw it: its bit is set for the whole
+     * run and blocks nothing, and the grid takes the drive pad's place.
+     */
+    val gridShows: Boolean
+        get() = lampTest || lampWords.values.any { it and CyclicState.ARM_BLOCKING_BITS != 0 }
 
     /** The battery ring's board and reading ([ringReading]). */
     val ring: Pair<Int?, BatteryReading> get() = ringReading(reporting, ::batteryOf)
@@ -566,6 +578,7 @@ class MainViewModel(
                 sides = b.setup.rideFacts(mcs, SetupFields.CONTROL_SIDE),
                 batteryFloor = b.setup.rideFacts(mcs, SetupFields.BATTERY_FLOOR),
                 imuModel = b.setup.rideFacts(mcs, SetupFields.IMU_MODEL),
+                boardStatus = mcs.mapNotNull { a -> b.setup.setupOf(a).status?.let { a to it } }.toMap(),
                 currentLimit = b.setup.rideFacts(mcs, SetupFields.MOTOR_CURRENT_LIMIT),
             )
         }.combine(picker) { ui, p ->

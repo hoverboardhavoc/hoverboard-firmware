@@ -4,11 +4,7 @@ import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
-import com.hoverboard.protocol.board.NET_PORT_UART
 import com.hoverboard.protocol.board.PIN_ABSENT
-import com.hoverboard.protocol.board.Validated
-import com.hoverboard.protocol.board.reservedSet
-import com.hoverboard.protocol.board.validate
 import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.ConfigReadResult
@@ -58,16 +54,6 @@ sealed interface LayoutNotice {
     /** No board is attached, so nothing was sent. */
     data object NotAttached : LayoutNotice
 
-    /**
-     * The board's part is not known, so there is no verdict to apply against: a layout is only
-     * valid or invalid ON a part. Either the board sends no part at all, or it sends a tag this app
-     * has no capability table for ([LayoutState.chip]).
-     */
-    data object PartUnknown : LayoutNotice
-
-    /** The staged layout is one the board would refuse. There is no override for a failing verdict. */
-    data object VerdictNotClean : LayoutNotice
-
     /** There is no layout to edit yet: the read pass has not produced one. */
     data object NotRead : LayoutNotice
 
@@ -106,43 +92,14 @@ data class LayoutState(
     val busy: Boolean get() = reading || applying
 
     /**
-     * The capability table the verdict is computed against: the one the board's own [chip] tag
-     * names, or null when the board named no part this app models ([ChipFamily.forTag]).
-     *
-     * Null is the whole unknown case, and it has no manual override. A layout is only valid or
-     * invalid ON a part, so with no part there is no verdict to show and nothing to edit, which is
-     * how the screen already behaves with no board attached.
+     * The part the pin picker offers pins of: the one the board's own [chip] tag names, or null
+     * when the board named no part this app models ([ChipFamily.forTag]). With no part the pin
+     * rows cannot be picked, since which pins exist is a fact about the silicon.
      */
     val part: ChipFamily? get() = chip?.let { ChipFamily.forTag(it) }
 
     /** The layout the board stores, or null while any field of it is unread. */
     val stored: BoardFields? get() = Layout.fieldsFrom(values)
-
-    /** The reserved pins no field may claim on this board, or null while the inputs are not known. */
-    val reserved: List<Int>? get() = part?.let { p -> reservedSet(p, 1 shl NET_PORT_UART) }
-
-    /**
-     * The verdict the board would reach on the staged layout: what [com.hoverboard.protocol.board.validate]
-     * answers, which is what its own boot will answer. Null while a part, the link set or the layout
-     * itself is not known.
-     */
-    val verdict: Validated? get() = judge(staged)
-
-    /**
-     * The verdict on what the board STORES right now, which is what it would boot into.
-     *
-     * Worth showing in its own right: writes go one field at a time, so an Apply cut short leaves a
-     * layout that is neither the old one nor the new one, and a layout is one object, so that state
-     * is an invalid board rather than a partial success. The screen says so rather than implying the
-     * board is simply behind.
-     */
-    val storedVerdict: Validated? get() = judge(stored)
-
-    private fun judge(fields: BoardFields?): Validated? {
-        val p = part ?: return null
-        val r = reserved ?: return null
-        return fields?.let { validate(it, p, r) }
-    }
 
     /** The fields that differ between the board's layout and the staged one, in field order. */
     val delta: List<LayoutSlot>
@@ -152,12 +109,13 @@ data class LayoutState(
             return Layout.delta(from, to)
         }
 
-    /** Whether the staged layout is one the board would accept. */
-    val clean: Boolean get() = verdict?.error == null && verdict != null
-
-    /** Whether Apply may run: a clean verdict, something to write, and nothing in the way. */
+    /**
+     * Whether Apply may run: a board attached and disarmed, nothing in flight, and something to
+     * write. Nothing judges the layout first: the board brings up what it can at its next boot and
+     * lists what it could not in its status (Setup's machine status).
+     */
     fun canApply(armed: Boolean): Boolean =
-        board != null && !armed && !busy && delta.isNotEmpty() && clean
+        board != null && !armed && !busy && delta.isNotEmpty()
 
     /** The one power-cycle instruction: the whole delta is written and nothing is left to write. */
     val awaitingPowerCycle: Boolean get() = written.isNotEmpty() && delta.isEmpty()
@@ -166,8 +124,7 @@ data class LayoutState(
      * Whether the staged layout claims any pin for [motor]: a hall, a gate or a phase sense.
      *
      * The editor offers a motor's tab on this (`specs/remote-ui.md` section 3.5a). A motor with no
-     * pin at all is not a motor half-configured, it is a board with one motor, which is the
-     * all-or-none rule the validator enforces asked as a question.
+     * pin at all is not a motor half-configured, it is a board with one motor.
      */
     fun motorHoldsAPin(motor: Int): Boolean {
         val fields = staged ?: return false
@@ -204,21 +161,16 @@ interface LayoutActions {
 
 /**
  * The board layout editor's model (`specs/remote-ui.md` section 3.5): read the attached board's
- * layout, edit it locally, show the verdict its own boot validator would reach, and write it.
+ * layout, edit it locally, and write it.
  *
- * Two things make this not the Setup screen next door. The verdict is EXACT rather than advisory,
- * because `board::validate` is a pure function of the staged fields, the part's capabilities and the
- * reserved set, and all three are in hand here ([LayoutState.verdict]): the part comes off the wire
- * too, from the board's own `chip` tag, so nothing about the verdict rests on what a user stated.
- * And the thing being edited is ONE object with ownership rules across its fields, so there is no
- * basket of independent values: [stage] edits a copy of the whole layout, [LayoutState.delta] is
- * what it would take to make the board hold it, and Apply is refused outright unless the verdict is
- * clean. There is no override.
+ * The thing being edited is ONE object, so there is no basket of independent values: [stage] edits
+ * a copy of the whole layout, and [LayoutState.delta] is what it would take to make the board hold
+ * it. Nothing judges the layout here. The firmware brings up each function from its own fields at
+ * boot and lists what did not come up in `board.status`, which Setup's machine status shows
+ * (`specs/configured-links.md` sections 3 and 5).
  *
- * Writes still go one field at a time, verified, because that is what the wire offers. A write that
- * fails mid-Apply therefore leaves the board holding a layout that is neither: the model keeps the
- * rest staged and the screen reports the stored layout's own verdict, which is the honest statement
- * of that state.
+ * Writes go one field at a time, verified, because that is what the wire offers. A write that
+ * fails mid-Apply leaves the rest staged, and applying again finishes it.
  */
 @Suppress("TooManyFunctions") // implements LayoutActions, plus the private steps each action needs
 class LayoutModel(
@@ -254,7 +206,7 @@ class LayoutModel(
         // `CyclicObs`), so the editor reads them instead of asking: the part it is, and the boot
         // it is on. The ATTACHED board's, by its address: the other board's state reaches the
         // phone on the same link, and this screen edits the layout of one board, so a part taken
-        // from whatever arrived last would judge one board's pin map against the other board's
+        // from whatever arrived last would offer one board the pins of the other board's
         // silicon.
         //
         // Only a report is folded in: a telemetry stream that goes away (the link dropped, the
@@ -284,8 +236,8 @@ class LayoutModel(
      * (`SetupModel.observeBoot`).
      *
      * A missing tag is no observation, never a change, and the first tag of a session is not one
-     * either. Neither can strand an Apply: the verdict an Apply needs comes from the part in the
-     * same `CYCLIC_STATE`, so a session that wrote anything has seen a boot tag.
+     * either. Neither strands an Apply: every `CYCLIC_STATE` carries the tag, so a session that
+     * wrote anything has seen one.
      */
     private fun observeBoot(tag: Int?) {
         if (tag == null) return
@@ -400,17 +352,11 @@ class LayoutModel(
     override fun apply() {
         if (refuseWhileArmed()) return
         val s = _state.value
-        val refusal = when {
-            s.board == null -> LayoutNotice.NotAttached
-            s.part == null -> LayoutNotice.PartUnknown
-            !s.clean -> LayoutNotice.VerdictNotClean
-            else -> null
-        }
-        if (refusal != null) {
-            _state.update { it.copy(notice = refusal) }
+        val board = s.board
+        if (board == null) {
+            _state.update { it.copy(notice = LayoutNotice.NotAttached) }
             return
         }
-        val board = s.board ?: return
         if (s.delta.isEmpty() || !op.tryLock()) return
         _state.update { it.copy(applying = true, notice = null) }
         scope.launch {

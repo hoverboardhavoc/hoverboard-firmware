@@ -34,16 +34,6 @@ import com.hoverboard.remote.ui.theme.CautionText
 import com.hoverboard.remote.ui.theme.Fg
 import com.hoverboard.remote.ui.theme.FgMuted
 import com.hoverboard.remote.ui.theme.Primary
-import com.hoverboard.remote.ui.theme.Tone
-import com.hoverboard.remote.ui.theme.ToneText
-import com.hoverboard.remote.ui.theme.Warning
-import com.hoverboard.remote.ui.theme.WarningText
-
-/** Test tag on the verdict panel. */
-const val LAYOUT_VERDICT_TAG = "layout_verdict"
-
-/** Test tag on the statement that the board stores a layout it would refuse. */
-const val LAYOUT_STORED_INVALID_TAG = "layout_stored_invalid"
 
 /** Test tag on the Apply button. */
 const val LAYOUT_APPLY_TAG = "layout_apply"
@@ -58,23 +48,20 @@ const val LAYOUT_POWER_CYCLE_TAG = "layout_power_cycle"
 const val LAYOUT_PART_UNKNOWN_TAG = "layout_part_unknown"
 
 /**
- * The board layout editor (`specs/remote-ui.md` section 3.5): the pins and the few board facts the
- * boot validator judges, for the attached board.
+ * The board layout editor (`specs/remote-ui.md` section 3.5): the pins and the few board facts
+ * that configure them, for the attached board.
  *
  * Its own door rather than a section of Setup, because the editing model is not Setup's. Setup is a
- * list of independent values, each meaningful alone; a layout is ONE object with ownership rules
- * across its fields, where a half-applied change is not partial progress but an invalid board. So
- * the screen shows one verdict over the whole staged layout, Apply is refused outright unless that
- * verdict is clean, and the changes are listed as a delta from what the board holds.
+ * list of independent values, each meaningful alone; a layout is ONE object, so the changes are
+ * staged together and listed as a delta from what the board holds, and Apply writes them.
  *
  * It adjusts a board that is already onboarded. Taking a board from blank to a bootable layout is
  * done from `hoverboard-cli` at the bench (`specs/decision-cli-onboarding.md` section 1), so this
  * screen offers no whole-layout presets.
  *
- * The verdict is exact, not advisory: the board's boot validator is a pure function of these fields,
- * the part's capabilities and the reserved pins, and the app runs that same function
- * ([com.hoverboard.protocol.board.validate]). What it cannot know without a reboot is whether the
- * hardware then behaves, and the panel says which is which.
+ * Nothing judges the layout here. After the power-cycle the board brings up what it can from these
+ * fields and lists what it could not in `board.status`, which Setup's machine status shows
+ * (`specs/configured-links.md` sections 3 and 5).
  */
 @Composable
 fun LayoutScreen(
@@ -87,9 +74,9 @@ fun LayoutScreen(
         actions.onShown()
         onDispose { actions.onHidden() }
     }
-    // The part belongs in this conjunction with the attached board: a layout is only valid or
-    // invalid ON a part, so a board that has not named one can be read but not edited.
-    val editable = !armed && !state.busy && state.board != null && state.staged != null && state.part != null
+    // The part is not in this conjunction: only a pin row needs it, to know which pins exist, and
+    // the row says so itself (LayoutFieldRow).
+    val editable = !armed && !state.busy && state.board != null && state.staged != null
 
     Column(
         modifier = modifier
@@ -109,7 +96,6 @@ fun LayoutScreen(
         if (armed) Lock()
         state.notice?.let { Notice(it, state, actions) }
         Status(state, actions)
-        if (state.part != null) Verdict(state)
         Delta(state, armed, actions)
         PowerCycle(state)
         if (state.staged == null && state.unread.isEmpty()) Caption(R.string.layout_not_read)
@@ -168,14 +154,12 @@ private fun Status(state: LayoutState, actions: LayoutActions) {
 
 /**
  * Which part the board says it is: the `chip` tag of its own `CYCLIC_STATE`
- * (`shared/linkctl/src/lib.rs`, `CyclicObs`), which is what the verdict is computed against.
+ * (`shared/linkctl/src/lib.rs`, `CyclicObs`), which is what the pin picker offers pins of.
  *
  * Two boards cannot be named: one that has sent no `CYCLIC_STATE` yet, so no part has arrived, and
  * one whose boot probe measured a combination the firmware allocates no fleet part for, which sends
- * the unknown tag. Neither can be judged, because a layout is only valid or
- * invalid ON a part, so the screen says the part is not known and shows no verdict. There is no way
- * to state it by hand: a verdict against a part a user guessed at is not the board's own answer,
- * which is the only thing this screen is worth showing.
+ * the unknown tag. On neither can a pin be picked, because which pins exist is a fact about the
+ * part, so the screen says the part is not known. There is no way to state it by hand.
  */
 @Composable
 private fun Part(state: LayoutState) {
@@ -198,61 +182,6 @@ private fun Part(state: LayoutState) {
             color = Fg,
         )
         Caption(R.string.layout_part_unknown_body)
-    }
-}
-
-/** The verdict over the staged layout, and what a verdict can and cannot say. */
-@Composable
-private fun Verdict(state: LayoutState) {
-    val verdict = state.verdict
-    val error = verdict?.error
-    val tone = when {
-        verdict == null -> Tone.MUTED
-        error == null -> Tone.PRIMARY
-        else -> Tone.WARNING
-    }
-    val colour = when (tone) {
-        Tone.PRIMARY -> Primary
-        Tone.WARNING -> Warning
-        else -> FgMuted
-    }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(2.dp, colour, RoundedCornerShape(8.dp))
-            .padding(12.dp)
-            .testTag(LAYOUT_VERDICT_TAG),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        PanelTitle(R.string.layout_verdict_title)
-        ToneText(
-            text = when {
-                verdict == null -> stringResource(R.string.layout_verdict_unknown)
-                error == null -> stringResource(R.string.layout_verdict_valid)
-                else -> layoutRefusalText(error)
-            },
-            tone = tone,
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        if (verdict != null) {
-            Caption(R.string.layout_verdict_exact)
-            Caption(R.string.layout_verdict_after_boot)
-        }
-        Caption(R.string.layout_verdict_reachable)
-    }
-    val stored = state.storedVerdict?.error ?: return
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(2.dp, Warning, RoundedCornerShape(8.dp))
-            .padding(12.dp)
-            .testTag(LAYOUT_STORED_INVALID_TAG),
-    ) {
-        WarningText(
-            stringResource(R.string.layout_stored_invalid, layoutFieldLabel(stored.field)),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-
     }
 }
 
@@ -286,9 +215,6 @@ private fun Delta(state: LayoutState, armed: Boolean, actions: LayoutActions) {
             ) { Text(stringResource(R.string.layout_apply)) }
             OutlinedButton(onClick = actions::revertAll) { Text(stringResource(R.string.layout_revert_all)) }
         }
-        // Only when there IS a verdict and it refuses. With no part there is no verdict at all,
-        // and the statement at the top of the screen is the one that says why nothing applies.
-        if (state.part != null && !state.clean) Caption(R.string.layout_apply_blocked)
     }
 }
 

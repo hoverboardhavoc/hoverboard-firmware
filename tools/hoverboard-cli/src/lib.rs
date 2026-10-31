@@ -11,5 +11,6 @@ pub mod guest;
 pub mod install;
 pub mod names;
 pub mod nodes;
+pub mod status;
 pub mod transport;
 pub mod wire;

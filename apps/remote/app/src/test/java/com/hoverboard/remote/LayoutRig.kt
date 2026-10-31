@@ -1,12 +1,11 @@
 package com.hoverboard.remote
 
-import com.hoverboard.protocol.board.BoardField
-import com.hoverboard.protocol.board.FieldRef
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.FieldDef
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -24,19 +23,19 @@ internal class LayoutRig(scope: TestScope) {
     val state: LayoutState get() = model.state.value
 
     /** The slot for [field] on [motor], the way a test names a layout field. */
-    fun slot(field: BoardField, motor: Int? = null): LayoutSlot =
-        checkNotNull(Layout.forField(FieldRef(field, motor)))
+    fun slot(field: FieldDef, motor: Int? = null): LayoutSlot =
+        checkNotNull(Layout.forField(field, motor))
 
     /** What the board stores for [field], as a raw byte. */
-    fun stored(field: BoardField, motor: Int? = null): Int =
+    fun stored(field: FieldDef, motor: Int? = null): Int =
         slot(field, motor).of(checkNotNull(state.stored))
 
     /** What is staged for [field]. */
-    fun staged(field: BoardField, motor: Int? = null): Int =
+    fun staged(field: FieldDef, motor: Int? = null): Int =
         slot(field, motor).of(checkNotNull(state.staged))
 
     /** Set [field] in the staged layout. */
-    fun stage(field: BoardField, raw: Int, motor: Int? = null) = model.stage(slot(field, motor), raw)
+    fun stage(field: FieldDef, raw: Int, motor: Int? = null) = model.stage(slot(field, motor), raw)
 
     /**
      * The board reports [chip] on its [boot]-th boot in its cyclic state, which is where the
@@ -66,8 +65,8 @@ internal class LayoutRig(scope: TestScope) {
 /**
  * A rig attached to [board] with the layout screen shown, its read pass done, and the board
  * reporting [chip] in its cyclic state. A null [chip] emits NO cyclic state at all, which is the
- * board whose telemetry has not arrived yet: the case the editor cannot judge, because the part
- * only reaches it on a payload.
+ * board whose telemetry has not arrived yet: the case where no pin can be picked, because the part
+ * only reaches the editor on a payload.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun TestScope.layoutRig(

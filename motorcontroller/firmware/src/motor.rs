@@ -1455,7 +1455,7 @@ pub fn requested_method(method_byte: u8) -> commutation::CommutationMethod {
 /// honoured on any brought-up motor. FOC is honoured only where the board has phase current to
 /// close a loop ON, and that whole fact is [`BootFixed::accepted_offsets`]: it can only be `Some`
 /// on a board that declares `motor.current_sense` (0x66), wired the two phase pins the declaration
-/// is validated against (`board::MotorPlan::phase_current`), and whose quiet-bridge calibration
+/// is held to (`crate::layout::MotorPlan::phase_current`), and whose quiet-bridge calibration
 /// was ACCEPTED by `commutation::foc::PhaseOffsets`. A `Foc` request without it is demoted to
 /// six-step and raises [`FAULT_METHOD`] ([`method_fault_bits`]), the way a board with no IMU is
 /// demoted out of Balance rather than balancing on no attitude (`specs/commutation.md`,
@@ -1583,7 +1583,7 @@ pub fn drive_direction(reversed: bool) -> commutation::Direction {
 }
 
 /// Decode the `MOTOR_DIRECTION` (0x62) store byte at the arm path: `0 = Forward`, nonzero =
-/// `Reverse`, the field's own rule (`store::MOTOR_DIRECTION`), the same one `board::validate`
+/// `Reverse`, the field's own rule (`store::MOTOR_DIRECTION`), the same one `layout::read_motor`
 /// applies to the boot plan's copy. A value-row input, re-read at every arm ([`rederive`]).
 #[inline]
 pub fn requested_direction(direction_byte: u8) -> commutation::Direction {
@@ -1799,7 +1799,7 @@ pub use hw::{bring_up, period_isr_hz};
 #[cfg(target_os = "none")]
 pub mod hw {
     use super::*;
-    use board::{AdcInput, MotorPlan};
+    use crate::layout::{AdcInput, GateSet, MotorPlan};
     use commutation::foc::PhaseOffsets;
     use commutation::Commutator;
     use core::ptr::addr_of_mut;
@@ -1825,10 +1825,10 @@ pub mod hw {
     /// `motor.dead_time`, since a DTG code is a time only through it.
     ///
     /// DERIVED from `board::DEAD_TIME_DTS_DIV`, the one owner of that unit, rather than written
-    /// here as `ClockDiv::Div2` beside a sentence in the validator saying the same thing. The
-    /// validator converts the fleet's 500 ns reference through the same number to get its floor,
-    /// so a divider change moves the floor and the boot refuses a staged code that has become too
-    /// short, instead of running it as a shorter dead time than it was staged for.
+    /// here as `ClockDiv::Div2`. `board::DEAD_TIME_MIN_DTG` converts the fleet's 500 ns reference
+    /// through the same number to get its floor, so a divider change moves the floor and the motor
+    /// bring-up (`layout::read_motor`) refuses a staged code that has become too short, instead of
+    /// running it as a shorter dead time than it was staged for.
     /// The injected group's ADC clock divider as the HAL's enum, DERIVED from [`ADC_CLOCK_DIV`]
     /// (the one owner of the number, which the sample hold's threshold is derived from too) so
     /// the two cannot disagree. A divider the ADC does not offer is a compile error.
@@ -2083,7 +2083,7 @@ pub mod hw {
         pub timer: PwmTimer,
     }
 
-    /// Bring one motor up from its validated plan, disarmed (`BRING_UP_STEPS`, in order).
+    /// Bring one motor up from its plan (`crate::layout::read_motor`), disarmed (`BRING_UP_STEPS`, in order).
     ///
     /// Returns the summary on success, or the step that stopped it. Nothing here writes MOE: the
     /// arming gate is not built, not held, and not reachable from this module. The summary carries
@@ -2278,7 +2278,7 @@ pub mod hw {
                         accepted_offsets: accepted,
                     };
                     // The plan's direction and align offset are the boot's first values of
-                    // `motor.direction` and `motor.align_offset`, read by `board::plumbing` at the
+                    // `motor.direction` and `motor.align_offset`, read by `layout::read_motor` at the
                     // same moment as the method byte; every arm re-reads both fields and installs
                     // them again (`rederive`).
                     let decode = commutation::sixstep::SixStep::new(
@@ -2348,7 +2348,7 @@ pub mod hw {
                 }
                 BringUpStep::RegisterPeriodHandler => irq::register_control_handler(period_isr),
                 BringUpStep::EnablePeriodVector => {
-                    let (period_irq, _, _) = irq::motor_era_irqs(chip.irq());
+                    let period_irq = irq::period_irq(chip.irq());
                     irq::unmask_irq(period_irq);
                 }
             }
@@ -2443,9 +2443,9 @@ pub mod hw {
         Some(CalVerdict::Refused(blocks[CAL_BLOCKS - 1]))
     }
 
-    /// The advanced-timer label behind a validated [`board::GateSet::timer`] index: the ONE place
-    /// that index becomes a HAL label (index 0 = TIMER0, 1 = TIMER7/TIM8, the numbering
-    /// `board::Capabilities::gate_set` returns). `None` for anything else, which is a model
+    /// The advanced-timer label behind a [`crate::layout::GateSet::timer`] index: the ONE place
+    /// that index becomes a HAL label (index 0 = TIMER0, 1 = TIMER7/TIM8, the numbering the boot's
+    /// `pincap::gate_set` mapping hands `layout::read_motor`). `None` for anything else, which is a model
     /// mismatch rather than a board state: the fleet's parts carry at most two advanced timers.
     ///
     /// A `Timer7` gate set resolves its label here and then FAILS the bring-up at
@@ -2469,7 +2469,7 @@ pub mod hw {
     /// `plan-hotpath-readiness.md` section 1's reference column, so the step list and the stage-2
     /// golden agree by construction). `timer` is the label [`gate_timer_label`] derived from this
     /// motor's validated gate set, never a literal.
-    fn timer_config(gates: &board::GateSet, timer: PeriphLabel) -> PwmConfig {
+    fn timer_config(gates: &GateSet, timer: PeriphLabel) -> PwmConfig {
         let ch = |i: usize| PwmChannelConfig {
             high: gates.hi[i].packed(),
             low: gates.lo[i].packed(),

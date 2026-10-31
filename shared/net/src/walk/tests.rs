@@ -1796,6 +1796,32 @@ fn node_class_answers_ok_and_refuses_an_unstore_read_only() {
     );
 }
 
+/// `board.status` (`specs/configured-links.md` section 5): read-only, answered `CFG_OK` from the
+/// record the node handed over at boot, empty on a node that handed none (a bridge), and a write
+/// is refused without touching flash.
+#[test]
+fn board_status_is_answered_from_the_record_and_refuses_a_write() {
+    static ENTRIES: [u8; 8] = [0x56, 1, 3, 0x16, 0x4D, 0, 5, 10];
+    let mut m = walked_pair();
+    let r = m.config_read(0x02, store::BOARD_STATUS.key());
+    assert_eq!(
+        (resp_status(&r), resp_value(&r)),
+        (CFG_OK, Some(Value::Bytes(&[])))
+    );
+    m.boards[0].resp.set_status(&ENTRIES);
+    let r = m.config_read(0x01, store::BOARD_STATUS.key());
+    assert_eq!(
+        (resp_status(&r), resp_value(&r)),
+        (CFG_OK, Some(Value::Bytes(&ENTRIES)))
+    );
+    let before = m.boards[0].flash.bytes.clone();
+    let w = m.config_write(0x01, store::BOARD_STATUS.key(), Value::Bytes(&[1, 2, 3, 4]));
+    assert_eq!(resp_status(&w), CFG_READ_ONLY);
+    assert!(m.boards[0].flash.bytes == before);
+    // 14 entries, the record's cap, fit one CONFIG_RESP.
+    const { assert!(56 <= CONFIG_RESP_VALUE_MAX) };
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Guest-address allocation (`specs/l3.md`, "Addressing"): the grant range and its wrap.
 // ---------------------------------------------------------------------------------------------------
