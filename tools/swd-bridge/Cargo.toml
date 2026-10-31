@@ -1,0 +1,79 @@
+# The host-side SWD mailbox bridge (specs/swd-mailbox.md, "Host"). A host library + CLI that reads and
+# writes the master's RAM mailbox rings over SWD MEM-AP **while the core runs, no halt** (the proven
+# LINK_OBS / openocd `read_memory`/`write_memory` path), and presents the bridge end as a host
+# `SerialTransport` - the mirror of the firmware `MailboxSerial`. Host-only (it talks to openocd over
+# TCP), a member of the tools/ workspace, so the thumbv7m build never sees it.
+[package]
+name = "swd-bridge"
+version = "0.1.0"
+license.workspace = true
+edition = "2021"
+description = "Host SWD RAM-mailbox bridge: read/write the master's mailbox rings over MEM-AP (openocd TCL RPC) while the core runs, presenting the bridge end as a host SerialTransport. The host counterpart of the firmware MailboxSerial."
+
+[dependencies]
+# The mailbox layout/ABI (constants + offsets) and the L2 framing the rings carry. Both build on the
+# host target (swd-mailbox is no_std but host-compatible; its cortex-m DMB dep is arm-gated).
+swd-mailbox = { path = "../../shared/swd-mailbox" }
+# The ring logic and attach handshake (specs/hoverboard-bridge.md, "Mailbox port"), shared with the hoverboard bridge.
+swd-bridge-core = { path = "../../shared/swd-bridge-core" }
+link = { path = "../../shared/link" }
+# The link-control payload codec: the canonical owner of the INPUTS/DRIVE_CMD/etc wire bytes and the
+# control-block opcode constants (the swd-mailbox-inputs tool encodes its INPUTS payload through it,
+# never hand-rolls the bytes).
+linkctl = { path = "../../shared/linkctl" }
+embedded-io = "0.6"
+# POSIX signals, for one thing only: `swd-mailbox-inputs --hold` installs a SIGINT handler so Ctrl-C
+# releases an armed board through the tool's own all-clear instead of dying mid-sleep and leaving the
+# release to the firmware's 1.5 s mirror timeout. std has no signal API, and the handler must be the
+# platform's own (an atomic store plus `signal`, the async-signal-safe pair) rather than a hand-rolled
+# extern block redeclaring libc's ABI beside it.
+libc = "0.2"
+# The host controller drives the L3 walk + CONFIG_* over the mailbox (net::Controller, the PDU codec,
+# the wire consts), and confirms the persisted node_address by mounting the store over a flash image
+# read back over SWD (store::Store + base::FlashError).
+net = { path = "../../shared/net" }
+store = { path = "../../shared/store" }
+base = { path = "../../shared/base" }
+
+[[bin]]
+name = "swd-mailbox-bridge"
+path = "src/main.rs"
+
+[[bin]]
+name = "swd-mailbox-walk"
+path = "src/bin/walk.rs"
+
+[[bin]]
+name = "l3-tier2"
+path = "src/bin/l3_tier2.rs"
+
+# General config-field writer: stage any registered field (board-layout presets included) over the
+# SWD mailbox, type-checked against the store registry (silicon-queue section 6 staging tool).
+[[bin]]
+name = "swd-mailbox-config"
+path = "src/bin/config_write.rs"
+
+# INPUTS sender: deliver an INPUTS L7 payload (throttle/buttons/rider) to an addressed board over the
+# SWD mailbox, so a bench session can assert power_request (buttons bit0) and drive the mode machine's
+# arming path (OFF->INIT->READY->RUN) to exercise the firmware's armed CONFIG_WRITE gate.
+[[bin]]
+name = "swd-mailbox-inputs"
+path = "src/bin/inputs.rs"
+
+[[bin]]
+name = "swd-mailbox-drive"
+path = "src/bin/drive.rs"
+
+[dev-dependencies]
+# The board-layout boot validator, so the end-to-end test can stage a layout via the config path
+# and then run the SAME validator the firmware runs at boot (proving the tool can stage both a
+# valid and an invalid layout for the firmware to judge). Dev-only; the tool itself never links it.
+board = { path = "../../motorcontroller/board" }
+# The attitude filter, for the same reason: the level-trim staging test runs the value it wrote
+# over the wire through the SAME consumer the firmware builds at boot, so a unit or sign mistake
+# between the field and the filter cannot pass. Dev-only; the tool itself never links it.
+attitude = { path = "../../motorcontroller/attitude" }
+
+[[bin]]
+name = "swd-mailbox-session"
+path = "src/bin/session.rs"

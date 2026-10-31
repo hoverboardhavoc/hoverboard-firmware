@@ -1,0 +1,31 @@
+# Control-cascade crate (specs/control.md): the 250 Hz outer control layer as pure, host-testable
+# no-FPU math. Slice 1 carries the shared helpers (clamps, round-toward-zero shift, the stock
+# section-8.2 ramp) and the config/constants surface (gain profiles + every fixed cascade
+# constant); the cascade blocks (shaping, balance PID, speed loop, engagement machine, throttle
+# mode) arrive one slice at a time per the spec's slicing. Recovered from the archived
+# implementation (archive/accumulated-build, commit 74b7773); the recovered PI record + step
+# already live in base::pi (Phase B relocation).
+#
+# The reference constants are preserved exactly (stock contract: Declassyfied control.md,
+# consolidated in its section 13).
+[package]
+name = "control"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Cascaded hoverboard outer control: shared clamp/shift/ramp helpers and the gain-profile + cascade constant surface (slice 1); pitch shaping, balance PID, speed/steer loop, engagement machine, and the throttle mode follow per specs/control.md. no_std, no-FPU, host-testable."
+
+[dependencies]
+# The spec's one allowed dependency (specs/control.md section (f)): base::fixed::Fix carries the
+# flagged-fractional Q paths (the PID's kd product, the 0.99/0.01 reference IIR), joined in
+# slice 3 with their first consumer (pid.rs); base::TORQUE_FULL_SCALE is the torque word's full
+# scale, owned there because the commutation crate scales its current reference by it too. The
+# archive's direct `fixed = "1"` dependency is NOT carried: base::fixed is the Q owner (Fix =
+# I32F32, the same underlying type).
+base = { path = "../../shared/base" }
+
+[dev-dependencies]
+# The latch-substate tie test (specs/control.md (c) / section (f) validation): the FSM's
+# sub-state byte drives Phase C's FaultLatch as its `a_substate` through a scripted scenario,
+# pinning the shared-state tie that makes the latch's HEALTHY predicate meaningful. Dev-only.
+state = { path = "../state" }

@@ -1,0 +1,34 @@
+# The hardware-free half of the hoverboard bridge (specs/hoverboard-bridge.md): the SWD engine over a pin trait,
+# the board operations, flashing, the mailbox session, the controller links' framing, the bridge as an L3 node, and the bridge
+# commands. no_std; the host tests run it against a bit-level simulated debug port and a GD32 model
+# (`sim`, also offered to tools/hoverboard-cli's tests by the `sim` feature).
+[package]
+name = "hoverboard-bridge-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Hoverboard bridge logic: SWD engine, GD32 board operations and flashing, SWD mailbox session, L2 framing and routing for the BLE and USB links, ESP command service. no_std, hardware behind traits."
+
+[features]
+# The simulated debug port and GD32 board, for host tests (here and in hoverboard-cli).
+sim = []
+
+[dependencies]
+link = { path = "../../shared/link" }
+net = { path = "../../shared/net" }
+store = { path = "../../shared/store" }
+base = { path = "../../shared/base" }
+swd-mailbox = { path = "../../shared/swd-mailbox" }
+swd-bridge-core = { path = "../../shared/swd-bridge-core" }
+espsvc = { path = "../../shared/espsvc" }
+linkctl = { path = "../../shared/linkctl" }
+embedded-io = "0.6"
+heapless = "0.8"
+sha2 = { version = "0.10", default-features = false }
+# The GDB remote serial protocol (src/gdb.rs). `alloc` for the per-session packet buffer: the
+# state machine owns it, so a new session needs a new one.
+gdbstub = { version = "0.7.10", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# Parses the GDB target description and memory map in the tests.
+roxmltree = "0.20"

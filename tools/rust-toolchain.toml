@@ -1,0 +1,8 @@
+# The host tools build on the nightly the motorcontroller workspace pins
+# (../motorcontroller/rust-toolchain.toml), the toolchain they built on while they sat inside it.
+# No crate here opts into a nightly feature; moving them to stable is a separate change. The
+# emulator runner's tests build the GD32 test images in ../motorcontroller, whose toolchain file
+# names the same channel and installs the thumbv7m target those builds need.
+[toolchain]
+channel = "nightly-2026-07-20"
+components = ["rustfmt", "clippy"]

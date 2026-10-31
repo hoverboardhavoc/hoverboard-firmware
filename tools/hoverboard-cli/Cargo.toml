@@ -1,15 +1,11 @@
 # The terminal tool for the hoverboard bridge (specs/hoverboard-bridge.md, "The terminal tool"): BLE via
 # btleplug, the ESP's USB console directly or through a TCP relay, L2 framing via `link`, the bridge
-# commands via `espsvc`. Host-only, its own workspace (as crates/swd-bridge is excluded from the main
-# one).
-[workspace]
-resolver = "2"
-
+# commands via `espsvc`. Host-only, a member of the tools/ workspace.
 [package]
 name = "hoverboard-cli"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
+license.workspace = true
 description = "Terminal tool for the hoverboard bridge: scan, info, id, flash, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
 
 [features]
@@ -20,13 +16,13 @@ default = ["ble"]
 ble = ["dep:btleplug", "dep:tokio", "dep:futures"]
 
 [dependencies]
-link = { path = "../../crates/link" }
-net = { path = "../../crates/net" }
+link = { path = "../../shared/link" }
+net = { path = "../../shared/net" }
 # The registry's field types and the name table (`specs/cli-config.md` section 3), for `config` and
 # the file commands.
-store = { path = "../../crates/store", features = ["names"] }
-linkctl = { path = "../../crates/linkctl" }
-espsvc = { path = "../../crates/espsvc" }
+store = { path = "../../shared/store", features = ["names"] }
+linkctl = { path = "../../shared/linkctl" }
+espsvc = { path = "../../shared/espsvc" }
 embedded-io = "0.6"
 # The BLE link and `scan` (the `ble` feature).
 btleplug = { version = "0.11", optional = true }
@@ -50,7 +46,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 # The bridge side, with the simulated board, for the client-against-service test.
-hoverboard-bridge-core = { path = "../../apps/hoverboard-bridge/core", features = ["sim"] }
-swd-mailbox = { path = "../../crates/swd-mailbox" }
+hoverboard-bridge-core = { path = "../../bridge/core", features = ["sim"] }
+swd-mailbox = { path = "../../shared/swd-mailbox" }
 # Builds the ELF fixtures for the image-check tests.
 object = { version = "0.36", default-features = false, features = ["write", "elf", "std"] }
