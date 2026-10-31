@@ -90,7 +90,7 @@ import no.nordicsemi.android.kotlin.ble.scanner.BleScanner
  * ## The app is a transient controller
  *
  * The firmware emits `CYCLIC_STATE` only while the board holds an assigned L3 address
- * (`crates/orchestrator/src/dispatch.rs`, `ble_cyclic_tx`), and an address arrives exactly one way:
+ * (`motorcontroller/orchestrator/src/dispatch.rs`, `ble_cyclic_tx`), and an address arrives exactly one way:
  * a controller performs first contact. So a rider remote that skipped the attach connected, showed
  * its control screen, and waited for telemetry that could never come, while commands appeared to
  * work only because a broadcast `dst` is delivered locally.
@@ -598,7 +598,7 @@ class BleHoverboardTransport(
      * they are.
      *
      * CYCLIC_STATE is the telemetry source because the firmware has no telemetry opcode at all.
-     * The 0x40..0x6F telemetry block is reserved and unimplemented (`crates/net/src/pdu.rs`,
+     * The 0x40..0x6F telemetry block is reserved and unimplemented (`shared/net/src/pdu.rs`,
      * `Opcode`); this app used to decode a TELEMETRY 0x20 that nothing ever sent.
      */
     private fun dispatchPacket(packet: ByteArray) {

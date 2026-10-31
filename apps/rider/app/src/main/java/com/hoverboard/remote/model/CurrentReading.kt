@@ -18,7 +18,7 @@ sealed interface CurrentReading {
     /**
      * The board's motor path is not up, so nothing is measuring.
      *
-     * The window words are written by the period interrupt alone (`crates/firmware/src/motor.rs`,
+     * The window words are written by the period interrupt alone (`motorcontroller/firmware/src/motor.rs`,
      * `OBS_CURRENT` and `OBS_MEAN_DUTY`), which does not run while the bridge is down, so what the
      * board keeps sending is whatever the last live window left there. That is the stale number
      * this state exists to refuse.

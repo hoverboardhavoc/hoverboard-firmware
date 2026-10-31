@@ -297,7 +297,7 @@ class FakeHoverboardTransport(
 
     /**
      * The maximum this board refuses a gain write against: its stored `CONTROL_GAIN_MAX`, else the
-     * default (`crates/control/src/config.rs`, `GainShadow`).
+     * default (`motorcontroller/control/src/config.rs`, `GainShadow`).
      */
     private fun tuneMax(target: Int, index: Int): Int? =
         (store[target to Key(Fields.CONTROL_GAIN_MAX.id, index)] as? Value.I16)?.v
@@ -385,7 +385,7 @@ class FakeHoverboardTransport(
 }
 
 /**
- * The appended observation block of a board that is sitting still (`crates/linkctl/src/lib.rs`,
+ * The appended observation block of a board that is sitting still (`shared/linkctl/src/lib.rs`,
  * `CyclicObs`): a zeroed current window, the per-boot identity every board reports, and an
  * odometer that has never counted an edge.
  *

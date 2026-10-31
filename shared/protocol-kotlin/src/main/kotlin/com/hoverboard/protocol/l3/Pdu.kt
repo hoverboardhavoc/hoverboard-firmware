@@ -1,7 +1,7 @@
 package com.hoverboard.protocol.l3
 
 /**
- * The L3 PDU codec, a byte-for-byte mirror of `crates/net/src/pdu.rs`'s `Pdu`. One PDU rides inside one L2
+ * The L3 PDU codec, a byte-for-byte mirror of `shared/net/src/pdu.rs`'s `Pdu`. One PDU rides inside one L2
  * packet:
  *
  * ```text
@@ -23,10 +23,10 @@ const val NO_ADDRESS = 0x00
  * First address a board grants a controller. The guest range is the top of the unicast space
  * (`specs/l3.md`, "Addressing"): boards live below it, so a guest address can never collide with an
  * assigned board's. [isBoard] takes its upper bound from this constant, so that is a derivation and
- * not two literals that happen to abut, matching `crates/net/src/pdu.rs`, `is_board`.
+ * not two literals that happen to abut, matching `shared/net/src/pdu.rs`, `is_board`.
  *
  * It lives here rather than with the walk constants because the address space is L3's model, exactly
- * as in `crates/net/src/pdu.rs`, the address model. The grant protocol (`crates/net/src/walk.rs`,
+ * as in `shared/net/src/pdu.rs`, the address model. The grant protocol (`shared/net/src/walk.rs`,
  * the `ASSIGN` exchange) consumes it to
  * decide which address to hand out; on this side the consumer is [Controller], which holds one as its
  * own session address. The [Walk] object next door carries the walk's WIRE constants, not the range.
@@ -44,7 +44,7 @@ const val GUEST_LAST = 0xFE
 const val HEADER_LEN = 3
 
 /**
- * The largest whole PDU, header included, a board takes or sends: `crates/net/src/walk.rs`'s
+ * The largest whole PDU, header included, a board takes or sends: `shared/net/src/walk.rs`'s
  * `MAX_PDU`, which sizes every walk and config buffer in the firmware. A longer request is never
  * answered: `Responder::ingest` does not check the length itself, but every copy it makes goes
  * through a `MAX_PDU` buffer (the delivered-to-self copy in `ingest`, each forwarded copy in
@@ -56,7 +56,7 @@ const val MAX_PDU = 64
 /**
  * Is `a` a board address (0x01..=0x7F: persistent across sessions, and reassigned only if a walk finds
  * the same address at two positions)? The top of the range is [GUEST_FIRST] exclusive, mirroring
- * `crates/net/src/pdu.rs`, `is_board`.
+ * `shared/net/src/pdu.rs`, `is_board`.
  */
 fun isBoard(a: Int): Boolean = a in 0x01 until GUEST_FIRST
 

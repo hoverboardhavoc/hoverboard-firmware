@@ -12,16 +12,16 @@ had three of four opcodes wrong, discarded the one message the board actually em
 ## Layout
 
 ```
-protocol-kotlin/
+shared/protocol-kotlin/
   build.gradle.kts        standalone Gradle build, pure Kotlin/JVM, Java 17
   settings.gradle.kts     rootProject.name = "protocol"  ->  com.hoverboard:protocol
   src/main/kotlin/com/hoverboard/protocol/
-    l2/                   framing: SOF/len/CRC, fragmentation, reassembly   (crates/link)
-    l3/                   PDU codec, addressing, the controller walk        (crates/net)
-    linkctl/              the four L7 control payload families              (crates/linkctl)
-    store/                CONFIG_* value type tags and encoding             (crates/store)
-    imu/                  the frames a staged IMU orientation may hold      (crates/imu)
-    board/                the board-layout boot validator                   (crates/board)
+    l2/                   framing: SOF/len/CRC, fragmentation, reassembly   (shared/link)
+    l3/                   PDU codec, addressing, the controller walk        (shared/net)
+    linkctl/              the four L7 control payload families              (shared/linkctl)
+    store/                CONFIG_* value type tags and encoding             (shared/store)
+    imu/                  the frames a staged IMU orientation may hold      (motorcontroller/imu)
+    board/                the board-layout boot validator                   (motorcontroller/board)
   src/test/kotlin/com/hoverboard/protocol/
     L2Test, PduTest, StoreWireTest, WalkTest, BleWalkTest    behaviour, ported with the code
     OrientationTest, BoardLayoutTest, PinPickerTest          the Rust's own vectors, ported
@@ -50,7 +50,7 @@ The app is its own Gradle build with its own version catalog, so this is wired a
 build** rather than a shared subproject: the app's `settings.gradle.kts` has
 
 ```kotlin
-includeBuild("../../protocol-kotlin")
+includeBuild("../../shared/protocol-kotlin")
 ```
 
 and declares `implementation("com.hoverboard:protocol")`. Gradle substitutes the coordinate onto
@@ -74,13 +74,13 @@ other and everything stays green.
 **`RustSourceDriftTest`** closes that. It locates the repo root, parses the Rust source, and
 compares it to the Kotlin:
 
-- `crates/linkctl/src/lib.rs`: opcodes, committed `LEN`s, struct field order and type, flag bits,
+- `shared/linkctl/src/lib.rs`: opcodes, committed `LEN`s, struct field order and type, flag bits,
   supervision timeouts
-- `crates/net/src/pdu.rs`: the `Opcode` enum, `HEADER_LEN`
-- `crates/link/src/framer.rs`, `frag.rs`: framing and fragmentation constants
-- `crates/store/src/key.rs`: value type tags
-- `crates/base/src/crc16.rs`: the CRC algorithm the firmware instantiates
-- `crates/board/src/lib.rs`, `plumbing.rs`, `tests.rs`: the board-layout validator's field set, its
+- `shared/net/src/pdu.rs`: the `Opcode` enum, `HEADER_LEN`
+- `shared/link/src/framer.rs`, `frag.rs`: framing and fragmentation constants
+- `shared/store/src/key.rs`: value type tags
+- `shared/base/src/crc16.rs`: the CRC algorithm the firmware instantiates
+- `motorcontroller/board/src/lib.rs`, `plumbing.rs`, `tests.rs`: the board-layout validator's field set, its
   refusal kinds and their `BOARD_OBS` codes, the order it takes its fields in, the per-chip
   capability tables, and the reserved-set rule that keeps a layout off the link's pins
 
@@ -88,7 +88,7 @@ The board mirror's purpose is a prediction rather than a decode: `board::validat
 function, so a client holding the staged fields, the chip's capability answers and the reserved set
 can state the boot verdict exactly instead of guessing at it. What it cannot reach is runtime-hal's
 real capability queries, which live in another repository this module deliberately does not check
-out; the Kotlin mirrors `crates/board/src/tests.rs`'s `MockChip` tables instead, and the cargo-side
+out; the Kotlin mirrors `motorcontroller/board/src/tests.rs`'s `MockChip` tables instead, and the cargo-side
 `rcap_agreement` suite is what holds those equal to the real ones.
 
 Where the Rust enumerates something, the comparison is an **exact set comparison**, so a firmware
@@ -96,7 +96,8 @@ change that *adds* a fifth control opcode also fails, rather than passing quietl
 mirror silently incomplete. If the Rust is restructured enough that a regex stops matching, the
 test fails loudly naming the pattern that missed, instead of degrading into a no-op.
 
-`build.gradle.kts` declares `crates/**/*.rs` as inputs to the `test` task. Without that Gradle sees
+`build.gradle.kts` declares the `*.rs` files under `shared/` and `motorcontroller/` as inputs to the
+`test` task. Without that Gradle sees
 only Kotlin sources, calls the task up to date after a firmware-only change, and skips the gate
 exactly when it is needed. That was observed, not theorised.
 
@@ -108,7 +109,7 @@ Both directions are verified by mutation:
 | Rust `OP_INPUTS` 0x12 -> 0x14, `CyclicState` fields reordered | `RustSourceDriftTest` fails |
 | Rust `OP_INPUTS` 0x12 -> 0x19, no `--rerun-tasks` | fails from cold cache correctly |
 | Rust gains an `OP_TELEMETRY` const the Kotlin does not mirror | exact-set compare fails on the extra entry, rather than passing on the subset |
-| `crates/` absent above the module | all 11 drift cases fail naming the path they searched for |
+| the Rust workspaces absent above the module | all 11 drift cases fail naming the path they searched for |
 
 In the Rust-side cases `WireDriftTest` passed while `RustSourceDriftTest` failed, which is the
 clearest statement of why both files exist.
@@ -119,8 +120,8 @@ clearest statement of why both files exist.
 pull request. It is the sixth check there and the only one with no Rust toolchain in it.
 
 The job needs a JDK and nothing else. No Android SDK, because this module is deliberately not an
-Android library; no `runtime-hal` checkout, because it reads `crates/` as text rather than building
-it, and `crates/` is in this repo. It is `setup-java`, `setup-gradle` and one Gradle invocation,
+Android library; no `runtime-hal` checkout, because it reads the Rust in `shared/` and
+`motorcontroller/` as text rather than building it, and both are in this repo. It is `setup-java`, `setup-gradle` and one Gradle invocation,
 seconds of work. The Android apps are **not** built in CI: both apply `com.android.application`,
 which resolves the SDK at configuration time, so every task in those builds needs an SDK install
 that catching protocol drift does not require.
@@ -139,8 +140,9 @@ The invocation is:
 `--rerun` and `--no-build-cache` are load-bearing. A plain `./gradlew test` reports
 `Task :test UP-TO-DATE` whenever Gradle believes nothing changed, and executes nothing: a green
 tick over zero tests, which is how this gate was already a no-op once. `build.gradle.kts` declares
-`crates/**/*.rs` as inputs to the `test` task and that is the correct fix for up-to-date tracking,
-but it is guarded on the `crates` directory existing and covers only `*.rs` beneath `crates/`, so
+the `*.rs` files under `shared/` and `motorcontroller/` as inputs to the `test` task and that is the
+correct fix for up-to-date tracking, but it is guarded on those directories existing and covers only
+`*.rs` beneath them, so
 relying on it alone means relying on that declaration staying complete forever. The flags take the
 question off the table. The suite runs in about two seconds, so there is nothing to save by
 skipping it. A following step then reads the JUnit XML and fails if `RustSourceDriftTest`
@@ -149,10 +151,10 @@ contributed no executed cases, which catches the same failure from the other sid
 ### Do not put a path filter on that job
 
 Whoever comes here to make CI faster will notice this job runs on commits that touch no Kotlin, and
-reach for `paths: protocol-kotlin/**`. That inverts the gate into its own opposite.
+reach for `paths: shared/protocol-kotlin/**`. That inverts the gate into its own opposite.
 
-Drift is introduced by editing the **Rust**. A commit that renumbers an opcode touches `crates/`
-and nothing under `protocol-kotlin/`, so the filter would skip the job on precisely the commit the
+Drift is introduced by editing the **Rust**. A commit that renumbers an opcode touches `shared/` or
+`motorcontroller/` and nothing under `shared/protocol-kotlin/`, so the filter would skip the job on precisely the commit the
 gate exists to catch, and the mismatch would ship. The job would still fire on Kotlin-only edits,
 where the author already has the protocol open in front of them and is least likely to get it
 wrong. What is left is a job that is green on every commit and catching nothing, which reads as
@@ -161,5 +163,5 @@ ships, the phone app still builds and still runs, and it turns up as an unexplai
 bench.
 
 The workflow has no path filters at all today, so leaving this job unfiltered costs nothing and
-needs no configuration. If filters are ever added, this job needs `crates/**` at minimum, and no
+needs no configuration. If filters are ever added, this job needs `shared/**` and `motorcontroller/**` at minimum, and no
 version of that list is cheaper to maintain than having no filter.

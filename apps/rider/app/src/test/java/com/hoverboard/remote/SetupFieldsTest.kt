@@ -65,7 +65,7 @@ class SetupFieldsTest {
     /**
      * The takes-effect classification, which no row declares: [SetupField.takesEffect] reads
      * [com.hoverboard.protocol.store.Fields.ARM_TIME], the mirror `RustSourceDriftTest` pins
-     * against the firmware's own arm row (`crates/firmware/src/arm.rs`, `read_arm_values`, and
+     * against the firmware's own arm row (`motorcontroller/firmware/src/arm.rs`, `read_arm_values`, and
      * `specs/integration.md`, the arm-time re-read table). Every other row is boot-read, whether
      * it configures a peripheral or is a value the boot path owns.
      *

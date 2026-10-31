@@ -56,14 +56,14 @@ class CommandPumpTest {
         runCurrent()
 
         // A stationary finger must keep streaming: DRIVE_CMD decays after 200 ms of silence
-        // (`crates/linkctl/src/lib.rs`, `DRIVE_TIMEOUT_TICKS`), so a single send is a blip
+        // (`shared/linkctl/src/lib.rs`, `DRIVE_TIMEOUT_TICKS`), so a single send is a blip
         // rather than a demand.
         assertTrue(writes.count { it == RiderCommand.armed(150) } >= 3)
     }
 
     @Test
     fun `the shipped cadence fits inside the firmware decay window with room for a lost frame`() {
-        // DRIVE_TIMEOUT_TICKS at the scheduler's 250 Hz (`crates/scheduler/src/lib.rs`,
+        // DRIVE_TIMEOUT_TICKS at the scheduler's 250 Hz (`motorcontroller/scheduler/src/lib.rs`,
         // `TICK_HZ`).
         val decayMs = DRIVE_TIMEOUT_TICKS * TICK_MS
         assertEquals(200, decayMs)
@@ -434,7 +434,7 @@ class CommandPumpTest {
 
         const val INTERVAL = 33L
 
-        /** 250 Hz scheduler tick, `crates/scheduler/src/lib.rs` (`TICK_HZ`, `TICK_MS`). */
+        /** 250 Hz scheduler tick, `motorcontroller/scheduler/src/lib.rs` (`TICK_HZ`, `TICK_MS`). */
         const val TICK_MS = 4
     }
 

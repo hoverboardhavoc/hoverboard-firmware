@@ -2,8 +2,8 @@ package com.hoverboard.protocol.store
 
 /**
  * The live-tunable words of the state-feedback balance law (`specs/state-feedback.md` section 6), a
- * mirror of two store handles, `crates/store/src/field.rs` (`CONTROL_SF_GAINS`,
- * `CONTROL_REFERENCE`), and of the seam that guards them, `crates/control/src/config.rs`
+ * mirror of two store handles, `shared/store/src/field.rs` (`CONTROL_SF_GAINS`,
+ * `CONTROL_REFERENCE`), and of the seam that guards them, `motorcontroller/control/src/config.rs`
  * (`GainShadow`, `REFERENCE_MAX`).
  *
  * Two keys of the live tune lane: the four gains, addressed as one `field_id` with the gain as the

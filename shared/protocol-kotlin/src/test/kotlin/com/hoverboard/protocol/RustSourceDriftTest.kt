@@ -143,9 +143,9 @@ class RustSourceDriftTest {
 
     private val repoRoot: File by lazy {
         var dir: File? = File(System.getProperty("user.dir")).absoluteFile
-        while (dir != null && !File(dir, "crates/linkctl/src/lib.rs").isFile) dir = dir.parentFile
+        while (dir != null && !File(dir, "shared/linkctl/src/lib.rs").isFile) dir = dir.parentFile
         checkNotNull(dir) {
-            "Could not find the firmware repo root (no crates/linkctl/src/lib.rs above " +
+            "Could not find the firmware repo root (no shared/linkctl/src/lib.rs above " +
                 "${System.getProperty("user.dir")}). This module is the Kotlin mirror of that " +
                 "source and its drift gate only works inside the firmware repository."
         }
@@ -316,7 +316,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The `(field_id, handle name)` rows of a `field_ids!` block in crates/store/src/field.rs, in
+     * The `(field_id, handle name)` rows of a `field_ids!` block in shared/store/src/field.rs, in
      * declaration order. [nth] selects the block: 0 is the production registry, 1 the
      * `#[cfg(feature = "test-fields")]` copy.
      *
@@ -329,7 +329,7 @@ class RustSourceDriftTest {
     private fun registryRows(text: String, nth: Int): List<Pair<Int, String>> {
         val blocks = Regex("""^field_ids!\s*\{""", RegexOption.MULTILINE).findAll(text).toList()
         check(blocks.size == 2) {
-            "crates/store/src/field.rs declares ${blocks.size} `field_ids!` blocks, not 2: this gate " +
+            "shared/store/src/field.rs declares ${blocks.size} `field_ids!` blocks, not 2: this gate " +
                 "reads the production registry and the `test-fields` copy, and cannot tell which is " +
                 "which otherwise"
         }
@@ -439,10 +439,10 @@ class RustSourceDriftTest {
         s.split('_').mapIndexed { i, part -> if (i == 0) part else part.replaceFirstChar(Char::uppercase) }
             .joinToString("")
 
-    private val linkctl by lazy { rust("crates/linkctl/src/lib.rs") }
+    private val linkctl by lazy { rust("shared/linkctl/src/lib.rs") }
 
     /**
-     * Every supervision timeout the firmware declares, by name, read out of crates/linkctl.
+     * Every supervision timeout the firmware declares, by name, read out of shared/linkctl.
      *
      * ONE selector, used by both tests that care (the exact-set mirror check and the keepalive
      * relation), so the two cannot come to disagree about which declarations count.
@@ -468,7 +468,7 @@ class RustSourceDriftTest {
      * was a literal space, so `pub const  FOURTH_TIMEOUT_TICKS` (two spaces) and a name wrapped to the
      * next line both escaped, and an unmirrored fourth timeout in the firmware left this suite GREEN.
      * The shapes below are therefore checked against the GATE - inject the declaration into
-     * crates/linkctl and run the suite - rather than against a reading of the regex.
+     * shared/linkctl and run the suite - rather than against a reading of the regex.
      *
      * What escapes by DESIGN: a constant with no `pub` at all, or `pub(self)`, which is the same
      * visibility. Not because the mirror could not carry it - the mirror never links against the Rust,
@@ -540,7 +540,7 @@ class RustSourceDriftTest {
     /**
      * [text] with [line] inserted after [anchor]: a drift on the RUST side, built in memory.
      *
-     * Every selector this file turned into a set was proven by editing crates/, running the suite
+     * Every selector this file turned into a set was proven by editing the Rust, running the suite
      * and reverting, which proves it on one machine on one afternoon. Growing the real source text
      * in memory proves the same thing on every build, and it reads the real file, so a fixture
      * cannot drift into testing a shape the Rust no longer has.
@@ -567,7 +567,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun aWireConstantInATypeTheSelectorDoesNotTakeFailsByName() {
-        val walk = rust("crates/net/src/walk.rs")
+        val walk = rust("shared/net/src/walk.rs")
         val anchor = "pub const PROTO_VER: u8 = 1;"
         assertTrue(
             wireConstants(grown(walk, anchor, "pub const KIND_RELAY: u8 = 0x03;"), "fixture")
@@ -617,14 +617,14 @@ class RustSourceDriftTest {
     }
 
     /**
-     * A framing constant added next to `crates/link/src/framer.rs`'s `SOF` reaches the set
+     * A framing constant added next to `shared/link/src/framer.rs`'s `SOF` reaches the set
      * [l2FrameConstantsAgreeWithTheRustSource] compares, so the mirror has to carry it. The four
      * reads there are by name and cannot notice a fifth.
      */
     @Test
     fun anL2FramingConstantNothingMirrorsReachesTheComparison() {
         val grownFramer = grown(
-            rust("crates/link/src/framer.rs"),
+            rust("shared/link/src/framer.rs"),
             "pub const SOF: u8 = 0x5A;",
             "pub const ESCAPE: u8 = 0x5B;",
         )
@@ -655,7 +655,7 @@ class RustSourceDriftTest {
     // --- opcodes ---------------------------------------------------------------------------------
 
     /**
-     * Exact-set comparison against the `OP_*` consts (`crates/linkctl/src/lib.rs`, the opcode
+     * Exact-set comparison against the `OP_*` consts (`shared/linkctl/src/lib.rs`, the opcode
      * block). Adding a fourth control family in the firmware fails this test until the Kotlin
      * mirrors it.
      *
@@ -678,16 +678,16 @@ class RustSourceDriftTest {
         assertEquals(fromRust, fromKotlin, "linkctl opcode allocation drifted from the Rust")
     }
 
-    /** Exact-set comparison against `crates/net/src/pdu.rs`'s `Opcode` enum. */
+    /** Exact-set comparison against `shared/net/src/pdu.rs`'s `Opcode` enum. */
     @Test
     fun l3OpcodesAgreeWithTheRustSource() {
-        val fromRust = discriminants(rust("crates/net/src/pdu.rs"), "Opcode")
+        val fromRust = discriminants(rust("shared/net/src/pdu.rs"), "Opcode")
         val fromKotlin = Opcode.entries.associate { it.name to it.value }
         assertEquals(fromRust, fromKotlin, "L3 opcode table drifted from the Rust")
     }
 
     /**
-     * Exact-set comparison against the `u8` address constants of `crates/net/src/pdu.rs`,
+     * Exact-set comparison against the `u8` address constants of `shared/net/src/pdu.rs`,
      * `BROADCAST` and its siblings.
      *
      * The guest range lives there, not with the walk constants: the address space is L3's own model,
@@ -698,7 +698,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun l3AddressConstantsAgreeWithTheRustSource() {
-        val fromRust = wireConstants(rust("crates/net/src/pdu.rs"), "L3 address constant")
+        val fromRust = wireConstants(rust("shared/net/src/pdu.rs"), "L3 address constant")
 
         val fromKotlin = mapOf(
             "BROADCAST" to BROADCAST,
@@ -710,7 +710,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * Exact-set comparison against the `u8` wire constants of `crates/net/src/walk.rs`,
+     * Exact-set comparison against the `u8` wire constants of `shared/net/src/walk.rs`,
      * `PROTO_VER` and its siblings.
      *
      * Every constant in the Kotlin [Walk] object is hand-copied from that file: the `NODE_HELLO`
@@ -733,7 +733,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun walkWireConstantsAgreeWithTheRustSource() {
-        val fromRust = wireConstants(rust("crates/net/src/walk.rs"), "walk wire constant")
+        val fromRust = wireConstants(rust("shared/net/src/walk.rs"), "walk wire constant")
 
         val fromKotlin = Walk::class.java.declaredFields
             .filter { it.type == Int::class.javaPrimitiveType }
@@ -751,7 +751,7 @@ class RustSourceDriftTest {
     @Test
     fun maxPduAgreesWithTheRustSource() {
         val m = findOne(
-            rust("crates/net/src/walk.rs"),
+            rust("shared/net/src/walk.rs"),
             """^\s*pub\s+const\s+MAX_PDU\s*:\s*usize\s*=\s*([^;]+);""",
             "walk.rs MAX_PDU",
         )
@@ -759,15 +759,15 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The secret mark's status (`crates/net/src/walk.rs`, `CFG_SECRET`), answered with no value for
-     * a read of a stored `wifi.pass` (`crates/store/src/field.rs`, `WIFI_PASS`, id `0x12`), which the
+     * The secret mark's status (`shared/net/src/walk.rs`, `CFG_SECRET`), answered with no value for
+     * a read of a stored `wifi.pass` (`shared/store/src/field.rs`, `WIFI_PASS`, id `0x12`), which the
      * app meets only as a refusal. The number is read out of the Rust, so renumbering it there fails
      * here until the mirror and the refusal follow.
      */
     @Test
     fun theSecretStatusMatchesTheFirmware() {
         val m = findOne(
-            rust("crates/net/src/walk.rs"),
+            rust("shared/net/src/walk.rs"),
             """^pub\s+const\s+CFG_SECRET\s*:\s*u8\s*=\s*([^;]+);""",
             "walk.rs CFG_SECRET",
         )
@@ -782,7 +782,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * Exact-set comparison against `Type::tag` in `crates/store/src/key.rs`.
+     * Exact-set comparison against `Type::tag` in `shared/store/src/key.rs`.
      *
      * Scoped to `tag()`'s own body: that file matches on `Type` in several places (`from_tag`, the
      * fixed-width table), and a value pattern loose enough to catch a non-literal tag would
@@ -790,10 +790,10 @@ class RustSourceDriftTest {
      */
     @Test
     fun storeTypeTagsAgreeWithTheRustSource() {
-        val key = rust("crates/store/src/key.rs")
+        val key = rust("shared/store/src/key.rs")
         val tagFn = key.substring(
             key.indexOf("pub const fn tag(self) -> u8 {").also {
-                check(it >= 0) { "No `pub const fn tag(self) -> u8` in crates/store/src/key.rs" }
+                check(it >= 0) { "No `pub const fn tag(self) -> u8` in shared/store/src/key.rs" }
             },
         ).substringBefore("\n    }")
 
@@ -945,7 +945,7 @@ class RustSourceDriftTest {
         }
         check(bits.isNotEmpty()) {
             "No `u8` constant in any of ${PAYLOADS.joinToString(", ")}'s impl blocks in " +
-                "crates/linkctl/src/lib.rs: the payloads carry eight bits between them, so reading " +
+                "shared/linkctl/src/lib.rs: the payloads carry eight bits between them, so reading " +
                 "none means the selector no longer finds the impls, not that the firmware dropped " +
                 "every flag."
         }
@@ -978,14 +978,14 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The `u16` level-mask constants (`crates/orchestrator/src/events.rs`, `EV_LATCH_B` and the bits
+     * The `u16` level-mask constants (`motorcontroller/orchestrator/src/events.rs`, `EV_LATCH_B` and the bits
      * beside it), evaluated: each is
 
      * `1 << N` or an OR of constants declared before it (`EV_MOTOR_BITS`, `FAULT_A_BITS`). A
      * constant written in any other form fails by name in [bitValue] rather than dropping out.
      */
     private fun rustLevelMasks(): Map<String, Int> {
-        val events = rust("crates/orchestrator/src/events.rs")
+        val events = rust("motorcontroller/orchestrator/src/events.rs")
         val values = linkedMapOf<String, Int>()
         for (m in findAll(events, """^pub\s+const\s+(\w+)\s*:\s*u16\s*=\s*([^;]+);""", "events.rs u16 masks")) {
             val name = m.groupValues[1]
@@ -1003,7 +1003,7 @@ class RustSourceDriftTest {
 
     /**
      * `CyclicState.ARM_BLOCKING_BITS` is Fault A and Fault B: `FAULT_A_BITS | EV_LATCH_B`, as the
-     * Rust declares them (`crates/orchestrator/src/events.rs`, `FAULT_A_BITS`). The rider app's
+     * Rust declares them (`motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`). The rider app's
      * fault lamps and fault disarm read it, so a bit the firmware adds to either group has to reach
      * the app or fail here.
      */
@@ -1017,7 +1017,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * Exact-set comparison against every `*_TIMEOUT_TICKS` const (`crates/linkctl/src/lib.rs`,
+     * Exact-set comparison against every `*_TIMEOUT_TICKS` const (`shared/linkctl/src/lib.rs`,
 
      * the supervision timeouts).
      *
@@ -1049,12 +1049,12 @@ class RustSourceDriftTest {
      * numbers out of the sources that own them, none of them out of this mirror, and checks the
      * relation between them:
      *
-     * - the window, from `crates/linkctl/src/lib.rs` (`INPUTS_TIMEOUT_TICKS`), in control ticks,
+     * - the window, from `shared/linkctl/src/lib.rs` (`INPUTS_TIMEOUT_TICKS`), in control ticks,
      *   through the same selector the exact-set mirror check uses. Reading the Rust rather than the
      *   mirrored Kotlin constant is deliberate: it keeps this test about the two artifacts that
      *   actually meet on the wire, the firmware and the app, rather than making it depend on
      *   another test having already proved the mirror faithful;
-     * - the tick itself, from `crates/scheduler/src/lib.rs` (`TICK_HZ`), which is what turns ticks
+     * - the tick itself, from `motorcontroller/scheduler/src/lib.rs` (`TICK_HZ`), which is what turns ticks
      *   into milliseconds (`TICK_MS` is `1000 / TICK_HZ` there, an expression, so the rate is what
      *   gets read and the division is done here);
      * - the keepalive, from the rider app's `LinkConfig` (`SEND_INTERVAL_MS` x
@@ -1071,13 +1071,13 @@ class RustSourceDriftTest {
     fun theArmMirrorWindowOutlastsTheAppsKeepalive() {
         val tickHz = literal(
             "TICK_HZ",
-            findOne(rust("crates/scheduler/src/lib.rs"), """^pub const TICK_HZ: u32 = ([^;]+);""", "TICK_HZ")
+            findOne(rust("motorcontroller/scheduler/src/lib.rs"), """^pub const TICK_HZ: u32 = ([^;]+);""", "TICK_HZ")
                 .groupValues[1],
             "scheduler tick rate",
         )
         val windowTicks = rustSupervisionTimeouts()["INPUTS_TIMEOUT_TICKS"]
             ?: error(
-                "no INPUTS_TIMEOUT_TICKS in crates/linkctl/src/lib.rs: the firmware's arm-mirror " +
+                "no INPUTS_TIMEOUT_TICKS in shared/linkctl/src/lib.rs: the firmware's arm-mirror " +
                     "window is what this test measures the app's cadence against, so it cannot " +
                     "check anything without it.",
             )
@@ -1097,7 +1097,7 @@ class RustSourceDriftTest {
             "the firmware holds a controller's arm mirror for ${windowMs}ms but the rider app only " +
                 "re-sends INPUTS every ${keepaliveMs}ms; the window must span at least " +
                 "$KEEPALIVE_MARGIN keepalive periods, so this build can disarm a board mid-ride on " +
-                "ordinary frame loss. Move the timeout (crates/linkctl) or the cadence " +
+                "ordinary frame loss. Move the timeout (shared/linkctl) or the cadence " +
                 "(LinkConfig.SEND_INTERVAL_MS / INPUTS_KEEPALIVE_TICKS), not this margin.",
         )
     }
@@ -1110,7 +1110,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun theDriveDemandScaleAgreesWithTheRustSource() {
-        val config = rust("crates/control/src/config.rs")
+        val config = rust("motorcontroller/control/src/config.rs")
         // These live inside per-area modules rather than at the top level of the file, so unlike
         // the linkctl patterns above they cannot anchor the `pub` to column 0.
         fun c(name: String, ty: String) = literal(
@@ -1149,7 +1149,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun theOnDutyFullScaleAgreesWithTheRustSource() {
-        val commutation = rust("crates/commutation/src/lib.rs")
+        val commutation = rust("motorcontroller/commutation/src/lib.rs")
         val arr = literal(
             "ARR",
             findOne(commutation, """^pub const ARR: u16 = ([^;]+);""", "ARR").groupValues[1],
@@ -1160,8 +1160,8 @@ class RustSourceDriftTest {
 
     /**
      * The live tune lane's two keys, against the `IndexedField` handles in
-     * `crates/store/src/field.rs` (`CONTROL_SF_GAINS`, `CONTROL_REFERENCE`) and the seam in
-     * `crates/control/src/config.rs` (`GainShadow`) (`specs/state-feedback.md` section 6): the ids,
+     * `shared/store/src/field.rs` (`CONTROL_SF_GAINS`, `CONTROL_REFERENCE`) and the seam in
+     * `motorcontroller/control/src/config.rs` (`GainShadow`) (`specs/state-feedback.md` section 6): the ids,
      * the per-index defaults and the ranges of `CONTROL_SF_GAINS` (0x79) and `CONTROL_REFERENCE`
      * (0x7B), and the `CONTROL_GAIN_MAX` (0x7A) defaults the gains are bounded by.
      *
@@ -1173,8 +1173,8 @@ class RustSourceDriftTest {
      */
     @Test
     fun theGainFieldsAgreeWithTheRustSource() {
-        val field = rust("crates/store/src/field.rs")
-        val config = rust("crates/control/src/config.rs")
+        val field = rust("shared/store/src/field.rs")
+        val config = rust("motorcontroller/control/src/config.rs")
 
         // `pub const NAME: IndexedField<i16, 4> =\n    IndexedField::new(0x7A, [20000, ...]);`
         fun family(name: String): Pair<Int, List<Int>> {
@@ -1255,7 +1255,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun theGainRampCapsAgreeWithTheRustSource() {
-        val config = rust("crates/control/src/config.rs")
+        val config = rust("motorcontroller/control/src/config.rs")
         val caps = findOne(
             config,
             """^\s+pub const RAMP_CAPS: \[i16; GAINS\] = \[([^\]]+)\];""",
@@ -1264,13 +1264,13 @@ class RustSourceDriftTest {
         assertEquals(caps, Gains.Ramp.CAPS, "RAMP_CAPS drifted")
         // The law applies them as a symmetric clamp of the step toward the shadow, every RUN pass.
         findOne(
-            rust("crates/control/src/sf.rs"),
+            rust("motorcontroller/control/src/sf.rs"),
             """\(l \+ clamp_sym\(target\[i\] as i32 - l, RAMP_CAPS\[i\] as i32\)\) as i16""",
             "the ramp step",
         )
 
         // The pass rate the bound counts passes in.
-        val hz = findOne(rust("crates/scheduler/src/lib.rs"), """^pub const TICK_HZ: u32 = ([^;]+);""", "TICK_HZ")
+        val hz = findOne(rust("motorcontroller/scheduler/src/lib.rs"), """^pub const TICK_HZ: u32 = ([^;]+);""", "TICK_HZ")
         assertEquals(literal("TICK_HZ", hz.groupValues[1], "tick rate"), Gains.Ramp.PASS_HZ, "TICK_HZ drifted")
 
         // The spec's convergence figures from 0 to the section-7 start `[3491, 4002, 197, 926]`:
@@ -1312,7 +1312,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun everyRegisteredFieldReachesTheMirror() {
-        val field = rust("crates/store/src/field.rs")
+        val field = rust("shared/store/src/field.rs")
         val registry = registryRows(field, 0)
         val withTestFields = registryRows(field, 1)
 
@@ -1350,7 +1350,7 @@ class RustSourceDriftTest {
         // WITNESS: a field registered with its id row left out of `field_ids!` still COMPILES (the
         // array's type pins the total, not the rows), and the test
         // `registry_has_every_declared_field_with_its_handle_type_and_default`
-        // (`crates/store/src/field.rs`, the registry's own check) asserts the same relation from
+        // (`shared/store/src/field.rs`, the registry's own check) asserts the same relation from
         // inside the crate. This is the mirror side's independent reading of it, so
         // the list this gate treats as the registry is checked against the Rust's own count without
         // depending on the Rust suite having been run.
@@ -1367,7 +1367,7 @@ class RustSourceDriftTest {
         assertEquals(
             declaredCount("not\\(feature = \"test-fields\"\\)", "the production"),
             registry.size,
-            "crates/store/src/field.rs declares a field count its `field_ids!` rows do not add up to, " +
+            "shared/store/src/field.rs declares a field count its `field_ids!` rows do not add up to, " +
                 "so either a registered field has no id row or this gate could not read one",
         )
         assertEquals(
@@ -1394,7 +1394,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * [Fields.ARM_TIME] against `ARM_ROW` in crates/firmware/src/arm.rs: which fields the firmware
+     * [Fields.ARM_TIME] against `ARM_ROW` in motorcontroller/firmware/src/arm.rs: which fields the firmware
      * re-reads when a board arms, and therefore which ones a client must NOT tell its operator to
      * restart a board for.
      *
@@ -1418,7 +1418,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun theArmTimeValueRowAgreesWithTheRustSource() {
-        val arm = rust("crates/firmware/src/arm.rs")
+        val arm = rust("motorcontroller/firmware/src/arm.rs")
         val decl = findOne(
             arm,
             """^const\s+ARM_ROW\s*:\s*\[\s*store::Key\s*;\s*(\d+)\s*\]\s*=\s*\[""",
@@ -1426,7 +1426,7 @@ class RustSourceDriftTest {
         )
         val open = decl.range.last
         val end = arm.indexOf("\n];", open)
-        check(end > open) { "Unterminated `ARM_ROW` array in crates/firmware/src/arm.rs" }
+        check(end > open) { "Unterminated `ARM_ROW` array in motorcontroller/firmware/src/arm.rs" }
         val body = arm.substring(open + 1, end)
 
         // `store::MOTOR_METHOD.key(),` or `store::IMU_AXIS_SIGN.at(0).key(),`, one per line. The
@@ -1468,7 +1468,7 @@ class RustSourceDriftTest {
     /**
      * The Setup screen's fields (`specs/rider-ui.md` section 3.4): each [Fields.ALL] entry's id,
      * storage type and default, against the `Field<T>` / `StrField` handle of the same name
-     * (`crates/store/src/field.rs`, the handles).
+     * (`shared/store/src/field.rs`, the handles).
      *
      * The same three silent drifts the gain pin guards: an id that moves makes the screen write some
      * OTHER field, a type that changes makes every write a `CFG_TYPE_MISMATCH`, and a default that
@@ -1480,7 +1480,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun theSetupFieldsAgreeWithTheRustSource() {
-        val field = rust("crates/store/src/field.rs")
+        val field = rust("shared/store/src/field.rs")
         for ((name, def) in Fields.ALL) {
             // `pub const NAME: Field<u32> = Field::new(0x20, 10_000);` or `StrField::new(0x10, "Hoverboard")`
             val m = findOne(
@@ -1540,7 +1540,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The read-only fields: every row of `REGISTRY` in `crates/store/src/field.rs` marked
+     * The read-only fields: every row of `REGISTRY` in `shared/store/src/field.rs` marked
      * `.read_only()` (`node.class`; `specs/l3.md`, "Node class"), against the [FieldDef.readOnly]
      * flags of [Fields.ALL]. Exact in both directions: a field the firmware starts refusing must
      * be marked here, so a client does not offer an edit the board answers with
@@ -1551,7 +1551,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun theReadOnlyFieldsAgreeWithTheRustRegistry() {
-        val field = rust("crates/store/src/field.rs")
+        val field = rust("shared/store/src/field.rs")
         val registry = field.substringAfter("pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [")
             .substringBefore("];")
         val rows = findAll(registry, """^\s*(\w+)\.entry\(\w*\)\.read_only\(\),""", "a read-only registry row")
@@ -1591,10 +1591,10 @@ class RustSourceDriftTest {
      */
     @Test
     fun theDocCommentVocabulariesAgreeWithTheRustSource() {
-        val field = rust("crates/store/src/field.rs")
+        val field = rust("shared/store/src/field.rs")
         fun docOf(name: String): String {
             val at = field.indexOf("pub const $name:")
-            check(at >= 0) { "No `pub const $name:` in crates/store/src/field.rs" }
+            check(at >= 0) { "No `pub const $name:` in shared/store/src/field.rs" }
             return field.substring(0, at).trimEnd().lines().reversed()
                 .takeWhile { it.trimStart().startsWith("///") }
                 .reversed().joinToString(" ") { it.trimStart().removePrefix("///").trim() }
@@ -1656,7 +1656,7 @@ class RustSourceDriftTest {
     fun theSetupChoiceVocabulariesAgreeWithTheRustSource() {
         assertEquals(
             mapOf("Throttle" to Fields.ControlMode.THROTTLE, "Balance" to Fields.ControlMode.BALANCE),
-            discriminants(rust("crates/control/src/mode.rs"), "ControlMode"),
+            discriminants(rust("motorcontroller/control/src/mode.rs"), "ControlMode"),
             "CONTROL_MODE vocabulary drifted",
         )
         assertEquals(
@@ -1665,12 +1665,12 @@ class RustSourceDriftTest {
                 "Sine" to Fields.MotorMethod.SINE,
                 "Foc" to Fields.MotorMethod.FOC,
             ),
-            discriminants(rust("crates/commutation/src/lib.rs"), "CommutationMethod"),
+            discriminants(rust("motorcontroller/commutation/src/lib.rs"), "CommutationMethod"),
             "MOTOR_METHOD vocabulary drifted",
         )
 
         // `pub fn model_from_index(index: u8) -> Option<Model> { match index { 1 => Some(MPU6050), ... } }`
-        val imu = rust("crates/imu/src/lib.rs")
+        val imu = rust("motorcontroller/imu/src/lib.rs")
         val start = imu.indexOf("pub fn model_from_index(")
         check(start >= 0) { "No `pub fn model_from_index(` found" }
         val body = imu.substring(start, imu.indexOf("\n}", start))
@@ -1695,7 +1695,7 @@ class RustSourceDriftTest {
         // `Fields.CURRENT_LIMIT_MA` is therefore the client's own editor range, and what is pinned
         // here is the ceiling (`MAX_LIMIT_COUNTS`), that the window keeps the hard trip's 2x
         // expressible, and the band the per-board FLOOR is clamped into.
-        val motor = rust("crates/firmware/src/motor.rs")
+        val motor = rust("motorcontroller/firmware/src/motor.rs")
         fun bound(name: String) = findOne(
             motor,
             """^pub\s+const\s+$name\s*:\s*i16\s*=\s*([^;]+);""",
@@ -1744,12 +1744,12 @@ class RustSourceDriftTest {
         )
 
         // The turn bounds' two seam clamps, which the Machine section offers as the ranges of its
-        // rows (`specs/rider-ui.md` 3.7b). The seam (`crates/control/src/drive.rs`,
+        // rows (`specs/rider-ui.md` 3.7b). The seam (`motorcontroller/control/src/drive.rs`,
         // `DriveTurn::new`) bounds each word as it reads it, at boot and again at every arm, and
         // the store validates type only, so a client offering a wider range offers values the board
         // will silently narrow. Mirrored on `Fields.NOISE_FLOOR`'s precedent, and pinned here the
         // way the battery calibration's clamps are below.
-        val drive = rust("crates/control/src/drive.rs")
+        val drive = rust("motorcontroller/control/src/drive.rs")
         fun seam(name: String, ty: String = "i16", src: String = drive): Long = literal(
             name,
             findOne(src, """^pub\s+const\s+$name\s*:\s*$ty\s*=\s*([^;]+);""", name)
@@ -1760,7 +1760,7 @@ class RustSourceDriftTest {
         // reads it too and cannot depend on `control`); the seam imports it rather than declaring it.
         findOne(drive, """^use\s+base::TORQUE_FULL_SCALE;""", "the drive seam's import of the full scale")
         assertEquals(
-            0L..seam("TORQUE_FULL_SCALE", "i32", rust("crates/base/src/lib.rs")),
+            0L..seam("TORQUE_FULL_SCALE", "i32", rust("shared/base/src/lib.rs")),
             Fields.TURN_MAX,
             "the turn_max seam clamp drifted",
         )
@@ -1777,7 +1777,7 @@ class RustSourceDriftTest {
         // The position clamp's seam (`control::sf::pos_clamp`, `specs/state-feedback.md` section
         // 4): 0 up to `POS_CLAMP_MAX`, a negative word read as 0, and the registered default
         // inside.
-        val sf = rust("crates/control/src/sf.rs")
+        val sf = rust("motorcontroller/control/src/sf.rs")
         val posMax = literal(
             "POS_CLAMP_MAX",
             findOne(sf, """^pub const POS_CLAMP_MAX: i16 = ([^;]+);""", "POS_CLAMP_MAX").groupValues[1],
@@ -1791,7 +1791,7 @@ class RustSourceDriftTest {
         )
 
         // The battery calibration's boot clamps (`VbattCal::new`), which the Setup rows offer as ranges.
-        val battery = rust("crates/orchestrator/src/battery.rs")
+        val battery = rust("motorcontroller/orchestrator/src/battery.rs")
         fun cal(name: String): Long {
             val raw = findOne(battery, """^pub\s+const\s+$name\s*:\s*i16\s*=\s*([^;]+);""", name)
                 .groupValues[1].trim().replace("_", "")
@@ -1805,12 +1805,12 @@ class RustSourceDriftTest {
         }
 
         // CONTROL_RIDER_REQUIRED's decode: 0 is the only byte that waives the rider. The rule has
-        // ONE home, `rider_required_from` in `crates/control/src/mode.rs`. The field is read
+        // ONE home, `rider_required_from` in `motorcontroller/control/src/mode.rs`. The field is read
         // twice: at the boot seam
         // (`ControlDispatch::new`) and again at every arm (`ControlDispatch::re_apply_values`, the
         // arm-time re-read), and the two must not drift. So this checks the rule where it lives and
         // then checks that both sites go through it.
-        val mode = rust("crates/control/src/mode.rs")
+        val mode = rust("motorcontroller/control/src/mode.rs")
         assertTrue(
             Regex("""const\s+fn\s+rider_required_from\s*\(\s*byte\s*:\s*u8\s*\)\s*->\s*bool\s*\{\s*byte\s*!=\s*0\s*\}""")
                 .containsMatchIn(mode),
@@ -1831,14 +1831,14 @@ class RustSourceDriftTest {
         // BOARD_BATTERY_FLOOR's decode: known AND (no floor at `<= 0`, else at or above it).
         assertTrue(
             Regex("""battery\s*!=\s*0\s*&&\s*\(self\.battery_floor\s*<=\s*0\s*\|\|\s*battery\s*>=\s*self\.battery_floor\)""")
-                .containsMatchIn(rust("crates/control/src/mode.rs")),
+                .containsMatchIn(rust("motorcontroller/control/src/mode.rs")),
             "ControlDispatch::battery_ok no longer reads `<= 0` as no floor: review Fields.BOARD_BATTERY_FLOOR and its Setup hint",
         )
     }
 
     /**
      * The orientation rule the Setup screen enforces before staging `IMU_AXIS_SIGN`
-     * (`specs/rider-ui.md` section 3.4, D7), against `imu::Config` in crates/imu/src/lib.rs, which
+     * (`specs/rider-ui.md` section 3.4, D7), against `imu::Config` in motorcontroller/imu/src/lib.rs, which
      * since `IMU_AXIS_ROLE` (0x68) judges a frame by the signs AND the axis roles
      * (`specs/imu.md`, the role model).
      *
@@ -1856,7 +1856,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun theOrientationRuleAgreesWithTheRustSource() {
-        val imu = rust("crates/imu/src/lib.rs")
+        val imu = rust("motorcontroller/imu/src/lib.rs")
 
         val defStart = imu.indexOf("impl Default for Config {")
         check(defStart >= 0) { "No `impl Default for Config {` found" }
@@ -1942,11 +1942,11 @@ class RustSourceDriftTest {
 
     @Test
     fun l2FrameConstantsAgreeWithTheRustSource() {
-        val framer = rust("crates/link/src/framer.rs")
+        val framer = rust("shared/link/src/framer.rs")
         assertEquals(
             setOf("SOF", "STREAM_HEADER_LEN", "STREAM_CRC_LEN", "MAX_L2_LEN", "MAX_STREAM_FRAME"),
             moduleConstNames(framer, "the L2 framing constants"),
-            "crates/link/src/framer.rs declares a framing constant this gate does not read, so the " +
+            "shared/link/src/framer.rs declares a framing constant this gate does not read, so the " +
                 "mirror is not required to carry it and a sender that ignores it stays green here",
         )
         fun c(name: String, ty: String) = num(
@@ -1966,14 +1966,14 @@ class RustSourceDriftTest {
 
     @Test
     fun fragHeaderConstantsAgreeWithTheRustSource() {
-        val frag = rust("crates/link/src/frag.rs")
+        val frag = rust("shared/link/src/frag.rs")
         // `PID_SHIFT` is module-private and so outside this census, on the same rule the supervision
         // timeouts state: a private constant is an internal detail of the crate, and the field it
         // shifts is pinned by the three public ones the header is built from.
         assertEquals(
             setOf("MORE_BIT", "MAX_PID", "MAX_FRAG_IDX", "MAX_FRAGMENTS"),
             moduleConstNames(frag, "the fragment-header constants"),
-            "crates/link/src/frag.rs declares a header constant this gate does not read",
+            "shared/link/src/frag.rs declares a header constant this gate does not read",
         )
         fun c(name: String) = num(
             findOne(frag, """^pub const $name: \w+ = ([^;]+);""", name).groupValues[1]
@@ -1988,7 +1988,7 @@ class RustSourceDriftTest {
 
     @Test
     fun l3HeaderLengthAgreesWithTheRustSource() {
-        val pdu = rust("crates/net/src/pdu.rs")
+        val pdu = rust("shared/net/src/pdu.rs")
         val fromRust = num(
             findOne(pdu, """^pub const HEADER_LEN: usize = (\d+);""", "L3 HEADER_LEN").groupValues[1],
         )
@@ -1996,7 +1996,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The CRC the firmware actually computes (`crates/base/src/crc16.rs`, `POLY` and `INIT`).
+     * The CRC the firmware actually computes (`shared/base/src/crc16.rs`, `POLY` and `INIT`).
      * That file no longer instantiates the `crc` crate's named `CRC_16_MODBUS` algorithm: it computes the same algorithm itself from a
      * nibble table, so the pin is the two constants that DEFINE it, the reflected polynomial
      * (`POLY`) and the init value (`INIT`). Those are exactly what `l2.Crc16` mirrors
@@ -2008,7 +2008,7 @@ class RustSourceDriftTest {
      */
     @Test
     fun crcAlgorithmAgreesWithTheRustSource() {
-        val crc = rust("crates/base/src/crc16.rs")
+        val crc = rust("shared/base/src/crc16.rs")
         val poly = findOne(crc, """^const POLY: u16 = ([^;]+);""", "CRC polynomial")
         assertEquals(
             0xA001,
@@ -2025,9 +2025,9 @@ class RustSourceDriftTest {
 
     // --- the board-layout validator mirror -------------------------------------------------------
 
-    private val boardLib by lazy { rust("crates/board/src/lib.rs") }
-    private val boardPlumbing by lazy { rust("crates/board/src/plumbing.rs") }
-    private val boardTests by lazy { rust("crates/board/src/tests.rs") }
+    private val boardLib by lazy { rust("motorcontroller/board/src/lib.rs") }
+    private val boardPlumbing by lazy { rust("motorcontroller/board/src/plumbing.rs") }
+    private val boardTests by lazy { rust("motorcontroller/board/src/tests.rs") }
 
     /** `SelfHold` -> `SELF_HOLD`: a Rust variant name as the Kotlin enum spells it. */
     private fun camelToScreaming(s: String): String =
@@ -2053,7 +2053,7 @@ class RustSourceDriftTest {
     /** Every query the `Capabilities` trait declares, by name; see the census in its test. */
     private fun capabilityQueries(text: String): Set<String> {
         val start = text.indexOf("pub trait Capabilities {")
-        check(start >= 0) { "No `pub trait Capabilities {` in crates/board/src/lib.rs" }
+        check(start >= 0) { "No `pub trait Capabilities {` in motorcontroller/board/src/lib.rs" }
         return findAll(text.substring(start, text.indexOf("\n}", start)), CAPABILITY_QUERY, "the Capabilities trait's queries")
             .map { it.groupValues[1] }
             .toSet()
@@ -2116,14 +2116,14 @@ class RustSourceDriftTest {
         assertEquals(PIN_ABSENT, absent, "board::ABSENT drifted")
         assertEquals(
             PIN_ABSENT,
-            literal("PIN_ABSENT", findOne(rust("crates/store/src/field.rs"), """^pub\s+const\s+PIN_ABSENT\s*:\s*u8\s*=\s*([^;]+);""", "PIN_ABSENT").groupValues[1], "PIN_ABSENT"),
+            literal("PIN_ABSENT", findOne(rust("shared/store/src/field.rs"), """^pub\s+const\s+PIN_ABSENT\s*:\s*u8\s*=\s*([^;]+);""", "PIN_ABSENT").groupValues[1], "PIN_ABSENT"),
             "store::PIN_ABSENT drifted",
         )
         // The board crate sizes its per-motor arrays by `store::MOTORS` (checked in the member list
         // above), so the count is read where it is declared.
         assertEquals(
             BoardFields.MOTORS,
-            literal("MOTORS", findOne(rust("crates/store/src/field.rs"), """^pub\s+const\s+MOTORS\s*:\s*u8\s*=\s*([^;]+);""", "store::MOTORS").groupValues[1], "motor count"),
+            literal("MOTORS", findOne(rust("shared/store/src/field.rs"), """^pub\s+const\s+MOTORS\s*:\s*u8\s*=\s*([^;]+);""", "store::MOTORS").groupValues[1], "motor count"),
             "the number of motors a field set carries drifted",
         )
     }
@@ -2355,7 +2355,7 @@ class RustSourceDriftTest {
     @Test
     fun theLayoutIsTheFieldSetTheFirmwareReads() {
         val from = boardPlumbing.indexOf("pub fn read_fields")
-        check(from >= 0) { "No `pub fn read_fields` in crates/board/src/plumbing.rs" }
+        check(from >= 0) { "No `pub fn read_fields` in motorcontroller/board/src/plumbing.rs" }
         val to = boardPlumbing.indexOf("/// One safe-USART allowlist entry", from)
         check(to > from) {
             "The doc comment that bounds `read_fields` (\"One safe-USART allowlist entry\") moved or " +
@@ -2385,7 +2385,7 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The capability tables, against `MockChip` in `crates/board/src/tests.rs`.
+     * The capability tables, against `MockChip` in `motorcontroller/board/src/tests.rs`.
      *
      * Two things are pinned, and the second is the one that matters. The gate maps and the chip set
      * are values, compared directly. The five query bodies are pinned as the Rust they are written
@@ -2474,12 +2474,12 @@ class RustSourceDriftTest {
      * refuses. The allowlist entries come out of `SAFE_LINK_USARTS` and its `net` slot constants; the
      * rule comes out of `claims_pins` verbatim; and the routability, which the firmware asks the HAL
      * rather than writing down, comes out of the assertion
-     * `the_inter_board_link_routes_on_each_fleet_part` in `crates/board/src/tests.rs` makes against
+     * `the_inter_board_link_routes_on_each_fleet_part` in `motorcontroller/board/src/tests.rs` makes against
      * it.
      */
     @Test
     fun theReservedSetRuleAgreesWithTheRustSource() {
-        val main = rust("crates/firmware/src/main.rs")
+        val main = rust("motorcontroller/firmware/src/main.rs")
         val slots = findAll(main, """^\s+const (PORT_IDX_\w+)\s*:\s*u8\s*=\s*([^;]+);""", "net port slots")
             .associate { it.groupValues[1] to literal(it.groupValues[1], it.groupValues[2], "net slot") }
         assertEquals(slots["PORT_IDX_UART"], NET_PORT_UART, "the inter-board link's net slot drifted")

@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test
 
 /**
  * The seam between the part a board NAMES on the wire and the capability table a verdict is
- * computed against: `ChipTag` in `crates/linkctl/src/lib.rs` on one side, [ChipFamily] on the
+ * computed against: `ChipTag` in `shared/linkctl/src/lib.rs` on one side, [ChipFamily] on the
  * other, joined by [ChipFamily.forTag].
  *
  * Both ends are already pinned to the Rust by `RustSourceDriftTest` (the tags against `ChipTag`,

@@ -45,7 +45,7 @@ object LinkConfig {
      * "rides through an ordinary RF dropout", not a guarantee at three.
      *
      * Going stale is also a ramp rather than a zeroing: the firmware feeds (0, 0) into the same
-     * rate limiter (`crates/control/src/config.rs`, `RATE`: 480 fixdt = 30 units/tick of its
+     * rate limiter (`motorcontroller/control/src/config.rs`, `RATE`: 480 fixdt = 30 units/tick of its
      * 1000-domain), so a full demand needs a further ~133 ms, plus the low-pass tail, to reach
      * zero. A brief loss is a sag and a recovery; a stop needs sustained silence.
      *

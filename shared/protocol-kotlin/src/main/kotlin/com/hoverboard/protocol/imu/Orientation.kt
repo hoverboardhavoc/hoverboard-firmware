@@ -4,7 +4,7 @@ package com.hoverboard.protocol.imu
  * The IMU orientation as the `IMU_AXIS_SIGN` (0x65) and `IMU_AXIS_ROLE` (0x68) fields can hold it,
  * and the rule that decides which frames are legal: a mirror of `imu::Config::default()`,
  * `imu::DEFAULT_ROLES`, `imu::Config::staged` (the unset rule and its refusal order),
- * `imu::Config::frame_is_rotation` and `imu::Config::triple_is_rotation` in `crates/imu/src/lib.rs`,
+ * `imu::Config::frame_is_rotation` and `imu::Config::triple_is_rotation` in `motorcontroller/imu/src/lib.rs`,
  * which `RustSourceDriftTest` pins.
  *
  * The sign field is six signs, `[ax, ay, az, gx, gy, gz]`, per CHIP axis. The roles field is

@@ -29,7 +29,7 @@ data class AllowlistPort(
 val SWD_PINS = listOf(0x0D, 0x0E)
 
 /**
- * The compiled allowlist as the firmware declares it (`crates/firmware/src/main.rs`,
+ * The compiled allowlist as the firmware declares it (`motorcontroller/firmware/src/main.rs`,
  * `SAFE_LINK_USARTS`): the inter-board link, pins and `LINK_SET` bit only.
  *
  * It held the onboard CC2541's two wirings as well (USART2 on PB10/PB11 under bit 2, USART0 on
@@ -48,7 +48,7 @@ const val NET_PORT_UART = 1
  * The allowlist as [chip] can route it.
  *
  * PA2/PA3 is USART1's default mapping on both families, so the inter-board link routes everywhere;
- * `crates/board/src/tests.rs`, `port_routability_agreement`, asserts that against runtime-hal's own
+ * `motorcontroller/board/src/tests.rs`, `port_routability_agreement`, asserts that against runtime-hal's own
  * pin model.
  */
 @Suppress("UNUSED_PARAMETER")

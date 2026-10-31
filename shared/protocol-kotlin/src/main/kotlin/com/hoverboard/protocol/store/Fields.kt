@@ -5,7 +5,7 @@ import com.hoverboard.protocol.board.PIN_ABSENT
 /**
  * One registered store field as the firmware declares it: its permanent `field_id`, its storage
  * [type] and its typed [default] (what a board that never staged the field reads). A mirror of one
- * `Field<T>` / `StrField` handle in `crates/store/src/field.rs`, which is the single source of truth
+ * `Field<T>` / `StrField` handle in `shared/store/src/field.rs`, which is the single source of truth
  * for all three facts; `RustSourceDriftTest` pins every entry of [Fields.ALL] against it.
  *
  * How many indices a field has is NOT here: the Rust handle does not carry it (an indexed field is a
@@ -26,7 +26,7 @@ data class FieldDef(val id: Int, val type: Type, val default: Value, val readOnl
 
 /**
  * One registered INDEXED store field whose indices default differently: a mirror of one
- * `IndexedField<T, N>` handle in `crates/store/src/field.rs`, carrying the id, the storage [type]
+ * `IndexedField<T, N>` handle in `shared/store/src/field.rs`, carrying the id, the storage [type]
  * and one default per index ([defaults], so its size is the field's `N`). `RustSourceDriftTest` pins
  * every entry of [Fields.INDEXED] against it.
  */
@@ -41,7 +41,7 @@ data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value
 
 /**
  * The registered store fields a settings client edits or displays (`specs/rider-ui.md` section 3.4),
- * mirrored from `crates/store/src/field.rs`, plus the value vocabularies the firmware gives the
+ * mirrored from `shared/store/src/field.rs`, plus the value vocabularies the firmware gives the
  * byte-valued ones.
  *
  * Not every registered field is here: `SOME_BLOB` and the test fields belong to nobody. The live
@@ -177,7 +177,7 @@ object Fields {
     val MOTOR_PHASE_B = FieldDef(0x55, Type.U8, Value.U8(PIN_ABSENT))
 
     /**
-     * What the pack IS: the number of cells in series (`crates/store/src/field.rs`,
+     * What the pack IS: the number of cells in series (`shared/store/src/field.rs`,
      * `BOARD_BATTERY_CELLS`). 0 = not stated, which is the default and is not a guess at eight.
      *
      * Written the SAME to both boards of a machine, the [CONTROL_FRAME] rule: one pack feeds both.
@@ -191,7 +191,7 @@ object Fields {
     val BOARD_BATTERY_CELLS = FieldDef(0x6A, Type.U8, Value.U8(0))
 
     /**
-     * What kind of cell the pack is (`crates/store/src/field.rs`, `BOARD_BATTERY_CHEMISTRY`), in
+     * What kind of cell the pack is (`shared/store/src/field.rs`, `BOARD_BATTERY_CHEMISTRY`), in
      * [BatteryChemistry]'s vocabulary; default [BatteryChemistry.LI_ION]. Written the same to both
      * boards, the [BOARD_BATTERY_CELLS] rule, and not read by the firmware.
      */
@@ -199,8 +199,8 @@ object Fields {
 
     /**
      * Which electrical level means ASSERTED on the board's three discrete input lines
-     * (`crates/store/src/field.rs`, `BOARD_INPUT_POLARITY`): b0 button, b1 pad A, b2 pad B, a set
-     * bit meaning active high. Bits 3..7 are reserved and inert (`crates/inputs/src/lib.rs`,
+     * (`shared/store/src/field.rs`, `BOARD_INPUT_POLARITY`): b0 button, b1 pad A, b2 pad B, a set
+     * bit meaning active high. Bits 3..7 are reserved and inert (`motorcontroller/inputs/src/lib.rs`,
      * `asserted`, masks them).
      *
      * A property of the input wiring fitted, not of the firmware, and a compiled literal until
@@ -241,7 +241,7 @@ object Fields {
 
     /**
      * Per-motor POLE-PAIR count: how many ELECTRICAL revolutions the rotor turns per mechanical
-     * one (`crates/store/src/field.rs`, `MOTOR_POLE_PAIRS`). With six hall edges per electrical
+     * one (`shared/store/src/field.rs`, `MOTOR_POLE_PAIRS`). With six hall edges per electrical
      * revolution, `6 * pole_pairs` edges make one revolution of the wheel, which is half of what
      * turns a [MOTOR_ODOMETER] count into a distance; [WHEEL_DIAMETER_MM] is the other half.
      *
@@ -281,10 +281,10 @@ object Fields {
     val MOTOR_NOISE_FLOOR = FieldDef(0x6B, Type.U16, Value.U16(2_100))
 
     /**
-     * Per-motor LIFETIME TRAVEL, in absolute hall edges (`crates/store/src/field.rs`,
+     * Per-motor LIFETIME TRAVEL, in absolute hall edges (`shared/store/src/field.rs`,
      * `MOTOR_ODOMETER`): every counted commutation edge adds 1 whichever way the wheel turned, so
      * the total never winds back. The live value is also on the wire, in the appended block
-     * (`crates/linkctl/src/lib.rs`, `CyclicObs`).
+     * (`shared/linkctl/src/lib.rs`, `CyclicObs`).
      *
      * **Counts, not a distance.** Converting needs a pole-pair count and a wheel diameter
      * ([MOTOR_POLE_PAIRS] and [WHEEL_DIAMETER_MM]), both registered and both defaulting to unset,
@@ -293,14 +293,14 @@ object Fields {
      *
      * **READ-ONLY to a client, and no client offers an editor for it.** It is the one field the
      * FIRMWARE writes on its own, once per ride, on a service-loop pass that finds the board
-     * disarmed and the wheel stopped (`Odometer` in `crates/firmware/src/odometer.rs`). A client write would
+     * disarmed and the wheel stopped (`Odometer` in `motorcontroller/firmware/src/odometer.rs`). A client write would
      * either be overwritten by that pass or silently falsify a machine's recorded travel, and
      * there is no reading an operator could take that makes one correct.
      */
     val MOTOR_ODOMETER = FieldDef(0x6D, Type.U32, Value.U32(0))
 
     /**
-     * This wheel's ROLLING diameter, millimetres (`crates/store/src/field.rs`,
+     * This wheel's ROLLING diameter, millimetres (`shared/store/src/field.rs`,
      * `WHEEL_DIAMETER_MM`): the other half of the edges-to-distance conversion, beside
      * [MOTOR_POLE_PAIRS]. One wheel revolution covers `PI * diameter_mm`.
      *
@@ -340,7 +340,7 @@ object Fields {
     val BOARD_BATTERY_CAL = IndexedFieldDef(0x69, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)))
 
     /**
-     * The rigid frame's turn input bound and rate (`crates/store/src/field.rs`,
+     * The rigid frame's turn input bound and rate (`shared/store/src/field.rs`,
      * `CONTROL_DRIVE_TURN`), indices 0 = `turn_max`, the differential torque in stock counts at
      * full stick, and 1 = `turn_slew`, the counts per control tick that the turn may move.
      *
@@ -351,7 +351,7 @@ object Fields {
      *
      * An arm-time parameter rather than a live-tune one (the tune lane carries [CONTROL_SF_GAINS]
      * and [CONTROL_REFERENCE] only), so a write takes effect at the next arm ([ARM_TIME]). Both
-     * indices are clamped by the firmware seam (`crates/control/src/drive.rs`, `DriveTurn`), since
+     * indices are clamped by the firmware seam (`motorcontroller/control/src/drive.rs`, `DriveTurn`), since
      * the store validates type and nothing else: [TURN_MAX] and [TURN_SLEW] mirror that clamp.
      */
     val CONTROL_DRIVE_TURN = IndexedFieldDef(0x75, Type.I16, listOf(Value.I16(0), Value.I16(24)))
@@ -364,7 +364,7 @@ object Fields {
     val MACHINE_DRIVE_MODE = FieldDef(0x78, Type.U8, Value.U8(0))
 
     /**
-     * The state-feedback balance law's four gains (`crates/store/src/field.rs`, `CONTROL_SF_GAINS`;
+     * The state-feedback balance law's four gains (`shared/store/src/field.rs`, `CONTROL_SF_GAINS`;
      * `specs/state-feedback.md` sections 2 and 6), indices [Gains.GP] / [Gains.GR] / [Gains.GX] /
      * [Gains.GV]. Default zero, the inert board: a zero word in balance mode. ON the live tune lane
      * ([Gains]), so NOT in [ARM_TIME]; bounded by [CONTROL_GAIN_MAX].
@@ -373,13 +373,13 @@ object Fields {
 
     /**
      * The gains' inclusive upper bounds, indexed like [CONTROL_SF_GAINS]
-     * (`crates/store/src/field.rs`, `CONTROL_GAIN_MAX`). Re-read at every arm ([ARM_TIME]).
+     * (`shared/store/src/field.rs`, `CONTROL_GAIN_MAX`). Re-read at every arm ([ARM_TIME]).
      * Defaults [Gains.DEFAULT_MAX].
      */
     val CONTROL_GAIN_MAX = IndexedFieldDef(0x7A, Type.I16, Gains.DEFAULT_MAX.map { Value.I16(it) })
 
     /**
-     * The stick reference (`crates/store/src/field.rs`, `CONTROL_REFERENCE`;
+     * The stick reference (`shared/store/src/field.rs`, `CONTROL_REFERENCE`;
      * `specs/state-feedback.md` section 4), indices [Gains.SPEED_MAX] (sixteenths of a count at
      * full stick; 0 = the stick does nothing and the machine holds position) and [Gains.SPEED_SLEW]
      * (1/4096 count per tick). ON the live tune lane, against compiled bounds
@@ -389,7 +389,7 @@ object Fields {
         IndexedFieldDef(0x7B, Type.I16, Gains.REFERENCE_DEFAULT.map { Value.I16(it) })
 
     /**
-     * The law's position clamp, hall edges (`crates/store/src/field.rs`, `CONTROL_POS_CLAMP`;
+     * The law's position clamp, hall edges (`shared/store/src/field.rs`, `CONTROL_POS_CLAMP`;
      * `specs/state-feedback.md` section 4): a machine pushed further than this comes back exactly
      * this far. Default 45 (0.26 m on the rover); 0 disables the position term. An arm-time
      * parameter ([ARM_TIME]); the firmware seam (`control::sf::pos_clamp`) clamps it into
@@ -467,7 +467,7 @@ object Fields {
 
     /**
      * The field ids the firmware re-reads every time a board ARMS, so a value written while
-     * disarmed runs from the next arm with no restart (`crates/firmware/src/arm.rs`, `ARM_ROW`;
+     * disarmed runs from the next arm with no restart (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`;
      * `specs/integration.md`, "When a stored value takes effect: the arm-time re-read"). Every
      * other registered field is read once, during boot.
      *
@@ -584,7 +584,7 @@ object Fields {
 
     /**
      * [MACHINE_DRIVE_MODE]'s vocabulary, written down in the field's own doc comment in
-     * `crates/store/src/field.rs` (the firmware has no enum for it, since it never reads the field).
+     * `shared/store/src/field.rs` (the firmware has no enum for it, since it never reads the field).
      */
     object MachineDriveMode {
         const val SINGLE = 0
@@ -595,7 +595,7 @@ object Fields {
 
     /**
      * [BOARD_BATTERY_CHEMISTRY]'s vocabulary, written down in the field's own doc comment in
-     * `crates/store/src/field.rs` (the firmware never reads the field).
+     * `shared/store/src/field.rs` (the firmware never reads the field).
      */
     object BatteryChemistry {
         const val LI_ION = 0
@@ -610,7 +610,7 @@ object Fields {
     }
 
     /**
-     * [CONTROL_SIDE]'s vocabulary (`side_is_right` in `crates/orchestrator/src/dispatch.rs`,
+     * [CONTROL_SIDE]'s vocabulary (`side_is_right` in `motorcontroller/orchestrator/src/dispatch.rs`,
      * which reads `1` as the right
      * wheel and every other byte as [LEFT]).
      */
@@ -620,7 +620,7 @@ object Fields {
     }
 
     /**
-     * [CONTROL_RIDER_REQUIRED]'s vocabulary (`ControlDispatch::new` in `crates/control/src/mode.rs`
+     * [CONTROL_RIDER_REQUIRED]'s vocabulary (`ControlDispatch::new` in `motorcontroller/control/src/mode.rs`
      * decodes `!= 0`, so every
      * byte other than [NOT_REQUIRED] reads as required).
      */

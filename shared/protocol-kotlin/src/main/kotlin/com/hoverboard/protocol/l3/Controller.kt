@@ -3,7 +3,7 @@ package com.hoverboard.protocol.l3
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 
-/** Shared L3 walk wire constants, a mirror of `crates/net/src/walk.rs`, the wire vocabulary. */
+/** Shared L3 walk wire constants, a mirror of `shared/net/src/walk.rs`, the wire vocabulary. */
 object Walk {
     /** `NODE_HELLO` request kind: a transient controller making first contact (grant a guest address). */
     const val KIND_CONTROLLER = 0x01
@@ -13,7 +13,7 @@ object Walk {
 
     // The guest range is NOT here. It is the address space's own fact and lives in Pdu.kt as
     // [GUEST_FIRST] / [GUEST_LAST], beside [BROADCAST], [NO_ADDRESS] and [isController], mirroring
-    // `crates/net/src/pdu.rs`, the address model. This object mirrors `crates/net/src/walk.rs`, which is a CONSUMER of
+    // `shared/net/src/pdu.rs`, the address model. This object mirrors `shared/net/src/walk.rs`, which is a CONSUMER of
     // the range: it decides which guest address is granted next, not what the range is.
 
     /** `PORTS` neighbour state: nothing wired to this port. */
@@ -157,7 +157,7 @@ private const val CONFIG_RESP_HEAD = 4
  * to `64 - 3 - 3 = 58` bytes. The verifying echo is the tighter bound: `CONFIG_RESP` is
  * `HEADER_LEN` + `[field_id, index, status, type_tag]` + the stored value, so `64 - 3 - 4 = 57`.
  * A 58-byte value is stored, but its echo would be a 65-byte PDU, which the firmware's `emit`
- * in `crates/net/src/walk.rs` cannot encode into its `MAX_PDU` buffer, so NO reply is sent and the
+ * in `shared/net/src/walk.rs` cannot encode into its `MAX_PDU` buffer, so NO reply is sent and the
  * client times out. A later `CONFIG_READ` of that key is unanswerable for the same reason, until the
  * value is rewritten at 57 bytes or fewer.
  */
@@ -199,14 +199,14 @@ data class ConfigResp(
 }
 
 /**
- * The transient controller (the host/app side), mirroring the WALK LOOP of `crates/net/src/walk.rs`'s
+ * The transient controller (the host/app side), mirroring the WALK LOOP of `shared/net/src/walk.rs`'s
  * `Controller`. Sequential request/response: it holds one outstanding request, advances on its reply,
  * and works the queue to quiescence. All requests leave on the single attach port; the gateway
  * forwards them onward by `dst`. The board-side responder lives in the firmware (and, for host tests,
  * in a mock).
  *
  * Not a mirror of all of it, and the gap is named rather than implied: the Rust `Controller` also
- * derives the attached node from the walk (`crates/net/src/walk.rs`, `HostLink`, recorded in
+ * derives the attached node from the walk (`shared/net/src/walk.rs`, `HostLink`, recorded in
  * `on_ports` from the port table's `kind` byte). Nothing here reads that byte, and [BleWalk] still
  * takes the entry board as the first board it recorded, which is the gateway half alone. A walk whose
  * gateway is not the attached node is described correctly by the Rust and not by this file.

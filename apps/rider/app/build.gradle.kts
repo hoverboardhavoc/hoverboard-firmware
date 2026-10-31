@@ -60,7 +60,7 @@ detekt {
 }
 
 dependencies {
-    // The shared Kotlin mirror of the firmware wire protocol (../../protocol-kotlin).
+    // The shared Kotlin mirror of the firmware wire protocol (shared/protocol-kotlin).
     // This replaced the app's own link/ package, which mirrored a retired protocol.
     implementation("com.hoverboard:protocol")
 

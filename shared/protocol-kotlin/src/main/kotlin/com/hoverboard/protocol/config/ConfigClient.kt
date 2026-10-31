@@ -13,7 +13,7 @@ import kotlinx.coroutines.sync.Mutex
 
 /**
  * A `CONFIG_RESP` refusal status: every status the firmware defines other than `CFG_OK` and
- * `CFG_DEFAULT`, the two answers to a successful read (`crates/net/src/walk.rs`, the refusal codes,
+ * `CFG_DEFAULT`, the two answers to a successful read (`shared/net/src/walk.rs`, the refusal codes,
  * which [Walk] carries and `RustSourceDriftTest` pins).
  */
 enum class CfgRefusal(val code: Int) {

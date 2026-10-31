@@ -517,7 +517,7 @@ class MainViewModelTest : RiderVmTest() {
             // so a session with no board attached has no board's readings to show.
             transport.setAttachedBoard(0x01)
             // batt 3555 cV = 35.55 V -> mid pack, not low. CYCLIC_STATE.battery is CENTIvolts
-            // (`crates/orchestrator/src/dispatch.rs`, `BlockWords`), not the millivolts this app
+            // (`motorcontroller/orchestrator/src/dispatch.rs`, `BlockWords`), not the millivolts this app
             // used to assume; reading it as mV would show a 36 V pack as 3.6 V and trip
             // battery-low.
             transport.emitCyclicState(
@@ -579,7 +579,7 @@ class MainViewModelTest : RiderVmTest() {
      * Replaces the old "telemetry merges latest per motor index".
      *
      * There is no per-motor telemetry frame any more: CYCLIC_STATE is one board-level record
-     * (`crates/linkctl/src/lib.rs`, `CyclicState`) with no motor index and no per-wheel current,
+     * (`shared/linkctl/src/lib.rs`, `CyclicState`) with no motor index and no per-wheel current,
      * and it is best-effort latest-wins (that crate's module doc). So the property worth pinning
      * flipped from "keep one entry per motor" to "the newest state wins outright", and it holds
      * for the appended block as much as for the committed words.

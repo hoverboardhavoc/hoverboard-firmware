@@ -36,7 +36,7 @@ object Throttle {
      *
      * The previous value before that was 1000, with a comment reasoning about top speed and a 40%
      * cap. Both the number and the reasoning were about the `INPUTS` throttle word, which no
-     * consumer read and which is now deleted (`crates/swd-bridge/src/bin/drive.rs`, the module
+     * consumer read and which is now deleted (`tools/swd-bridge/src/bin/drive.rs`, the module
      * doc, tells the two words called "throttle" apart), so nothing that comment described was
      * ever measured: the app had never moved a wheel.
      *
