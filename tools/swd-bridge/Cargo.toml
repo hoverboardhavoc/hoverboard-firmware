@@ -65,10 +65,6 @@ name = "swd-mailbox-drive"
 path = "src/bin/drive.rs"
 
 [dev-dependencies]
-# The board-layout boot validator, so the end-to-end test can stage a layout via the config path
-# and then run the SAME validator the firmware runs at boot (proving the tool can stage both a
-# valid and an invalid layout for the firmware to judge). Dev-only; the tool itself never links it.
-board = { path = "../../motorcontroller/board" }
 # The attitude filter, for the same reason: the level-trim staging test runs the value it wrote
 # over the wire through the SAME consumer the firmware builds at boot, so a unit or sign mistake
 # between the field and the filter cannot pass. Dev-only; the tool itself never links it.

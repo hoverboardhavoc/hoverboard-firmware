@@ -275,7 +275,8 @@ data class CyclicObs(
  * (`motorcontroller/orchestrator/src/dispatch.rs`, `cyclic_state`, from `motorcontroller/orchestrator/src/events.rs`,
  * `Levels`): one bit per producer, so a reader sees which producers are asserted right now rather
  * than a code it could miss between emissions. Not every bit is a fault: the mask also carries the
- * mode fault and the power request, and [FAULT_A_BITS] is the group that is. [faultA] applies it.
+ * mode fault, the power request and the configuration bit ([EV_CONFIG]), and [FAULT_A_BITS] is the
+ * group that is. [faultA] applies it.
  *
  * [peerDemand] is the +-28500 stock-native torque a rigid-frame LEADER commands its peer to apply
  * (`shared/linkctl/src/lib.rs`, `CyclicState::peer_demand`), and 0 from every other board; [leader]
@@ -406,6 +407,13 @@ data class CyclicState(
 
         /** [fault] bit 11: an arm attempt aborted before MOE. `events.rs`, `EV_MOTOR_ARM`. */
         const val EV_MOTOR_ARM = 1 shl 11
+
+        /**
+         * [fault] bit 12: a configured function did not come up at boot, so the board's
+         * `board.status` has an entry (`specs/configured-links.md` section 5). Set for the whole
+         * run; not in [FAULT_A_BITS], so it blocks nothing. `events.rs`, `EV_CONFIG`.
+         */
+        const val EV_CONFIG = 1 shl 12
 
         /**
          * The FAULT-A group of the [fault] mask: comms loss, the tilt cutout, IMU loss, motor 0's

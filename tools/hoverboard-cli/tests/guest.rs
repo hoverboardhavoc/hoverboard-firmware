@@ -91,8 +91,8 @@ fn the_tally_counts_each_source_with_its_rate_and_longest_gap() {
     assert!((t.rate(0x02, ms(2000)) - 1.0).abs() < 1e-9);
     assert_eq!(
         t.line(ms(1000)),
-        "t=1s  0x01 5 frames 5.0/s gap 0.21s mode 3 peer_demand 0 battery 310 | \
-         0x02 2 frames 2.0/s gap 0.42s mode 2 peer_demand -40 battery 0"
+        "t=1s  0x01 5 frames 5.0/s gap 0.21s mode 3 peer_demand 0 battery 310 fault 0x0000 | \
+         0x02 2 frames 2.0/s gap 0.42s mode 2 peer_demand -40 battery 0 fault 0x0000"
     );
     assert_eq!(
         t.summary(ms(1000)),
@@ -407,7 +407,7 @@ fn the_binary_watches_over_tcp_and_sends_nothing_after_the_attach() {
     assert_eq!(lines.len(), 4, "{out}");
     assert!(lines[1].starts_with("t=2s  0x01 1"), "{out}");
     assert!(
-        lines[1].contains("mode 3 peer_demand 0 battery 310 | 0x02 "),
+        lines[1].contains("mode 3 peer_demand 0 battery 310 fault 0x0000 | 0x02 "),
         "{out}"
     );
     let sent = board.join().unwrap();

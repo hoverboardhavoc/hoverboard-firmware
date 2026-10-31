@@ -621,7 +621,7 @@ class SetupScreenTest {
 
     /**
      * A bridge shows the keys every node has and nothing of a board's (`specs/hoverboard-bridge.md`, "The bridge
-     * as a node"): its name, its class read-only, and its link set. No drive, IMU or calibration row,
+     * as a node"): its name and its class read-only. No drive, IMU or calibration row,
      * and no attitude flow.
      */
     @Test
@@ -629,7 +629,6 @@ class SetupScreenTest {
         val bridge = mapOf(
             SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.BRIDGE),
             SetupFields.DEVICE_NAME.key to Value.Str("hb-bridge-1a2b"),
-            SetupFields.LINK_SET.key to Value.U8(1),
         )
         show(setupState(board = 0x01, values = bridge, other = 0x02))
 

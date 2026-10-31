@@ -111,6 +111,32 @@ class FaultDisarmTest : RiderVmTest() {
         assertFalse(now().armed)
     }
 
+    /**
+     * CONFIG (bit 12) is set for the whole run and blocks nothing, so it never draws the grid in the
+     * pad's place by itself, never refuses the arm, and never names the armed statement; when the
+     * grid shows for another reason, its lamp is lit with the rest.
+     */
+    @Test
+    fun `config alone does not draw the grid and is lit when the grid shows`() = runTest(dispatcher) {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        runCurrent()
+        advanceTimeBy(MainViewModel.LAMP_TEST_MS + 1)
+        runCurrent()
+        transport.emitCyclicState(frame(CyclicState.EV_CONFIG))
+        runCurrent()
+        var state = now()
+        assertEquals(CyclicState.EV_CONFIG, state.lampWords[ONE_BOARD])
+        assertTrue(FaultLamp.CONFIG in state.lamps, "a set bit is never hidden")
+        assertFalse(state.gridShows, "CONFIG alone leaves the pad in place")
+        assertTrue(state.canArm, "CONFIG refuses nothing")
+
+        transport.emitCyclicState(frame(CyclicState.EV_CONFIG or CyclicState.EV_MOTOR_HALL))
+        runCurrent()
+        state = now()
+        assertTrue(state.gridShows)
+        assertEquals(CyclicState.EV_CONFIG or CyclicState.EV_MOTOR_HALL, state.lampWords[ONE_BOARD])
+    }
+
     // --- the latch hold ------------------------------------------------------------------------
 
     /**

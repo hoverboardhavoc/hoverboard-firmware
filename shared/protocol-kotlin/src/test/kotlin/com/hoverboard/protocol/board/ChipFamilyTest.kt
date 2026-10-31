@@ -6,14 +6,13 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 
 /**
- * The seam between the part a board NAMES on the wire and the capability table a verdict is
- * computed against: `ChipTag` in `shared/linkctl/src/lib.rs` on one side, [ChipFamily] on the
- * other, joined by [ChipFamily.forTag].
+ * The seam between the part a board NAMES on the wire and the pin list the layout editor picks
+ * from: `ChipTag` in `shared/linkctl/src/lib.rs` on one side, [ChipFamily] on the other, joined by
+ * [ChipFamily.forTag].
  *
- * Both ends are already pinned to the Rust by `RustSourceDriftTest` (the tags against `ChipTag`,
- * the parts against `MockChip`), and each can grow a member without the other noticing. That is the
- * case this file exists for: a fourth fleet part allocated a tag but given no capability answers
- * would read on the wire and judge nothing, and the reverse would be a table no board can ask for.
+ * The tags are pinned to the Rust by `RustSourceDriftTest`, and either side can grow a member
+ * without the other noticing: a fourth fleet part allocated a tag but given no pin list would read
+ * on the wire and offer nothing, and the reverse would be a list no board can ask for.
  */
 class ChipFamilyTest {
 
@@ -33,8 +32,8 @@ class ChipFamilyTest {
     @Test
     fun theUnknownTagNamesNoPart() {
         // The board's boot probe measured a family and an advanced-timer count the firmware has no
-        // fleet part for. There are no capability answers to judge a layout against, and the
-        // nearest part is not an answer, so a client is left with nothing rather than a guess.
+        // fleet part for. There is no pin list to pick from, and the nearest part is not an
+        // answer, so a client is left with nothing rather than a guess.
         assertNull(ChipFamily.forTag(ChipTag.Unknown))
     }
 }

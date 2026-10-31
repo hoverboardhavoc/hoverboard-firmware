@@ -151,7 +151,7 @@ CUTS = (
 # Anything in the image that LOOKS like a panic. Every text symbol matching this must be claimed by
 # a PANIC_SET pattern, or the gate fails: an unrecognised panic symbol is a hole in the panic set,
 # not something to ignore. Deliberately avoids matching ordinary vocabulary (`DebugMonitor` holds
-# "bug"; `board::plumbing::BoardObs::failure` holds "fail", hence the anchored `_fail$`).
+# "bug"; a symbol such as `BoardObs::failure` holds "fail", hence the anchored `_fail$`).
 PANIC_LOOKING = re.compile(
     r"panic|unwind|unwrap_failed|expect_failed|_fail$|unreachable|assert_fail"
     r"|handle_alloc_error|abort"

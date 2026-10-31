@@ -38,10 +38,11 @@ attached node from what the walk reports, never from a convention, and `--dst` t
 ## Decoding key
 
 - **Pin fields** are a packed byte, `(port << 4) | pin`, port 0 = PA, 1 = PB, 2 = PC. `0xFF` = the
-  pin is absent on this board. Pin fields are 0x40 through 0x55; `motor.dead_time` (0x64) is a raw
+  pin is absent on this board. Pin fields are 0x40 through 0x57; `motor.dead_time` (0x64) is a raw
   timer value in that same numeric range and is NOT a pin.
-- **`link.set` (0x02)** is a bit per port: `6` = `0b110` = the inter-board link and the BLE port
-  are live.
+- **`link.tx` (0x56) and `link.rx` (0x57)** are the inter-board links' pins, index = the link (0 or
+  1). A link exists when both its pins are set; nothing is stored by default, so a board brings up
+  no UART until they are written (`PA2`/`PA3` for the fleet's inter-board cable).
 - **`control.mode` (0x22)**: 0 = Throttle (works with no IMU), 1 = Balance.
 - **`control.rider_required` (0x23)**: 1 = the engage gate requires a rider level, 0 = it does not,
   which is how a padless machine balances (`specs/control.md` (i)).

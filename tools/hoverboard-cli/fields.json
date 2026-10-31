@@ -10,22 +10,22 @@
     "read_only": false
   },
   {
-    "id": 2,
-    "path": "link.set",
-    "type": "u8",
-    "index": "single",
-    "count": 1,
-    "kind": "int",
-    "board_owned": true,
-    "read_only": false
-  },
-  {
     "id": 3,
     "path": "node.class",
     "type": "u8",
     "index": "single",
     "count": 1,
     "kind": "int",
+    "board_owned": false,
+    "read_only": true
+  },
+  {
+    "id": 5,
+    "path": "board.status",
+    "type": "blob",
+    "index": "single",
+    "count": 1,
+    "kind": "blob",
     "board_owned": false,
     "read_only": true
   },
@@ -656,6 +656,26 @@
     "index": "single",
     "count": 1,
     "kind": "int",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 86,
+    "path": "link.tx",
+    "type": "u8",
+    "index": "array",
+    "count": 2,
+    "kind": "pin",
+    "board_owned": false,
+    "read_only": false
+  },
+  {
+    "id": 87,
+    "path": "link.rx",
+    "type": "u8",
+    "index": "array",
+    "count": 2,
+    "kind": "pin",
     "board_owned": false,
     "read_only": false
   }

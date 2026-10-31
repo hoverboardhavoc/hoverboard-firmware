@@ -125,13 +125,14 @@ impl Tally {
             .iter()
             .map(|(&a, s)| {
                 format!(
-                    "{a:#04x} {} frames {:.1}/s gap {:.2}s mode {} peer_demand {} battery {}",
+                    "{a:#04x} {} frames {:.1}/s gap {:.2}s mode {} peer_demand {} battery {} fault {:#06x}",
                     s.frames,
                     self.rate(a, elapsed),
                     s.longest_gap.as_secs_f64(),
                     s.last.mode,
                     s.last.peer_demand,
-                    s.last.battery
+                    s.last.battery,
+                    s.last.fault
                 )
             })
             .collect();

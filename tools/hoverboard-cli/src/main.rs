@@ -683,6 +683,14 @@ fn file_command(
     for l in config::report(&b.name, &plan, &reads, &after) {
         println!("{l}");
     }
+    // A pin field is read only at boot; what the board made of it is its `board.status`.
+    if plan
+        .steps
+        .iter()
+        .any(|s| names::row_of(s.key).is_some_and(|r| r.kind == store::Kind::Pin))
+    {
+        println!("{}", hoverboard_cli::status::PIN_HINT);
+    }
     Ok(plan.changes())
 }
 
@@ -692,6 +700,15 @@ struct Flags {
     force: bool,
     /// `--yes`: `replace` un-stores without asking.
     yes: bool,
+}
+
+/// A node's `board.status` value, or `None` when it does not answer one.
+fn board_status(wire: &mut impl Wire, src: u8, addr: u8) -> Option<Vec<u8>> {
+    let r = nodes::read(wire, src, addr, store::BOARD_STATUS.key()).ok()?;
+    if r.status != net::walk::CFG_OK {
+        return None;
+    }
+    hoverboard_cli::status::entries_of(r.value())
 }
 
 /// The motor controllers the walk found, for `watch` and `drive` with no nodes given.
@@ -845,6 +862,7 @@ impl Via<'_> {
 const COMMANDS: &[&str] = &[
     "scan",
     "nodes",
+    "status",
     "name",
     "config",
     "dump",
@@ -966,7 +984,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         Some(Via::Ble(_)) => Given::Device,
     };
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|status [<node>...]|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
     let cmd = match word {
         Some(_) if COMMANDS.contains(&rest[0]) => rest[0],
         _ => return Err(usage.into()),
@@ -1099,15 +1117,77 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
             return Err(usage.into());
         }
         let mut wire = Framed::new(via.open()?);
-        let (_, found) = walk(&mut wire)?;
+        let (src, found) = walk(&mut wire)?;
         println!("address  class             name");
         for f in &found {
+            // A motor controller whose boot status has entries is marked (`board.status`).
+            let n = match f.class {
+                Some(CLASS_MOTOR) => board_status(&mut wire, src, f.addr)
+                    .map(|v| v.len() / board::status::ENTRY_LEN)
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            let mark = if n > 0 {
+                format!("  ! {n} status entries, see \"status\"")
+            } else {
+                String::new()
+            };
             println!(
-                "{:#04x}     {:<16}  {}",
+                "{:#04x}     {:<16}  {}{mark}",
                 f.addr,
                 class_name(f.class),
                 f.name.as_deref().unwrap_or("-")
             );
+        }
+        return Ok(0);
+    }
+
+    if cmd == "status" {
+        let mut wire = Framed::new(via.open()?);
+        let (src, found) = walk(&mut wire)?;
+        let targets: Vec<&Found> = if rest.len() > 1 {
+            rest[1..]
+                .iter()
+                .map(|spec| {
+                    let a = nodes::resolve(spec, &found)?;
+                    found
+                        .iter()
+                        .find(|f| f.addr == a)
+                        .ok_or_else(|| format!("the walk found no node {a:#04x}"))
+                })
+                .collect::<Result<_, String>>()?
+        } else {
+            found
+                .iter()
+                .filter(|f| f.class == Some(CLASS_MOTOR))
+                .collect()
+        };
+        if targets.is_empty() {
+            return Err("the walk found no motor controller".into());
+        }
+        for f in targets {
+            let name = node_name(f);
+            let Some(value) = board_status(&mut wire, src, f.addr) else {
+                println!("{name}: no board.status answer");
+                continue;
+            };
+            let mut link_pins = |i: u8| {
+                let mut pin =
+                    |k: store::Key| match nodes::read(&mut wire, src, f.addr, k).ok()?.value() {
+                        Some(store::Value::U8(p)) => Some(p),
+                        _ => None,
+                    };
+                Some((
+                    pin(store::LINK_TX.at(i).key())?,
+                    pin(store::LINK_RX.at(i).key())?,
+                ))
+            };
+            let pins: Vec<Option<(u8, u8)>> = (0..store::LINKS).map(&mut link_pins).collect();
+            for l in hoverboard_cli::status::lines(&name, &value, |i| {
+                pins.get(i as usize).copied().flatten()
+            }) {
+                println!("{l}");
+            }
         }
         return Ok(0);
     }

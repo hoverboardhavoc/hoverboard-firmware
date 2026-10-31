@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.ConfigReadResult
@@ -220,6 +221,10 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  *   for the same reason; null for a field this session has not got, and 0 for a board that has
  *   never been told it. Together they are what turns the odometer's hall edges into a distance
  *   ([com.hoverboard.remote.model.WheelGeometry]).
+ * @param status what this board's `board.status` listed when it was read on attach: the
+ *   functions its last boot configured and could not bring up (`specs/configured-links.md`
+ *   section 5), empty when they all came up, null while this session has not read it. Kept out of
+ *   [values] for [countsPerAmp]'s reason.
  */
 data class BoardSetup(
     val values: Map<Key, Value> = emptyMap(),
@@ -233,6 +238,7 @@ data class BoardSetup(
     val countsPerAmp: Int? = null,
     val polePairs: Int? = null,
     val diameterMm: Int? = null,
+    val status: List<BoardStatus.Entry>? = null,
 ) {
     /** Whether any field's write is queued or in flight. */
     val writing: Boolean get() = writes.values.any { it.sending }
@@ -267,8 +273,9 @@ data class BoardSetup(
      * refuse: it is not a proper rotation, or part of it is unread while a frame index was written
      * (a frame write stopped part way and the rest is in doubt).
      *
-     * The firmware refuses such a frame and does not bring up the IMU (`specs/imu.md`, `BOARD_OBS`
-     * result 11), so balance is lost until it is corrected. No write order avoids an illegal
+     * The firmware refuses such a frame and does not bring up the IMU, and the board's `board.status`
+     * lists it (reason 7, `specs/configured-links.md` section 5), so balance is lost until it is
+     * corrected. No write order avoids an illegal
      * intermediate: any two of the four flat rotations differ in two signs of a triple, and the
      * writes go one at a time. So a frame write that stops part way can leave one stored, and only
      * completing it makes it safe. A board whose stored frame was already illegal is flagged the same.
@@ -820,10 +827,11 @@ class SetupModel(
      * says it is a motor controller, what the screens state before Setup is opened
      * ([SetupFields.MOTOR_FACTS]: the drive mode the app drives by (3.2), the frame and side the arm
      * control acts on (3.7a), the pack that turns the battery word into a state of charge (3.6b)
-     * and the rider requirement the arm control states), and the counts per amp and wheel geometry
-     * that turn its telemetry words into amps and a distance. A node whose class read has not
-     * answered is asked nothing more: it shows its address alone, and it is read again with the
-     * next pass.
+     * and the rider requirement the arm control states), the counts per amp and wheel geometry
+     * that turn its telemetry words into amps and a distance, and its `board.status`, which
+     * Setup's machine status lists under the board (`specs/remote-ui.md` 3.1c). A node whose class
+     * read has not answered is asked nothing more: it shows its address alone, and it is read again
+     * with the next pass.
      */
     private fun readRideFacts() {
         if (_state.value.attached == null) return
@@ -842,6 +850,7 @@ class SetupModel(
                 for (field in SetupFields.MOTOR_FACTS) for (node in mcs) readOne(node, field.key)
                 for (node in mcs) readCountsPerAmp(node)
                 for (node in mcs) readWheelGeometry(node)
+                for (node in mcs) readBoardStatus(node)
                 // The Ride screen's lamp test runs once per connection, when this first completes
                 // (`specs/remote-ui.md` 3.1b): the facts that decide which lamps apply are in.
                 _state.update { it.copy(rideFactsRead = true) }
@@ -895,6 +904,17 @@ class SetupModel(
         if (pp is ReadValue) update(node) { it.copy(polePairs = pp.value.asLong()?.toInt()) }
         val wd = awaitSlot { transport.readConfig(Fields.WHEEL_DIAMETER_MM.key(), board) }
         if (wd is ReadValue) update(node) { it.copy(diameterMm = wd.value.asLong()?.toInt()) }
+    }
+
+    /**
+     * Read [node]'s `board.status` into [BoardSetup.status]: what its last boot could not bring up.
+     * Not [readOne], for [readCountsPerAmp]'s reason. A read that fails, or answers something that
+     * is not the blob this key carries, leaves the status unread.
+     */
+    private suspend fun readBoardStatus(node: Int) {
+        val board = node.takeIf { it in _state.value.addresses } ?: return
+        val r = awaitSlot { transport.readConfig(Fields.BOARD_STATUS.key(), board) } ?: return
+        if (r is ReadValue) BoardStatus.decode(r.value)?.let { entries -> update(node) { it.copy(status = entries) } }
     }
 
     /** Start whatever operation is due, the ride facts first: called on attach and whenever the lock frees. */

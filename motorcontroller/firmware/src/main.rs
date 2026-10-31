@@ -5,25 +5,23 @@
 //!
 //! It wires the libraries it does not own (`store` + `FmcFlash`, `net`'s L3 `Responder`, `link`'s L2,
 //! the `swd-mailbox`, and `runtime-hal`'s detect / clock / USART) into one cooperative service loop:
-//! boot-safe -> init the SWD mailbox -> detect -> 72 MHz clock -> mount the store -> **bring up the
-//! L2 links** (the inter-board UART) into `net` -> service them forever.
+//! boot-safe -> init the SWD mailbox -> detect -> 72 MHz clock -> mount the store -> **bring up
+//! what the layout configures** (the links, the IMU, the inputs, the motor) -> service them forever.
 //!
-//! **Two ports** (specs/l3.md, "Ports"). The SWD mailbox is always port 0 (a debugger, a host or the
-//! hoverboard bridge attaches over MEM-AP, no wiring); **port 1 is the inter-board UART** (USART1
-//! PA2/PA3, the proven inter-board link), brought up on every boot whose `LINK_SET` does not clear
-//! it. A board stays at `0x00` until assigned, then persists its `LINK_SET` (the bitmask of live
-//! ports) alongside its `node_address`. A phone reaches the board through the bridge on its SWD
-//! header (`specs/hoverboard-bridge.md`); the onboard CC2541 is no longer driven
-//! (`specs/decision-cc2541-removal.md`).
+//! **Three ports** (`specs/configured-links.md` section 4). The SWD mailbox is always port 0 (a
+//! debugger, a host or the hoverboard bridge attaches over MEM-AP, no wiring); ports 1 and 2 are the
+//! two inter-board links, each brought up from its stored pins (`link.tx`/`link.rx`) when both are
+//! set. A board with nothing stored brings up its mailbox and no UART, and is configured through the
+//! bridge on its SWD header (`specs/hoverboard-bridge.md`). A board stays at `0x00` until assigned,
+//! then persists its `node_address`.
 //!
-//! **One image, two board families, decided by staged data.** The IMU sits on mirrored pins across
-//! the fleet: the standard family puts it on I2C0's PB6/PB7, the classywalk offroad family on I2C1's
-//! PB10/PB11. The chip cannot tell them apart - a bench slave and an offroad board are the same
-//! GD32F130 part - so the persisted board layout decides (`imu.scl_pin`/`imu.sda_pin`).
-//!
-//! Pin safety (specs/l3.md, "Pin safety"): only the safe USART is touched (USART1 PA2/PA3, clear of
-//! any advanced-timer gate pin). Busy-spin, NEVER `wfi` (a wfi with `DBG_CTL0 = 0` locks GD32 SWD
-//! re-attach).
+//! **Each subsystem brings up what it can** (`specs/configured-links.md` section 3). There is no
+//! layout validator: each bring-up reads its own fields (`crate::layout`) and asks the HAL, and a
+//! failure leaves that function absent, adds an entry to the status record (`BOARD_OBS`, served as
+//! `board.status` and flagged by `EV_CONFIG` on the wire) and never halts the boot. The IMU, for
+//! one, sits on mirrored pins across the fleet (I2C0's PB6/PB7 on the standard family, I2C1's
+//! PB10/PB11 on the classywalk offroad family, on the same GD32F130 part), so the stored layout
+//! decides. Busy-spin, NEVER `wfi` (a wfi with `DBG_CTL0 = 0` locks GD32 SWD re-attach).
 //!
 //! **The integrated control stack (specs/integration.md, slice 7).** On top of the link spine the
 //! image runs the orchestrated pipeline: the SysTick ISR ticks the ISR-safe `scheduler` static at
@@ -31,9 +29,9 @@
 //! `linkctl::decode` into the orchestrator inbox), dispatches the due tasks (the 250 Hz control
 //! pipeline + the 16 ms input task, both pure `orchestrator` functions over the `SHELL` static),
 //! feeds the IWDG AFTER dispatch (R2, the wdg-bench placement), emits the cyclic payload
-//! port-directed on the inter-board UART (addressed boards only), samples the arm fact into the
-//! responder each pass (R4) and defers the LINK_SET persist while armed. The IMU comes up
-//! plan-gated (the first `BoardPlan` consumer, fail-soft to link-only-plus-throttle); MOE
+//! port-directed on each inter-board link (addressed boards only) and samples the arm fact into the
+//! responder each pass (R4). The IMU comes up from its staged pins (fail-soft to
+//! link-only-plus-throttle); MOE
 //! enactment stays a recorded seam (R3, pre-motor). Statics safety: the `SHELL` is touched only
 //! from the main thread (the loop and the dispatch callbacks are the same context); the
 //! `SCHEDULER` is the one ISR/thread crossing and its atomics are the arbitration.
@@ -45,6 +43,7 @@
 #![cfg_attr(target_os = "none", no_main)]
 
 mod arm;
+mod layout;
 mod motor;
 mod odometer;
 /// The host tests' in-RAM `store::Flash`, one copy for the whole crate (see the module).
@@ -56,11 +55,12 @@ mod firmware {
 
     use crate::arm;
     use crate::guest_tx::{emit_mailbox_samples, GuestSlots, GuestStaged};
+    use crate::layout;
     use crate::link_drain::bounded_drain;
     use crate::motor;
     use crate::odometer;
     use crate::probe_window::poll_window_elapsed;
-    use board::plumbing::{read_fields, reserved_set, AllowlistPort, BoardObs};
+    use board::status::{Reason, StatusRecord};
     use core::mem::MaybeUninit;
     use core::ptr::{addr_of, addr_of_mut};
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -82,15 +82,15 @@ mod firmware {
     use runtime_hal::descriptor::ClockPath;
     use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
     use runtime_hal::{
-        detect_chip, DmaTx, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel, RingBufferedRx,
-        SplitSerial, Usart, WdgTimeout,
+        detect_chip, DescriptorError, DmaTx, Floating, FreeWatchdog, I2c, I2cMode, Input,
+        InputGroup, PeriphLabel, Pin as GpioPin, RingBufferedRx, SplitSerial, Usart, WdgTimeout,
     };
     use scheduler::{systick_load, Scheduler};
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_BATTERY_CAL, BOARD_BATTERY_FLOOR,
         CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_POS_CLAMP,
         CONTROL_REFERENCE, CONTROL_RIDER_REQUIRED, CONTROL_SF_GAINS, CONTROL_SIDE, IMU_AXIS_ROLE,
-        IMU_AXIS_SIGN, IMU_GYRO_BIAS, LINK_SET, NODE_CLASS,
+        IMU_AXIS_SIGN, IMU_GYRO_BIAS, NODE_CLASS,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
     use vectors as _;
@@ -154,18 +154,16 @@ mod firmware {
     /// per-pass cost small; undrained bytes wait in the DMA ring + `StreamFramer` for the next pass.
     const DRAIN_BUDGET: usize = 8;
 
-    /// `LINK_SET` bit for a live port (a per-port bitmask; the mailbox port 0 is always present and is
-    /// not part of the discovered set, so only the USART link ports 1.. are recorded).
-    const fn link_bit(port: u8) -> u8 {
-        1u8 << port
-    }
-    /// Port indices (fixed slots): 0 = SWD mailbox, 1 = inter-board UART.
+    /// Port indices (fixed slots, `specs/configured-links.md` section 4): 0 = the SWD mailbox, 1 =
+    /// link 0, 2 = link 1. Link `i` is port `PORT_IDX_LINK0 + i`.
     const PORT_IDX_MAILBOX: u8 = 0;
-    const PORT_IDX_UART: u8 = 1;
-    /// The board's `net` ports: the mailbox and the inter-board link, on every boot. A board whose
-    /// `LINK_SET` clears the UART bit still REGISTERS port 1 (its link is simply absent and an
-    /// emission to it drops), which is what it did before the CC2541 port went.
-    const N_PORTS: u8 = 2;
+    const PORT_IDX_LINK0: u8 = 1;
+    /// How many inter-board links a board can have (`store::LINKS`), as an array length.
+    const N_LINKS: usize = store::LINKS as usize;
+    /// The board's `net` ports: the mailbox and both link ports, on every boot. A link that is not
+    /// configured or did not come up is still a REGISTERED port: an emission to it drops, and a
+    /// `PROBE_PORTS` reports it `empty`.
+    const N_PORTS: u8 = 1 + store::LINKS;
 
     /// VTOR alignment invariant: the `RAM_VECTORS` static (packed by memory.x's `.ramtables`
     /// section) carries `RamVectorTable`'s own alignment, and VTOR accepts a table aligned to a
@@ -176,71 +174,16 @@ mod firmware {
     const _: () =
         assert!(core::mem::align_of::<RamVectorTable>() >= core::mem::size_of::<RamVectorTable>());
 
-    /// One entry in the safe-link USART allowlist (`specs/l3.md`, "Pin safety": gate-capable pins
-    /// denied). Pins and the `LINK_SET` bit ONLY: which peripheral a pair drives, and whether this
-    /// silicon can drive it at all, are the HAL pin model's answers ([`usart_of`]), asked per boot.
-    struct SafeLinkUsart {
-        /// This entry's bit in the persisted `LINK_SET` mask: the identity of the WIRING, and what
-        /// the reserved-set computation keys its freeing rule on.
-        link_set_bit: u8,
-        /// The entry's pin pair, packed `(port << 4) | pin`: the allowlist's PIN fact, the
-        /// single declaration the board validator's reserved set is computed from
-        /// (`specs/board-model.md` check 3).
-        pins: [u8; 2],
-    }
-
-    /// The spec's safe-UART allowlist (`specs/l3.md` §143): USART1 PA2/PA3, the inter-board link
-    /// (both boards, both families). Gate-capable pins (USART0-default PA9/PA10) are denied - that
-    /// is the allowlist's whole job.
+    /// The USART a link's pin pair drives on THIS chip, if the HAL can bring that instance up: the
+    /// one place the firmware asks the pin model "what is on these pins, and can I use it?".
     ///
-    /// It held three entries while the onboard CC2541 was driven: the module's two wirings, USART2
-    /// on PB10/PB11 (standard family, `LINK_SET` bit 2) and USART0 on PB6/PB7 (offroad family, bit
-    /// 3), are gone with it (`specs/decision-cc2541-removal.md`), and those bits mean nothing now.
-    const SAFE_LINK_USARTS: [SafeLinkUsart; 1] = [SafeLinkUsart {
-        link_set_bit: PORT_IDX_UART,
-        pins: [0x02, 0x03], // PA2/PA3
-    }];
-
-    /// [`SAFE_LINK_USARTS`]'s inter-board-link entry, and the instance its pins drive.
-    ///
-    /// Declared, not resolved. PA2/PA3 is USART1's default mapping on BOTH families (the pin
-    /// model's `USART_PIN_MAPPINGS` carries exactly one row for it, routable everywhere), so there
-    /// is no per-board choice to make and no per-family answer to look up. Two things keep the
-    /// named instance honest rather than a stale copy: `Usart::new` re-derives the pair through
-    /// `pincap::usart_pins` on every boot and refuses a mismatch (`SelectorAddrMismatch`), so a
-    /// drift fails loud at the seam on the first boot; and the R-CAP agreement suite asserts the
-    /// pair routes to USART1 on every fleet part at host-test time.
-    ///
-    /// It is also a deliberate flash decision (`specs/decision-flash-budget.md`). Routing this slot
-    /// through a per-boot resolver costs **816 B**, because the inter-board USART's instance then
-    /// stops being a constant and `RingBufferedRx::new`'s DMA-channel selection can no longer fold.
-    const LINK_ENTRY_UART: usize = 0;
-    const LINK_USART: PeriphLabel = PeriphLabel::Usart1;
-    const _: () = assert!(SAFE_LINK_USARTS[LINK_ENTRY_UART].link_set_bit == PORT_IDX_UART);
-
-    /// The USART instance a safe-link entry's pins drive on THIS chip, if the HAL can bring that
-    /// instance up: the one place the firmware asks the pin model "what is on these pins, and can
-    /// I use it?".
-    ///
-    /// Two HAL answers, both required and neither substitutable for the other. `pincap::usart_pins`
-    /// is the ROUTING half (does this pair map to a USART on this family, and through which AF -
-    /// `USART0_TX` is AF1 at PA9 but AF0 at PB6, so only the mapping can say); `supports_rx` is the
-    /// RECEIVE half (can the HAL actually take that instance's RX). `None` from either means the
-    /// entry is not a candidate this boot, which is exactly how one allowlist serves both families
-    /// without a family test written here.
-    fn usart_of(chip: &runtime_hal::Chip, pins: [u8; 2]) -> Option<PeriphLabel> {
-        let mapping = runtime_hal::pincap::usart_pins(chip, pins[0], pins[1])?;
+    /// Two HAL answers, both required. `pincap::usart_pins` is the ROUTING half (does this (TX, RX)
+    /// pair map to a USART on this family, and through which AF or remap); `supports_rx` is the
+    /// RECEIVE half (can the HAL take that instance's RX with a DMA ring). `None` from either means
+    /// the link is not routable here, recorded as such (`specs/configured-links.md` section 4).
+    fn link_usart(chip: &runtime_hal::Chip, tx: u8, rx: u8) -> Option<PeriphLabel> {
+        let mapping = runtime_hal::pincap::usart_pins(chip, tx, rx)?;
         runtime_hal::supports_rx(chip, mapping.usart).then_some(mapping.usart)
-    }
-
-    /// The compiled allowlist with the HAL's per-boot answers filled in, the form the validator's
-    /// reserved set consumes.
-    fn allowlist(chip: &runtime_hal::Chip) -> [AllowlistPort; 1] {
-        SAFE_LINK_USARTS.map(|u| AllowlistPort {
-            link_set_bit: u.link_set_bit,
-            pins: u.pins,
-            routable: usart_of(chip, u.pins).is_some(),
-        })
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -350,15 +293,19 @@ mod firmware {
         slots: [0; MAX_VECTORS],
     };
 
-    /// The inter-board USART's DMA RX ring. NOT `.bss`: it lives in the 192 B alignment gap
-    /// between the SWD mailbox carve and the 256-aligned RAM vector table (`memory.x`,
-    /// `.ramtables`; shrink round 7; the gap's other 64 B are free since the CC2541 port went),
-    /// which cortex-m-rt's zero loop never visits, so `main` zeroes
-    /// it explicitly at the one place the `&'static mut` is formed. Nothing reads a ring byte the
-    /// DMA has not written (the reader stays behind the live write index), so the zeroing keeps
-    /// the SWD-visible bytes identical to the `.bss` days rather than guarding a read.
+    /// Link 0's DMA RX ring. NOT `.bss`: it lives in the 192 B alignment gap between the SWD
+    /// mailbox carve and the 256-aligned RAM vector table (`memory.x`, `.ramgap`; shrink round 7),
+    /// which cortex-m-rt's zero loop never visits, so the link bring-up zeroes it explicitly at the
+    /// one place the `&'static mut` is formed. Nothing reads a ring byte the DMA has not written
+    /// (the reader stays behind the live write index), so the zeroing keeps the SWD-visible bytes
+    /// identical to the `.bss` days rather than guarding a read.
     #[link_section = ".uninit.DMA_RING"]
     static mut DMA_RING: MaybeUninit<DmaRing<DMA_CAP>> = MaybeUninit::uninit();
+
+    /// Link 1's DMA RX ring, in cortex-m-rt's `.uninit` (the gap's free 64 B are too small for its
+    /// 128 B; `specs/configured-links.md` section 4), zeroed where it is formed as ring 0 is.
+    #[link_section = ".uninit.DMA_RING_1"]
+    static mut DMA_RING_1: MaybeUninit<DmaRing<DMA_CAP>> = MaybeUninit::uninit();
 
     /// A DMA ring's storage, 4-aligned. The alignment is for the ZEROING, not the DMA: `[0; N]`
     /// written through a pointer the compiler knows is word-aligned lowers to the `memclr4` the
@@ -367,11 +314,11 @@ mod firmware {
     #[repr(C, align(4))]
     struct DmaRing<const N: usize>([u8; N]);
 
-    /// The inter-board USART's DMA TX buffer (.bss; same pattern as [`DMA_RING`]). A DMA transfer
-    /// reads its source for as long as it runs, so the transmitter owns this copy rather than the
-    /// caller's frame. Sized to [`UART_FRAMER_N`], the largest encoded frame this port can emit, so
-    /// a whole frame always goes in ONE transfer and never comes back truncated.
-    static mut UART_TX_DMA: [u8; UART_FRAMER_N] = [0; UART_FRAMER_N];
+    /// Each link's DMA TX buffer (.bss), index = the link. A DMA transfer reads its source for as
+    /// long as it runs, so the transmitter owns this copy rather than the caller's frame. Sized to
+    /// [`UART_FRAMER_N`], the largest encoded frame a link can emit, so a whole frame always goes in
+    /// ONE transfer and never comes back truncated.
+    static mut LINK_TX_DMA: [[u8; UART_FRAMER_N]; N_LINKS] = [[0; UART_FRAMER_N]; N_LINKS];
 
     /// The 250 Hz scheduler (the upgraded ISR-safe crate). The ONE ISR/thread crossing: the
     /// SysTick ISR calls `tick(&self)` concurrently with the loop's `dispatch(&self)`; the
@@ -426,8 +373,8 @@ mod firmware {
     static ODOMETER_TOTAL: AtomicU32 = AtomicU32::new(0);
 
     /// Write calls the inter-board port's serial adapter ABANDONED because a transmit flag did not
-    /// come up inside its write budget (`runtime_hal::serial`'s `tx_timeouts`, saturating u16), in
-    /// the low half. The high half was the CC2541 port's and is zero.
+    /// come up inside its write budget (`runtime_hal::serial`'s `tx_timeouts`, saturating u16): link
+    /// 0's in the low half, link 1's in the high half (`specs/configured-links.md` section 4).
     ///
     /// **The expected reading is zero**, and a non-zero one is specific: the port
     /// stopped accepting bytes and the frame was dropped rather than the main thread spinning on
@@ -762,14 +709,14 @@ mod firmware {
         /// (both edges count), and an ODD count means the level is currently held (or the read
         /// tore). Audit-corrected: this doc originally stated the parity inverted.
         event_levels: u8,
-        /// Inter-board UART recovered LINE-ERROR count ([`LINK_LINE_ERRORS`]): `SplitSerial`-absorbed
-        /// self-healed DMA-RX wire disturbances (`LineError`: ERRIE overrun / framing / noise) since
+        /// Inter-board links' recovered LINE-ERROR count, summed over the links
+        /// ([`LINK_LINE_ERRORS`]): `SplitSerial`-absorbed self-healed DMA-RX wire disturbances (`LineError`: ERRIE overrun / framing / noise) since
         /// boot. Appended (offset-preserving) so the SWD reader's existing field offsets are unchanged.
         /// The self-heal observable: non-zero with `cyclic_age` fresh proves the DMA-RX line-error
         /// recovery ran on an induced peer-reboot glitch. Counted APART from laps (the OQ1 split).
         link_line_errors: u32,
-        /// Inter-board UART LAP-OVERRUN count ([`LINK_LAP_OVERRUNS`]): `SplitSerial`-absorbed
-        /// buffer-overrun losses (the DMA lapped the read cursor: the consumer fell behind) since boot.
+        /// Inter-board links' LAP-OVERRUN count, summed over the links ([`LINK_LAP_OVERRUNS`]):
+        /// `SplitSerial`-absorbed buffer-overrun losses (the DMA lapped the read cursor: the consumer fell behind) since boot.
         /// Appended LAST (offset-preserving). The OQ1 split's other half: kept SEPARATE from
         /// `link_line_errors` so lap noise cannot masquerade as a line-error self-heal hit.
         link_lap_overruns: u32,
@@ -954,8 +901,8 @@ mod firmware {
         /// stopped draining. `epoch` does not answer it, because nothing clears `epoch`: non-zero
         /// only means a bridge attached at some point this boot.
         mailbox_drops: u32,
-        /// The inter-board port's abandoned writes in the low half ([`TX_TIMEOUTS`]); the high half
-        /// was the CC2541 port's and is zero. Appended LAST, so every prior field keeps its offset (the
+        /// The inter-board links' abandoned writes ([`TX_TIMEOUTS`]): link 0 in the low half, link 1
+        /// in the high half. Appended LAST, so every prior field keeps its offset (the
         /// offset-preserving append the ISR-metric, roll, motor, balance, BLE and stack blocks all
         /// used); word 35 in the SWD map.
         tx_timeouts: u32,
@@ -1687,6 +1634,7 @@ mod firmware {
         inputs: InputPins,
         boot_count: u32,
         chip_tag: ChipTag,
+        config_fault: bool,
     ) {
         let imu_configured = imu_dev.is_some();
         // SAFETY: single-threaded boot (only the DMA RX ISR is live, and it reaches only the
@@ -1714,6 +1662,7 @@ mod firmware {
                     BoardIdentity {
                         boot_tag: boot_count as u8,
                         chip: chip_tag,
+                        config_fault,
                     },
                 ),
                 i2c: imu_bus,
@@ -1733,54 +1682,47 @@ mod firmware {
         }
     }
 
-    /// Bring the IMU up on the bus the staged layout put it on (the first `BoardPlan` consumer).
+    /// Bring the IMU up on the bus its staged pins name (`specs/configured-links.md` section 3).
     ///
-    /// Everything about WHERE the IMU is comes from the validated plan: the pin pair is the one the
-    /// board's `imu.scl_pin` / `imu.sda_pin` fields name, and the I2C instance behind that pair is
-    /// the pin model's answer for this chip. There is no compiled pin pair and no compiled instance
-    /// here, because there is no fleet-wide answer to compile: the standard family's IMU is I2C0 on
+    /// Everything about WHERE the IMU is comes from the store: `imu.model` enables the group, the
+    /// pin pair is `imu.scl`/`imu.sda` ([`layout::read_imu`]), and the I2C instance behind the pair
+    /// is the pin model's answer for this chip. There is no compiled pin pair and no compiled
+    /// instance, because there is no fleet-wide answer: the standard family's IMU is I2C0 on
     /// PB6/PB7 and the classywalk offroad family's is I2C1 on PB10/PB11, on the same GD32F130 part.
     ///
-    /// The typed-pin seam costs nothing to make data-driven. `Chip::pin` hands back the same
-    /// `Pin<Input<Floating>>` the named bags do, whichever byte it is asked for, so the two pairs
-    /// are two VALUES through one `I2c::new`, not two instantiations of it.
+    /// Fails soft in every refusal (`(None, None)`), each one recorded in the status record: the
+    /// board boots link-only-plus-throttle, and `CTRL_OBS`'s `imu_configured` reads 0 beside
+    /// `imu_staged` (the flags byte's b0 and b6).
     ///
-    /// Fails soft in every refusal (`(None, None)`): the board boots link-only-plus-throttle and
-    /// the outcome is observable (`imu_configured` in `CTRL_OBS`). Every refusal here is a STAGED
-    /// IMU that did not come up, which the flags byte's b6 says and b0 cannot: the four `None`
-    /// returns above (an instance the pin model will not resolve, an untyped pin, an unknown model
-    /// index, a refused frame) plus a bus that will not init and a probe that does not answer all
-    /// publish the same `imu_configured = 0` as a board with no IMU fitted at all.
-    ///
-    /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget idiom, as `init_shell` /
-    /// `validate_layout`). Only the two live handles are returned; the staged gyro
-    /// bias, the probe/init working set and `I2c::new`'s own frame are gone before the loop exists,
-    /// instead of sitting in `main`'s frame, which is permanent because `main` never returns.
+    /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget idiom, as `init_shell`).
+    /// Only the two live handles are returned; the staged gyro bias, the probe/init working set and
+    /// `I2c::new`'s own frame are gone before the loop exists.
     #[inline(never)]
     fn bring_up_imu<F: store::Flash>(
         chip: &runtime_hal::Chip,
         store: &Store<F>,
-        plan: Option<&board::BoardPlan>,
+        status: &mut StatusRecord,
     ) -> (Option<I2c>, Option<imu::Imu>) {
-        let ip = match plan.and_then(|p| p.imu) {
-            Some(ip) => ip,
-            None => return (None, None),
+        let Some(ip) = layout::read_imu(store, status) else {
+            return (None, None);
         };
+        let (scl_id, scl_packed) = (store::IMU_SCL_PIN.id(), ip.scl.packed());
         // The instance behind the staged pair, from the pin model that owns the pair -> instance
-        // fact. The validator already accepted this pair as an I2C instance (its `NotI2cPair`
-        // check), so this resolves for any plan that carries an IMU; asking the model again is
-        // what makes the LABEL handed to `I2c::new` come from the same table as the bus index the
-        // plan carries, rather than from a `0 => I2c0` match written out here.
-        let Some(instance) =
-            runtime_hal::pincap::i2c_instance(chip, ip.scl.packed(), ip.sda.packed())
+        // fact, so the label handed to `I2c::new` comes from the same table that routes the pins.
+        let Some(instance) = runtime_hal::pincap::i2c_instance(chip, scl_packed, ip.sda.packed())
         else {
+            status.record(scl_id, 0, Reason::NotRouted, scl_packed);
             return (None, None);
         };
         // The staged pins as typed handles, with their port clock enabled.
-        let (Ok(scl), Ok(sda)) = (chip.pin(ip.scl.packed()), chip.pin(ip.sda.packed())) else {
+        let Some(scl) = typed_pin(chip, scl_packed, scl_id, 0, status) else {
+            return (None, None);
+        };
+        let Some(sda) = typed_pin(chip, ip.sda.packed(), scl_id, 0, status) else {
             return (None, None);
         };
         let Some(model) = imu::model_from_index(ip.model) else {
+            status.record(store::IMU_MODEL.id(), 0, Reason::NotUp, 0);
             return (None, None);
         };
         // Stage the per-board zero-rate gyro bias from the store (IMU_GYRO_BIAS x/y/z at indices
@@ -1792,15 +1734,9 @@ mod firmware {
             store.get(IMU_GYRO_BIAS.at(2)),
         ];
         // Stage the per-board IMU SIGN MAP the same way (IMU_AXIS_SIGN, indices 0..5 =
-        // [ax, ay, az, gx, gy, gz]). It is the rotation between the chip's axes and the board
-        // frame: a mounting fact, per board, exactly like the bias above. It used to be the
-        // compiled default alone, which is the STOCK board's mount and cannot also be right for a
-        // differently-mounted one; both bench boards read the up-axis at -0.97 g while level and
-        // right way up because of it (`specs/imu.md`, "Board-config fields").
-        //
-        // 0 = unset -> that index of the compiled reference map (`imu::Config::staged` owns the
-        // rule), so an unconfigured board behaves exactly as before and a configured one
-        // overrides per axis.
+        // [ax, ay, az, gx, gy, gz]): the rotation between the chip's axes and the board frame, a
+        // mounting fact per board (`specs/imu.md`, "Board-config fields"). 0 = unset -> that index
+        // of the compiled reference map (`imu::Config::staged` owns the rule).
         let mut staged_sign = [0i32; 6];
         for (i, s) in staged_sign.iter_mut().enumerate() {
             *s = store.get(IMU_AXIS_SIGN.at(i as u8));
@@ -1814,29 +1750,28 @@ mod firmware {
         ];
         // A frame that is not a proper rotation with distinct roles is REFUSED here, before the
         // bus is touched: the IMU is not brought up (so Balance demotes to Throttle with the mode
-        // fault, the existing fail-soft), and BOARD_OBS names the refusal. The rest of the layout
-        // stays in force, so the record is rewritten over the validator's success with the latch
-        // pin it already carries.
+        // fault, the existing fail-soft), and the status record names the refusal through the
+        // mapping the arm refusal shares (`arm::imu_frame_fault`).
         let cfg = match imu::Config::staged(staged_sign, bias, staged_roles) {
             Ok(cfg) => cfg,
             Err(e) => {
-                // SAFETY: single-threaded boot, interrupts not yet enabled; raw-pointer access
-                // only (the BOARD_OBS discipline, `apply_layout`).
-                unsafe {
-                    let obs = core::ptr::addr_of_mut!(BOARD_OBS);
-                    *obs = BoardObs::failure(&imu_frame_refusal(e), (*obs).self_hold);
-                }
+                let (field, first) = arm::imu_frame_fault(e);
+                status.record(field, 0, Reason::ImuFrame, first);
                 return (None, None);
             }
         };
-        let Ok(mut bus) = I2c::new(
+        let mut bus = match I2c::new(
             chip,
             &CLOCK,
             instance,
             (scl, sda),
             I2cMode::fast(IMU_I2C_HZ, runtime_hal::i2c::FastDuty::Two),
-        ) else {
-            return (None, None);
+        ) {
+            Ok(bus) => bus,
+            Err(e) => {
+                refused(status, scl_id, 0, e, scl_packed);
+                return (None, None);
+            }
         };
         let mut dev = imu::Imu::new(model, cfg);
         if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {
@@ -1845,72 +1780,10 @@ mod firmware {
             cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * IMU_SETTLE_MS);
             (Some(bus), Some(dev))
         } else {
+            // The IMU did not answer its probe: NotUp with detail 0.
+            status.record(scl_id, 0, Reason::NotUp, 0);
             (None, None)
         }
-    }
-
-    /// The `BOARD_OBS` refusal for an IMU frame `imu::Config::staged` refused, off the shared
-    /// [`arm::imu_frame_fault`] mapping: the same pair the arm refusal's `CTRL_OBS` cause byte is
-    /// built from, so the boot record and the bench read cannot name different fields for the same
-    /// frame. The mapping lives in `arm.rs`'s pure half because this function cannot be host-tested
-    /// (it is inside the target-only `mod firmware`) and that one can.
-    fn imu_frame_refusal(e: imu::FrameError) -> board::BoardError {
-        let (field, first) = arm::imu_frame_fault(e);
-        board::BoardError {
-            field: board::FieldRef { field, motor: None },
-            kind: board::BoardErrorKind::ImuFrame(first),
-        }
-    }
-
-    /// Apply the persisted board layout at boot: validate it (specs/board-model.md checks 1-4),
-    /// assert the power latch on the pin the store stages before anything is done with the rest of
-    /// the verdict, and publish the outcome.
-    ///
-    /// The reserved set is the compiled allowlist minus the LINK_SET-freed ports plus SWD (the
-    /// plumbing helper owns the freeing rule; the allowlist pin facts come from SAFE_LINK_USARTS,
-    /// their single owner), the fields arrive through the registry defaults, and the chip
-    /// capabilities through the HalCaps adapter. On Ok, the success record + the BoardPlan the
-    /// integration bring-up consumes (the IMU group, the input pins); on Err, the failure record
-    /// naming the offending field, and the boot proceeds link-only (the fail-loud contract's
-    /// posture).
-    ///
-    /// Returned WITH the plan: whether the staging ASKED for an IMU
-    /// (`motorcontroller/board/src/lib.rs`, `Validated::imu_staged`), which the boot publishes as the
-    /// `CTRL_OBS` flags byte b6. It cannot be derived from the plan on the way out: a refused
-    /// layout carries no plan at all, and that is one of the cases the bit has to tell apart from
-    /// a board with no IMU fitted. It rides out of the validator rather than off a second store
-    /// read so the ask the boot publishes is the ask the validator judged.
-    ///
-    /// **Why the latch comes off `Validated::self_hold` and not off the plan.** SELF_HOLD is this
-    /// board's own power rail (see [`assert_self_hold`]), so it must go up even when the layout is
-    /// rejected: a board whose motor group is mis-staged still boots link-only by design, and on
-    /// battery it stays reachable to be corrected only if its own rail stays latched. The validator
-    /// resolves it first and reports it either way, from the same staged fields and the same
-    /// reserved set as everything else, so the pin the latch drives and the pin held against every
-    /// other field cannot disagree.
-    ///
-    /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the validator's
-    /// working set (fields, reserved set, claims) lives here and is gone before the loop's deep
-    /// ingest/append chain exists, instead of inflating the boot frame (`boot`'s since shrink
-    /// round 7, `main`'s before).
-    #[inline(never)]
-    fn apply_layout<F: store::Flash>(
-        chip: &runtime_hal::Chip,
-        store: &Store<F>,
-        allowlist: &[AllowlistPort],
-        link_set: u8,
-    ) -> (Option<board::BoardPlan>, bool) {
-        let reserved = reserved_set(allowlist, link_set);
-        let v = board::validate(&read_fields(store), &HalCaps { chip }, reserved.as_slice());
-        let self_hold = assert_self_hold(chip, v.self_hold);
-        let (obs, plan) = match v.plan {
-            Ok(plan) => (BoardObs::success(self_hold), Some(plan)),
-            Err(e) => (BoardObs::failure(&e, self_hold), None),
-        };
-        // SAFETY: single-threaded boot, interrupts not yet enabled, the one writer this boot;
-        // via a raw pointer so no reference to the `static mut` is formed.
-        unsafe { *core::ptr::addr_of_mut!(BOARD_OBS) = obs };
-        (plan, v.imu_staged)
     }
 
     /// Route one delivered-but-unhandled PDU (the `net` hand-back): the reserved control block
@@ -2002,108 +1875,80 @@ mod firmware {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // Board-layout validation (specs/board-model.md, slicing item 4): after the store mounts and
-    // before any board-field bring-up, the persisted pin layout is read and validated against the
-    // detected chip; the outcome lands in the SWD-readable BOARD_OBS block, and the resulting
-    // BoardPlan feeds the integration bring-up (the IMU group + the input pins, its first
-    // consumers; specs/integration.md boot delta).
+    // Direct bring-up (`specs/configured-links.md` section 3): each subsystem reads its own fields
+    // and asks the HAL; a failure costs only that function and adds an entry to BOARD_OBS.
     // ---------------------------------------------------------------------------------------------
 
-    /// Assert this board's power-latch (SELF_HOLD) high, on the pin `board.self_hold` STAGES.
-    /// Returns the packed pin actually driven, or `board::ABSENT` if none was.
+    /// Record a HAL refusal of `pin` against the function `field`/`index`: the SWD pins as
+    /// [`Reason::SwdPin`] with the pin, anything else as [`Reason::NotUp`] with the HAL's error code
+    /// (`DescriptorError::code`).
+    fn refused(status: &mut StatusRecord, field: u8, index: u8, e: DescriptorError, pin: u8) {
+        match e {
+            DescriptorError::SwdPin => status.record(field, index, Reason::SwdPin, pin),
+            e => status.record(field, index, Reason::NotUp, e.code()),
+        }
+    }
+
+    /// `pin` as a typed HAL handle with its port clock on, or `None` recorded against the function
+    /// `field`/`index` (an SWD pin, or a port this silicon does not carry).
+    fn typed_pin(
+        chip: &runtime_hal::Chip,
+        pin: u8,
+        field: u8,
+        index: u8,
+        status: &mut StatusRecord,
+    ) -> Option<GpioPin<Input<Floating>>> {
+        match chip.pin(pin) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                refused(status, field, index, e, pin);
+                None
+            }
+        }
+    }
+
+    /// Assert this board's power-latch (SELF_HOLD) high, on the pin `board.self_hold` STAGES, FIRST
+    /// of every bring-up, and record the pin driven in the status record (`ABSENT` when none was).
     ///
     /// Role-agnostic on EVERY board: latch this board's own rail on so it stays up after the
     /// inter-board wake drops. A slave is woken over the cable and would otherwise fall back asleep
     /// once the master stops driving it; a master bridges its own power button. Unconditional,
-    /// never gated on chip family (family != master/slave), because role is not yet known here:
-    /// identity is positional, assigned later by the walk, and the latch cannot wait for it.
-    /// RoboDurden does the same (`main.c:148`).
+    /// never gated on chip family, because role is not known here. RoboDurden does the same
+    /// (`main.c:148`).
     ///
     /// **Which pin, and why from the store.** The pin is per-board wiring, so the staged field owns
     /// it: `board.self_hold`'s registry default (PB12, the fleet wiring) is what an unstaged board
-    /// reads, so this drives PB12 there exactly as the compiled constant it replaces did. A board
-    /// wired differently stages its own byte and this drives THAT pin. There is no compiled latch
-    /// pin left to disagree with the field, and the pin held against the rest of the layout is the
-    /// same one: the validator claims `Validated::self_hold` before it looks at any other field, so
-    /// a second claimant on the latch pin is a named duplicate failure.
-    ///
-    /// **Ordering.** Called as early as the staged pin can be known: `board::validate` resolves the
-    /// latch first and the caller drives it before it does anything with the rest of the verdict,
-    /// all inside [`apply_layout`], which runs immediately after `Store::mount`. The latch is
+    /// reads. A board wired differently stages its own byte and this drives THAT pin. It is
     /// unavoidably post-mount (its pin is persisted data), so the window between power-on and the
-    /// assert is the mount itself, which is inside the window the previous hardcoded assert already
-    /// had 54 lines further down the boot. This shortens that window; it does not open one. What it
-    /// deliberately does NOT do is assert a compiled guess first and correct it after: on a board
-    /// wired to a different latch pin, the guess drives some other staged function push-pull for
-    /// the length of the mount, which is a worse failure than the one it would be hedging against.
+    /// assert is the mount itself.
     ///
-    /// **Loud on failure.** `None` here means the field is staged absent (this board declares no
-    /// latch) or the staged byte named no usable pin (bad encoding, a pin absent on this silicon, a
-    /// pin the link layer reserved). Either way nothing is driven, and in the second case
-    /// `Validated::plan` carries the failure, so `BOARD_OBS` reports it against `board.self_hold`'s
-    /// registry id with `BOARD_OBS.self_hold` reading `ABSENT`. On battery that board powers off;
-    /// it does not silently hold a wrong pin high while reporting a clean layout.
-    fn assert_self_hold(chip: &runtime_hal::Chip, pin: Option<board::Pin>) -> u8 {
-        let Some(pin) = pin else {
-            return board::ABSENT;
+    /// A staged byte that names no usable pin (a bad encoding, an SWD pin, a port this silicon does
+    /// not carry) drives nothing and is recorded; on battery that board powers off rather than
+    /// holding a wrong pin high.
+    fn assert_self_hold<F: store::Flash>(
+        chip: &runtime_hal::Chip,
+        store: &Store<F>,
+        status: &mut StatusRecord,
+    ) {
+        let field = store::BOARD_SELF_HOLD;
+        let Some(pin) = layout::pin(store, field, status) else {
+            return;
         };
-        // The port clock comes up with the handle (`Chip::pin`), the same way the by-name getters
-        // do it. A pin this silicon does not carry was already refused by the resolver.
-        let Ok(handle) = chip.pin(pin.packed()) else {
-            return board::ABSENT;
+        let Some(handle) = typed_pin(chip, pin.packed(), field.id(), 0, status) else {
+            return;
         };
         // Dropping the handle leaves the pin configured and driven: the latch has to outlive every
-        // frame in this boot, and no later owner may take it (the validator's claim is what stops
-        // one being assigned).
+        // frame in this boot.
         let _ = handle.into_push_pull_output().set_high();
-        pin.packed()
+        status.self_hold = pin.packed();
     }
 
-    /// The real `board::Capabilities` implementation: a thin adapter over runtime-hal's R-CAP
-    /// pin-capability queries (`runtime_hal::pincap`, its `specs/pin-capability.md`) - the
-    /// store's `FmcFlash` pattern (a consumer-side trait impl over the HAL primitive; the
-    /// capability answers come from the HAL model, never a table here). Packed pin bytes cross
-    /// the seam; the named advanced timer maps to the trait's zero-based index (TIMER0 = 0,
-    /// TIMER7/TIM8 = 1).
-    struct HalCaps<'a> {
-        chip: &'a runtime_hal::Chip,
-    }
-
-    impl board::Capabilities for HalCaps<'_> {
-        fn pin_exists(&self, pin: board::Pin) -> bool {
-            runtime_hal::pincap::pin_exists(self.chip, pin.packed())
-        }
-        fn gate_capable(&self, pin: board::Pin) -> bool {
-            runtime_hal::pincap::gate_capable(self.chip, pin.packed())
-        }
-        fn gate_set(&self, hi: [board::Pin; 3], lo: [board::Pin; 3]) -> Option<u8> {
-            runtime_hal::pincap::gate_set(self.chip, hi.map(|p| p.packed()), lo.map(|p| p.packed()))
-                .map(|t| if t == PeriphLabel::Timer7 { 1 } else { 0 })
-        }
-        fn adc_channel(&self, pin: board::Pin) -> Option<u8> {
-            runtime_hal::pincap::adc_channel(self.chip, pin.packed())
-        }
-        fn i2c_pair(&self, scl: board::Pin, sda: board::Pin) -> Option<u8> {
-            runtime_hal::pincap::i2c_pair(self.chip, scl.packed(), sda.packed())
-        }
-    }
-
-    /// The board-layout validator's SWD-readable outcome (`specs/board-model.md`,
-    /// "Observability"): magic, result code, the offending field's registry id + index, the
-    /// power-latch pin this boot actually drove, and the kind-specific detail word. Read it over
-    /// SWD at the address of the `BOARD_OBS` symbol
-    /// (`nm <elf> | grep BOARD_OBS`). A `static mut` with a fixed un-mangled symbol, written
-    /// once per boot (before any interrupt is enabled) via a raw pointer, never through a
-    /// reference.
+    /// The boot status record (`specs/configured-links.md` section 5): what did not come up, and
+    /// why. Written during boot through the one `&mut` [`boot`] forms, fixed after it, read over SWD
+    /// at the address of this un-mangled symbol (`tools/swdobs.py`), and served as `board.status`
+    /// from its entries. Never read through a reference while it is written.
     #[no_mangle]
-    static mut BOARD_OBS: BoardObs = BoardObs {
-        magic: 0,
-        result: 0,
-        field_id: 0,
-        index: 0,
-        self_hold: 0,
-        detail: 0,
-    };
+    static mut BOARD_OBS: StatusRecord = StatusRecord::new();
 
     // ---------------------------------------------------------------------------------------------
     // Serials: the L2 links ride runtime-hal's embedded-io adapters (specs/firmware.md, "The link
@@ -2203,11 +2048,9 @@ mod firmware {
         service_loop(
             &mut state.epoch_watch,
             &mut state.mailbox_link,
-            &mut state.uart_link,
+            &mut state.links,
             &mut state.responder.0,
             &mut state.wdg,
-            state.discovered,
-            state.configured,
             state.odometer_base,
         )
     }
@@ -2216,11 +2059,11 @@ mod firmware {
     /// the watchdog, the mailbox epoch watch and the three boot facts the loop reads. It is a
     /// struct, not a set of locals in `main`, for one reason: a local of `main` is in `main`'s
     /// frame, and `main`'s frame is the one frame in the image that never pops. Everything that
-    /// is NOT in here (the detected `Chip`, the plan, the allowlist, the split USART halves, the IMU handles, the input pins, the motor summary) is bring-up
+    /// is NOT in here (the detected `Chip`, the motor plan, the split USART halves, the IMU handles, the input pins, the motor summary) is bring-up
     /// scaffolding, built and consumed in [`boot`] and gone before the loop's deep chains exist.
     ///
     /// Built IN PLACE: [`boot`] gets `&mut MaybeUninit<LoopState>` and each large field is written
-    /// by its own `#[inline(never)]` placer ([`place_uart_link`], [`place_mailbox_link`],
+    /// by its own `#[inline(never)]` placer ([`place_link`], [`place_mailbox_link`],
     /// [`place_responder`]) that takes the slot's raw pointer. The placer
     /// is where the construction temporaries live (a `Link` is built from a transport built from a
     /// carrier built from two DMA halves, each a value on the way), and the placer's frame pops.
@@ -2232,17 +2075,15 @@ mod firmware {
     struct LoopState {
         epoch_watch: EpochWatch,
         mailbox_link: MailboxLink,
-        uart_link: Option<UartLink>,
+        /// The inter-board links, index = the link (port `PORT_IDX_LINK0 + i`); `None` where the
+        /// link is not configured or did not come up.
+        links: [Option<UartLink>; N_LINKS],
         /// Wrapped to word alignment: `Responder` is `align(2)`, and `Responder::new`'s fill of
         /// the slot through an `align(2)` pointer linked the byte-wise `__aeabi_memset` (92 B)
         /// beside the word-wise `__aeabi_memset4` the rest of the image uses; word-aligned, it
         /// uses the one already there.
         responder: Aligned4<Responder>,
         wdg: FreeWatchdog,
-        /// The discovered link-set bitmask (see its computation in [`boot`]).
-        discovered: u8,
-        /// Whether the board booted with a persisted `LINK_SET` (a walked board).
-        configured: bool,
         /// Motor 0's stored odometer total at boot (`specs/odometer.md`).
         odometer_base: u32,
     }
@@ -2254,14 +2095,13 @@ mod firmware {
     /// The whole bring-up, from the mailbox header to the watchdog, in a frame that POPS.
     ///
     /// `#[inline(never)]` is the point, not a hint: inlined into `main` this body's locals would be
-    /// `main`'s frame again, which is the 2,248 B this split exists to free. It is the body `main`
-    /// used to have, verbatim and in the same order (the hardware side effects here are ordered:
-    /// SELF_HOLD before the layout verdict, the vector table before any ring, the rings before the
-    /// links, the shell before the tick source, the watchdog last), with the long-lived values
-    /// written into `state` where `main` used to bind them as locals.
+    /// `main`'s frame again, which is the 2,248 B this split exists to free. The hardware side
+    /// effects here are ordered: SELF_HOLD first of every bring-up, the vector table before any
+    /// ring, the rings before the links, the shell before the tick source, the watchdog last; the
+    /// long-lived values are written into `state`.
     ///
-    /// `state` is written exactly once per field and never read here except through the one
-    /// `is_some()` fact the link-set needs, after the field's write.
+    /// `state` is written exactly once per field; the one read is the responder's `set_status`
+    /// after its placer wrote it.
     #[inline(never)]
     fn boot(state: &mut MaybeUninit<LoopState>) {
         let st = state.as_mut_ptr();
@@ -2352,23 +2192,22 @@ mod firmware {
                 Some(s) => s,
                 None => halt(),
             };
-        let link_set = store.get(LINK_SET);
-        let configured = link_set != 0;
         // The odometer's stored total, motor 0's (`specs/odometer.md`). Read here with the other
         // boot-read fields and handed to the loop, which owns every later read and the one write.
         let odometer_base = store.get(store::MOTOR_ODOMETER.at(0));
 
-        // The safe-link allowlist with this chip's routability answers filled in: the one input the
-        // layout validation and the port assignment share.
-        let allowlist = allowlist(&chip);
+        // The boot status record (`specs/configured-links.md` section 5): every bring-up below that
+        // leaves its function absent adds an entry here. The one `&mut` to the static, formed once;
+        // its last use is the `set_status` hand-over at the end of this function.
+        // SAFETY: single-threaded boot, before any interrupt is enabled; nothing else forms a
+        // reference to `BOARD_OBS` while this one is live.
+        let status: &mut StatusRecord = unsafe { &mut *addr_of_mut!(BOARD_OBS) };
 
-        // Apply the persisted layout (a popped boot frame: see `apply_layout`). Its FIRST act is
-        // the SELF_HOLD assert, on the pin the store stages: the board's own power rail goes up the
-        // moment its pin is knowable, before the whole-layout validation that must not be able to
-        // withhold it. On the bench both boards run on debugger 3V3 that bypasses the latch, so
-        // that assert is a no-op for power there and is verifiable only as the pin's `GPIOx.OCTL`
-        // bit; it matters on battery + the inter-board cable.
-        let (plan, imu_staged) = apply_layout(&chip, store, &allowlist, link_set);
+        // The power latch FIRST of every bring-up, on the pin the store stages: the board's own
+        // power rail goes up the moment its pin is knowable. On the bench both boards run on
+        // debugger 3V3 that bypasses the latch, so the assert is verifiable only as the pin's
+        // `GPIOx.OCTL` bit; it matters on battery + the inter-board cable.
+        assert_self_hold(&chip, store, status);
 
         // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
         // raw register views internally and never consumes the one-shot flag, so ordering vs
@@ -2379,35 +2218,10 @@ mod firmware {
             None => halt(),
         };
 
-        // === Link-listen (passive, DMA, link::INTER_BOARD_BAUD) on the inter-board USART (port 1) ===
-        //
-        // Always brought up (both boards, every boot): it is the proven inter-board link. Configured
-        // boards still bring it up iff its port bit is set (it always is for a walked board).
-        let want_uart = !configured || link_set & link_bit(PORT_IDX_UART) != 0;
-        // The inter-board link: the one safe-link slot with a single fleet-wide answer, declared
-        // rather than resolved (see `LINK_USART` for why, including what resolving it costs).
-        // `Usart::new` re-derives the pair through the pin model and refuses a mismatch, so a
-        // wrong declaration halts here on the first boot instead of driving the wrong peripheral.
-        let gpioa = match chip.gpioa() {
-            Ok(p) => p.split(),
-            Err(_) => halt(),
-        };
-
-        // One bring-up, split into owned halves (specs/usart-split.md): the RX half is consumed by
-        // RingBufferedRx below, the TX half drives polled TX. No second handle on a live base.
-        let usart1 = match Usart::new(&chip, &CLOCK, LINK_USART, (gpioa.pa2, gpioa.pa3), LINK_BAUD)
-        {
-            Ok(u) => u,
-            Err(_) => halt(),
-        };
-        let (usart1_tx, usart1_rx) = usart1.split();
-        // The RAM vector table and the DMA ring are plain zero-initialized statics (.bss): the
-        // earlier `cortex_m::singleton!` pattern materialized their init EXPRESSIONS (1 KiB +
-        // 128 B) as temporaries in `main`'s frame before copying into the static, which is
-        // exactly the stack the deep ingest/append chain needs (the slice-7 stack-budget fix).
-        // A zero-init static costs no stack and no copy; the `&'static mut` is formed once,
-        // here, before any interrupt exists. The `RamVectorTable`'s VTOR alignment rides the
-        // type.
+        // The RAM vector table is a plain zero-initialized static (.bss): the earlier
+        // `cortex_m::singleton!` pattern materialized its init EXPRESSION as a temporary in `main`'s
+        // frame before copying into the static (the slice-7 stack-budget fix). The `&'static mut`
+        // is formed once, here, before any interrupt exists. The VTOR alignment rides the type.
         // SAFETY: the one formation of a &mut to this static, single-threaded boot.
         let vectors: &'static mut RamVectorTable = unsafe { &mut *addr_of_mut!(RAM_VECTORS) };
         // VTOR requires the table aligned to its power-of-two granule, which `RamVectorTable`
@@ -2424,34 +2238,33 @@ mod firmware {
         // SAFETY (install): RAM init done, no peripheral IRQ enabled yet, `vectors` is a 'static table.
         unsafe { install(vectors, chip.irq()) };
         // The motor-era interrupt-priority ordering (HAL R7, `specs/motor-integration.md`'s
-        // execution model): the period (ADC injected-EOC) vector above the USART1 RX vector above
-        // the DMA-RX vector above SysTick at the stock 0xF0. Applied here, BEFORE any of those
-        // vectors is unmasked (the DMA/USART RX bring-up is below, the period vector is the motor
-        // bring-up's last step), and it is the single owner of the SysTick priority too, so this
-        // replaces the firmware's own SCB poke. Writing priorities enables nothing.
+        // execution model): the period (ADC injected-EOC) vector above every USART RX vector above
+        // the DMA vectors above SysTick at the stock 0xF0. Applied here, BEFORE any of those
+        // vectors is unmasked (the link bring-up is below, the period vector is the motor
+        // bring-up's last step), and it is the single owner of the SysTick priority too. Writing
+        // priorities enables nothing.
         runtime_hal::irq::apply_motor_era_priorities(chip.irq());
         // SAFETY (enable): the table is installed; RingBufferedRx::new registers + unmasks its handlers.
         unsafe { cortex_m::interrupt::enable() };
-        // The inter-board ring, transmitter and link, built in place in the loop's state by a
-        // popped frame (`place_uart_link` holds the SAFETY arguments for the two buffers and the
-        // `halt()` rule for the two arming failures).
-        let uart_link = unsafe { addr_of_mut!((*st).uart_link) };
-        place_uart_link(uart_link, want_uart, &chip, usart1_tx, usart1_rx);
 
-        // === The links into `net`: port 0 = mailbox (always), port 1 = UART ===
+        // === The links (`specs/configured-links.md` section 4): link i is port 1 + i ===
+        //
+        // Each link exists when both its pins are stored, and is built in place in the loop's state
+        // by a popped frame ([`place_link`]). Unset, its pins are not touched. Every slot is
+        // written, `None` for a link that is absent, so the state is whole when `boot` returns.
+        for i in 0..store::LINKS {
+            // SAFETY: a pointer to slot `i` of the `links` field of `main`'s uninitialized state,
+            // written once by the placer and read by nobody until `boot` returns.
+            let slot = unsafe {
+                addr_of_mut!((*st).links)
+                    .cast::<Option<UartLink>>()
+                    .add(i as usize)
+            };
+            place_link(slot, i, &chip, store, status);
+        }
+
+        // The mailbox, port 0, always.
         place_mailbox_link(unsafe { addr_of_mut!((*st).mailbox_link) }, mailbox);
-        // The link fact the rest of the boot reads, taken once from the written slot.
-        // SAFETY: the field was written by its placer above; a shared read of initialized memory
-        // with no other reference alive.
-        let uart_up = unsafe { (*uart_link).is_some() };
-
-        // The discovered link-set: the bitmask of live USART links, persisted at assign (below) and
-        // read back as `LINK_SET` on every later boot.
-        let discovered = if uart_up {
-            link_bit(SAFE_LINK_USARTS[LINK_ENTRY_UART].link_set_bit)
-        } else {
-            0
-        };
 
         place_responder(
             // SAFETY: a `&mut MaybeUninit` to one field of `main`'s uninitialized state: the
@@ -2465,78 +2278,112 @@ mod firmware {
 
         // === The integration boot delta (specs/integration.md, after the existing bring-up) ===
 
-        // 1. IMU bring-up on the bus the staged layout named (the first BoardPlan consumer): I2C0
-        //    on PB6/PB7 for the standard family, I2C1 on PB10/PB11 for the classywalk offroad
-        //    family, from this one image. The port assignment above already guaranteed no link
-        //    port took those pins, so nothing can be driving them. Fails soft: the board boots
-        //    link-only-plus-throttle and the outcome is observable (imu_configured in CTRL_OBS,
-        //    read against imu_staged: the flags byte's b0 and b6).
-        let (imu_bus, imu_dev) = bring_up_imu(&chip, store, plan.as_ref());
+        // 1. IMU bring-up on the bus its staged pins name: I2C0 on PB6/PB7 for the standard
+        //    family, I2C1 on PB10/PB11 for the classywalk offroad family, from this one image.
+        //    Fails soft: the board boots link-only-plus-throttle and the outcome is observable
+        //    (imu_configured in CTRL_OBS, read against imu_staged: the flags byte's b0 and b6, and
+        //    the status record).
+        let (imu_bus, imu_dev) = bring_up_imu(&chip, store, status);
+        // Whether the staging ASKED for an IMU (`imu.model` nonzero, the group's enable): published
+        // as `CTRL_OBS` b6 so a bench read tells "never asked" from "asked and nothing came up".
+        let imu_staged = store.get(store::IMU_MODEL) != 0;
 
-        // The plan-driven input pins (button + pads): resolve the configured ones into a
-        // branch-free InputGroup; absent fields sample as idle through the per-line mask. Port C
-        // (the fleet-default pad B, PC15) needs its clock enabled; A/B already are.
+        // The input pins (button + pads): each its own single field, resolved into a branch-free
+        // InputGroup; absent or refused lines sample as idle through the per-line mask. Resolving
+        // each pin through the HAL enables its port clock (port C for the fleet-default pad B,
+        // PC15) and refuses the SWD pins, recorded against that line's field.
         let inputs = {
-            // `match`, not `.map(..).unwrap_or(..)`: at opt-level "z" the closure survived as its
-            // own out-of-line function once `main` stopped being one whole-program body (the
-            // boot/loop split), costing ~96 B for three field reads.
-            let (b, pa, pb) = match plan.as_ref() {
-                Some(p) => (
-                    p.button.map(|x| x.packed()),
-                    p.pad_a.map(|x| x.packed()),
-                    p.pad_b.map(|x| x.packed()),
-                ),
-                None => (None, None, None),
+            let mut line = |field: store::Field<u8>| -> Option<u8> {
+                let p = layout::pin(store, field, status)?.packed();
+                typed_pin(&chip, p, field.id(), 0, status).map(|_| p)
             };
-            if [b, pa, pb].iter().flatten().any(|&x| (x >> 4) == 2) {
-                let _ = chip.gpioc();
-            }
-            // `match` for the same reason as above (the `and_then` closure cost ~110 B).
+            let (b, pa, pb) = (
+                line(store::BOARD_BUTTON),
+                line(store::PAD_A),
+                line(store::PAD_B),
+            );
+            // `match`, not `.and_then(..)`: at opt-level "z" the closure survived as its own
+            // out-of-line function once `main` stopped being one whole-program body (~110 B).
             let group = match b.or(pa).or(pb) {
-                Some(f) => chip
-                    .input_group([b.unwrap_or(f), pa.unwrap_or(f), pb.unwrap_or(f)])
-                    .ok(),
+                Some(f) => {
+                    match chip.input_group([b.unwrap_or(f), pa.unwrap_or(f), pb.unwrap_or(f)]) {
+                        Ok(g) => Some(g),
+                        Err(e) => {
+                            let field = if b.is_some() {
+                                store::BOARD_BUTTON.id()
+                            } else if pa.is_some() {
+                                store::PAD_A.id()
+                            } else {
+                                store::PAD_B.id()
+                            };
+                            refused(status, field, 0, e, f);
+                            None
+                        }
+                    }
+                }
                 None => None,
             };
             InputPins {
+                has_button: group.is_some() && b.is_some(),
+                has_pad_a: group.is_some() && pa.is_some(),
+                has_pad_b: group.is_some() && pb.is_some(),
                 group,
-                has_button: b.is_some(),
-                has_pad_a: pa.is_some(),
-                has_pad_b: pb.is_some(),
                 polarity: store.get(store::BOARD_INPUT_POLARITY),
             }
         };
 
-        // 1b. Motor bring-up, plan-gated (`specs/motor-integration.md` slice 3, DISARMED): the
+        // The battery-sense input (`board.battery.pin`) and the ADC channel behind it: the motor's
+        // injected group converts it, and its calibration is read only where it is staged.
+        let vbatt = layout::read_adc_input(
+            store,
+            store::BOARD_BATTERY_PIN,
+            |p| runtime_hal::pincap::adc_channel(&chip, p),
+            status,
+        );
+
+        // 1b. Motor bring-up (`specs/motor-integration.md` slice 3, DISARMED): motor 0's own fields
+        //     (`layout::read_motor`, which holds its gate group to the dead-time floor), then the
         //     timer + injected ADC are configured and the 16 kHz period ISR starts stepping the
-        //     commutator, with MOE never written (this crate does not name the arming gate at all;
-        //     arming is slice 5). A board with no motor group configured, or one this slice cannot
-        //     drive, is left exactly as before: the outcome rides in `CTRL_OBS`'s motor block.
+        //     commutator, with MOE never written (this crate does not name the arming gate at all).
+        //     A board with no motor group configured, or one this image cannot drive, is left
+        //     exactly as before: the outcome rides in `CTRL_OBS`'s motor block, and a group that is
+        //     staged but refused, or a bring-up step that fails, in the status record.
         //     Placed after the RAM vector table is installed (the period vector routes through it)
         //     and before the tick source, so the 250 Hz task never runs against a half-built motor.
-        //     Slice 5: a successful bring-up hands its configured timer to `arm`, which derives
-        //     the one arming gate in the image from it. A board that skips the bring-up never
-        //     installs a gate and is therefore UNARMABLE, not merely unarmed.
-        let motor_skip = match plan.as_ref().map(|p| &p.motors[0]) {
-            Some(m) => match motor::bring_up(
-                &chip,
-                m,
-                plan.as_ref().and_then(|p| p.vbatt),
-                store.get(store::MOTOR_METHOD),
-                PERIOD_HZ,
-                store.get(store::MOTOR_CURRENT_LIMIT),
-                store.get(store::MOTOR_NOISE_FLOOR.at(0)),
-            ) {
-                Ok(summary) => {
-                    arm::hw::install(&summary.timer);
-                    None
-                }
-                Err(skip) => Some(skip),
+        //     A successful bring-up hands its configured timer to `arm`, which derives the one
+        //     arming gate in the image from it. A board that skips the bring-up never installs a
+        //     gate and is therefore UNARMABLE, not merely unarmed.
+        let motor_plan = layout::read_motor(
+            store,
+            0,
+            |hi, lo| {
+                runtime_hal::pincap::gate_set(&chip, hi, lo).map(|t| {
+                    if t == PeriphLabel::Timer7 {
+                        1
+                    } else {
+                        0
+                    }
+                })
             },
-            None => Some(motor::MotorSkip::Absent),
-        };
-        if let Some(skip) = motor_skip {
-            motor::record_skip(skip);
+            |p| runtime_hal::pincap::adc_channel(&chip, p),
+            status,
+        );
+        match motor::bring_up(
+            &chip,
+            &motor_plan,
+            vbatt,
+            store.get(store::MOTOR_METHOD),
+            PERIOD_HZ,
+            store.get(store::MOTOR_CURRENT_LIMIT),
+            store.get(store::MOTOR_NOISE_FLOOR.at(0)),
+        ) {
+            Ok(summary) => arm::hw::install(&summary.timer),
+            Err(skip) => {
+                if let motor::MotorSkip::StepFailed(_) = skip {
+                    status.record(store::MOTOR_GATE_HI_A.id(), 0, Reason::NotUp, 0);
+                }
+                motor::record_skip(skip);
+            }
         }
 
         // 2. The control-dispatch boot seam rides inside the orchestrator constructor
@@ -2581,7 +2428,7 @@ mod firmware {
             // The battery-sense calibration (BOARD_BATTERY_CAL, 0 = slope / 1 = offset), boot-read
             // and seam-clamped by `VbattCal::new`, on a board whose plan carries `board.battery.pin`
             // only: a board that does not sense has no calibration to read.
-            plan.as_ref().and_then(|p| p.vbatt).map(|_| {
+            vbatt.map(|_| {
                 orchestrator::battery::VbattCal::new(
                     store.get(BOARD_BATTERY_CAL.at(0)),
                     store.get(BOARD_BATTERY_CAL.at(1)),
@@ -2605,12 +2452,15 @@ mod firmware {
             store.get(BOARD_BATTERY_FLOOR),
             imu_bus,
             imu_dev,
-            // Whether the staging asked for an IMU at all, from the validator above: published as
-            // the `CTRL_OBS` flags byte b6, which is what makes `imu_configured = 0` readable.
+            // Whether the staging asked for an IMU at all: published as the `CTRL_OBS` flags byte
+            // b6, which is what makes `imu_configured = 0` readable.
             imu_staged,
             inputs,
             next_boot_count(),
             chip_tag,
+            // Whether any configured function did not come up: `EV_CONFIG` on the wire for the
+            // whole run (`specs/configured-links.md` section 5). Every bring-up is done by here.
+            !status.is_empty(),
         );
 
         // 3. The tick source (integration.md step-3 order: register the task table, mark the
@@ -2657,76 +2507,122 @@ mod firmware {
             Err(_) => halt(),
         };
 
+        // The status record is fixed from here: hand its entries to the responder, which answers
+        // `board.status` from them (`specs/configured-links.md` section 5). `status`'s last use was
+        // above, so the shared borrow formed here is the only reference to the static.
+        // SAFETY: as the `&mut` above; the responder field was written by its placer.
+        unsafe {
+            (*addr_of_mut!((*st).responder))
+                .0
+                .set_status((*addr_of!(BOARD_OBS)).entries())
+        };
+
         // The remaining fields, LAST, so `main` finds the state complete the moment this returns.
         // SAFETY: the one write of each; `st` points at `main`'s `MaybeUninit`, no reference to
         // which exists while this runs.
         unsafe {
             addr_of_mut!((*st).wdg).write(wdg);
             addr_of_mut!((*st).epoch_watch).write(EpochWatch::new(mailbox));
-            addr_of_mut!((*st).discovered).write(discovered);
-            addr_of_mut!((*st).configured).write(configured);
             addr_of_mut!((*st).odometer_base).write(odometer_base);
         }
     }
 
-    /// Place the inter-board link into the loop's state: arm the receive ring and the one-shot
-    /// transmitter on the split USART halves, and build the link over them if this boot wants the
-    /// port. A POPPED boot frame (shrink round 7): the ring receiver, the transmitter and the
-    /// `SplitSerial` are each a value on the way to the `Link`, and here they are this frame's.
+    /// Bring link `i` up from its stored pins and place it into its slot of the loop's state
+    /// (`specs/configured-links.md` section 4): the USART the pair drives, the receive ring and the
+    /// one-shot transmitter on its split halves, and the `Link` over them. A POPPED boot frame
+    /// (shrink round 7): the ring receiver, the transmitter and the `SplitSerial` are each a value
+    /// on the way to the `Link`, and here they are this frame's; the `Link` is written into the
+    /// slot through the raw pointer, never returned by value.
     ///
-    /// The two halves are armed whether or not the link is wanted, exactly as before the split
-    /// (a board that drops the port still owns its DMA channels); only the `Link` is conditional.
+    /// Unset (both pins), the slot is `None` and no pin is touched. Any failure (one pin of two, a
+    /// pair no USART routes on this chip, a HAL refusal, a USART already brought up by the other
+    /// link) leaves the slot `None` and records why against `link.tx` at index `i`; it never halts.
+    /// The two buffers are this link's own statics, formed once each (each `i` is placed once).
     ///
     /// Runs AFTER `irq::install` and `cortex_m::interrupt::enable()`: arming either half registers
     /// and unmasks a vector.
     #[inline(never)]
-    fn place_uart_link(
+    fn place_link<F: store::Flash>(
         slot: *mut Option<UartLink>,
-        want_uart: bool,
+        i: u8,
         chip: &runtime_hal::Chip,
-        usart1_tx: runtime_hal::UsartTx,
-        usart1_rx: runtime_hal::UsartRx,
+        store: &Store<F>,
+        status: &mut StatusRecord,
     ) {
-        // SAFETY: as RAM_VECTORS in `boot`: the one &mut formation, before the DMA IRQ exists. The
-        // `write` is the zeroing `.bss` used to do (the ring is NOLOAD now, see its declaration).
-        let dma_buf: &'static mut [u8; DMA_CAP] =
-            unsafe { &mut (*addr_of_mut!(DMA_RING)).write(DmaRing([0; DMA_CAP])).0 };
-        let rx_dma = match RingBufferedRx::new(chip, usart1_rx, LINK_USART, dma_buf) {
+        let link = bring_up_link(i, chip, store, status);
+        // SAFETY: `slot` is slot `i` of the `links` field of `main`'s `MaybeUninit<LoopState>`,
+        // written here once and read by nobody until `boot` returns.
+        unsafe { slot.write(link) };
+    }
+
+    /// [`place_link`]'s body: the link, or `None` with the reason recorded.
+    #[inline(always)]
+    fn bring_up_link<F: store::Flash>(
+        i: u8,
+        chip: &runtime_hal::Chip,
+        store: &Store<F>,
+        status: &mut StatusRecord,
+    ) -> Option<UartLink> {
+        let [tx, rx] = layout::read_link(store, i, status)?;
+        let (field, tx, rx) = (store::LINK_TX.id(), tx.packed(), rx.packed());
+        let Some(usart) = link_usart(chip, tx, rx) else {
+            status.record(field, i, Reason::NotRouted, tx);
+            return None;
+        };
+        let tx_pin = typed_pin(chip, tx, field, i, status)?;
+        let rx_pin = typed_pin(chip, rx, field, i, status)?;
+        // One bring-up, split into owned halves (specs/usart-split.md): the RX half is consumed by
+        // the ring, the TX half by the transmitter. `Usart::new` refuses an instance the other link
+        // already brought up (`InUse`) before it touches a register, so that link keeps running.
+        let (usart_tx, usart_rx) =
+            match Usart::new(chip, &CLOCK, usart, (tx_pin, rx_pin), LINK_BAUD) {
+                Ok(u) => u.split(),
+                Err(e) => {
+                    refused(status, field, i, e, tx);
+                    return None;
+                }
+            };
+        // SAFETY: the one &mut formation of this link's ring and transmit buffer (each `i` is
+        // placed once), before its DMA IRQ exists. The ring `write` is the zeroing `.bss` would
+        // have done (both rings are NOLOAD, see their declarations).
+        let (ring, tx_buf): (&'static mut [u8; DMA_CAP], &'static mut [u8]) = unsafe {
+            let ring = if i == 0 {
+                addr_of_mut!(DMA_RING)
+            } else {
+                addr_of_mut!(DMA_RING_1)
+            };
+            (
+                &mut (*ring).write(DmaRing([0; DMA_CAP])).0,
+                (*addr_of_mut!(LINK_TX_DMA)).get_mut(i as usize)?,
+            )
+        };
+        let rx_dma = match RingBufferedRx::new(chip, usart_rx, usart, ring) {
             Ok(r) => r,
-            Err(_) => halt(),
+            Err(e) => {
+                refused(status, field, i, e, rx);
+                return None;
+            }
         };
-        // The transmit half of the same port, on its own DMA channel (Ch6 on the F103, Ch3 on the
-        // F130, where it shares the receive channel's grouped vector). Armed here, beside the ring
-        // and after the same `install` + `enable`, because arming it unmasks a vector too.
-        //
-        // SAFETY: as DMA_RING above, the one &mut formation of this static, before its DMA IRQ
-        // exists.
-        let tx_buf: &'static mut [u8] = unsafe { &mut *addr_of_mut!(UART_TX_DMA) };
-        // `halt()` on failure, matching the ring two statements up: the only failure reachable here
-        // is the channel's write-back self-check, on the same DMA0 the ring just armed, and a board
-        // whose inter-board transmit silently did not come up has no way to say so.
-        let tx_dma = match DmaTx::new(chip, usart1_tx, tx_buf, CLOCK.sysclk_hz, LINK_BAUD) {
+        // The transmit half of the same port, on its own DMA channel, armed beside the ring and
+        // after the same `install` + `enable`, because arming it unmasks a vector too.
+        let tx_dma = match DmaTx::new(chip, usart_tx, tx_buf, CLOCK.sysclk_hz, LINK_BAUD) {
             Ok(t) => t,
-            Err(_) => halt(),
+            Err(e) => {
+                refused(status, field, i, e, tx);
+                return None;
+            }
         };
-        let uart_link: Option<UartLink> = if want_uart {
-            Some(Link::new(SerialTransport::new(
-                SplitSerial::new(tx_dma, rx_dma, CLOCK.sysclk_hz),
-                UART_FRAME_CAP,
-            )))
-        } else {
-            None
-        };
-        // SAFETY: `slot` is the `uart_link` field of `main`'s `MaybeUninit<LoopState>`, written
-        // here once and read by nobody until `boot` returns.
-        unsafe { slot.write(uart_link) };
+        Some(Link::new(SerialTransport::new(
+            SplitSerial::new(tx_dma, rx_dma, CLOCK.sysclk_hz),
+            UART_FRAME_CAP,
+        )))
     }
 
     /// Place the mailbox link (port 0, always present) into the loop's state. A POPPED boot frame
     /// (shrink round 7): the 264 B `Link` is this frame's temporary, not `boot`'s.
     #[inline(never)]
     fn place_mailbox_link(slot: *mut MailboxLink, mailbox: Mailbox) {
-        // SAFETY: as `place_uart_link`'s write: the `mailbox_link` field of `main`'s state, once.
+        // SAFETY: as `place_link`'s write: the `mailbox_link` field of `main`'s state, once.
         unsafe {
             slot.write(Link::new(SerialTransport::new(
                 MailboxSerial::firmware(mailbox),
@@ -2750,7 +2646,7 @@ mod firmware {
     ) {
         let mut responder = Responder::new(
             N_PORTS,
-            [PORT_SWD, PORT_UART, 0, 0],
+            [PORT_SWD, PORT_UART, PORT_UART, 0],
             mcu,
             NODE_CLASS.default(),
             FW_VER,
@@ -2788,20 +2684,17 @@ mod firmware {
     fn service_loop(
         epoch_watch: &mut EpochWatch,
         mailbox_link: &mut MailboxLink,
-        uart_link: &mut Option<UartLink>,
+        links: &mut [Option<UartLink>; N_LINKS],
         responder: &mut Responder,
         wdg: &mut FreeWatchdog,
-        discovered: u8,
-        configured: bool,
         odometer_base: u32,
     ) -> ! {
         // The tick captured when the current `PROBE_PORTS` started (rising edge of `probing()`);
         // `None` when no probe is in flight. The poll window is measured from it (deviation 2).
         let mut probe_start: Option<u32> = None;
-        let mut link_set_saved = configured; // once assigned, persist LINK_SET once
-                                             // The odometer's running total and its write decision (`specs/odometer.md`). It lives
-                                             // here because the write belongs here: the loop is the main thread, it already samples
-                                             // the arm fact, and it is where the OTHER deferred persist waits for a disarmed pass.
+        // The odometer's running total and its write decision (`specs/odometer.md`). It lives
+        // here because the write belongs here: the loop is the main thread, it already samples
+        // the arm fact, and it is where the OTHER deferred persist waits for a disarmed pass.
         let mut odo = odometer::Odometer::new(odometer_base, motor::EDGES.load(Ordering::Relaxed));
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
@@ -2843,7 +2736,7 @@ mod firmware {
                     None => None,
                 };
                 route_handback(handed, responder, &mut emits);
-                route_emits(&emits, mailbox_link, uart_link);
+                route_emits(&emits, mailbox_link, links);
                 true
             });
 
@@ -2853,48 +2746,62 @@ mod firmware {
             //      poll_recv surfaces the self-heal (link_line_errors++ / lap_overruns flat / cyclic_age
             //      fresh, no reset). Drives the shipping self-heal path, fabricating no DMA state.
             if INJECT_UART_LINE_ERROR.swap(0, Ordering::Relaxed) != 0 {
-                if let Some(l) = uart_link.as_ref() {
+                // Into the first link that came up.
+                if let Some(l) = links.iter().flatten().next() {
                     l.transport().serial().inject_line_error();
                 }
             }
 
-            // 2b. Drain the inter-board UART link (port 1), if it came up. Bounded (integration.md,
-            //     "Bounded link drain"): this is the port carrying the peer's 250 Hz CYCLIC_STATE
-            //     flood, so an unbounded drain here is exactly what collapsed the F130 loop.
-            bounded_drain(DRAIN_BUDGET, || {
-                let Some(n) = uart_link
-                    .as_mut()
-                    .and_then(|l| l.poll_recv(&mut rxbuf))
-                    .map(|f| copy_pdu(f, &mut pdu))
-                else {
-                    return false;
-                };
-                emits.clear();
-                // The store comes from the static, in a borrow scoped to this statement (see
-                // `STORE`): ingest is where a `CONFIG_WRITE` reaches flash, and it must not hold a
-                // borrow across `dispatch()` below. `None` is unreachable after boot (the static is
-                // written before the loop is entered); matching rather than unwrapping keeps the
-                // impossible case out of the panic machinery.
-                // SAFETY: main-thread context, the `SHELL` discipline.
-                let handed = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
-                    Some(st) => responder.ingest(PORT_IDX_UART, &pdu[..n], st, &mut emits),
-                    None => None,
-                };
-                route_handback(handed, responder, &mut emits);
-                route_emits(&emits, mailbox_link, uart_link);
-                true
-            });
-            // Sample the inter-board link's two recovered-loss counters into the OBS crossings (the
-            // `SplitSerial` absorbs each self-healed RX condition as a counter tick, classified by the
-            // OQ1 split: a wire disturbance -> line_errors, a slow-consumer lap -> lap_overruns). Read
-            // through the link -> transport -> serial, published by the 250 Hz callback.
-            if let Some(l) = uart_link.as_ref() {
-                let s = l.transport().serial();
-                LINK_LINE_ERRORS.store(s.line_errors() as u32, Ordering::Relaxed);
-                LINK_LAP_OVERRUNS.store(s.lap_overruns() as u32, Ordering::Relaxed);
-                // The TX half of the same read-through-the-link: the abandoned writes, low half
-                // (`TX_TIMEOUTS`; the high half was the CC2541 port's and stays zero).
-                TX_TIMEOUTS.store(s.tx_timeouts() as u32, Ordering::Relaxed);
+            // 2b. Drain each inter-board link that came up (link i is port 1 + i). Bounded
+            //     (integration.md, "Bounded link drain"): a link carries the peer's 250 Hz
+            //     CYCLIC_STATE flood, so an unbounded drain here is exactly what collapsed the F130
+            //     loop. One body over the index, so the second link costs no second copy.
+            for i in 0..N_LINKS {
+                bounded_drain(DRAIN_BUDGET, || {
+                    let Some(n) = links
+                        .get_mut(i)
+                        .and_then(|l| l.as_mut())
+                        .and_then(|l| l.poll_recv(&mut rxbuf))
+                        .map(|f| copy_pdu(f, &mut pdu))
+                    else {
+                        return false;
+                    };
+                    emits.clear();
+                    // The store comes from the static, in a borrow scoped to this statement (see
+                    // `STORE`): ingest is where a `CONFIG_WRITE` reaches flash, and it must not
+                    // hold a borrow across `dispatch()` below. `None` is unreachable after boot;
+                    // matching rather than unwrapping keeps the impossible case out of the panic
+                    // machinery.
+                    // SAFETY: main-thread context, the `SHELL` discipline.
+                    let port = PORT_IDX_LINK0 + i as u8;
+                    let handed = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
+                        Some(st) => responder.ingest(port, &pdu[..n], st, &mut emits),
+                        None => None,
+                    };
+                    route_handback(handed, responder, &mut emits);
+                    route_emits(&emits, mailbox_link, links);
+                    true
+                });
+            }
+            // Sample the links' recovered-loss counters into the OBS crossings (the `SplitSerial`
+            // absorbs each self-healed RX condition as a counter tick, classified by the OQ1 split:
+            // a wire disturbance -> line_errors, a slow-consumer lap -> lap_overruns), summed over
+            // the links. The abandoned writes go one link per half of `TX_TIMEOUTS` (low = link 0,
+            // high = link 1). Read through the link -> transport -> serial, published by the 250 Hz
+            // callback.
+            {
+                let (mut line, mut lap, mut tx_to) = (0u32, 0u32, 0u32);
+                for (i, l) in links.iter().enumerate() {
+                    if let Some(l) = l {
+                        let s = l.transport().serial();
+                        line += s.line_errors() as u32;
+                        lap += s.lap_overruns() as u32;
+                        tx_to |= (s.tx_timeouts() as u32) << (16 * (i & 1));
+                    }
+                }
+                LINK_LINE_ERRORS.store(line, Ordering::Relaxed);
+                LINK_LAP_OVERRUNS.store(lap, Ordering::Relaxed);
+                TX_TIMEOUTS.store(tx_to, Ordering::Relaxed);
             }
 
             // 2c. If either drain PERSISTED a config write, re-read the fields the
@@ -2923,7 +2830,7 @@ mod firmware {
             if fire {
                 emits.clear();
                 responder.poll_probe(&mut emits);
-                route_emits(&emits, mailbox_link, uart_link);
+                route_emits(&emits, mailbox_link, links);
             }
 
             // 4. R4: sample the arm fact into the responder each pass (integration.md; the mode
@@ -2945,17 +2852,6 @@ mod firmware {
                 }
             };
             responder.set_armed(armed);
-
-            // 5. Persist LINK_SET once, at assignment (specs/l3.md: "Once assigned it persists the
-            //    set of ports that came up live") - DEFERRED while armed (integration.md R4: no
-            //    flash program while armed; the persist-once latch waits for a disarmed pass).
-            if !link_set_saved && !armed && responder.addr() != net::pdu::NO_ADDRESS {
-                // SAFETY: main-thread context, as the ingest borrows above.
-                if let Some(st) = unsafe { (*addr_of_mut!(STORE)).as_mut() } {
-                    let _ = st.set(LINK_SET, discovered);
-                }
-                link_set_saved = true;
-            }
 
             // 5b. The odometer (`specs/odometer.md`). Fold the ISR's edge count into the running
             //     total every pass, publish it for the cyclic payload and for an SWD read, and
@@ -3012,11 +2908,12 @@ mod firmware {
                 // SAFETY: main-thread context, after dispatch returned; scoped as above.
                 unsafe { (*addr_of_mut!(SHELL)).as_mut() }.and_then(|s| s.cyclic_out.take())
             };
-            if let (Some(c), Some(l)) = (pending, uart_link.as_mut()) {
+            if let Some(c) = pending {
                 let mut payload = [0u8; CyclicState::ENCODED_LEN];
                 let n = c.encode(&mut payload);
                 // The PDU scratch is free here (the drains are done this pass): reuse it as the
-                // frame buffer instead of a second 64 B local.
+                // frame buffer instead of a second 64 B local. The same frame goes out every link
+                // that came up: each is point-to-point to its own neighbour.
                 if let Ok(p) = net::Pdu::new(
                     linkctl::OP_CYCLIC_STATE,
                     responder.addr(),
@@ -3024,7 +2921,9 @@ mod firmware {
                     &payload[..n],
                 ) {
                     if let Ok(len) = p.encode(&mut pdu) {
-                        let _ = l.send(&pdu[..len]);
+                        for l in links.iter_mut().flatten() {
+                            let _ = l.send(&pdu[..len]);
+                        }
                     }
                 }
             }
@@ -3072,22 +2971,21 @@ mod firmware {
         n
     }
 
-    /// Route the Responder's emitted PDUs to the right L2 link by emit port (0 = mailbox, 1 = UART).
-    /// Best-effort (L2 is best-effort; the controller retransmits the acknowledged plane). A port
-    /// with no live link (a not-brought-up UART) silently drops.
-    fn route_emits(emits: &Emits, mailbox: &mut MailboxLink, uart: &mut Option<UartLink>) {
+    /// Route the Responder's emitted PDUs to the right L2 link by emit port (0 = mailbox, 1 + i =
+    /// link i). Best-effort (L2 is best-effort; the controller retransmits the acknowledged plane).
+    /// A port with no live link (a link not configured or not brought up) silently drops.
+    fn route_emits(
+        emits: &Emits,
+        mailbox: &mut MailboxLink,
+        links: &mut [Option<UartLink>; N_LINKS],
+    ) {
         for e in emits {
-            match e.port {
-                PORT_IDX_MAILBOX => {
-                    let _ = mailbox.send(&e.bytes);
-                }
-                PORT_IDX_UART => {
-                    if let Some(l) = uart.as_mut() {
-                        let _ = l.send(&e.bytes);
-                    }
-                }
-                // No slot 2+ on this board: `net` slots are the board's PORTS.
-                _ => {}
+            if e.port == PORT_IDX_MAILBOX {
+                let _ = mailbox.send(&e.bytes);
+            } else if let Some(Some(l)) =
+                links.get_mut(e.port.wrapping_sub(PORT_IDX_LINK0) as usize)
+            {
+                let _ = l.send(&e.bytes);
             }
         }
     }

@@ -60,7 +60,7 @@ const val LAMP_SHEET_TAG = "lamp_sheet"
  * the whole machine, with a mark per board slot inside each, so both boards' faults show at once.
  * Which lamps are in it is [UiState.lamps], and nothing here decides that.
  *
- * Four columns, or five when nine lamps are shown, so it is never more than two rows. A lamp is lit
+ * Four columns, or five when nine or ten lamps are shown, so it is never more than two rows. A lamp is lit
  * while its bit is set on any reporting board (or the app holds a latch lit), and every shown lamp
  * is lit with every mark during the lamp test. Tapping a lamp, lit or dark, opens its sheet.
  */

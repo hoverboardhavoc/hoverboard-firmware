@@ -29,8 +29,9 @@
 
 use heapless::Vec;
 use store::{
-    DynError, Flash, Key, Store, StoreError, Stored, Type, Value, DEVICE_NAME, ERASED_TAG,
-    NODE_ADDRESS, NODE_CLASS, SECRET, WIFI_PASS, WIFI_SSID, WIFI_TX_POWER, WIFI_TX_POWER_RANGE,
+    DynError, Flash, Key, Store, StoreError, Stored, Type, Value, BOARD_STATUS, DEVICE_NAME,
+    ERASED_TAG, NODE_ADDRESS, NODE_CLASS, SECRET, WIFI_PASS, WIFI_SSID, WIFI_TX_POWER,
+    WIFI_TX_POWER_RANGE,
 };
 
 use crate::forward::Forwarder;
@@ -421,6 +422,10 @@ pub struct Responder {
     /// MAC-based name, which it never writes to its store. `None` on a board, which answers the
     /// registry default.
     default_name: Option<&'static [u8]>,
+    /// The node's boot status record's entries, answered for a `CONFIG_READ` of `board.status`
+    /// (`specs/configured-links.md` section 5) with `CFG_OK`: the node's own fact, never stored.
+    /// Empty until [`Responder::set_status`], which is what a bridge answers.
+    status: &'static [u8],
     /// The next grant's offset inside this node's guest slice ([`guest_slice`]). The slice itself
     /// is derived from the live address at each grant, so an `ASSIGN` or a boot-time restore moves
     /// the allocator to the new slice with no further state.
@@ -453,6 +458,7 @@ impl Responder {
             mcu,
             class,
             default_name: None,
+            status: &[],
             guest_slot: 0,
             probe: None,
             armed: false,
@@ -476,10 +482,17 @@ impl Responder {
         self.default_name = Some(name);
     }
 
+    /// Answer `entries` for a read of `board.status`: the boot status record's entries, four bytes
+    /// each, fixed after boot (`specs/configured-links.md` section 5). A board calls it once, after
+    /// its last bring-up.
+    pub fn set_status(&mut self, entries: &'static [u8]) {
+        self.status = entries;
+    }
+
     /// What a `CONFIG_READ` of `key` answers: the value and the status, [`CFG_OK`] when a record
     /// holds the value, [`CFG_DEFAULT`] when none does, and [`CFG_SECRET`] for a stored secret, whose
-    /// value no reply carries. `node.class` comes from the node, an unstored `device.name` from the
-    /// node's own default when it has one, everything else from the store.
+    /// value no reply carries. `node.class` and `board.status` come from the node, an unstored
+    /// `device.name` from the node's own default when it has one, everything else from the store.
     fn read_value<'s, F: Flash>(
         &self,
         store: &'s Store<F>,
@@ -487,6 +500,9 @@ impl Responder {
     ) -> Result<(Value<'s>, u8), DynError> {
         if key == NODE_CLASS.key() {
             return Ok((Value::U8(self.class), CFG_OK));
+        }
+        if key == BOARD_STATUS.key() {
+            return Ok((Value::Bytes(self.status), CFG_OK));
         }
         let (value, stored) = store.get_value(key)?;
         Ok(match (stored, self.default_name) {

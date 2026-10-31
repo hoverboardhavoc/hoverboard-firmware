@@ -2962,9 +2962,16 @@ fn the_esp_answers_a_default_read_un_stores_its_name_and_compacts() {
     {
         let mut m = Rig::new(&mut flash);
         m.walk(0);
-        // `link_set` is not stored on the bridge: a successful read of the default.
-        let r = m.config_read(0x03, store::LINK_SET.key());
-        assert_eq!(r[2..], [net::walk::CFG_DEFAULT, store::Type::U8.tag(), 0]);
+        // `link.tx` is not stored on the bridge: a successful read of the default (unset).
+        let r = m.config_read(0x03, store::LINK_TX.at(0).key());
+        assert_eq!(
+            r[2..],
+            [
+                net::walk::CFG_DEFAULT,
+                store::Type::U8.tag(),
+                store::PIN_ABSENT
+            ]
+        );
 
         let mut w = vec![store::DEVICE_NAME.id(), 0, store::Type::Str.tag()];
         w.extend_from_slice(b"rover-esp");

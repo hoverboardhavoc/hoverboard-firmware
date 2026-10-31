@@ -124,7 +124,6 @@ class SetupFieldsTest {
     @Test
     fun walkOwnedFieldsTakeNothing() {
         assertFalse(SetupFields.NODE_ADDRESS.accepts(Value.U8(2)))
-        assertFalse(SetupFields.LINK_SET.accepts(Value.U8(1)))
     }
 
     /** P2-8: a name longer than one `CONFIG_WRITE` and its echo carry is refused, counted in UTF-8 bytes. */

@@ -303,7 +303,7 @@ pub struct ArmValues {
 /// cannot fail and a virgin board re-derives exactly the defaults the boot path used.
 ///
 /// The firmware brings up motor 0, so `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET` and
-/// `MOTOR_CURRENT_CAL` are read at index 0, matching `board::plumbing`'s own per-motor `.at(m)`
+/// `MOTOR_CURRENT_CAL` are read at index 0, matching `layout::read_motor`'s own per-motor `.at(m)`
 /// fill.
 /// Every key [`read_arm_values`] resolves, as ONE row, in the order the match below reads them.
 ///
@@ -464,7 +464,7 @@ pub struct Rederived {
 /// REFUSED, and carries WHICH of the three frame checks refused it, because that is the one cause
 /// of a refused arm an operator can act on: it reaches `CTRL_OBS` word 33's cause byte through the
 /// caller's re-read seam (`specs/integration.md`, "The arm refusals"), named exactly as the boot
-/// path names the same frame in `BOARD_OBS`.
+/// path names the same frame in the boot status record (`board.status`).
 ///
 /// **The all-or-nothing shape is load-bearing.** Everything is derived and validated here, in RAM,
 /// against nothing the loop can see; only an `Ok` is applied, and it is applied as a whole. So a
@@ -580,15 +580,16 @@ pub const fn note_confirm_refusal(word: u32) -> u32 {
 /// (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
 ///
 /// Two observers read it and they must not name the same frame differently: the BOOT refusal's
-/// `BOARD_OBS` record (`main.rs`'s `imu_frame_refusal`, which builds the `BoardError` from this
-/// pair) and the ARM refusal's `CTRL_OBS` cause byte ([`imu_frame_cause_byte`]). It lives in this
-/// module's PURE half, with the arm-time consumer, so the agreement is host-testable: the boot path
-/// is inside the target-only `mod firmware` and nothing on the host could otherwise pin it.
-pub const fn imu_frame_fault(e: imu::FrameError) -> (board::BoardField, u8) {
+/// status-record entry (`main.rs`'s `bring_up_imu`, reason `ImuFrame` against this field with this
+/// index as its detail; `specs/configured-links.md` section 5) and the ARM refusal's `CTRL_OBS`
+/// cause byte ([`imu_frame_cause_byte`]). It lives in this module's PURE half, with the arm-time
+/// consumer, so the agreement is host-testable: the boot path is inside the target-only
+/// `mod firmware` and nothing on the host could otherwise pin it. The field is its store id.
+pub const fn imu_frame_fault(e: imu::FrameError) -> (u8, u8) {
     match e {
-        imu::FrameError::Roles => (board::BoardField::ImuAxisRole, 0),
-        imu::FrameError::Accel => (board::BoardField::ImuAxisSign, 0),
-        imu::FrameError::Gyro => (board::BoardField::ImuAxisSign, 3),
+        imu::FrameError::Roles => (store::IMU_AXIS_ROLE.id(), 0),
+        imu::FrameError::Accel => (store::IMU_AXIS_SIGN.id(), 0),
+        imu::FrameError::Gyro => (store::IMU_AXIS_SIGN.id(), 3),
     }
 }
 
@@ -599,11 +600,11 @@ pub const fn imu_frame_fault(e: imu::FrameError) -> (board::BoardField, u8) {
 /// Bit 7 marks a cause PRESENT, because the accel refusal's field and index are both encoded as
 /// zero and a reader must be able to tell it from "no frame refusal this boot". Bit 2 says the
 /// refusal names `IMU_AXIS_ROLE` rather than `IMU_AXIS_SIGN`. Bits 0..1 carry the refused triple's
-/// first `IMU_AXIS_SIGN` index exactly as `BOARD_OBS`'s `detail` does (0 = accel, 3 = gyro), so the
+/// first `IMU_AXIS_SIGN` index exactly as the status entry's detail does (0 = accel, 3 = gyro), so the
 /// two records decode by the same rule. `tools/swdobs.py` mirrors it.
 pub const fn imu_frame_cause_byte(e: imu::FrameError) -> u8 {
     let (field, first) = imu_frame_fault(e);
-    let names_role = matches!(field, board::BoardField::ImuAxisRole);
+    let names_role = field == store::IMU_AXIS_ROLE.id();
     0x80 | ((names_role as u8) << 2) | first
 }
 
@@ -1013,7 +1014,7 @@ mod tests {
     /// three numbers are the contract rather than the function's shape.
     ///
     /// It also pins the agreement the "one shared mapping" claim rests on: [`imu_frame_fault`] is
-    /// what `main.rs`'s `imu_frame_refusal` builds the boot `BOARD_OBS` record from, so a frame
+    /// what `main.rs`'s `bring_up_imu` builds the boot status entry from, so a frame
     /// that refuses the ARM names the same field, and the same `IMU_AXIS_SIGN` index, as the same
     /// frame refusing the BOOT. That function is inside the target-only `mod firmware` and cannot
     /// be tested here; the pair it consumes can.
@@ -1040,13 +1041,13 @@ mod tests {
         // The pair the boot record is built from, which is what makes the two records agree.
         assert_eq!(
             imu_frame_fault(Roles),
-            (board::BoardField::ImuAxisRole, 0),
+            (store::IMU_AXIS_ROLE.id(), 0),
             "a bad role pair names IMU_AXIS_ROLE"
         );
-        assert_eq!(imu_frame_fault(Accel), (board::BoardField::ImuAxisSign, 0));
+        assert_eq!(imu_frame_fault(Accel), (store::IMU_AXIS_SIGN.id(), 0));
         assert_eq!(
             imu_frame_fault(Gyro),
-            (board::BoardField::ImuAxisSign, 3),
+            (store::IMU_AXIS_SIGN.id(), 3),
             "the gyro triple starts at IMU_AXIS_SIGN index 3"
         );
     }

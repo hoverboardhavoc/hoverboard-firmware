@@ -48,11 +48,6 @@ checksum = "46afbd2983a5d5a7bd740ccb198caf5b82f45c40c09c0eed36052d91cb92e719"
 [[package]]
 name = "board"
 version = "0.1.0"
-dependencies = [
- "base",
- "runtime-hal",
- "store",
-]
 
 [[package]]
 name = "bytemuck"
@@ -455,7 +450,7 @@ dependencies = [
 [[package]]
 name = "runtime-hal"
 version = "0.1.0"
-source = "git+https://github.com/hoverboardhavoc/runtime-hal?branch=main#2cd8864cfe786c2c513f94813053c699258c4616"
+source = "git+https://github.com/hoverboardhavoc/runtime-hal?branch=main#ae5c45c32908f4e076ea2cf020572f2e721c76a2"
 dependencies = [
  "cortex-m",
  "embedded-hal 1.0.0",

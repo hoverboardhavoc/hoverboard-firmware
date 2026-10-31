@@ -55,8 +55,18 @@ impl hoverboard_cli::wire::ByteLink for Tap {
 /// Serve the bridge's TCP console for `connections` clients one after the other, running the whole
 /// machine between reads, and letting the probe windows close whenever nothing moves.
 fn serve(listener: TcpListener, connections: usize) -> After {
+    serve_with(listener, connections, |_| {})
+}
+
+/// [`serve`], with the machine set up by `setup` first.
+fn serve_with(
+    listener: TcpListener,
+    connections: usize,
+    setup: impl FnOnce(&mut Machine<'static>),
+) -> After {
     use hoverboard_cli::wire::Wire;
     let mut m = machine();
+    setup(&mut m);
     let mut ops = Vec::new();
     for _ in 0..connections {
         let mut tap = hoverboard_cli::wire::Framed::new(Tap::default());
@@ -617,4 +627,81 @@ fn over_a_boards_own_link_an_esp_command_finds_no_bridge() {
     assert!(!ok);
     assert!(err.contains("no bridge on this machine"), "{err}");
     drop(server);
+}
+
+/// `status` and the `nodes` marker over a simulated machine whose master reports one entry of each
+/// reason in its `board.status` (`specs/configured-links.md` section 5) and whose slave reports
+/// none.
+#[test]
+fn status_reads_board_status_from_each_motor_controller() {
+    use board::status::Reason::*;
+    static ENTRIES: [u8; 28] = [
+        0x4A,
+        0,
+        NotAPin as u8,
+        0x47, // hall: a byte that is no pin
+        0x56,
+        0,
+        Incomplete as u8,
+        0x57, // link 0: rx unset
+        0x56,
+        1,
+        NotRouted as u8,
+        0x16, // link 1: no USART
+        0x43,
+        0,
+        SwdPin as u8,
+        0x0D, // led.green on SWDIO
+        0x4D,
+        0,
+        DeadTime as u8,
+        10, // gate: dead time 10
+        0x48,
+        0,
+        NotUp as u8,
+        0, // imu: no probe answer
+        0x65,
+        0,
+        ImuFrame as u8,
+        3, // imu: gyro triple refused
+    ];
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        serve_with(listener, 3, |m| {
+            m.master.resp.set_status(&ENTRIES);
+        })
+    });
+
+    let (ok, out, err) = cli(&[&tcp, "status"]);
+    assert!(ok, "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "Hoverboard: motors[0] hall: stored byte 0x47 is not a pin",
+            "Hoverboard: link[0]: incomplete, link.rx[0] is not set",
+            "Hoverboard: link[1]: no USART routes this pair on this chip",
+            "Hoverboard: led.green: PA13 is an SWD pin",
+            "Hoverboard: motors[0] gate: dead time 10 is below the floor of 18",
+            "Hoverboard: imu: the IMU did not answer its probe",
+            "Hoverboard: imu: the frame is not a rotation (imu.axis_sign from index 3)",
+            "Hoverboard: ok",
+        ],
+        "{out}"
+    );
+
+    let (ok, out, err) = cli(&[&tcp, "status", "0x02"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "Hoverboard: ok\n");
+
+    let (ok, out, err) = cli(&[&tcp, "nodes"]);
+    assert!(ok, "{err}");
+    let rows: Vec<&str> = out.lines().collect();
+    assert!(
+        rows[1].starts_with("0x01") && rows[1].ends_with("! 7 status entries, see \"status\""),
+        "{out}"
+    );
+    assert!(!rows[2].contains('!'), "{out}");
+    server.join().unwrap();
 }

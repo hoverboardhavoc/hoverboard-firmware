@@ -22,6 +22,9 @@ net = { path = "../../shared/net" }
 # the file commands.
 store = { path = "../../shared/store", features = ["names"] }
 linkctl = { path = "../../shared/linkctl" }
+# The boot status record's layout and reason codes, for `status` (`specs/configured-links.md`
+# section 5): `board.status` decodes with the firmware's own type.
+board = { path = "../../motorcontroller/board" }
 espsvc = { path = "../../shared/espsvc" }
 embedded-io = "0.6"
 # The BLE link and `scan` (the `ble` feature).

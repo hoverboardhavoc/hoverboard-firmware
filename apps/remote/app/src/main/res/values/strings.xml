@@ -298,7 +298,6 @@
     <string name="setup_field_node_class">Node class</string>
     <string name="setup_field_drive_mode">Drive mode (every board must match)</string>
     <string name="setup_field_node_address">Node address</string>
-    <string name="setup_field_link_set">Link set</string>
     <string name="setup_field_control_mode">Control mode</string>
     <string name="setup_field_rider_required">Rider required (balance mode)</string>
     <string name="setup_field_battery_floor">Low-battery floor (cV)</string>
@@ -522,31 +521,19 @@
     <string name="layout_refresh">Read again</string>
     <string name="layout_not_read">The layout has not been read yet.</string>
     <!-- %1$d is how many of the layout\'s fields could not be read. -->
-    <string name="layout_unread">%1$d of the layout\'s fields could not be read, so there is no layout to judge. Read again.</string>
+    <string name="layout_unread">%1$d of the layout\'s fields could not be read, so there is no layout to edit. Read again.</string>
 
     <!-- %1$s is the part the board reports, e.g. GD32F103C8 (6-FET, 48-pin). -->
     <string name="layout_part">Part: %1$s, as the board reports it.</string>
     <string name="layout_part_unknown_title">Part not known</string>
     <string name="layout_part_unsent">This board has not sent its part yet. It arrives with the board\'s state, a few times a second.</string>
     <string name="layout_part_unnamed">This board reports a part this app does not know.</string>
-    <string name="layout_part_unknown_body">A layout is only valid or invalid ON a part: pins that one part bonds the next one does not. So there is no verdict here, and nothing can be changed.</string>
-
-    <string name="layout_verdict_valid">This layout validates. The board would accept it and bring up what it describes.</string>
-    <!-- %1$s is the field\'s name, %2$s the reason it was refused. -->
-    <string name="layout_verdict_invalid">Refused: %1$s. %2$s</string>
-    <string name="layout_verdict_unknown">The layout has not been read, so there is nothing to judge.</string>
-    <string name="layout_verdict_title">Verdict</string>
-    <string name="layout_verdict_exact">The board\'s boot validator is a pure function of these fields, this part and the reserved pins, and this is that function\'s answer.</string>
-    <string name="layout_verdict_after_boot">What only a reboot can tell: whether the hardware behaves, so whether the IMU answers on the staged bus, the halls read and the motors turn. The board\'s own verdict is not readable over the link either, so a clean apply is confirmed by the board behaving on reconnect.</string>
-    <string name="layout_verdict_reachable">A wrong layout disables the affected function until it is corrected and re-booted; the board stays reachable. The link\'s own pins are not layout fields and cannot be claimed by one.</string>
-    <!-- %1$s is the field the stored layout is refused on. -->
-    <string name="layout_stored_invalid">The board currently STORES a layout it would refuse, on %1$s. A layout is one object, so this is an invalid board rather than a board half-way to a new layout. Finish applying the changes below.</string>
+    <string name="layout_part_unknown_body">Which pins exist is a fact about the part: pins one part bonds the next one does not. So no pin can be picked here until the part is known.</string>
 
     <string name="layout_delta_title">Changes to write</string>
     <!-- %1$s is the field, %2$s what the board holds, %3$s what would be written. -->
     <string name="layout_delta_line">%1$s: %2$s → %3$s</string>
     <string name="layout_apply">Apply</string>
-    <string name="layout_apply_blocked">Apply is disabled while the verdict is a refusal. There is no override: the board would refuse this layout at boot and come up link-only.</string>
     <string name="layout_revert">Revert</string>
     <string name="layout_revert_all">Revert all</string>
     <string name="layout_no_changes">No changes staged. Edits here are local until Apply writes them.</string>
@@ -563,7 +550,7 @@
     <!-- %1$d is the motor index. -->
     <string name="layout_group_motor">Motor %1$d</string>
     <string name="layout_add_motor">Add a second motor</string>
-    <string name="layout_motor_caption">Direction and align offset are the Setup screen\'s rows. They are read here because a layout is one object, and they do not change the verdict.</string>
+    <string name="layout_motor_caption">Direction and align offset are the Setup screen\'s rows. They are read here because a layout is one object.</string>
 
     <string name="layout_field_self_hold">Power latch</string>
     <string name="layout_field_vbatt">Battery sense</string>
@@ -592,8 +579,8 @@
     <string name="layout_field_phase_b">Phase B sense</string>
 
     <string name="layout_note_self_hold">Set from hoverboard-cli when the board is onboarded, not in this app. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
-    <string name="layout_note_imu">Both pins and a model, or none: a half-staged IMU is a refused layout, not an absent IMU.</string>
-    <string name="layout_note_gates">All six gates with a dead time at or above the floor, or none. The picker offers only this part\'s advanced-timer pins, and the six still have to form one timer\'s complementary set.</string>
+    <string name="layout_note_imu">Both pins and a model, or none: a half-staged IMU does not come up, and the board lists it in its status.</string>
+    <string name="layout_note_gates">All six gates with a dead time at or above the floor, or none, and the six have to be one advanced timer\'s complementary set. The board lists a gate group it could not bring up in its status.</string>
     <string name="layout_note_halls">All three halls, or none.</string>
     <string name="layout_note_phase">Both pins exactly when the sense is declared present, and both on an analog pin.</string>
     <string name="layout_note_dead_time">%1$d DTG ticks or more once the gates are configured; 0 only with them unset. A shorter one lets both FETs of a leg conduct.</string>
@@ -604,31 +591,16 @@
     <string name="layout_cancel">Cancel</string>
     <string name="layout_set">Set</string>
     <string name="layout_unset">Not set</string>
-    <string name="layout_row_part_unknown">Not editable: the board\'s part is not known.</string>
-    <string name="layout_no_candidates">No pin on this part is free and eligible for this function.</string>
+    <string name="layout_row_part_unknown">No pin can be picked: the board\'s part is not known.</string>
+    <string name="layout_no_candidates">No pin on this part is free.</string>
     <string name="layout_choice_imu_none">None fitted</string>
     <string name="layout_choice_imu_mpu6050">MPU-6050</string>
     <string name="layout_choice_imu_clone">MPU-6050 clone</string>
     <string name="layout_choice_sense_absent">None</string>
     <string name="layout_choice_sense_present">Present</string>
 
-    <string name="layout_reason_bad_encoding">That byte is not a pin this encoding defines.</string>
-    <string name="layout_reason_incomplete">The function\'s fields are all-or-none and only some are set.</string>
-    <string name="layout_reason_dead_time">The gates are configured, so the dead time must be %1$d DTG ticks or more. Anything shorter is shoot-through.</string>
-    <!-- %1$s is a pin name. -->
-    <string name="layout_reason_duplicate">%1$s is already claimed by another function.</string>
-    <string name="layout_reason_reserved">%1$s belongs to a live link port or to SWD.</string>
-    <string name="layout_reason_unknown_pin">%1$s is not bonded on this part.</string>
-    <string name="layout_reason_gate_capable">%1$s drives an advanced timer, so only a gate may claim it.</string>
-    <string name="layout_reason_invalid_gate_set">These six pins are not one advanced timer\'s complementary set.</string>
-    <string name="layout_reason_not_adc">%1$s has no ADC channel behind it.</string>
-    <string name="layout_reason_not_i2c">Those two pins are not a hardware I2C bus. A software bus is not built.</string>
-    <string name="layout_reason_imu_frame">The stored IMU orientation is not a rotation. The Setup screen owns it.</string>
-
     <string name="layout_notice_armed">The board is armed. A layout is written to flash, which it refuses while armed.</string>
     <string name="layout_notice_not_attached">No board is attached, so nothing was sent.</string>
-    <string name="layout_notice_part_unknown">The board\'s part is not known, so there is no verdict to apply against.</string>
-    <string name="layout_notice_not_clean">That layout is one the board would refuse, so it was not written.</string>
     <string name="layout_notice_slot_busy">The link was busy with another request, so nothing was sent.</string>
     <!-- %1$s is the field\'s name. -->
     <string name="layout_notice_unanswered">The write to %1$s went unanswered. The board may or may not hold it; the field was read back.</string>
@@ -677,6 +649,10 @@
     <string name="lamp_arm_when">An arm stopped before the bridge was switched on. Every arm first re-reads the stored settings and refuses one the board cannot use, for example an IMU orientation that is not a rotation, then checks that the motor interrupt is running.</string>
     <string name="lamp_arm_blocks">Arming. The app disarms when it lights, which releases a refused setting\'s lamp. A motor interrupt that was not running holds it until the board is powered off and on.</string>
     <string name="lamp_arm_fix">If the IMU orientation was just changed, set it again on Setup, then tap ARM. If the lamp comes back with nothing changed, power the board off and on.</string>
+    <string name="lamp_config_title">Configuration incomplete</string>
+    <string name="lamp_config_when">A function this board\'s stored settings configure did not come up when the board started: a group with only some of its pins set, a pin the chip cannot use for it or that is not a pin at all, a dead time below the floor, or a part that did not answer. The board leaves that function off and runs the rest. It stays lit until the board starts with the setting corrected.</string>
+    <string name="lamp_config_blocks">Nothing. The board arms as usual, without the function that did not come up.</string>
+    <string name="lamp_config_fix">Setup lists, under this board, what did not come up and why. Correct that setting, then power the board off and on.</string>
 
     <!-- The Ride screen, 8a (`specs/remote-ui.md` 3.1). -->
     <string name="ride_slot_left">L</string>
@@ -763,4 +739,32 @@
     <string name="status_lockdown">LOCKDOWN</string>
     <string name="status_not_turning">Not turning: the app has asked for drive for 1 s and the wheel reports no rotation.</string>
     <string name="board_mode_demoted">MODE %1$s: the board is not running the control mode it stores (Balance with no working IMU runs Throttle), or both boards claim the rigid lead.</string>
+
+    <!-- One line per board.status entry (specs/configured-links.md section 5), named the way hoverboard-cli status names it. %1$s is the function, %2$s why it did not come up. -->
+    <string name="status_config_line">%1$s: %2$s</string>
+    <string name="status_config_unread">A configured function did not come up when this board started, and the list of what did not has not been read.</string>
+    <!-- The functions an entry names. %1$d is the motor or the link. -->
+    <string name="status_fn_gate">motors[%1$d] gate</string>
+    <string name="status_fn_hall">motors[%1$d] hall</string>
+    <string name="status_fn_current">motors[%1$d] current sense</string>
+    <string name="status_fn_link">link[%1$d]</string>
+    <string name="status_fn_imu">IMU</string>
+    <string name="status_fn_battery">battery sense</string>
+    <!-- %1$s is the field id in hex, %2$d the index: a field this app has no name for. -->
+    <string name="status_fn_unknown">field %1$s[%2$d]</string>
+    <!-- The reasons. %1$s is a byte in hex, a field path or a pin name. -->
+    <string name="status_reason_not_a_pin">stored byte %1$s is not a pin</string>
+    <string name="status_reason_incomplete">incomplete: %1$s is not set</string>
+    <string name="status_reason_not_routed">the chip does not route %1$s</string>
+    <string name="status_reason_link_not_routed">no USART routes this pair on this chip (%1$s)</string>
+    <string name="status_reason_swd">%1$s is an SWD pin</string>
+    <!-- %1$d is the stored dead time, %2$d the floor. -->
+    <string name="status_reason_dead_time">dead time %1$d is below the floor of %2$d</string>
+    <!-- %1$d is the HAL's error code. -->
+    <string name="status_reason_not_up">did not come up (HAL error %1$d)</string>
+    <string name="status_reason_no_answer">did not answer its probe</string>
+    <!-- %1$d is the first imu.axis_sign index of the refused triple. -->
+    <string name="status_reason_imu_frame">the IMU frame is not a rotation (axis_sign from index %1$d)</string>
+    <!-- %1$d is the reason byte, %2$d the detail byte. -->
+    <string name="status_reason_unknown">reason %1$d, detail %2$d</string>
 </resources>

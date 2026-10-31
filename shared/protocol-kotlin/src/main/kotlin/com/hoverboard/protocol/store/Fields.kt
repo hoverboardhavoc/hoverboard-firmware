@@ -47,21 +47,38 @@ data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value
  * Not every registered field is here: `SOME_BLOB` and the test fields belong to nobody. The live
  * tune lane's keys, ranges and ramp are in [Gains]. A field is added when a client exercises it,
  * which is why the board-layout block (0x40-0x55 plus the per-motor facts) is here now: the layout
- * editor's mirrored validator reads it (`specs/remote-ui.md` section 3.5,
- * [com.hoverboard.protocol.board.validate]).
+ * editor reads and writes it (`specs/remote-ui.md` section 3.5, [com.hoverboard.protocol.board.Layout]).
  */
 object Fields {
     /** The board's persistent L3 node address (walk-owned; displayed, never edited). */
     val NODE_ADDRESS = FieldDef(0x01, Type.U8, Value.U8(0))
-
-    /** The L3 link-set bitmask (walk-owned; displayed, never edited). */
-    val LINK_SET = FieldDef(0x02, Type.U8, Value.U8(0))
 
     /**
      * What a node is (`specs/l3.md`, "Node class"): `0x01` = motor controller, `0x02` = bridge.
      * Read-only; a board running this firmware reads `0x01`.
      */
     val NODE_CLASS = FieldDef(0x03, Type.U8, Value.U8(0x01), readOnly = true)
+
+    /**
+     * What went wrong at the board's last bring-up (`specs/configured-links.md` section 5): the
+     * status record's entries as bytes, four per entry, decoded by
+     * [com.hoverboard.protocol.board.BoardStatus]. Read-only and answered by the node, never stored;
+     * empty means everything configured came up.
+     */
+    val BOARD_STATUS = FieldDef(0x05, Type.Blob, Value.Bytes(ByteArray(0)), readOnly = true)
+
+    /** How many inter-board links a board can have (`shared/store/src/field.rs`, `LINKS`). */
+    const val LINKS = 2
+
+    /**
+     * Each inter-board link's transmit pin, index = the link (`specs/configured-links.md` section
+     * 2): a link exists when both its pins are set. Unset by default, so a board with nothing
+     * stored brings up no UART.
+     */
+    val LINK_TX = IndexedFieldDef(0x56, Type.U8, List(LINKS) { Value.U8(PIN_ABSENT) })
+
+    /** Each inter-board link's receive pin, index = the link (see [LINK_TX]). */
+    val LINK_RX = IndexedFieldDef(0x57, Type.U8, List(LINKS) { Value.U8(PIN_ABSENT) })
 
     /** The advertised device name. */
     val DEVICE_NAME = FieldDef(0x10, Type.Str, Value.Str("Hoverboard"))
@@ -227,8 +244,8 @@ object Fields {
 
     /**
      * Per-motor phase-current sense DECLARATION: 0 = none. The capability half of the
-     * phase-current group, which the boot validator holds to agreeing with [MOTOR_PHASE_A] /
-     * [MOTOR_PHASE_B], so a board cannot declare current sense with no channels behind it.
+     * phase-current group: nonzero brings up [MOTOR_PHASE_A] / [MOTOR_PHASE_B], and a declaration
+     * with either pin unset is recorded in `board.status` as incomplete.
      */
     val MOTOR_CURRENT_SENSE = FieldDef(0x66, Type.U8, Value.U8(0))
 
@@ -400,7 +417,7 @@ object Fields {
     /** Every field above by its Rust handle name: the set the drift gate pins. */
     val ALL: Map<String, FieldDef> = mapOf(
         "NODE_ADDRESS" to NODE_ADDRESS,
-        "LINK_SET" to LINK_SET,
+        "BOARD_STATUS" to BOARD_STATUS,
         "NODE_CLASS" to NODE_CLASS,
         "DEVICE_NAME" to DEVICE_NAME,
         "WIFI_SSID" to WIFI_SSID,
@@ -463,6 +480,8 @@ object Fields {
         "CONTROL_SF_GAINS" to CONTROL_SF_GAINS,
         "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
         "CONTROL_REFERENCE" to CONTROL_REFERENCE,
+        "LINK_TX" to LINK_TX,
+        "LINK_RX" to LINK_RX,
     )
 
     /**

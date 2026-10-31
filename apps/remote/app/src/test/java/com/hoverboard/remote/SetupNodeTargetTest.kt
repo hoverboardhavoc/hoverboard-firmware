@@ -111,7 +111,7 @@ class SetupNodeTargetTest {
     // --- a bridge's Setup (`specs/remote-ui.md` 3.4) --------------------------------------------
 
     /**
-     * A bridge shows the keys every node has: its name, its class read-only, and its link set. Its
+     * A bridge shows the keys every node has: its name and its class read-only. Its
      * read pass asks for nothing else, and the class row takes no edit.
      */
     @Test
