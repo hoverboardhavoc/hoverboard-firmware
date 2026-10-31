@@ -44,14 +44,15 @@ struct Server {
     link: LinkService,
 }
 
-/// The link service. The UUIDs are this firmware's own; the app finds the pair by property.
-#[gatt_service(uuid = "4842e500-7a1d-4c0e-9d1b-35a1c0de0001")]
+/// The link service. The UUIDs are this firmware's own (`espsvc` owns them); the app finds the
+/// pair by property, the handheld by UUID.
+#[gatt_service(uuid = espsvc::LINK_SERVICE_UUID)]
 struct LinkService {
     /// Central to bridge: the L2 byte stream.
-    #[characteristic(uuid = "4842e500-7a1d-4c0e-9d1b-35a1c0de0002", write_without_response)]
+    #[characteristic(uuid = espsvc::LINK_RX_UUID, write_without_response)]
     rx: Vec<u8, WRITE_MAX>,
     /// Bridge to central: the L2 byte stream, at most 20 B per notification.
-    #[characteristic(uuid = "4842e500-7a1d-4c0e-9d1b-35a1c0de0003", notify)]
+    #[characteristic(uuid = espsvc::LINK_TX_UUID, notify)]
     tx: Vec<u8, NOTIFY_MAX>,
 }
 
