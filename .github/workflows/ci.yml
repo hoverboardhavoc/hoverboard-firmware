@@ -10,37 +10,48 @@ name: CI
 # firmware out into a `hoverboard-firmware/` subdirectory, the layout the sibling checkout once
 # needed, because every path below is written against it.
 #
+# The repository holds four Cargo workspaces, one per build chain (specs/repo-layout.md):
+# motorcontroller/ (the GD32 image, pinned nightly, thumbv7m by default), shared/ (the crates more
+# than one chain links, 1.92), tools/ (the host programs, pinned nightly) and bridge/ (the ESP32-C3
+# image, 1.92). Each cargo step runs from inside its workspace, so that workspace's
+# rust-toolchain.toml and .cargo/ apply; the root holds no Cargo workspace.
+#
 # Eight checks:
-#   - lint: rustfmt over everything CI builds, then clippy over BOTH build surfaces (thumbv7m and
-#     host --all-targets; without --all-targets clippy lints only the lib and skips every test),
-#   - build the default embedded target (thumbv7m-none-eabi),
-#   - run the host tests on the runner's Linux host target,
+#   - lint: rustfmt over the motorcontroller, shared and tools workspaces (the bridge's runs in its
+#     own job), then clippy over both build surfaces of the motorcontroller and shared workspaces
+#     (thumbv7m and host --all-targets; without --all-targets clippy lints only the lib and skips
+#     every test) and over swd-bridge,
+#   - build the default embedded target (thumbv7m-none-eabi) in motorcontroller/,
+#   - run the host tests (the motorcontroller and shared suites) on the runner's Linux host target,
 #   - run the tools' own test suites (python + bash, no cargo): the climit session driver, the
 #     FOC trace sampler, the robo-preset extraction, the imu-tilt word map, the armed-bridge verdict, the flash guard
 #     harness, the board-target runner, and the CTRL_OBS word count against the firmware struct,
-#   - run the workspace-excluded swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite),
+#   - run swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite), in tools/,
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
 #     emulator-runner (it lives in that job because its unicorn build needs cmake),
 #   - run the Kotlin protocol mirror's drift gate: it reads the Rust as text and compares it to
-#     protocol-kotlin's mirror of the wire protocol,
+#     shared/protocol-kotlin's mirror of the wire protocol,
 #   - run the rider app's unit tests (both variants) and detekt. That job and the drift gate are
 #     the two with no Rust toolchain in them; it is the only one that needs the Android SDK.
 #
-# TOOLCHAIN: every CARGO job runs the PINNED NIGHTLY nightly-2026-07-20, not stable (rust-toolchain.toml
-# carries the why: the shipping image is built with -Z build-std, worth -2,408 B of flashed span, and
-# build-std is nightly-only). Three consequences this file has to honour, in every one of them:
+# TOOLCHAIN: every CARGO job runs the PINNED NIGHTLY nightly-2026-07-20, not stable
+# (motorcontroller/rust-toolchain.toml carries the why: the shipping image is built with -Z
+# build-std, worth -2,408 B of flashed span, and build-std is nightly-only). The exceptions are the
+# shared/ and bridge/ workspaces, which pin 1.92; the lint and host-test jobs install both. Three
+# consequences this file has to honour, in every job:
 #   - `dtolnay/rust-toolchain@<ref>` takes the toolchain from its REF, and that argument OVERRIDES
 #     rust-toolchain.toml. A job left on `@1.96.0` would silently keep building on stable while the
 #     repo believes it is on nightly, so all five jobs use `@master` with an explicit `toolchain:`
 #     input, which is the action's documented form for a dated nightly. The action ref floats; the
-#     TOOLCHAIN is pinned by the input, and rust-toolchain.toml is the backstop (cargo resolves it at
-#     invocation regardless of what the action made default).
+#     TOOLCHAIN is pinned by the input, and each workspace's rust-toolchain.toml is the backstop
+#     (rustup resolves it from the directory cargo runs in, regardless of what the action made
+#     default).
 #   - the SAME component set (rustfmt, clippy, rust-src) is passed in EVERY job, even where a job uses
-#     only part of it. rustup installs any component named in rust-toolchain.toml even into an
+#     only part of it. rustup installs any component named in a rust-toolchain.toml even into an
 #     already-present toolchain, so a job that requested a smaller set would trigger a full toolchain
 #     re-download on its first cargo call. Matching the file exactly is the cheap way to satisfy it.
-#   - the toolchain file also auto-installs thumbv7m-none-eabi; we still pass `targets` so the host
-#     target the tests need is present too.
+#   - motorcontroller/rust-toolchain.toml also auto-installs thumbv7m-none-eabi; we still pass
+#     `targets` so the host target the tests need is present too.
 
 on:
   push:
@@ -54,19 +65,25 @@ env:
 
 jobs:
   # Format + lint gates, first so an unformatted commit fails fast (rustfmt is a pure-source check,
-  # no build). Clippy runs over BOTH surfaces CI builds:
+  # no build). Clippy runs over BOTH surfaces CI builds, in the motorcontroller workspace and in the
+  # shared one:
   #   - the thumbv7m surface (what `cargo build` ships). It cannot use --all-targets: test harnesses
   #     need std/libtest, which the bare-metal target lacks;
   #   - the host-test surface with --all-targets, which is where the #[cfg(test)] modules and
   #     integration tests get linted (clippy without --all-targets lints only the lib and silently
   #     skips all test code), with the same -F store/test-fields the host-test job compiles with.
-  # The workspace-excluded crates are covered too: swd-bridge is fmt-checked and
-  # clippy'd here via its manifest; emulator-runner is fmt-checked here but clippy'd in the
-  # emulator-tests job (its unicorn native build needs cmake, installed there); hardware-runner
-  # is fmt-checked here and ONLY fmt-checked (it drives real probes over probe-rs, so nothing in
-  # CI compiles or runs it; rustfmt is a pure-source check, no build needed).
+  # Clippy lints workspace MEMBERS only, never a path dependency, so the shared crates are linted
+  # in shared/ and not by the motorcontroller run. Their thumbv7m surface (store's FmcFlash,
+  # swd-mailbox's board-only code) is the code the motorcontroller build compiles into the image on
+  # the pinned nightly, so that run uses the nightly too; their host surface runs on shared/'s own
+  # 1.92.
+  # The tools/ workspace: rustfmt covers every member here; swd-bridge is clippy'd here;
+  # emulator-runner is clippy'd in the emulator-tests job (its unicorn native build needs cmake,
+  # installed there); hoverboard-cli in its own job, per platform; hardware-runner is ONLY
+  # fmt-checked (it drives real probes over probe-rs, so nothing in CI compiles or runs it). The
+  # bridge workspace's rustfmt and clippy run in the bridge job, which carries its toolchain.
   lint:
-    name: rustfmt + clippy (thumbv7m + host --all-targets)
+    name: rustfmt + clippy (motorcontroller, shared, tools)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -84,10 +101,21 @@ jobs:
           targets: thumbv7m-none-eabi, x86_64-unknown-linux-gnu
           components: rustfmt, clippy, rust-src
 
+      # shared/'s toolchain (shared/rust-toolchain.toml).
+      - name: Install Rust (1.92, for shared/) + rustfmt/clippy
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92"
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt, clippy
+
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hoverboard-firmware
+          workspaces: |
+            hoverboard-firmware/motorcontroller
+            hoverboard-firmware/shared
+            hoverboard-firmware/tools
 
       # The Kotlin mirror's cross-file citations, checked rather than trusted. Every declaration in the
       # two files the script has in SCOPE (LinkCtl.kt, WireDriftTest.kt) names the Rust it mirrors by
@@ -100,8 +128,8 @@ jobs:
       # the script says so, because specs/ is gitignored and does not exist on a runner.
       #
       # It runs here rather than in the Kotlin job because it reads the RUST, and drift is introduced
-      # by editing the Rust: a rename in crates/ with the mirror's citation left behind is the failure
-      # it exists to catch, and that commit may touch no Kotlin at all.
+      # by editing the Rust: a rename in shared/ or motorcontroller/ with the mirror's citation left
+      # behind is the failure it exists to catch, and that commit may touch no Kotlin at all.
       - name: Citations in the Kotlin mirror resolve to real symbols
         run: python3 tools/check-citations.py
 
@@ -112,23 +140,24 @@ jobs:
       - name: panic-reach parser tests (fixtures, no toolchain)
         run: python3 tools/panic-reach.py --selftest
 
-      # The runtime-hal pin agrees across the three tracked lockfiles. The root one names the commit
-      # the image builds against; tools/hoverboard-cli and apps/hoverboard-bridge record runtime-hal
-      # through their path dependencies (store among them) without compiling it, and pin the same
-      # commit so that no lockfile in the tree names a different one. Each must carry the git source:
-      # a local build with the `--config` runtime-hal patch (CLAUDE.md, "Running the checks")
-      # rewrites the entry to the patched path package, which has no source line, and a lockfile
-      # committed that way leaves cargo here to re-resolve runtime-hal's main at run time. Pure
-      # source, no toolchain.
+      # The runtime-hal pin agrees across the four tracked lockfiles, one per Cargo workspace.
+      # motorcontroller/'s names the commit the image builds against; shared/ declares the same
+      # workspace dependency (store names it) and pins the same commit; tools/ and bridge/ record
+      # runtime-hal through their path dependencies (store among them) without compiling it, and pin
+      # the same commit so that no lockfile in the tree names a different one. Each must carry the
+      # git source: a local build with the `--config` runtime-hal patch (CLAUDE.md, "Running the
+      # checks") rewrites the entry to the patched path package, which has no source line, and a
+      # lockfile committed that way leaves cargo here to re-resolve runtime-hal's main at run time.
+      # Pure source, no toolchain.
       - name: runtime-hal pin agrees across the tracked lockfiles
         run: |
           pin() {
             grep -A2 '^name = "runtime-hal"$' "$1" \
               | grep -oE '^source = "git\+https://github\.com/hoverboardhavoc/runtime-hal[^"]*"' || true
           }
-          root=$(pin Cargo.lock)
+          root=$(pin motorcontroller/Cargo.lock)
           fail=0
-          for f in Cargo.lock tools/hoverboard-cli/Cargo.lock apps/hoverboard-bridge/Cargo.lock; do
+          for f in motorcontroller/Cargo.lock shared/Cargo.lock tools/Cargo.lock bridge/Cargo.lock; do
             p=$(pin "$f")
             echo "$f: ${p:-no runtime-hal git source}"
             if [ -z "$p" ] || [ "$p" != "$root" ]; then fail=1; fi
@@ -140,19 +169,39 @@ jobs:
             exit 1
           fi
 
-      - name: rustfmt (workspace)
+      - name: rustfmt (motorcontroller)
+        working-directory: hoverboard-firmware/motorcontroller
         run: cargo fmt --all --check
 
-      - name: rustfmt (workspace-excluded crates)
-        run: |
-          cargo fmt --check --manifest-path crates/swd-bridge/Cargo.toml
-          cargo fmt --check --manifest-path crates/emulator-runner/Cargo.toml
-          cargo fmt --check --manifest-path crates/hardware-runner/Cargo.toml
+      - name: rustfmt (shared)
+        working-directory: hoverboard-firmware/shared
+        run: cargo fmt --all --check
 
-      - name: clippy (thumbv7m build surface)
+      - name: rustfmt (tools)
+        working-directory: hoverboard-firmware/tools
+        run: cargo fmt --all --check
+
+      - name: clippy (motorcontroller, thumbv7m build surface)
+        working-directory: hoverboard-firmware/motorcontroller
         run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
 
-      - name: clippy (host-test surface, all targets)
+      - name: clippy (motorcontroller, host-test surface, all targets)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: >
+          cargo clippy
+          --workspace --all-targets
+          --target ${{ env.HOST_TARGET }}
+          -F store/test-fields
+          -- -D warnings
+
+      # On the pinned nightly, overriding shared/rust-toolchain.toml: this is the surface the image
+      # build compiles, and that is the toolchain it compiles it on.
+      - name: clippy (shared, thumbv7m build surface, the image's nightly)
+        working-directory: hoverboard-firmware/shared
+        run: cargo +nightly-2026-07-20 clippy --target thumbv7m-none-eabi -- -D warnings
+
+      - name: clippy (shared, host-test surface, all targets)
+        working-directory: hoverboard-firmware/shared
         run: >
           cargo clippy
           --workspace --all-targets
@@ -161,16 +210,18 @@ jobs:
           -- -D warnings
 
       - name: clippy (swd-bridge, all targets)
+        working-directory: hoverboard-firmware/tools
         run: >
           cargo clippy
-          --manifest-path crates/swd-bridge/Cargo.toml
+          -p swd-bridge
           --all-targets
           --target ${{ env.HOST_TARGET }}
           -- -D warnings
 
-  # Embedded build for the real target. A bare `cargo build` uses the thumbv7m-none-eabi default from
-  # .cargo/config.toml and builds the workspace images (dummy-test, store-test), which compile the
-  # pinned runtime-hal (store/store-test's target-gated FmcFlash dep).
+  # Embedded build for the real target, in motorcontroller/. A bare `cargo build` there uses the
+  # thumbv7m-none-eabi default from motorcontroller/.cargo/config.toml and builds the workspace images
+  # (dummy-test, store-test), which compile the pinned runtime-hal (store/store-test's target-gated
+  # FmcFlash dep).
   #
   # The upper flashed-span size gate (against the 62 KiB no-bootloader region) is enforced below,
   # after objcopy (specs/decision-flash-budget.md); the LTO-gutted floor guard is its lower companion.
@@ -198,20 +249,22 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hoverboard-firmware
+          workspaces: hoverboard-firmware/motorcontroller
 
       - name: Build (default thumbv7m target)
+        working-directory: hoverboard-firmware/motorcontroller
         run: cargo build
 
       # The universal shipping image: the release `firmware` ELF (specs/firmware.md, "The binary:
       # downloadable and installable"). One linked image, valid on every part.
       #
-      # `cargo image` is the workspace's ONE image command (.cargo/config.toml `[alias]`): release,
-      # -p firmware, --target thumbv7m-none-eabi, -Z build-std=core,compiler_builtins. CI runs the
-      # SAME alias a developer runs, so the artifact uploaded here is the invocation anyone can
+      # `cargo image` is the workspace's ONE image command (motorcontroller/.cargo/config.toml
+      # `[alias]`): release, -p firmware, --target thumbv7m-none-eabi, -Z
+      # build-std=core,compiler_builtins. CI runs the SAME alias a developer runs, so the artifact uploaded here is the invocation anyone can
       # reproduce locally, byte for byte. Do not spell the flags out again here: a second copy is a
       # second thing to drift.
       - name: Build release firmware image (cargo image = the build-std shipping build)
+        working-directory: hoverboard-firmware/motorcontroller
         run: cargo image
 
       # objcopy -O binary gives the flashable .bin. arm-none-eabi-objcopy comes from binutils;
@@ -220,8 +273,8 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
           arm-none-eabi-objcopy -O binary \
-            target/thumbv7m-none-eabi/release/firmware \
-            target/thumbv7m-none-eabi/release/firmware.bin
+            motorcontroller/target/thumbv7m-none-eabi/release/firmware \
+            motorcontroller/target/thumbv7m-none-eabi/release/firmware.bin
 
       # LTO-gutted-image guard (round-7a): a capacity/assert mismatch can make LTO delete the whole
       # main loop while the image still links (.text 55 KB -> 16.8 KB). Fail the build if the release
@@ -229,7 +282,7 @@ jobs:
       # the binutils installed in the objcopy step above. Mirrors tools/flash.sh's flash-time guard.
       - name: Assert release code floor + required symbols (LTO-gutted-image guard)
         run: |
-          elf=target/thumbv7m-none-eabi/release/firmware
+          elf=motorcontroller/target/thumbv7m-none-eabi/release/firmware
           # Sum every CODE section, not `.text` alone: the F1x0 zero-wait-flash split
           # (specs/motor-integration.md, "Hot-path flash placement") puts the 16 kHz period ISR and the
           # 250 Hz control path in `.hotcode`, inside the first 32 KiB, so a `.text`-only floor reads a
@@ -297,7 +350,7 @@ jobs:
       # assert, which a check of the root's own `bl` targets would have passed. Same binutils the
       # steps above use.
       - name: Assert no panic reachable from the motor hot paths
-        run: python3 tools/panic-reach.py target/thumbv7m-none-eabi/release/firmware
+        run: python3 tools/panic-reach.py motorcontroller/target/thumbv7m-none-eabi/release/firmware
 
       # UPPER size gate (specs/decision-flash-budget.md, "Mechanical follow-ups", guard 1): fail if the
       # FULL FLASHED SPAN (objcopy .bin size, NOT .text alone -- the .text figure understates the span
@@ -311,8 +364,8 @@ jobs:
       # fire at. The arithmetic, so the next person moving this number sees what it was set against:
       #
       #   hard limit            63,488 B   62 KiB = the 64 KiB part less the 2 KiB store reserve
-      #                                    (crates/firmware/memory.x); an over-span image fails to LINK
-      #   lever B (vector trim)   -512 B   128-entry, 512-aligned flash table (crates/vectors)
+      #                                    (motorcontroller/firmware/memory.x); an over-span image fails to LINK
+      #   lever B (vector trim)   -512 B   128-entry, 512-aligned flash table (motorcontroller/vectors)
       #   lever A (build-std)   -2,408 B   nightly + `cargo image` + the core/compiler_builtins pins
       #   image at the raise    60,584 B   measured here, both levers in, slice 5's arming plumbing in
       #   IMAGE (2026-08-02)      53,904 B   after the wide-division outlining (-8,616 B, bit-exact)
@@ -447,7 +500,7 @@ jobs:
       # no verdict, so what this governs is only which number a ratchet may be taken from.
       - name: Assert release flashed-span ceiling (upper size gate)
         run: |
-          span=$(wc -c < target/thumbv7m-none-eabi/release/firmware.bin)
+          span=$(wc -c < motorcontroller/target/thumbv7m-none-eabi/release/firmware.bin)
           echo "release flashed span = ${span} B (.bin)"
           ceiling=62000
           hard=63488
@@ -471,8 +524,8 @@ jobs:
         with:
           name: firmware
           path: |
-            hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware.bin
-            hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware
+            hoverboard-firmware/motorcontroller/target/thumbv7m-none-eabi/release/firmware.bin
+            hoverboard-firmware/motorcontroller/target/thumbv7m-none-eabi/release/firmware
 
       # A tagged release additionally attaches them as GitHub Release assets, the stable download.
       - name: Attach to GitHub Release (on tag)
@@ -480,11 +533,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware.bin
-            hoverboard-firmware/target/thumbv7m-none-eabi/release/firmware
+            hoverboard-firmware/motorcontroller/target/thumbv7m-none-eabi/release/firmware.bin
+            hoverboard-firmware/motorcontroller/target/thumbv7m-none-eabi/release/firmware
 
-  # Host tests. Run with an explicit host target so they neither inherit the thumbv7m default nor the
-  # link.x flag scoped to it in .cargo/config.toml. The HAL is not linked on the host target; cargo
+  # Host tests: the motorcontroller suite, then the shared suite. Run with an explicit host target so
+  # they neither inherit the thumbv7m default nor the link.x flag scoped to it in
+  # motorcontroller/.cargo/config.toml. The HAL is not linked on the host target; cargo
   # still resolves (and fetches) the pinned runtime-hal, since it resolves target-gated dependencies
   # on every target.
   host-tests:
@@ -506,15 +560,26 @@ jobs:
           targets: x86_64-unknown-linux-gnu
           components: rustfmt, clippy, rust-src
 
+      # shared/'s toolchain (shared/rust-toolchain.toml), for the shared suite.
+      - name: Install Rust (1.92, for shared/) + host target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92"
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt, clippy
+
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hoverboard-firmware
+          workspaces: |
+            hoverboard-firmware/motorcontroller
+            hoverboard-firmware/shared
 
       # Through the wrapper a person runs locally (tools/host-test.sh), so CI's flags and the flags a
       # local pass means CANNOT drift: the script resolves the host triple itself (`rustc -vV`, which
       # is HOST_TARGET on this runner) and owns the `-F store/test-fields` flag the store's
-      # persist/negative-control tests need. Its header says why both are needed.
+      # persist/negative-control tests need, and it runs each suite from inside its workspace so the
+      # workspace's own toolchain applies. Its header says why.
       - name: Run host tests
         run: ./tools/host-test.sh
 
@@ -599,17 +664,17 @@ jobs:
         run: bash tools/tests/test_board_runner.sh
 
       # CTRL_OBS is read over SWD by symbol and offset from outside this repo's build, so the word
-      # count in tools/swdobs.py and the `#[repr(C)]` struct in crates/firmware/src/main.rs are two
+      # count in tools/swdobs.py and the `#[repr(C)]` struct in motorcontroller/firmware/src/main.rs are two
       # facts that must agree with nothing between them. climit-session.py refuses to run against an
       # ELF that disagrees, which is a refusal at the bench, hours after the change. This is the same
       # comparison against the struct's own compile-time size assert, in CI, at the commit.
       - name: CTRL_OBS word count agrees with the firmware struct
         run: |
           words=$(python3 -c "import sys; sys.path.insert(0, 'tools'); import swdobs; print(swdobs.CTRL_OBS_WORDS)")
-          pinned=$(grep -oE 'size_of::<CtrlObs>\(\) == [0-9]+ \* 4' crates/firmware/src/main.rs | grep -oE '[0-9]+' | head -1)
-          echo "swdobs.py decodes ${words} words; crates/firmware/src/main.rs asserts ${pinned}"
+          pinned=$(grep -oE 'size_of::<CtrlObs>\(\) == [0-9]+ \* 4' motorcontroller/firmware/src/main.rs | grep -oE '[0-9]+' | head -1)
+          echo "swdobs.py decodes ${words} words; motorcontroller/firmware/src/main.rs asserts ${pinned}"
           if [ -z "$pinned" ]; then
-            echo "FAIL: could not find the CtrlObs size assert in crates/firmware/src/main.rs" >&2
+            echo "FAIL: could not find the CtrlObs size assert in motorcontroller/firmware/src/main.rs" >&2
             exit 1
           fi
           if [ "$words" != "$pinned" ]; then
@@ -619,11 +684,10 @@ jobs:
             exit 1
           fi
 
-  # crates/swd-bridge is workspace-excluded (a host-only tool: it talks to openocd over TCP), so the
-  # workspace host-test job never compiles it. Its unit suite is the ONLY agreement check between the
+  # tools/swd-bridge is a tools/ workspace member (a host-only tool: it talks to openocd over TCP),
+  # so the host-test job never compiles it. Its unit suite is the ONLY agreement check between the
   # host `HostMailbox` and the firmware `Mailbox` (ring layout, ABI constants, framing), so it runs
-  # here via its own manifest on the host target. The tests are pure host unit tests (no openocd, no
-  # probe).
+  # here in tools/ on the host target. The tests are pure host unit tests (no openocd, no probe).
   swd-bridge-tests:
     name: swd-bridge tests (HostMailbox <-> Mailbox agreement)
     runs-on: ubuntu-latest
@@ -646,19 +710,20 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hoverboard-firmware
+          workspaces: hoverboard-firmware/tools
 
       - name: Run swd-bridge tests
+        working-directory: hoverboard-firmware/tools
         run: >
           cargo test
-          --manifest-path crates/swd-bridge/Cargo.toml
+          -p swd-bridge
           --target ${{ env.HOST_TARGET }}
 
-  # The laptop-side tool for the hoverboard bridge (tools/hoverboard-cli, its own workspace), built
+  # The laptop-side tool for the hoverboard bridge (tools/hoverboard-cli, in the tools/ workspace), built
   # and tested on the three desktop platforms its transports support: BLE through btleplug (CoreBluetooth,
   # BlueZ over D-Bus, WinRT), the USB console through serialport, the Wi-Fi console over TCP. Linux
-  # needs the D-Bus headers for btleplug. The explicit --target keeps the root .cargo/config.toml's
-  # thumbv7m default out of a host build, as every other host job here does. The binaries are uploaded
+  # needs the D-Bus headers for btleplug. The explicit --target names the host build, as every other
+  # host job here does. The binaries are uploaded
   # per platform and attached to a release on a tag beside the firmware images, each named for its
   # target triple (`hoverboard-cli-<triple>`, `.exe` on Windows): softprops/action-gh-release
   # replaces an asset of the same name, so one shared name would leave one platform's binary.
@@ -680,7 +745,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     defaults:
       run:
-        working-directory: hoverboard-firmware
+        working-directory: hoverboard-firmware/tools
         shell: bash
     steps:
       - name: Checkout firmware
@@ -702,15 +767,15 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hoverboard-firmware/tools/hoverboard-cli
+          workspaces: hoverboard-firmware/tools
 
       - name: rustfmt
-        run: cargo fmt --check --manifest-path tools/hoverboard-cli/Cargo.toml
+        run: cargo fmt --check -p hoverboard-cli
 
       - name: clippy
         run: >
           cargo clippy
-          --manifest-path tools/hoverboard-cli/Cargo.toml
+          -p hoverboard-cli
           --target ${{ matrix.target }}
           --all-targets -- -D warnings
 
@@ -720,7 +785,7 @@ jobs:
         if: runner.os == 'Linux'
         run: >
           cargo clippy
-          --manifest-path tools/hoverboard-cli/Cargo.toml
+          -p hoverboard-cli
           --target ${{ matrix.target }}
           --no-default-features
           --all-targets -- -D warnings
@@ -728,7 +793,7 @@ jobs:
       - name: Tests
         run: >
           cargo test
-          --manifest-path tools/hoverboard-cli/Cargo.toml
+          -p hoverboard-cli
           --target ${{ matrix.target }}
 
       # The refusals of a CLI without `ble` (tests/no_ble.rs, which the default build compiles out).
@@ -736,34 +801,34 @@ jobs:
         if: runner.os == 'Linux'
         run: >
           cargo test
-          --manifest-path tools/hoverboard-cli/Cargo.toml
+          -p hoverboard-cli
           --target ${{ matrix.target }}
           --no-default-features
 
       - name: Build release
         run: >
           cargo build --release
-          --manifest-path tools/hoverboard-cli/Cargo.toml
+          -p hoverboard-cli
           --target ${{ matrix.target }}
 
       - name: Name the binary for its target
         run: |
-          mkdir -p tools/hoverboard-cli/target/dist
-          cp tools/hoverboard-cli/target/${{ matrix.target }}/release/hoverboard-cli${{ matrix.ext }} \
-            tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
+          mkdir -p target/dist
+          cp target/${{ matrix.target }}/release/hoverboard-cli${{ matrix.ext }} \
+            target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: hoverboard-cli-${{ matrix.target }}
-          path: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
+          path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
 
       - name: Attach to GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
+          files: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
           # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
           # same text, so whichever job runs last leaves it.
           body: |
@@ -788,7 +853,7 @@ jobs:
       PI_TARGET: arm-unknown-linux-gnueabihf
     defaults:
       run:
-        working-directory: hoverboard-firmware
+        working-directory: hoverboard-firmware/tools
     steps:
       - name: Checkout firmware
         uses: actions/checkout@v4
@@ -817,29 +882,29 @@ jobs:
       - name: Build release (no ble)
         run: >
           cargo zigbuild --release
-          --manifest-path tools/hoverboard-cli/Cargo.toml
+          -p hoverboard-cli
           --target ${{ env.PI_TARGET }}.2.36
           --no-default-features
 
       # Named for its target triple beside the other platforms' (the hoverboard-cli job says why).
       - name: Name the binary for its target
         run: |
-          mkdir -p tools/hoverboard-cli/target/dist
-          cp tools/hoverboard-cli/target/${{ env.PI_TARGET }}/release/hoverboard-cli \
-            tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+          mkdir -p target/dist
+          cp target/${{ env.PI_TARGET }}/release/hoverboard-cli \
+            target/dist/hoverboard-cli-${{ env.PI_TARGET }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: hoverboard-cli-${{ env.PI_TARGET }}
-          path: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+          path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
           if-no-files-found: error
 
       - name: Attach to GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: hoverboard-firmware/tools/hoverboard-cli/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+          files: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
           # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
           # same text, so whichever job runs last leaves it.
           body: |
@@ -850,15 +915,15 @@ jobs:
             A release promises no compatibility with any other release: a CLI, app, bridge image and
             board image from different releases may not work together.
 
-  # The hoverboard bridge (apps/hoverboard-bridge): its own workspace on its own toolchain, the
-  # 1.92 stable its rust-toolchain.toml pins with the riscv32imc target (the esp-hal fork it patches
-  # in is not built on the main workspace's nightly). The hardware-free core's host tests and clippy
+  # The hoverboard bridge (bridge/): its own workspace on its own toolchain, the 1.92 stable its
+  # rust-toolchain.toml pins with the riscv32imc target (the esp-hal fork it patches in is not built
+  # on the motorcontroller workspace's nightly). The hardware-free core's host tests and clippy
   # (all targets) first, then the firmware's release build with no Wi-Fi variables set (the network
   # is a store field, specs/bridge-onboarding.md section 2), then the two images with a pinned
   # espflash binary release: the merged install image for install-esp (bootloader/bootloader.bin,
   # partitions.csv, the app in ota_0, padded to 4 MB) and the app image for update-esp. The core's
   # path dependencies (store among them) declare a target-gated runtime-hal dependency that cargo
-  # still resolves and fetches, at the commit apps/hoverboard-bridge/Cargo.lock pins, without
+  # still resolves and fetches, at the commit bridge/Cargo.lock pins, without
   # compiling it.
   bridge:
     name: Hoverboard bridge (core tests + clippy, release images)
@@ -867,7 +932,7 @@ jobs:
       ESPFLASH_VERSION: 4.6.0
     defaults:
       run:
-        working-directory: hoverboard-firmware/apps/hoverboard-bridge
+        working-directory: hoverboard-firmware/bridge
     steps:
       - name: Checkout firmware
         uses: actions/checkout@v4
@@ -884,7 +949,7 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hoverboard-firmware/apps/hoverboard-bridge
+          workspaces: hoverboard-firmware/bridge
 
       - name: rustfmt
         run: cargo fmt --all --check
@@ -932,8 +997,8 @@ jobs:
         with:
           name: hoverboard-bridge
           path: |
-            hoverboard-firmware/apps/hoverboard-bridge/target/img/hoverboard-bridge-install.bin
-            hoverboard-firmware/apps/hoverboard-bridge/target/img/hoverboard-bridge.bin
+            hoverboard-firmware/bridge/target/img/hoverboard-bridge-install.bin
+            hoverboard-firmware/bridge/target/img/hoverboard-bridge.bin
           if-no-files-found: error
 
       - name: Attach to GitHub Release (on tag)
@@ -941,8 +1006,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            hoverboard-firmware/apps/hoverboard-bridge/target/img/hoverboard-bridge-install.bin
-            hoverboard-firmware/apps/hoverboard-bridge/target/img/hoverboard-bridge.bin
+            hoverboard-firmware/bridge/target/img/hoverboard-bridge-install.bin
+            hoverboard-firmware/bridge/target/img/hoverboard-bridge.bin
           # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
           # same text, so whichever job runs last leaves it.
           body: |
@@ -954,9 +1019,10 @@ jobs:
             board image from different releases may not work together.
 
   # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
-  # flashes). emulator-runner is excluded from the workspace (it links Unicorn's cmake-built native lib,
-  # which cannot cross-compile to thumbv7m), so it is built/tested via its own manifest on the host
-  # target, behind the `unicorn` feature. The tests build the dummy-test AND store-test images first.
+  # flashes). emulator-runner is a tools/ workspace member (it links Unicorn's cmake-built native lib,
+  # which cannot cross-compile to thumbv7m), built/tested there on the host target, behind the
+  # `unicorn` feature. The tests build the dummy-test AND store-test images first, in
+  # motorcontroller/, so that workspace's target directory is cached here too.
   emulator-tests:
     name: Emulator tests (Unicorn, tier 2)
     runs-on: ubuntu-latest
@@ -982,12 +1048,15 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hoverboard-firmware
+          workspaces: |
+            hoverboard-firmware/tools
+            hoverboard-firmware/motorcontroller
 
       - name: Run emulator tests under Unicorn
+        working-directory: hoverboard-firmware/tools
         run: >
           cargo test
-          --manifest-path crates/emulator-runner/Cargo.toml
+          -p emulator-runner
           --features unicorn
           --target ${{ env.HOST_TARGET }}
 
@@ -995,24 +1064,27 @@ jobs:
       # unicorn dep (the cmake-built native lib), and this job already installs cmake + carries the
       # build in its cache. Same --all-targets + -D warnings bar as the lint job.
       - name: clippy (emulator-runner, unicorn, all targets)
+        working-directory: hoverboard-firmware/tools
         run: >
           cargo clippy
-          --manifest-path crates/emulator-runner/Cargo.toml
+          -p emulator-runner
           --features unicorn
           --all-targets
           --target ${{ env.HOST_TARGET }}
           -- -D warnings
 
   # The Kotlin mirror's drift gate, and the only job here with no Rust toolchain in it.
-  # protocol-kotlin/ is the single Kotlin copy of the wire protocol that crates/link, crates/net,
-  # crates/linkctl and crates/store define in Rust, and both in-tree Android apps consume it. Its
-  # RustSourceDriftTest PARSES those Rust files and exact-set compares them against the Kotlin, so a
-  # firmware edit that outruns the mirror fails here rather than turning up as an unexplained silence
-  # on the bench. protocol-kotlin/README.md has the full description.
+  # shared/protocol-kotlin/ is the single Kotlin copy of the wire protocol that shared/link,
+  # shared/net, shared/linkctl and shared/store define in Rust (with the motorcontroller crates it also
+  # reads), and the rider app consumes it. Its RustSourceDriftTest PARSES those Rust files and
+  # exact-set compares them against the Kotlin, so a firmware edit that outruns the mirror fails here
+  # rather than turning up as an unexplained silence on the bench. shared/protocol-kotlin/README.md
+  # has the full description.
   #
   # NO PATH FILTER, DELIBERATELY, and this job must not acquire one later. Drift is introduced by
-  # editing the RUST: a commit that renumbers an opcode touches crates/ and nothing under
-  # protocol-kotlin/. A `paths: protocol-kotlin/**` filter would therefore skip this job on exactly
+  # editing the RUST: a commit that renumbers an opcode touches shared/ or motorcontroller/ and
+  # nothing under shared/protocol-kotlin/. A `paths: shared/protocol-kotlin/**` filter would therefore
+  # skip this job on exactly
   # the commit it exists to catch, while still running it on Kotlin-only edits, where the author
   # already has the protocol in front of them. That leaves a job that is green on every commit and
   # catching nothing, which reads as coverage while providing none. This workflow has no path filters
@@ -1030,10 +1102,10 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: hoverboard-firmware/protocol-kotlin
+        working-directory: hoverboard-firmware/shared/protocol-kotlin
     steps:
       # Same checkout path as the cargo jobs, so this working directory lines up with theirs. The
-      # drift test walks up from protocol-kotlin/ looking for crates/linkctl/src/lib.rs, which this
+      # drift test walks up from shared/protocol-kotlin/ looking for shared/linkctl/src/lib.rs, which this
       # single checkout provides; if it ever cannot find it, the test throws with an explanatory
       # message rather than skipping, and the job fails.
       - name: Checkout firmware
@@ -1042,7 +1114,7 @@ jobs:
           path: hoverboard-firmware
 
       # JDK 17 because that is the level the module targets, read out of its build rather than
-      # guessed: protocol-kotlin/build.gradle.kts pins sourceCompatibility/targetCompatibility to
+      # guessed: shared/protocol-kotlin/build.gradle.kts pins sourceCompatibility/targetCompatibility to
       # VERSION_17 and jvmTarget to JVM_17, and both consuming apps compile at 17 as well. The build
       # deliberately declares no jvmToolchain() (its comment says why), so whatever JDK Gradle runs
       # on IS the compiler; running it on 17 makes the compiling JVM and the bytecode target agree.
@@ -1062,10 +1134,10 @@ jobs:
       # --rerun and --no-build-cache are the point of this step, not boilerplate. A plain
       # `./gradlew test` reports `Task :test UP-TO-DATE` on any run where Gradle thinks nothing
       # changed and executes NOTHING: green tick, zero tests, which is precisely how this gate was a
-      # no-op before. build.gradle.kts does declare crates/**/*.rs as inputs to the test task, and
-      # that is the right fix for up-to-date tracking, but it is guarded on the crates directory
-      # existing and covers only *.rs beneath crates/, so resting the gate on it means resting it on
-      # that declaration staying complete forever. --rerun forces the named task to execute whatever
+      # no-op before. build.gradle.kts does declare the *.rs under shared/ and motorcontroller/ as
+      # inputs to the test task, and that is the right fix for up-to-date tracking, but it is guarded
+      # on those directories existing and covers only *.rs beneath them, so resting the gate on it
+      # means resting it on that declaration staying complete forever. --rerun forces the named task to execute whatever
       # its up-to-date state, --no-build-cache stops a cached result being served instead of a run,
       # and the suite takes about two seconds, so there is nothing worth saving by skipping it.
       - name: Run the protocol tests (forced re-execution, no cache)
@@ -1115,7 +1187,7 @@ jobs:
   # say so in one line instead of failing somewhere inside AGP's configuration.
   #
   # No cargo: the app is Kotlin, and the one thing it builds
-  # besides itself is protocol-kotlin, which its settings.gradle.kts pulls in as an included build
+  # besides itself is shared/protocol-kotlin, which its settings.gradle.kts pulls in as an included build
   # from this same checkout.
   #
   # COST, and it is the largest job in this file. Estimated 6 to 12 minutes on a cold runner and 4
