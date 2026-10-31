@@ -1,2 +1,0 @@
-M: 4207 samples  peak_current=3695  chopped_periods=5  current_trips=1  invalid_hall_dwell=0  coasting_samples=0  max_speed=4  faults=[-]
-S: 4232 samples  peak_current=2513  chopped_periods=3  current_trips=0  invalid_hall_dwell=0  coasting_samples=0  max_speed=4  faults=[STALE]

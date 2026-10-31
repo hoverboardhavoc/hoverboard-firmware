@@ -1,4 +1,0 @@
-1 CONFIG op(s) on node 0x01
-  CONFIG_WRITE 0x43:0 = 0x19 (U8) -> CFG_OK value U8(25)
-  CONFIG_READ  0x43:0 -> CFG_OK value U8(25)  (write -> read matches)
-PASS: 1 CONFIG op(s) answered CFG_OK; a staged layout needs a REBOOT for the board's boot validator to judge it

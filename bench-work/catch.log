@@ -1,9 +1,0 @@
-watching dispatch_count on port 6668, stall threshold 150 ms
-
-t=  263.0 STALL: dispatch_count stuck at 600737 for 1322 ms. Halting.
-Traceback (most recent call last):
-  File "/Users/hoverboardhavoc/dev/hoverboard-firmware/bench-work/catch-hang.py", line 56, in <module>
-    pc, lr, sp, xpsr = reg("pc"), reg("lr"), reg("sp"), reg("xPSR")
-  File "/Users/hoverboardhavoc/dev/hoverboard-firmware/bench-work/catch-hang.py", line 55, in <lambda>
-    reg = lambda r: int(o.cmd(f"reg {r}").split()[-1], 0)
-ValueError: invalid literal for int() with base 0: 'target'

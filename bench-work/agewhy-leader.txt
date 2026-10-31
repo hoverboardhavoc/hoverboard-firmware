@@ -1,6 +1,0 @@
-leader: 74360 samples in 600.0 s, 124 Hz, 1 failed reads
-leader: max age 3 ticks (12 ms); line_errors 0, lap_overruns 4
-leader: age   1    48329  64.993 %
-leader: age   2    24153  32.481 %
-leader: age   3     1878   2.526 %
-leader: 0 samples at age >= 4; 0 coincide with a ring overrun, 0 with a line error

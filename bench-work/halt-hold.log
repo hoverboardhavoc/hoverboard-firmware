@@ -1,9 +1,0 @@
-armed probe: stall threshold 20.0 ms, 2 dumps max
-Traceback (most recent call last):
-  File "/Users/hoverboardhavoc/dev/hoverboard-firmware/bench-work/arm-probe.py", line 60, in <module>
-    lv = m.read_words(LIVE, 10)
-  File "/Users/hoverboardhavoc/dev/hoverboard-firmware/tools/swdobs.py", line 323, in read_words
-    vals = [int(v, 0) for v in out.split()]
-  File "/Users/hoverboardhavoc/dev/hoverboard-firmware/tools/swdobs.py", line 323, in <listcomp>
-    vals = [int(v, 0) for v in out.split()]
-ValueError: invalid literal for int() with base 0: 'read_memory:'
