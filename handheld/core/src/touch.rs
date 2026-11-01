@@ -127,11 +127,14 @@ pub struct Calibration {
     pub height: i32,
 }
 
-/// The start calibration: portrait 240 x 320.
+/// The start calibration: portrait 240 x 320. Raw Y runs low at the top of the panel: with the
+/// common CYD figure `(3700, 200)` a touch at the top read as the arm zone (the bench log
+/// `bench-work/handheld/arm-hold-1130.log`), so the Y ends are the other way round. X keeps the
+/// start figure until the corners are measured (section 7.2 check 3).
 pub const CALIBRATION: Calibration = Calibration {
     swap: false,
     x_raw: (3800, 240),
-    y_raw: (3700, 200),
+    y_raw: (200, 3700),
     width: 240,
     height: 320,
 };
@@ -466,6 +469,17 @@ mod tests {
 
     fn good() -> Reading {
         reading(1000, [2000; 3], [2000; 3])
+    }
+
+    #[test]
+    fn the_calibration_puts_low_raw_y_at_the_top() {
+        // The raw Y medians of the bench log, top to bottom of the panel.
+        let y = |raw: u16| CALIBRATION.to_sub(2000, raw).1 / SUB;
+        assert!(y(200) == 0 && y(3700) == CALIBRATION.height);
+        assert!(y(1002) < y(1667) && y(1667) < y(2542) && y(2542) < y(3567));
+        // The arm zone is the bottom of the panel: high raw Y.
+        let zone = crate::arm::ARM_ZONE_Y;
+        assert!(y(1002) < zone && y(3567) >= zone);
     }
 
     #[test]

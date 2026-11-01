@@ -2,6 +2,7 @@
 //! pinned bridge with the filter accept list, find the link pair by UUID, subscribe, and run the
 //! L2 stream between the notifications, the model and writes to `rx`.
 
+use core::fmt::Write;
 use core::sync::atomic::Ordering;
 use embassy_futures::join::join;
 
@@ -13,7 +14,7 @@ use trouble_host::prelude::*;
 use handheld_core::session::Sends;
 use handheld_core::wire::Wire;
 
-use crate::{now_ms, with, PUMP, RELEASE_AT};
+use crate::{now_ms, with, LOG, PUMP, RELEASE_AT};
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 3;
@@ -21,6 +22,9 @@ const L2CAP_CHANNELS_MAX: usize = 3;
 const RETRY: Duration = Duration::from_millis(500);
 /// How often the link steps the model when nothing arrives.
 const STEP: Duration = Duration::from_millis(10);
+/// The shortest gap between two `DRIVE_CMD` trace lines while armed, and while disarmed, ms.
+const TRACE_ARMED: u32 = 250;
+const TRACE_DISARMED: u32 = 5000;
 
 /// Connect, serve, reconnect, for ever.
 pub async fn run<C: Controller>(controller: C, bridge: [u8; 6]) {
@@ -143,6 +147,7 @@ async fn session<C: Controller>(
         let mut chunk = [0u8; 244];
         let mut tick = Instant::now();
         let (mut rx_n, mut tx_n, mut since) = (0u16, 0u16, now_ms());
+        let mut traced = now_ms().wrapping_sub(TRACE_DISARMED);
         loop {
             match select3(listener.next(), Timer::at(tick + STEP), PUMP.wait()).await {
                 Either3::First(n) => wire.feed(n.as_ref()),
@@ -162,10 +167,24 @@ async fn session<C: Controller>(
             }
             // The pump's frames, latest wins: the outbox holds one of each kind per board until
             // the stream before it has gone to the BLE host.
-            let (frames, release_at) = with(|m| {
+            let (frames, release_at, trace) = with(|m| {
+                let every = if m.arm.armed() {
+                    TRACE_ARMED
+                } else {
+                    TRACE_DISARMED
+                };
+                let trace = if now.wrapping_sub(traced) >= every {
+                    m.session.src().and(m.drive_trace())
+                } else {
+                    None
+                };
                 let f = m.session.src().map(|src| m.outbox.take(src));
-                (f, RELEASE_AT.swap(0, Ordering::Relaxed))
+                (f, RELEASE_AT.swap(0, Ordering::Relaxed), trace)
             });
+            if let Some(t) = trace {
+                traced = now;
+                let _ = LOG.try_send(t);
+            }
             for f in frames.iter().flatten() {
                 wire.send(f);
                 tx_n = tx_n.saturating_add(1);
@@ -183,10 +202,13 @@ async fn session<C: Controller>(
             }
             if release_at != 0 {
                 let us = (Instant::now().as_micros() as u32).wrapping_sub(release_at);
-                println!(
+                let mut line = heapless::String::new();
+                let _ = write!(
+                    line,
                     "handheld: release handed to the BLE host {} us after the Up sample",
                     us
                 );
+                let _ = LOG.try_send(line);
             }
             if now.wrapping_sub(since) >= 1000 {
                 with(|m| {

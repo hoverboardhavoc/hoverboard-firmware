@@ -325,6 +325,45 @@ impl Model {
         core::mem::take(&mut self.released)
     }
 
+    /// One line for the bench log, read just before the link takes the outbox: the arm level, the
+    /// drive in force (the mode the motor controllers store and its `DRIVE_CMD` targets, or the
+    /// refusal), and each `DRIVE_CMD` due as kind, value and steer per board. `None` when no
+    /// `DRIVE_CMD` is due.
+    pub fn drive_trace(&self) -> Option<String<160>> {
+        if self.outbox.drive.is_empty() {
+            return None;
+        }
+        let mut s: String<160> = String::new();
+        let _ = write!(
+            s,
+            "drive: {} ",
+            if self.arm.armed() {
+                "armed"
+            } else {
+                "disarmed"
+            }
+        );
+        let mode = self
+            .session
+            .facts()
+            .first()
+            .and_then(|f| f.get(Fact::DriveMode))
+            .and_then(|v| drive::DriveMode::of(v as u8));
+        let _ = match (self.drive(), mode) {
+            (Ok(t), Some(m)) => write!(s, "mode {} to {:02x?}", m.name(), t.drive.as_slice()),
+            (Ok(t), None) => write!(s, "mode none to {:02x?}", t.drive.as_slice()),
+            (Err(r), _) => write!(s, "refused {:?}", r),
+        };
+        for (dst, d) in self.outbox.drive.iter() {
+            let kind = match d.kind {
+                linkctl::DriveKind::Neutral => "Neutral",
+                linkctl::DriveKind::Throttle => "Throttle",
+            };
+            let _ = write!(s, " | {:#04x} {} {} {}", dst, kind, d.value, d.steer);
+        }
+        Some(s)
+    }
+
     /// The throttle overlay (section 5.7): while armed and the touch is `Down` or `Lifting`, the
     /// zero line at `y0` and the thumb at `yf`, in pixels, `live` in `Down`, and the demand as a
     /// signed percent.
@@ -1117,7 +1156,11 @@ mod tests {
         assert!(m.run_pump(now));
         assert_eq!(m.outbox.drive.len(), 2);
         assert_eq!(m.outbox.drive[0].1.kind, linkctl::DriveKind::Neutral);
+        let trace = m.drive_trace().expect("a DRIVE_CMD is due");
+        assert!(trace.starts_with("drive: disarmed mode "), "{}", trace);
+        assert_eq!(trace.matches("Neutral 0 0").count(), 2, "{}", trace);
         m.outbox = Outbox::default();
+        assert_eq!(m.drive_trace(), None);
         hold_band(&mut m, now);
         use crate::touch::SUB;
         m.touch = TouchView {
@@ -1138,6 +1181,9 @@ mod tests {
             })
         );
         assert!(!m.take_release());
+        let trace = m.drive_trace().expect("a DRIVE_CMD is due");
+        assert!(trace.starts_with("drive: armed mode "), "{}", trace);
+        assert_eq!(trace.matches("Throttle 32767 0").count(), 2, "{}", trace);
         // A release goes out at once, and is reported as one.
         m.outbox = Outbox::default();
         m.touch.drive = None;

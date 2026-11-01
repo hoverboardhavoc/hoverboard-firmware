@@ -3,7 +3,10 @@
 //!
 //! Tasks (section 6.2): the touch sampler on an interrupt executor above the main one, so a
 //! display transfer never delays a sample; the BLE host and the link (framing, walk, ride facts,
-//! inbox) and the view on the main executor. They share one [`Model`] behind a lock.
+//! inbox) on the main executor; the view alone on the second core's executor, so a frame drawn
+//! over the blocking display SPI never delays the link (a frame can take hundreds of ms, and on a
+//! shared executor the link waited for it, release included). They share one [`Model`] behind a
+//! lock.
 #![no_std]
 #![no_main]
 // The test-pattern build stops after the pattern and leaves the rest of the boot unused.
@@ -19,6 +22,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
@@ -34,11 +38,12 @@ use esp_hal::ledc::timer::{self, TimerIFace};
 use esp_hal::ledc::{LSGlobalClkSource, Ledc, LowSpeed};
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::spi::Mode;
+use esp_hal::system::Stack;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
-use esp_rtos::embassy::InterruptExecutor;
+use esp_rtos::embassy::{Executor, InterruptExecutor};
 use mipidsi::interface::SpiInterface;
 use mipidsi::models::ILI9341Rgb565;
 use mipidsi::options::{ColorOrder, Orientation};
@@ -89,6 +94,10 @@ static PWM_TIMER: StaticCell<esp_hal::ledc::timer::Timer<'static, LowSpeed>> = S
 
 /// Wakes the link when the pump has put frames in the outbox.
 pub static PUMP: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Lines the link logs while connected, printed by the second core: a UART print waits on the
+/// FIFO, about 87 us a byte at 115200 baud, and the link must not wait on it. A full queue drops
+/// the line.
+pub static LOG: Channel<CriticalSectionRawMutex, heapless::String<160>, 8> = Channel::new();
 /// When the sample that released the throttle was taken (µs, low 32 bits; 0 for none): the link
 /// logs the time to the frames it hands the BLE host (section 7.2 check 6).
 pub static RELEASE_AT: AtomicU32 = AtomicU32::new(0);
@@ -107,7 +116,10 @@ impl Led {
         let _ = self.green.set_duty(g);
     }
 }
-static SAMPLER: StaticCell<InterruptExecutor<1>> = StaticCell::new();
+static SAMPLER: StaticCell<InterruptExecutor<2>> = StaticCell::new();
+/// The second core's stack and executor: the view runs there alone.
+static VIEW_STACK: StaticCell<Stack<16384>> = StaticCell::new();
+static VIEW_EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
@@ -223,7 +235,7 @@ async fn main(spawner: Spawner) {
     let irq = Input::new(p.GPIO36, InputConfig::default().with_pull(Pull::None));
     let touch = xpt2046::Xpt2046::new(tspi, tcs, irq);
 
-    let sampler = SAMPLER.init(InterruptExecutor::new(sw.software_interrupt1));
+    let sampler = SAMPLER.init(InterruptExecutor::new(sw.software_interrupt2));
     sampler.start(Priority::Priority1).must_spawn(sample(touch));
 
     // The test pattern stays on the panel: no view, no link.
@@ -233,7 +245,19 @@ async fn main(spawner: Spawner) {
         let _ = (&bl, &panel, &led);
     }
     #[cfg(not(feature = "test-pattern"))]
-    spawner.must_spawn(view(panel, led));
+    esp_rtos::start_second_core(
+        p.CPU_CTRL,
+        sw.software_interrupt1,
+        VIEW_STACK.init(Stack::new()),
+        move || {
+            VIEW_EXECUTOR.init(Executor::new()).run(|s| {
+                s.must_spawn(view(panel));
+                s.must_spawn(logger());
+            });
+        },
+    );
+    #[cfg(not(feature = "test-pattern"))]
+    spawner.must_spawn(led_task(led));
     if let Some(c) = connector {
         let controller: ExternalController<_, 20> = ExternalController::new(c);
         link::run(controller, BRIDGE.unwrap_or([0; 6])).await;
@@ -303,6 +327,31 @@ async fn sample(mut dev: TouchDev) {
     }
 }
 
+/// The LED follows the arm level, on the main executor: the LEDC channels are not `Send`, so they
+/// cannot move to the second core with the view.
+#[embassy_executor::task]
+async fn led_task(mut led: Led) {
+    let mut lit = false;
+    let mut ticker = Ticker::every(Duration::from_millis(40));
+    loop {
+        ticker.next().await;
+        let armed = with(|m| m.arm.armed());
+        if lit != armed {
+            lit = armed;
+            led.set(armed);
+        }
+    }
+}
+
+/// Print the link's lines (see [`LOG`]).
+#[embassy_executor::task]
+async fn logger() {
+    loop {
+        let line = LOG.receive().await;
+        println!("{}", line);
+    }
+}
+
 /// One short log line of the view.
 fn log_view(v: &handheld_core::model::View, debug: &(heapless::String<40>, heapless::String<40>)) {
     use handheld_core::model::{Body, Lower};
@@ -353,12 +402,12 @@ fn log_view(v: &handheld_core::model::View, debug: &(heapless::String<40>, heapl
 
 /// The view: at most 25 redraws a second, each drawing only what changed.
 #[embassy_executor::task]
-async fn view(mut panel: Panel, mut led: Led) {
+async fn view(mut panel: Panel) {
     let mut cache = panel::Cache::default();
     let mut drawn_overlay: Option<handheld_core::model::Overlay> = None;
-    let mut led_armed = false;
     let mut ticker = Ticker::every(Duration::from_millis(40));
     let mut logged = 0u32;
+    let mut slow_logged = 0u32;
     loop {
         ticker.next().await;
         let now = now_ms();
@@ -368,6 +417,7 @@ async fn view(mut panel: Panel, mut led: Led) {
             logged = now;
             log_view(&v, &debug);
         }
+        let started = Instant::now();
         let dbg = cfg!(debug_assertions) || cfg!(feature = "debug-line");
         let d = dbg.then_some((debug.0.as_str(), debug.1.as_str()));
         if drawn_overlay != overlay {
@@ -382,9 +432,14 @@ async fn view(mut panel: Panel, mut led: Led) {
         if let Some(o) = &overlay {
             panel::draw_overlay(&mut panel, o);
         }
-        if led_armed != v.armed {
-            led_armed = v.armed;
-            led.set(v.armed);
+        // A frame's drawing longer than the 40 ms period, at most a line a second. Drawing is
+        // synchronous over the blocking SPI (mipidsi's `draw_iter` sets a window per pixel); on the
+        // executor the link shared, the link waited for it (`arm-hold-1130.log`: releases handed
+        // over 100 to 745 ms late during armed drags).
+        let took = started.elapsed().as_millis();
+        if took > 40 && now.wrapping_sub(slow_logged) >= 1000 {
+            slow_logged = now;
+            println!("view: frame took {} ms", took);
         }
     }
 }
