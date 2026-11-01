@@ -14,7 +14,7 @@ import kotlin.math.roundToInt
  *   the board's own counter sense.
  * @param polePairs `motors.0.pole_pairs`, null while unread and 0 while unset.
  * @param diameterMm `motors.0.wheel_diameter_mm`, null while unread and 0 while unset.
- * @param side `control.side`, null while unread; [Fields.ControlSide.RIGHT] mirrors the rate.
+ * @param side motor 0's `side`, null while unread; [Fields.ControlSide.RIGHT] mirrors the rate.
  */
 data class SpeedFacts(
     val address: Int,
@@ -72,7 +72,7 @@ sealed interface SpeedReading {
         const val WHEEL_DIAMETER = "motors.0.wheel_diameter_mm"
 
         /** The CLI name of [SpeedFacts.side]'s field. */
-        const val SIDE = "control.side"
+        const val SIDE = "motors.0.side"
 
         private const val TENTHS = 10.0
         private const val WHOLE_FROM_TENTHS = 100
@@ -89,7 +89,7 @@ private fun kmh(rateQ12: Int, polePairs: Int, diameterMm: Int, right: Boolean): 
 
 /**
  * The machine's speed: the MEAN of the reporting boards' speeds, each turned into the machine's
- * forward sense by its own `control.side` (the fold `control::wheel_forward` applies on the board),
+ * forward sense by its own motor's `side` (the fold `control::wheel_forward` applies on the board),
  * since the two wheels of a machine turn opposite ways in their own senses.
  *
  * A speed only when every reporting board has all three facts; otherwise [SpeedReading.NoSpeed]

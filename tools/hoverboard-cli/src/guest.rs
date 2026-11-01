@@ -1,7 +1,7 @@
-//! The console as an L3 guest (`specs/hoverboard-bridge.md`, "`watch` and `drive`"): attach with
-//! `NODE_HELLO` to the node on the link, tally the `CYCLIC_STATE` frames the board emits on its
-//! mailbox port (the bridge re-publishes them on every controller link), and build the `DRIVE_CMD`
-//! and `INPUTS` frames `drive` sends.
+//! The console as an L3 guest (`specs/hoverboard-bridge.md`, "`watch` and `drive`"; `machine watch`
+//! and `machine drive` on the command line): attach with `NODE_HELLO` to the node on the link, tally
+//! the `CYCLIC_STATE` frames the board emits on its mailbox port (the bridge re-publishes them on
+//! every controller link), and build the `DRIVE_CMD` and `INPUTS` frames `drive` sends.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -12,10 +12,19 @@ use net::walk::Controller;
 
 use crate::wire::Wire;
 
+/// What an attach learned from the `NODE_HELLO` reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attached {
+    /// The guest address the node granted.
+    pub guest: u8,
+    /// The node's own address, `None` for a node with none yet (`Controller::gateway_addr`).
+    pub node: Option<u8>,
+}
+
 /// Attach to the node at the other end of `wire` (the bridge, or a board's own BLE module): send
-/// `NODE_HELLO` (dst `0x00`, the one peer) up to `tries` times, `within` apart, and return the guest
-/// address it grants. Every other packet that arrives meanwhile is dropped.
-pub fn attach<W: Wire>(wire: &mut W, tries: u32, within: Duration) -> Option<u8> {
+/// `NODE_HELLO` (dst `0x00`, the one peer) up to `tries` times, `within` apart. Every other packet
+/// that arrives meanwhile is dropped.
+pub fn attach<W: Wire>(wire: &mut W, tries: u32, within: Duration) -> Option<Attached> {
     for _ in 0..tries {
         let mut c = Controller::new();
         let hello = c
@@ -25,7 +34,10 @@ pub fn attach<W: Wire>(wire: &mut W, tries: u32, within: Duration) -> Option<u8>
         let deadline = Instant::now() + within;
         while let Some(pkt) = wire.recv(deadline.saturating_duration_since(Instant::now())) {
             if c.on_reply(&pkt) {
-                return c.granted();
+                return Some(Attached {
+                    guest: c.granted()?,
+                    node: c.gateway_addr(),
+                });
             }
         }
     }
@@ -94,6 +106,11 @@ impl Tally {
             }
         }
         true
+    }
+
+    /// The last frame heard from `src`.
+    pub fn last(&self, src: u8) -> Option<&CyclicState> {
+        self.sources.get(&src).map(|s| &s.last)
     }
 
     /// Frames from `src` so far.

@@ -43,6 +43,7 @@ fn state(mode: u8, peer_demand: i16, battery: u16) -> CyclicState {
             odometer: 0,
         },
         wheel_rate: 0,
+        machine: 0,
     }
 }
 
@@ -231,7 +232,7 @@ impl Wire for Board {
                     Opcode::NodeHello.to_u8(),
                     0x01,
                     dst,
-                    &[0x01, PROTO_VER, 0, 0, 0x10, addr],
+                    &[0x01, PROTO_VER, addr],
                 )
             };
             self.inbox.push_back(cyclic(0x01, &state(3, 0, 310)));
@@ -254,7 +255,14 @@ fn attach_sends_node_hello_to_the_one_peer_and_adopts_the_grant() {
         inbox: VecDeque::new(),
         answer_on: 2,
     };
-    assert_eq!(attach(&mut b, 3, ms(1)), Some(0x88));
+    // The grant, and the node's own address from the reply.
+    assert_eq!(
+        attach(&mut b, 3, ms(1)),
+        Some(hoverboard_cli::guest::Attached {
+            guest: 0x88,
+            node: Some(0x01)
+        })
+    );
     assert_eq!(b.sent.len(), 2);
     for f in &b.sent {
         let p = Pdu::decode(f).unwrap();
@@ -311,7 +319,7 @@ fn serve_board(listener: TcpListener, run: Duration) -> Vec<Vec<u8>> {
                     Opcode::NodeHello.to_u8(),
                     0x01,
                     p.src,
-                    &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
+                    &[0x01, PROTO_VER, 0x88],
                 );
                 w.send(&g);
                 t0 = Some(Instant::now());
@@ -350,7 +358,7 @@ fn the_binary_drives_over_tcp_and_prints_the_watch_line() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
     let board = std::thread::spawn(move || serve_board(listener, Duration::from_secs(5)));
-    let (ok, out, err) = cli(&[&tcp, "drive", "300", "2", "0x01"]);
+    let (ok, out, err) = cli(&[&tcp, "machine", "drive", "300", "2", "0x01"]);
     assert!(ok, "{err}");
     assert!(err.contains("attached as guest 0x88"), "{err}");
     let lines: Vec<&str> = out.lines().collect();
@@ -401,7 +409,7 @@ fn the_binary_watches_over_tcp_and_sends_nothing_after_the_attach() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
     let board = std::thread::spawn(move || serve_board(listener, Duration::from_secs(4)));
-    let (ok, out, err) = cli(&[&tcp, "watch", "2", "0x01", "0x02"]);
+    let (ok, out, err) = cli(&[&tcp, "machine", "watch", "2", "0x01", "0x02"]);
     assert!(ok, "{err}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 4, "{out}");

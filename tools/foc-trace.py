@@ -3,15 +3,23 @@
 
 The bench sampler of specs/foc-torque.md sections 7 and 10. The rover and the offroad pair are
 reached only through their bridges (specs/hoverboard-bridge.md; the OpenOCD tools do not reach
-them), so this polls `hoverboard-cli read` of the whole CTRL_OBS block, at up to 10 Hz, and never
-halts the core: the bridge reads RAM through the MEM-AP exactly as tools/motor-trace.py's OpenOCD
-does.
+them), so this samples the whole CTRL_OBS block through one `hoverboard-cli board read <board>
+<addr> <len> --hz <n>` process, at up to 10 Hz, and never halts the core: the bridge wired to the
+board reads RAM through the MEM-AP exactly as tools/motor-trace.py's OpenOCD does. That process
+finds the bridge once and streams on one connection (specs/board-route.md section 2), so --board
+takes any target (an address, a device.name or a uid prefix) at no cost per sample. The rate comes
+from the stream: each row's time is when the bridge read it, and a slot the bridge could not keep
+up with is skipped, never made up.
 
 Usage:
-    tools/foc-trace.py --tcp HOST:PORT (--cal-node NODE | --cal COUNTS) [--node BRIDGE] [--hz 10]
+    tools/foc-trace.py --tcp HOST:PORT --board BOARD [--cal COUNTS] [--hz 10]
                        [--csv FILE] [--elf PATH] [--frame DIRECTION ALIGN_OFFSET]
                        [--cli PATH]
-    (--serial DEVICE or --device NAME in place of --tcp, as hoverboard-cli takes them)
+    (--serial DEVICE or --device NAME in place of --tcp, as hoverboard-cli takes them; BOARD is a
+    hoverboard-cli target: an address, a device.name or a uid prefix)
+
+The cal and FOC_GAINS reads are one `hoverboard-cli` call each before the stream starts, since the
+bridge's console serves one connection at a time.
 
 Ctrl-C to stop. It takes no bench lock: it touches no probe, only the bridge, and the gate
 session it samples for holds the lock (specs/foc-torque.md section 10).
@@ -20,19 +28,19 @@ What it prints, per sample (words of motorcontroller/firmware/src/main.rs `CtrlO
 tools/swdobs.py word map, which owns the indices):
 
 - word 11, the torque word the demand produced (the throttle conditioner sits between
-  `hoverboard-cli drive <value>` and it, so every gate criterion refers to this number);
+  `hoverboard-cli machine drive <value>` and it, so every gate criterion refers to this number);
 - word 20, the motor's method byte (2 = FOC); word 23, the FAULT bits;
 - word 22's angle, word 24's edge count and word 39's period-based rate;
 - word 31, the window's peak magnitude, `chopped` and `trips`;
 - words 47 to 49, the FOC observation, every one a 64-period window mean (specs/foc-torque.md
   section 7): `ia`, `ib` (every method), `id`, `iq`, `iq_ref` and `vq` (0 unless FOC), in counts
-  and, for the currents, in amps at the board's own `motor.current_cal` (0x67), read off it at
-  stand-up with `hoverboard-cli config` (or given with --cal, and then said so).
+  and, for the currents, in amps at the board's own `motors[0].current.cal` (0x4C), read off it at
+  stand-up with `hoverboard-cli board get` (or given with --cal, and then said so).
 
 The CSV adds word 11's mode byte.
 
-With --frame DIRECTION ALIGN_OFFSET (the board's staged `motor.direction` 0x62 and
-`motor.align_offset` 0x63), it also runs the crate's own Clarke and forward Park on this host over
+With --frame DIRECTION ALIGN_OFFSET (the board's staged `motors.<i>.direction` 0x4F and
+`motors.<i>.align_offset` 0x51), it also runs the crate's own Clarke and forward Park on this host over
 word 47 at `angle + angle_path_offset(direction, align_offset)`, bit-exact to
 motorcontroller/commutation (`clarke`, `park_forward`, `lookup_sincos`, `angle_path_offset`): gate O2's
 reading, in sine, with the rotor held. The angle is word 22's instantaneous one and the currents a
@@ -53,7 +61,6 @@ import re
 import signal
 import subprocess
 import sys
-import time
 
 from swdobs import (
     CTRL_MAGIC, CTRL_OBS_WORDS, DEFAULT_ELF, REPO, W_DUTY2_ANGLE, W_FOC_DQ_MEAN, W_FOC_HOLD,
@@ -145,12 +152,15 @@ def host_frame(ia, ib, angle, direction, align_offset):
 # The bridge read and the decode.
 # --------------------------------------------------------------------------------------------------
 HEXDUMP_RE = re.compile(r"^([0-9a-fA-F]{8}):((?: [0-9a-fA-F]{2})+)\s*$")
-# `hoverboard-cli config <node> 0x67.0` prints `0x67.0 at 0x01 (name): ok 455 (0x01c7)`.
-CONFIG_RE = re.compile(r"^0x([0-9a-fA-F]+)\.(\d+) at .*?: (.+?)(?: (-?\d+)(?: \(0x[0-9a-fA-F]+\))?)?\s*$")
+# `board read --hz`'s line: the seconds since the stream started, then the bytes as hex.
+SAMPLE_RE = re.compile(r"^(\d+\.\d{3}) ([0-9a-fA-F]*)$")
+# `hoverboard-cli board get <board> 0x4c.0` prints `<name>: motors[0].current.cal = 455`, with
+# ` (default)` after the value when the board stores none.
+GET_RE = re.compile(r"^.+?: \S+ = (-?\d+)(?: \(default\))?\s*$")
 
 
 def parse_hexdump(text, addr, length):
-    """The bytes of `hoverboard-cli read <addr> <len>` (its `%08x: bb bb ...` rows, 16 to a row).
+    """The bytes of `hoverboard-cli board read <board> <addr> <len>` (its `%08x: bb bb ...` rows, 16 to a row).
     Raises RuntimeError on a short, non-contiguous or unparsable answer."""
     data = bytearray()
     for line in text.splitlines():
@@ -166,19 +176,28 @@ def parse_hexdump(text, addr, length):
     return bytes(data)
 
 
+def parse_sample(line, length):
+    """One line of `hoverboard-cli board read <board> <addr> <len> --hz <n>`: (seconds since the
+    stream started, the bytes). Raises RuntimeError on a line of another shape or length."""
+    m = SAMPLE_RE.match(line.strip())
+    if not m or len(m.group(2)) != 2 * length:
+        raise RuntimeError(f"not a {length} B sample line: {line.strip()[-200:]!r}")
+    return float(m.group(1)), bytes.fromhex(m.group(2))
+
+
 def words_le(data):
     """Little-endian u32 words of a byte string whose length is a multiple of four."""
     return [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
 
 
-def parse_config(text, field):
-    """(status, value) of `hoverboard-cli config`'s line for `field` (value None on a refusal);
-    (None, None) when no such line was printed."""
+def parse_get(text):
+    """The value of `hoverboard-cli board get`'s line for an integer field, stored or default;
+    None when no such line was printed."""
     for line in text.splitlines():
-        m = CONFIG_RE.match(line.strip())
-        if m and int(m.group(1), 16) == field:
-            return m.group(3), int(m.group(4)) if m.group(4) is not None else None
-    return None, None
+        m = GET_RE.match(line.strip())
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def decode(w, cal, frame=None):
@@ -230,40 +249,51 @@ def find_cli(given):
 
 
 class Bridge:
-    """`hoverboard-cli` over one link. `run(argv)` returns the subprocess shape (`.returncode`,
-    `.stdout`, `.stderr`), so a test passes a fake instead of a bridge."""
+    """`hoverboard-cli` over one link, to one board. `run(argv)` returns the subprocess shape
+    (`.returncode`, `.stdout`, `.stderr`) and `popen(argv)` a running process with text `.stdout`
+    and `.stderr`, so a test passes fakes instead of a bridge."""
 
-    def __init__(self, cli, link, node=None, run=None):
-        self.cli, self.link, self.node = cli, list(link), node
-        self.run = run or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=10))
+    def __init__(self, cli, link, board, run=None, popen=None):
+        self.cli, self.link, self.board = cli, list(link), board
+        self.run = run or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=30))
+        self.popen = popen or (lambda argv: subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1))
 
-    def argv(self, *cmd, node=True):
-        a = [self.cli] + self.link
-        if node and self.node:
-            a += ["--node", self.node]
-        return a + [str(c) for c in cmd]
+    def argv(self, *cmd):
+        return [self.cli] + self.link + [str(c) for c in cmd]
 
     def read(self, addr, length):
-        r = self.run(self.argv("read", f"0x{addr:08x}", length))
+        r = self.run(self.argv("board", "read", self.board, f"0x{addr:08x}", length))
         if r.returncode != 0:
-            raise RuntimeError(f"hoverboard-cli read failed: {(r.stderr or r.stdout).strip()[-200:]}")
+            raise RuntimeError(f"hoverboard-cli board read failed: {(r.stderr or r.stdout).strip()[-200:]}")
         return parse_hexdump(r.stdout, addr, length)
 
     def read_words(self, addr, count):
         return words_le(self.read(addr, 4 * count))
 
-    def config_read(self, node, field, index=0):
-        # `config` walks the machine and addresses the node itself, so no --node.
-        r = self.run(self.argv("config", node, f"0x{field:02x}.{index}", node=False))
-        return parse_config(r.stdout, field)
+    def stream_words(self, addr, count, hz):
+        """(seconds, words) per sample of `board read --hz`, from one process, until it ends;
+        then RuntimeError with what it said. The process is ended when this tool exits."""
+        p = self.popen(self.argv("board", "read", self.board, f"0x{addr:08x}", 4 * count, "--hz", f"{hz:g}"))
+        atexit.register(p.kill)
+        for line in p.stdout:
+            t, data = parse_sample(line, 4 * count)
+            yield t, words_le(data)
+        p.wait()
+        raise RuntimeError(f"the board read stream ended: {p.stderr.read().strip()[-200:]}")
+
+    def get(self, field, index=0):
+        """`board get` of `<field>.<index>` on the board: (value or None, what it printed)."""
+        r = self.run(self.argv("board", "get", self.board, f"0x{field:02x}.{index}"))
+        return parse_get(r.stdout) if r.returncode == 0 else None, (r.stderr or r.stdout).strip()
 
 
-def read_cal(bridge, node):
-    """`motor.current_cal` (0x67) of motor 0 on `node`: (raw, effective). Exits when it cannot."""
-    status, value = bridge.config_read(node, CURRENT_CAL_FIELD)
-    if status != "ok" or value is None:
-        sys.exit(f"{TOOL}: reading 0x67.0 on {node} failed (status {status}); give --cal to scale "
-                 "the amps columns by hand")
+def read_cal(bridge):
+    """`motors[0].current.cal` (0x4C) of the board: (raw, effective). Exits when it cannot."""
+    value, said = bridge.get(CURRENT_CAL_FIELD)
+    if value is None:
+        sys.exit(f"{TOOL}: reading 0x4C.0 on {bridge.board} failed ({said[-200:]}); give --cal to "
+                 "scale the amps columns by hand")
     return value, clamp_current_cal(value)
 
 
@@ -322,56 +352,52 @@ def main(argv=None):
     link.add_argument("--tcp", help="HOST:PORT of the bridge's console (<name>.local:5333)")
     link.add_argument("--serial", help="the bridge's USB console device")
     link.add_argument("--device", help="the bridge's BLE name or address")
-    ap.add_argument("--node", help="read through the bridge at this node rather than the one on the "
-                    "link (hoverboard-cli --node: an ESP command, reached through the boards)")
-    ap.add_argument("--hz", type=float, default=10.0, help="sample rate, at most 10")
+    ap.add_argument("--board", required=True, help="the sampled board, as a hoverboard-cli target "
+                    "(an address, a device.name or a uid prefix): its bridge reads it, and its 0x4C.0 "
+                    "scales the amps unless --cal is given")
+    ap.add_argument("--hz", type=float, default=10.0, help="the rate the stream is asked for, at most 10")
     ap.add_argument("--csv", default=None)
     ap.add_argument("--elf", default=DEFAULT_ELF)
     ap.add_argument("--cli", default=None, help="the hoverboard-cli binary")
-    cal = ap.add_mutually_exclusive_group()
-    cal.add_argument("--cal-node", help="the sampled board's node (address or device.name), whose "
-                     "0x67.0 scales the amps")
-    cal.add_argument("--cal", type=int, help="counts per amp, given rather than read off the board")
+    ap.add_argument("--cal", type=int, help="counts per amp, given rather than read off the board")
     ap.add_argument("--frame", nargs=2, type=int, metavar=("DIRECTION", "ALIGN_OFFSET"),
                     help="run Clarke and Park on the host over word 47 (gate O2)")
     args = ap.parse_args(argv)
     if not 0 < args.hz <= 10:
-        sys.exit(f"{TOOL}: --hz {args.hz}: the bridge read is polled at up to 10 Hz")
+        sys.exit(f"{TOOL}: --hz {args.hz}: the bridge read is streamed at up to 10 Hz")
 
     ctrl, gains = resolve(args.elf)
     link_args = (["--tcp", args.tcp] if args.tcp else
                  ["--serial", args.serial] if args.serial else ["--device", args.device])
-    bridge = Bridge(find_cli(args.cli), link_args, args.node)
+    bridge = Bridge(find_cli(args.cli), link_args, args.board)
 
     if args.cal is not None:
         cpa, cal_note = clamp_current_cal(args.cal), f"--cal {args.cal} counts per amp (given, not read)"
     else:
-        # The board's own node, not --node: that names the bridge the read goes through.
-        node = args.cal_node
-        if not node:
-            sys.exit(f"{TOOL}: the amps need the board's 0x67: give --cal-node (its address or "
-                     "device.name, as `hoverboard-cli nodes` lists it) or --cal")
-        raw, cpa = read_cal(bridge, node)
-        cal_note = f"motor.current_cal (0x67) on {node} = {raw} counts per amp"
+        raw, cpa = read_cal(bridge)
+        cal_note = f"motors[0].current.cal (0x4C) on {args.board} = {raw} counts per amp"
         if cpa != raw:
             cal_note += f", which the firmware's boot seam clamps to {cpa}"
 
+    if gains is None:
+        gains_note = "FOC_GAINS: absent from the ELF"
+    else:
+        try:
+            gains_note = gains_text(gains, bridge.read_words(gains, len(FOC_GAIN_FIELDS)))
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+            gains_note = f"FOC_GAINS at 0x{gains:08x} (its values could not be read: {e})"
+
+    samples = bridge.stream_words(ctrl, CTRL_OBS_WORDS, args.hz)
     try:
-        first = bridge.read_words(ctrl, CTRL_OBS_WORDS)
-    except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+        t, first = next(samples)
+    except (RuntimeError, OSError) as e:
         sys.exit(f"{TOOL}: {e}")
     if first[0] != CTRL_MAGIC:
         sys.exit(f"{TOOL}: CTRL_OBS magic is 0x{first[0]:08x}, expected 0x{CTRL_MAGIC:08x}.\n"
                  "  The flashed image is not the one at --elf, so every address here is wrong.")
 
     print(f"elf={os.path.relpath(args.elf, REPO)} CTRL_OBS at 0x{ctrl:08x}, {args.hz} Hz, Ctrl-C to stop")
-    if gains is None:
-        print("FOC_GAINS: absent from the ELF")
-    else:
-        try:
-            print(gains_text(gains, bridge.read_words(gains, len(FOC_GAIN_FIELDS))))
-        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
-            print(f"FOC_GAINS at 0x{gains:08x} (its values could not be read: {e})")
+    print(gains_note)
     print(f"  {cal_note}: the A columns are counts / {cpa}.")
     print("  torque = CTRL_OBS word 11, the word the demand produced; me = word 20's method (2 FOC).")
     print("  ia ib = word 47, the mean phase currents (every method); id iq = word 48 and iqref vq =")
@@ -396,26 +422,10 @@ def main(argv=None):
 
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    t0 = time.time()
-    period = 1.0 / args.hz
-    failed = row_n = 0
+    row_n = 0
     w = first
     while True:
-        loop_start = time.time()
-        if w is None:
-            try:
-                w = bridge.read_words(ctrl, CTRL_OBS_WORDS)
-            except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
-                # One lost read on the wireless link is a dropped sample; a run of them is the link.
-                failed += 1
-                print(f"  -- sample dropped ({e})", flush=True)
-                if failed >= 5:
-                    sys.exit(f"{TOOL}: five consecutive reads failed, the link is gone")
-                continue
-        failed = 0
         r = decode(w, cpa, frame)
-        w = None
-        t = time.time() - t0
         if row_n and row_n % 25 == 0:
             print(hdr)
         print(row_text(t, r), flush=True)
@@ -424,9 +434,10 @@ def main(argv=None):
             vals += [r[c] for c in FRAME_COLUMNS] if frame else []
             writer.writerow([f"{v:.4f}" if isinstance(v, float) else v for v in vals])
         row_n += 1
-        slack = period - (time.time() - loop_start)
-        if slack > 0:
-            time.sleep(slack)
+        try:
+            t, w = next(samples)
+        except (RuntimeError, OSError) as e:
+            sys.exit(f"{TOOL}: {e}")
 
 
 if __name__ == "__main__":

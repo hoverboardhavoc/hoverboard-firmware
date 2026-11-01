@@ -22,8 +22,8 @@
 //! comes from the shipped ELF's `.stack_sizes` and from the board's own boot paint
 //! (`specs/firmware.md`, "RAM/stack budget"). What transfers is the store code the two images share,
 //! and only where a gate states a DIFFERENCE between two scenarios run on this one image: the
-//! registry `lookup`'s marginal cost (`dynamic_config_write_costs_no_extra_stack_chip1k`) and the
-//! compaction chain's marginal staging (`compaction_costs_no_record_sized_stack_chip1k`). A stack
+//! registry `lookup`'s marginal cost (`dynamic_config_write_costs_no_extra_stack_f130c8`) and the
+//! compaction chain's marginal staging (`compaction_costs_no_record_sized_stack_f130c8`). A stack
 //! regression in either of those is a CI failure here rather than a bench discovery. Anything else
 //! on the firmware's chain, `service_loop`, `ingest`, the resolvers, the ISRs, is not in this image
 //! and is not gated here.
@@ -45,7 +45,7 @@ use unicorn_engine::{Arch, ArmCpuModel, HookType, Mode, Prot, RegisterARM, Unico
 use crate::fmc_board::{attach, FLASH_BASE};
 use crate::fmc_model::FmcModel;
 
-/// Flash window to map: 256 KiB, covering the chip2k store region at the top of the 256 KiB extent
+/// Flash window to map: 256 KiB, covering the GD32F103RC store region at the top of the 256 KiB extent
 /// (`0x0803_F000`) as well as the low-flash code. A 4 KiB-multiple, the `mem_protect` unit.
 const FLASH_SIZE: u64 = 256 * 1024;
 /// GD32 RAM base.
@@ -89,10 +89,10 @@ pub struct StoreEmu {
 
 impl StoreEmu {
     /// Build a persistent emulator for a part with `page_size` (1024 or 2048) and a `flash_size`
-    /// (the chip's flash EXTENT in bytes: 64 KiB for chip1k, 256 KiB for chip2k) and load `image`
+    /// (the chip's flash EXTENT in bytes: 64 KiB for the GD32F103C8 and GD32F130C8, 256 KiB for the GD32F103RC) and load `image`
     /// once. The store region is the top two pages of that EXTENT (NOT of the mapped window):
     /// `store_base = (FLASH_BASE + flash_size) - 2 * page_size`, matching the on-target `FmcFlash`
-    /// geometry for the corresponding `Chip` (chip1k -> `0x0800_F800`; chip2k -> `0x0803_F000`).
+    /// geometry for the corresponding `Chip` (64 KiB -> `0x0800_F800`; 256 KiB -> `0x0803_F000`).
     ///
     /// Unicorn maps memory zero-initialized, but erased NOR flash reads `0xFFFF`, and the store's
     /// virgin-region logic + the FMC model's write-once both depend on that, so the whole mapped flash

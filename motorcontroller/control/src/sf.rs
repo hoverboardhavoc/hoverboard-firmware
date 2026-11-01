@@ -20,7 +20,7 @@ use crate::config::sf::{
 use crate::helpers::clamp_sym;
 use base::TORQUE_FULL_SCALE;
 
-/// The `pos_clamp` seam ceiling, edges (`store::CONTROL_POS_CLAMP`, 0x7C; section 6): 450 edges is
+/// The `pos_clamp` seam ceiling, edges (`store::CONTROL_POS_CLAMP`, 0x2A; section 6): 450 edges is
 /// five wheel turns, 2.6 m on the rover's 165 mm wheel. The clamp is the whole bound on what a
 /// held push or a stuck wheel can wind into the position term, so the ceiling keeps that bound a
 /// few metres; it also sizes `P` (`450 * 20480` fits `i32` with room, the overflow bound of
@@ -96,8 +96,8 @@ pub struct SfInputs {
     pub in_run: bool,
 }
 
-/// The configuration the law runs at: the shadow's gain row (`CONTROL_SF_GAINS`, 0x79), the
-/// reference row (`CONTROL_REFERENCE`, 0x7B) and the position clamp (`CONTROL_POS_CLAMP`, 0x7C).
+/// The configuration the law runs at: the shadow's gain row (`CONTROL_SF_GAINS`, 0x27), the
+/// reference row (`CONTROL_REFERENCE`, 0x29) and the position clamp (`CONTROL_POS_CLAMP`, 0x2A).
 /// The ranges are the seams' (section 6); the arithmetic here holds for any `i16`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SfConfig {

@@ -20,7 +20,7 @@
 //!    plants, so mock / Unicorn / silicon are byte-identical (DoD #5).
 //!
 //! The two 1 KiB bench parts (F103 master via ST-Link, F130 slave via dap42 CMSIS-DAP) run the
-//! `--features chip1k` image over this driver. The 12-FET 2 KiB part is a DEFERRED bench task (see
+//! `--features gd32f103c8` or `gd32f130c8` image over this driver. The 12-FET 2 KiB part is a DEFERRED bench task (see
 //! [`Chip2kDeferred`]).
 //!
 //! Bench note: hold `tools/bench-lock.sh` around any call here (one shared physical bench); the binary
@@ -43,15 +43,15 @@ use crate::RunError;
 /// The geometry of the store region for the selected part, derived exactly as the on-target
 /// `FmcFlash` does (`store_base = (FLASH_BASE + flash_size) - 2 * page_size`). `page_size` and
 /// `flash_size` are part-specific driver inputs, NOT hardcoded: the bench parts pick them on the CLI,
-/// consistent with how the `store-test` image picks its `Chip` by build feature (`chip1k` / `chip2k`).
+/// consistent with how the `store-test` image picks its `Chip` by chip feature (`gd32f103c8`, `gd32f130c8`: 1 KiB pages; `gd32f103rc`: 2 KiB).
 ///
-/// chip1k: `page_size = 1024`, `flash_size = 64 KiB` -> `store_base = 0x0800_F800`.
-/// chip2k: `page_size = 2048`, `flash_size = 256 KiB` -> `store_base = 0x0803_F000` (deferred silicon).
+/// 1 KiB parts: `page_size = 1024`, `flash_size = 64 KiB` -> `store_base = 0x0800_F800`.
+/// GD32F103RC: `page_size = 2048`, `flash_size = 256 KiB` -> `store_base = 0x0803_F000` (deferred silicon).
 #[derive(Clone, Copy, Debug)]
 pub struct Part {
     /// The detected page size in bytes (1024 or 2048).
     pub page_size: usize,
-    /// The flash EXTENT in bytes (64 KiB for chip1k, 256 KiB for chip2k).
+    /// The flash EXTENT in bytes (64 KiB for the 1 KiB-page parts, 256 KiB for the GD32F103RC).
     pub flash_size: u32,
 }
 
@@ -65,7 +65,7 @@ impl Part {
     /// The 2 KiB-page 12-FET part (GD32F103RC): 256 KiB flash, 2 KiB pages. Its SILICON run is a
     /// DEFERRED bench task (see [`Chip2kDeferred`]); this constant only documents the geometry and lets
     /// the host-side region builders be exercised for it. The 2 KiB-page LOGIC is already CI-covered by
-    /// the emulated `chip2k` path (Tier 2).
+    /// the emulated GD32F103RC path (Tier 2).
     pub const CHIP2K: Part = Part {
         page_size: 2048,
         flash_size: 256 * 1024,
@@ -89,7 +89,7 @@ impl Part {
 /// Per the storage spec (Tier 3), the 2 KiB-page part (GD32F103RC, 256 KiB) would be driven over
 /// **OpenOCD + the ESP32 elaphureLink** WiFi-SWD bridge, for which `probe-rs` has NO backend
 /// (elaphureLink is not a probe-rs transport), and which is gated on bench hardware. The 2 KiB-page
-/// *logic* is already CI-covered by the emulated `chip2k` path (Tier 2, `emulator-runner`), so only the
+/// *logic* is already CI-covered by the emulated GD32F103RC path (Tier 2, `emulator-runner`), so only the
 /// on-silicon oracle is deferred, not the coverage.
 ///
 /// This is a deliberate, documented gap, NOT a broken stub: the host-side region geometry for the part
@@ -99,7 +99,7 @@ impl Part {
 /// [`Part::CHIP2K`]; nothing else in this driver assumes 1 KiB.
 //
 // DEFERRED: 12-FET (GD32F103RC, 2 KiB) silicon over OpenOCD + ESP32 elaphureLink. probe-rs has no
-// elaphureLink backend; gated on bench hardware. The 2 KiB logic is CI-covered by the emulated chip2k
+// elaphureLink backend; gated on bench hardware. The 2 KiB logic is CI-covered by the emulated GD32F103RC
 // path. See specs/storage-layer.md Tier 3.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -119,7 +119,7 @@ impl StoreDriver {
     ///
     /// `chip` is a probe-rs target name (a GD32 definition with CPUTAPID 0); `probe_selector` is a
     /// probe-rs selector (`VID:PID` or `VID:PID:serial`). Both come from the caller (CLI), as in
-    /// [`run_image`](crate::run_image). `part` is [`Part::CHIP1K`] for the bench parts (chip2k silicon
+    /// [`run_image`](crate::run_image). `part` is [`Part::CHIP1K`] for the bench parts (GD32F103RC silicon
     /// is deferred, see [`Chip2kDeferred`]).
     pub fn attach(
         image: &Path,

@@ -20,17 +20,14 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.config.CfgRefusal
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SetupGroup
 import com.hoverboard.remote.ui.screens.MACHINE_BADGE_TAG
-import com.hoverboard.remote.ui.screens.MACHINE_MODE_TAG
 import com.hoverboard.remote.ui.screens.MACHINE_SECTION_TAG
 import com.hoverboard.remote.ui.screens.SetupScreen
-import com.hoverboard.remote.ui.screens.machineModeTag
-import com.hoverboard.remote.ui.screens.machineModeUseTag
 import com.hoverboard.remote.ui.screens.machineSideTag
 import com.hoverboard.remote.ui.screens.machineWriteTag
 import com.hoverboard.remote.ui.screens.setupAdvancedTag
@@ -45,9 +42,9 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * The Machine section of the Setup screen (`specs/remote-ui.md` 3.2 and 3.7a): the drive mode, the
- * frame and the right wheel, read across every motor controller, written to every one, and badged
- * when the copies disagree. Apart from [SetupScreenTest] only for its size.
+ * The Machine section of the Setup screen (`specs/remote-ui.md` 3.7a): the frame and the right
+ * wheel, read across the motor controllers, written to every one, and badged when the copies
+ * disagree. Apart from [SetupScreenTest] only for its size.
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
@@ -94,12 +91,13 @@ class SetupMachineScreenTest {
         addresses = listOfNotNull(0x01, slaveValues?.let { 0x02 }),
         attached = 0x01,
         boards = buildMap {
-            put(0x01, BoardSetup(values = masterValues, writes = masterWrites))
-            if (slaveValues != null) put(0x02, BoardSetup(values = slaveValues, writes = slaveWrites))
+            val motor = Walk.CLASS_MOTOR
+            put(0x01, BoardSetup(values = masterValues, writes = masterWrites, identity = identityOf(motor, 0x01)))
+            if (slaveValues != null) {
+                put(0x02, BoardSetup(values = slaveValues, writes = slaveWrites, identity = identityOf(motor, 0x02)))
+            }
         },
     )
-
-    private fun modeIs(mode: Int) = mapOf(SetupFields.DRIVE_MODE.key to Value.U8(mode))
 
     private fun frameIs(rigid: Boolean) =
         mapOf(SetupFields.CONTROL_FRAME.key to Value.U8(if (rigid) 1 else 0))
@@ -274,70 +272,5 @@ class SetupMachineScreenTest {
             .assertExists()
         compose.onNode(hasAnyAncestor(hasTestTag(row)) and hasText(s(R.string.setup_write_awaiting_restart)))
             .assertDoesNotExist()
-    }
-
-    // --- the drive mode under Machine (`specs/remote-ui.md` 3.2) ---------------------------------
-
-    /** A drive-mode chip is the write: the model sends it to every motor controller. */
-    @Test
-    fun tappingADriveModeAsksForTheWriteToEveryBoard() {
-        val actions = Recorder()
-        show(machineState(), actions = actions)
-
-        compose.onNodeWithTag(MACHINE_MODE_TAG).performScrollTo().assertExists()
-        compose.onNodeWithTag(machineModeTag(DriveMode.SINGLE)).assertIsSelected()
-        compose.onNodeWithTag(machineModeTag(DriveMode.BOUND)).performScrollTo().performClick()
-        assertTrue("chooseDriveMode:${DriveMode.BOUND.byte}" in actions.calls)
-    }
-
-    /**
-     * Copies that disagree are badged, named per board, select no chip, and offer a one-tap write of
-     * each value the boards hold to every board.
-     */
-    @Test
-    fun differingDriveModesBadgeAndOfferEitherValueToAll() {
-        val actions = Recorder()
-        show(
-            machineState(
-                masterValues = stored + modeIs(DriveMode.BOUND.byte),
-                slaveValues = stored + modeIs(DriveMode.RIGID.byte),
-            ),
-            actions = actions,
-        )
-
-        val verdict = s(R.string.setup_machine_value, "Hoverboard 0x01", s(R.string.drive_mode_bound)) +
-            " " + s(R.string.setup_machine_value, "Hoverboard 0x02", s(R.string.drive_mode_rigid))
-        compose.onNodeWithText(verdict).performScrollTo().assertExists()
-        compose.onAllNodesWithTag(MACHINE_BADGE_TAG).onFirst().assertExists()
-        for (mode in DriveMode.entries) compose.onNodeWithTag(machineModeTag(mode)).assertIsNotSelected()
-
-        compose.onNodeWithTag(machineModeUseTag(DriveMode.RIGID.byte)).performScrollTo().performClick()
-        compose.onNodeWithTag(machineModeUseTag(DriveMode.BOUND.byte)).performScrollTo().performClick()
-        assertEquals(
-            listOf("chooseDriveMode:${DriveMode.RIGID.byte}", "chooseDriveMode:${DriveMode.BOUND.byte}"),
-            actions.calls.filter { it.startsWith("chooseDriveMode") },
-        )
-    }
-
-    /** Copies that agree select their chip, read agree, and carry no badge and no use-value button. */
-    @Test
-    fun agreeingDriveModesSelectTheirChipWithNoBadge() {
-        val both = stored + modeIs(DriveMode.DIFFERENTIAL.byte)
-        show(machineState(masterValues = both, slaveValues = both))
-
-        compose.onNodeWithTag(machineModeTag(DriveMode.DIFFERENTIAL)).performScrollTo().assertIsSelected()
-        compose.onNodeWithText(s(R.string.setup_machine_frame_agree, s(R.string.drive_mode_differential)))
-            .performScrollTo().assertExists()
-        compose.onAllNodesWithTag(MACHINE_BADGE_TAG).assertCountEquals(0)
-        compose.onNodeWithTag(machineModeUseTag(DriveMode.DIFFERENTIAL.byte)).assertDoesNotExist()
-    }
-
-    /** A drive-mode copy left unread reads unknown rather than claiming a mode. */
-    @Test
-    fun anUnreadDriveModeReadsUnknown() {
-        show(machineState(slaveValues = stored - SetupFields.DRIVE_MODE.key))
-
-        compose.onNodeWithText(s(R.string.setup_machine_mode_unknown)).performScrollTo().assertExists()
-        for (mode in DriveMode.entries) compose.onNodeWithTag(machineModeTag(mode)).assertIsNotSelected()
     }
 }

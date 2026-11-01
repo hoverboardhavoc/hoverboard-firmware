@@ -43,3 +43,8 @@ runner = "../tools/board-target-runner.sh"
 # image and the CI image come out of the same invocation.
 [alias]
 image = ["build", "--release", "-p", "firmware", "--target", "thumbv7m-none-eabi", "-Z", "build-std=core,compiler_builtins"]
+# The per-chip images (specs/hal.md section 6): the same build-std release build of `firmware` with
+# one chip feature, each in its own target directory so the two images and the universal one never
+# share (or overwrite) a build. The ELF is target/<chip>/thumbv7m-none-eabi/release/firmware.
+image-f103 = ["build", "--release", "-p", "firmware", "--features", "gd32f103c8", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f103c8", "-Z", "build-std=core,compiler_builtins"]
+image-f130 = ["build", "--release", "-p", "firmware", "--features", "gd32f130c8", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f130c8", "-Z", "build-std=core,compiler_builtins"]

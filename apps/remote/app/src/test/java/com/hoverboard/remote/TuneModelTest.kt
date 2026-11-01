@@ -208,8 +208,14 @@ class TuneModelTest {
 
         rig.model.save()
         runCurrent()
+        // Machine fields: each one goes to every motor controller, the tuned board first.
         assertEquals(
-            listOf(Triple(board, gp, Value.I16(3591)), Triple(board, speedMax, Value.I16(120))),
+            listOf(
+                Triple(board, gp, Value.I16(3591)),
+                Triple(other, gp, Value.I16(3591)),
+                Triple(board, speedMax, Value.I16(120)),
+                Triple(other, speedMax, Value.I16(120)),
+            ),
             rig.transport.writes,
         )
         assertEquals(listOf(board to gp, board to speedMax), rig.transport.reads.drop(reads))

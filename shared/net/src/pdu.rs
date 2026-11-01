@@ -68,6 +68,16 @@ pub enum Opcode {
     Assign = 0x06,
     /// The board confirms it persisted the address.
     AssignAck = 0x07,
+    /// "Who are you": to an addressed node, empty (`specs/machine-settings.md` section 6.1).
+    Identify = 0x08,
+    /// The [`Opcode::Identify`] reply: the node's class, chip family, firmware version and factory
+    /// unique ID ([`crate::walk::Identity`]).
+    Identity = 0x09,
+    /// "What went wrong at your bring-up": to an addressed node, empty.
+    StatusRead = 0x0A,
+    /// The [`Opcode::StatusRead`] reply: the boot status record's entries, four bytes each, at most
+    /// fourteen; empty from a bridge.
+    Status = 0x0B,
     /// Read a config field from an addressed board.
     ConfigRead = 0x30,
     /// Write a config field (provisioning).
@@ -98,6 +108,10 @@ impl Opcode {
             0x03 => Some(Opcode::Ports),
             0x06 => Some(Opcode::Assign),
             0x07 => Some(Opcode::AssignAck),
+            0x08 => Some(Opcode::Identify),
+            0x09 => Some(Opcode::Identity),
+            0x0A => Some(Opcode::StatusRead),
+            0x0B => Some(Opcode::Status),
             0x30 => Some(Opcode::ConfigRead),
             0x31 => Some(Opcode::ConfigWrite),
             0x32 => Some(Opcode::ConfigResp),
@@ -212,6 +226,10 @@ mod tests {
             Opcode::Ports,
             Opcode::Assign,
             Opcode::AssignAck,
+            Opcode::Identify,
+            Opcode::Identity,
+            Opcode::StatusRead,
+            Opcode::Status,
             Opcode::ConfigRead,
             Opcode::ConfigWrite,
             Opcode::ConfigResp,

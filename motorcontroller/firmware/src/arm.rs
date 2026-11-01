@@ -3,7 +3,7 @@
 //!
 //! `motorcontroller/firmware/src/motor.rs` is disarmed by construction and stays that way: it configures the
 //! timer, runs the counter and steps the commutator, and it never names the arming gate. This file
-//! is the complement. It holds the [`runtime_hal::ArmGate`] for the configured motor and it holds
+//! is the complement. It holds the [`hal::ArmGate`] for the configured motor and it holds
 //! nothing else, so **the whole energize decision is one file, one static, one `arm()` call**, which
 //! is bring-up step 11's "keep the energize point one visible boundary in one place" made
 //! structural. A host test in this module enforces it over the crate's source.
@@ -250,48 +250,50 @@ pub fn off_inhibit(motor_running: bool, period_live: bool, speed: i32) -> bool {
 /// path). Only the gains' MAXIMA are here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArmValues {
-    /// `store::MOTOR_METHOD` (0x21).
+    /// `store::MOTOR_METHOD` (0x23, `machine.method`).
     pub method_byte: u8,
-    /// `store::MOTOR_DIRECTION` (0x62) at motor 0, raw: `motor::requested_direction` decodes it.
+    /// `store::MOTOR_DIRECTION` (0x4F) at motor 0, raw: `motor::requested_direction` decodes it.
     /// In the row since 2026-10-20, when the bench showed the boot-read it replaced: writing the
     /// field and arming changed nothing, writing it and resetting reversed the wheel
     /// (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the direction gate).
     pub direction_byte: u8,
-    /// `store::MOTOR_ALIGN_OFFSET` (0x63) at motor 0, raw: `commutation::sixstep::SixStep::new`
+    /// `store::MOTOR_ALIGN_OFFSET` (0x51) at motor 0, raw: `commutation::sixstep::SixStep::new`
     /// takes it mod 6. In the row with the direction (the row's test is whether a field touches a
     /// peripheral register, and the offset enters one argument along from the direction in the
     /// same decode); as a boot-read, sweeping it cost a reboot per value.
     pub align_offset_byte: u8,
-    /// `store::CONTROL_MODE` (0x22) raw: the owning type decodes it and judges it against the
+    /// `store::CONTROL_MODE` (0x20, `machine.mode`) raw: the owning type decodes it and judges it against the
     /// board's IMU fact, which this layer does not hold.
     pub control_mode_byte: u8,
-    /// `store::CONTROL_FRAME` (0x25) raw: resolved beside the mode byte by the same owner
+    /// `store::CONTROL_FRAME` (0x21, `machine.frame`) raw: resolved beside the mode byte by the same owner
     /// (`specs/rover-one-imu.md` section 5: in the row so staging a frame costs a re-arm, not a
     /// power cycle).
     pub frame_byte: u8,
-    /// `store::CONTROL_SIDE` (0x26) raw: which wheel of a rigid machine this board drives, the
+    /// `store::CONTROL_SIDE` (0x50, `side`) at motor 0, raw: which wheel of a rigid machine this
+    /// board's motor drives, the
     /// owner of the control block's `role_right` word (`specs/rover-one-imu.md` section 5). In
     /// the row beside the frame, and for the same reason: it is a machine-type setting a phone
     /// stages, and staging it should cost a re-arm rather than a power cycle.
     pub side_byte: u8,
-    /// `store::MOTOR_CURRENT_LIMIT` (0x20), milliamps.
+    /// `store::MOTOR_CURRENT_LIMIT` (0x4E) at motor 0, milliamps.
     pub current_limit_ma: u32,
-    /// `store::MOTOR_CURRENT_CAL` (0x67) at motor 0, stock current counts per amp.
+    /// `store::MOTOR_CURRENT_CAL` (0x4C) at motor 0, stock current counts per amp.
     pub current_cal: u16,
-    /// `store::IMU_AXIS_SIGN` (0x65), indices 0..5 = `[ax, ay, az, gx, gy, gz]`.
-    pub imu_sign: [i32; 6],
-    /// `store::IMU_AXIS_ROLE` (0x68), indices 0..1 = `[UP, PITCH_RATE]`.
+    /// `store::IMU_AXIS_SIGN` (0x15), indices 0..2 = `[x, y, z]`, applied to the accelerometer
+    /// and the gyro alike (`imu::Config::staged`).
+    pub imu_sign: [i32; 3],
+    /// `store::IMU_AXIS_ROLE` (0x16), indices 0..1 = `[UP, PITCH_RATE]`.
     pub imu_roles: [u8; 2],
-    /// `store::CONTROL_RIDER_REQUIRED` (0x23), raw: the owning type decodes it.
+    /// `store::CONTROL_RIDER_REQUIRED` (0x22), raw: the owning type decodes it.
     pub rider_required_byte: u8,
-    /// `store::BOARD_BATTERY_FLOOR` (0x24), centivolts, `<= 0` = no floor.
+    /// `store::BOARD_BATTERY_FLOOR` (0x26), centivolts, `<= 0` = no floor.
     pub battery_floor: i16,
-    /// `store::CONTROL_GAIN_MAX` (0x7A), indices 0..3 = the per-gain inclusive upper bounds of
+    /// `store::CONTROL_GAIN_MAX` (0x28), indices 0..3 = the per-gain inclusive upper bounds of
     /// `[gp, gr, gx, gv]`.
     pub gain_max: [i16; 4],
-    /// `store::CONTROL_DRIVE_TURN` (0x75), indices 0..1 = `[turn_max, turn_slew]`, torque counts.
+    /// `store::CONTROL_DRIVE_TURN` (0x2B), indices 0..1 = `[turn_max, turn_slew]`, torque counts.
     pub drive_turn: [i16; 2],
-    /// `store::CONTROL_POS_CLAMP` (0x7C), edges, raw: the owning seam (`control::sf::pos_clamp`)
+    /// `store::CONTROL_POS_CLAMP` (0x2A), edges, raw: the owning seam (`control::sf::pos_clamp`)
     /// clamps it (`specs/state-feedback.md` section 4).
     pub pos_clamp: i16,
 }
@@ -305,7 +307,9 @@ pub struct ArmValues {
 /// The firmware brings up motor 0, so `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET` and
 /// `MOTOR_CURRENT_CAL` are read at index 0, matching `layout::read_motor`'s own per-motor `.at(m)`
 /// fill.
-/// Every key [`read_arm_values`] resolves, as ONE row, in the order the match below reads them.
+/// Every key [`read_arm_values`] resolves, as ONE row: exactly the registered keys whose effect is
+/// arm (`store::Effect::Arm`, `specs/machine-settings.md` section 5), which a test holds to the
+/// registry, in registry order. A per-motor field is read at motor 0, the one motor a board drives.
 ///
 /// The row exists because of what a per-field read costs. `Store::get` walks the whole active
 /// page for each field (append-only, newest wins, so it cannot stop at the first match), and read
@@ -317,32 +321,29 @@ pub struct ArmValues {
 /// **Adding a field here costs one key and one match arm, not one page walk.** That is the point
 /// of the row, and it is why the list is written out rather than assembled somewhere clever: the
 /// next person moving a value into the arm-time read should see exactly what it contains.
-const ARM_ROW: [store::Key; 25] = [
-    store::MOTOR_METHOD.key(),
-    store::MOTOR_DIRECTION.at(0).key(),
-    store::MOTOR_ALIGN_OFFSET.at(0).key(),
-    store::CONTROL_MODE.key(),
-    store::CONTROL_FRAME.key(),
-    store::CONTROL_SIDE.key(),
-    store::MOTOR_CURRENT_LIMIT.key(),
-    store::MOTOR_CURRENT_CAL.at(0).key(),
+pub const ARM_ROW: [store::Key; 22] = [
     store::IMU_AXIS_SIGN.at(0).key(),
     store::IMU_AXIS_SIGN.at(1).key(),
     store::IMU_AXIS_SIGN.at(2).key(),
-    store::IMU_AXIS_SIGN.at(3).key(),
-    store::IMU_AXIS_SIGN.at(4).key(),
-    store::IMU_AXIS_SIGN.at(5).key(),
     store::IMU_AXIS_ROLE.at(0).key(),
     store::IMU_AXIS_ROLE.at(1).key(),
+    store::CONTROL_MODE.key(),
+    store::CONTROL_FRAME.key(),
     store::CONTROL_RIDER_REQUIRED.key(),
+    store::MOTOR_METHOD.key(),
     store::BOARD_BATTERY_FLOOR.key(),
     store::CONTROL_GAIN_MAX.at(0).key(),
     store::CONTROL_GAIN_MAX.at(1).key(),
     store::CONTROL_GAIN_MAX.at(2).key(),
     store::CONTROL_GAIN_MAX.at(3).key(),
+    store::CONTROL_POS_CLAMP.key(),
     store::CONTROL_DRIVE_TURN.at(0).key(),
     store::CONTROL_DRIVE_TURN.at(1).key(),
-    store::CONTROL_POS_CLAMP.key(),
+    store::MOTOR_CURRENT_CAL.at(0).key(),
+    store::MOTOR_CURRENT_LIMIT.at(0).key(),
+    store::MOTOR_DIRECTION.at(0).key(),
+    store::CONTROL_SIDE.at(0).key(),
+    store::MOTOR_ALIGN_OFFSET.at(0).key(),
 ];
 
 pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
@@ -354,16 +355,13 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
         align_offset_byte: store::MOTOR_ALIGN_OFFSET.at(0).default(),
         control_mode_byte: store::CONTROL_MODE.default(),
         frame_byte: store::CONTROL_FRAME.default(),
-        side_byte: store::CONTROL_SIDE.default(),
-        current_limit_ma: store::MOTOR_CURRENT_LIMIT.default(),
+        side_byte: store::CONTROL_SIDE.at(0).default(),
+        current_limit_ma: store::MOTOR_CURRENT_LIMIT.at(0).default(),
         current_cal: store::MOTOR_CURRENT_CAL.at(0).default(),
         imu_sign: [
             store::IMU_AXIS_SIGN.at(0).default(),
             store::IMU_AXIS_SIGN.at(1).default(),
             store::IMU_AXIS_SIGN.at(2).default(),
-            store::IMU_AXIS_SIGN.at(3).default(),
-            store::IMU_AXIS_SIGN.at(4).default(),
-            store::IMU_AXIS_SIGN.at(5).default(),
         ],
         imu_roles: [
             store::IMU_AXIS_ROLE.at(0).default(),
@@ -397,10 +395,10 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             v.control_mode_byte = store::scalar_or_default(store::CONTROL_MODE, tag, b);
         } else if k == store::CONTROL_FRAME.key() {
             v.frame_byte = store::scalar_or_default(store::CONTROL_FRAME, tag, b);
-        } else if k == store::CONTROL_SIDE.key() {
-            v.side_byte = store::scalar_or_default(store::CONTROL_SIDE, tag, b);
-        } else if k == store::MOTOR_CURRENT_LIMIT.key() {
-            v.current_limit_ma = store::scalar_or_default(store::MOTOR_CURRENT_LIMIT, tag, b);
+        } else if k == store::CONTROL_SIDE.at(0).key() {
+            v.side_byte = store::scalar_or_default(store::CONTROL_SIDE.at(0), tag, b);
+        } else if k == store::MOTOR_CURRENT_LIMIT.at(0).key() {
+            v.current_limit_ma = store::scalar_or_default(store::MOTOR_CURRENT_LIMIT.at(0), tag, b);
         } else if k == store::MOTOR_CURRENT_CAL.at(0).key() {
             v.current_cal = store::scalar_or_default(store::MOTOR_CURRENT_CAL.at(0), tag, b);
         } else if k == store::CONTROL_RIDER_REQUIRED.key() {
@@ -464,7 +462,7 @@ pub struct Rederived {
 /// REFUSED, and carries WHICH of the three frame checks refused it, because that is the one cause
 /// of a refused arm an operator can act on: it reaches `CTRL_OBS` word 33's cause byte through the
 /// caller's re-read seam (`specs/integration.md`, "The arm refusals"), named exactly as the boot
-/// path names the same frame in the boot status record (`board.status`).
+/// path names the same frame in the boot status record (`STATUS_READ`).
 ///
 /// **The all-or-nothing shape is load-bearing.** Everything is derived and validated here, in RAM,
 /// against nothing the loop can see; only an `Ok` is applied, and it is applied as a whole. So a
@@ -576,8 +574,8 @@ pub const fn note_confirm_refusal(word: u32) -> u32 {
 
 /// The ONE mapping from a frame `imu::Config::staged` refused onto the field it names and the
 /// refused triple's first `IMU_AXIS_SIGN` index: a bad role pair names `IMU_AXIS_ROLE`, a mirrored
-/// accel triple names `IMU_AXIS_SIGN` index 0, a mirrored gyro triple the same field at index 3
-/// (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
+/// sign triple names `IMU_AXIS_SIGN` index 0 (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation"). The
+/// gyro shares the triple (`specs/machine-settings.md` section 3.1), so there is no second one.
 ///
 /// Two observers read it and they must not name the same frame differently: the BOOT refusal's
 /// status-record entry (`main.rs`'s `bring_up_imu`, reason `ImuFrame` against this field with this
@@ -589,7 +587,6 @@ pub const fn imu_frame_fault(e: imu::FrameError) -> (u8, u8) {
     match e {
         imu::FrameError::Roles => (store::IMU_AXIS_ROLE.id(), 0),
         imu::FrameError::Accel => (store::IMU_AXIS_SIGN.id(), 0),
-        imu::FrameError::Gyro => (store::IMU_AXIS_SIGN.id(), 3),
     }
 }
 
@@ -600,8 +597,8 @@ pub const fn imu_frame_fault(e: imu::FrameError) -> (u8, u8) {
 /// Bit 7 marks a cause PRESENT, because the accel refusal's field and index are both encoded as
 /// zero and a reader must be able to tell it from "no frame refusal this boot". Bit 2 says the
 /// refusal names `IMU_AXIS_ROLE` rather than `IMU_AXIS_SIGN`. Bits 0..1 carry the refused triple's
-/// first `IMU_AXIS_SIGN` index exactly as the status entry's detail does (0 = accel, 3 = gyro), so the
-/// two records decode by the same rule. `tools/swdobs.py` mirrors it.
+/// first `IMU_AXIS_SIGN` index exactly as the status entry's detail does (always 0), so the two
+/// records decode by the same rule. `tools/swdobs.py` mirrors it.
 pub const fn imu_frame_cause_byte(e: imu::FrameError) -> u8 {
     let (field, first) = imu_frame_fault(e);
     let names_role = field == store::IMU_AXIS_ROLE.id();
@@ -621,7 +618,7 @@ pub mod hw {
     use crate::motor;
     use core::ptr::addr_of_mut;
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use runtime_hal::ArmGate;
+    use hal::ArmGate;
 
     /// The configured motor's arming gate, installed once at boot from the bring-up's timer and
     /// read only by the 250 Hz control task afterwards. `None` on a board whose motor was not
@@ -683,7 +680,7 @@ pub mod hw {
     /// Install the arming gate for a brought-up motor. Called once, on the boot thread, from the
     /// bring-up's summary. Installing it does not arm anything: MOE is untouched here, and the
     /// mode machine is in OFF for the whole of boot.
-    pub fn install(timer: &runtime_hal::PwmTimer) {
+    pub fn install(timer: &hal::PwmTimer) {
         // SAFETY: the one write, on the boot thread, before the scheduler exists and therefore
         // before any control task can read it.
         unsafe { *addr_of_mut!(GATE) = Some(timer.arm_gate()) };
@@ -1020,17 +1017,14 @@ mod tests {
     /// be tested here; the pair it consumes can.
     #[test]
     fn the_frame_cause_byte_names_each_check_distinctly() {
-        use imu::FrameError::{Accel, Gyro, Roles};
+        use imu::FrameError::{Accel, Roles};
         // Bit 7 = present, bit 2 = names IMU_AXIS_ROLE, bits 0..1 = the triple's first index.
         assert_eq!(imu_frame_cause_byte(Accel), 0x80);
-        assert_eq!(imu_frame_cause_byte(Gyro), 0x83);
         assert_eq!(imu_frame_cause_byte(Roles), 0x84);
         // Distinct, and never 0: a zero byte is "no frame refusal this boot" in the published word,
-        // and the accel case (field and index both zero) is the one that would otherwise collide.
-        for (a, b) in [(Accel, Gyro), (Accel, Roles), (Gyro, Roles)] {
-            assert_ne!(imu_frame_cause_byte(a), imu_frame_cause_byte(b));
-        }
-        for e in [Accel, Gyro, Roles] {
+        // and the sign case (field and index both zero) is the one that would otherwise collide.
+        assert_ne!(imu_frame_cause_byte(Accel), imu_frame_cause_byte(Roles));
+        for e in [Accel, Roles] {
             assert_ne!(imu_frame_cause_byte(e), 0);
             // The byte survives the fold into the word and comes back out of the cause lane.
             assert_eq!(
@@ -1045,11 +1039,6 @@ mod tests {
             "a bad role pair names IMU_AXIS_ROLE"
         );
         assert_eq!(imu_frame_fault(Accel), (store::IMU_AXIS_SIGN.id(), 0));
-        assert_eq!(
-            imu_frame_fault(Gyro),
-            (store::IMU_AXIS_SIGN.id(), 3),
-            "the gyro triple starts at IMU_AXIS_SIGN index 3"
-        );
     }
 
     /// **The re-read refusal is written in exactly two places and released in exactly one**, which
@@ -1405,7 +1394,7 @@ mod tests {
 
     /// A valid staged frame: the compiled reference map's signs with the identity roles, which
     /// `imu::Config::staged` accepts (both triples are proper rotations).
-    const GOOD_SIGN: [i32; 6] = [-1, 1, -1, -1, 1, -1];
+    const GOOD_SIGN: [i32; 3] = [-1, 1, -1];
     const GOOD_ROLES: [u8; 2] = [3, 2];
 
     /// A board's boot-fixed facts, as the bring-up would have built them: the boot-read noise
@@ -1428,10 +1417,10 @@ mod tests {
             s.set(store::MOTOR_ALIGN_OFFSET.at(0), 4).unwrap();
             s.set(store::CONTROL_MODE, 1).unwrap();
             s.set(store::CONTROL_FRAME, 1).unwrap();
-            s.set(store::CONTROL_SIDE, 1).unwrap();
-            s.set(store::MOTOR_CURRENT_LIMIT, 7_500).unwrap();
+            s.set(store::CONTROL_SIDE.at(0), 1).unwrap();
+            s.set(store::MOTOR_CURRENT_LIMIT.at(0), 7_500).unwrap();
             s.set(store::MOTOR_CURRENT_CAL.at(0), 300).unwrap();
-            for (i, sign) in [1i32, -1, 1, 1, -1, 1].into_iter().enumerate() {
+            for (i, sign) in [1i32, -1, 1].into_iter().enumerate() {
                 s.set(store::IMU_AXIS_SIGN.at(i as u8), sign).unwrap();
             }
             s.set(store::IMU_AXIS_ROLE.at(0), 1).unwrap();
@@ -1457,7 +1446,7 @@ mod tests {
                 side_byte: 1,
                 current_limit_ma: 7_500,
                 current_cal: 300,
-                imu_sign: [1, -1, 1, 1, -1, 1],
+                imu_sign: [1, -1, 1],
                 imu_roles: [1, 3],
                 rider_required_byte: 0,
                 battery_floor: 2_900,
@@ -1487,8 +1476,7 @@ mod tests {
         let v = with_store(|s| {
             for row in store::REGISTRY.iter() {
                 let def = row.def();
-                // A read-only field is never stored, so there is nothing to perturb.
-                if ROW_IDS.contains(&def.field_id) || def.read_only {
+                if ROW_IDS.contains(&def.field_id) {
                     skipped += 1;
                     continue;
                 }
@@ -1519,7 +1507,7 @@ mod tests {
         assert_eq!(
             perturbed + skipped,
             store::REGISTRY_LEN,
-            "every registry entry is perturbed, in the value row, or read-only"
+            "every registry entry is perturbed or in the value row"
         );
         assert!(
             perturbed > skipped,
@@ -1532,50 +1520,83 @@ mod tests {
         );
     }
 
-    /// The field ids of the spec's value row, as [`read_arm_values`] reads them. The one place the
-    /// row is written down as data, for the test above.
+    /// The field ids of the arm row, as [`read_arm_values`] reads them.
     const ROW_IDS: [u8; 15] = [
-        0x21, // MOTOR_METHOD
-        0x62, // MOTOR_DIRECTION
-        0x63, // MOTOR_ALIGN_OFFSET
-        0x22, // CONTROL_MODE
-        0x25, // CONTROL_FRAME
-        0x26, // CONTROL_SIDE
-        0x20, // MOTOR_CURRENT_LIMIT
-        0x67, // MOTOR_CURRENT_CAL
-        0x65, // IMU_AXIS_SIGN
-        0x68, // IMU_AXIS_ROLE
-        0x23, // CONTROL_RIDER_REQUIRED
-        0x24, // BOARD_BATTERY_FLOOR
-        0x7A, // CONTROL_GAIN_MAX
-        0x75, // CONTROL_DRIVE_TURN
-        0x7C, // CONTROL_POS_CLAMP
+        0x15, // IMU_AXIS_SIGN
+        0x16, // IMU_AXIS_ROLE
+        0x20, // CONTROL_MODE
+        0x21, // CONTROL_FRAME
+        0x22, // CONTROL_RIDER_REQUIRED
+        0x23, // MOTOR_METHOD
+        0x26, // BOARD_BATTERY_FLOOR
+        0x28, // CONTROL_GAIN_MAX
+        0x2A, // CONTROL_POS_CLAMP
+        0x2B, // CONTROL_DRIVE_TURN
+        0x4C, // MOTOR_CURRENT_CAL
+        0x4E, // MOTOR_CURRENT_LIMIT
+        0x4F, // MOTOR_DIRECTION
+        0x50, // CONTROL_SIDE
+        0x51, // MOTOR_ALIGN_OFFSET
     ];
 
-    /// [`ROW_IDS`] is the row the reader actually reads: every id there comes from the store handle
-    /// of the field the re-read names, so a renumbered field cannot leave the list stale.
+    /// `specs/machine-settings.md` section 9, test 1: [`ARM_ROW`] is exactly the registered keys
+    /// whose effect is arm, so the row cannot drift from the registry's attribute, and [`ROW_IDS`]
+    /// is its ids.
     #[test]
-    fn the_row_id_list_matches_the_fields_the_re_read_reads() {
-        assert_eq!(
-            ROW_IDS,
-            [
-                store::MOTOR_METHOD.id(),
-                store::MOTOR_DIRECTION.at(0).id(),
-                store::MOTOR_ALIGN_OFFSET.at(0).id(),
-                store::CONTROL_MODE.id(),
-                store::CONTROL_FRAME.id(),
-                store::CONTROL_SIDE.id(),
-                store::MOTOR_CURRENT_LIMIT.id(),
-                store::MOTOR_CURRENT_CAL.id(),
-                store::IMU_AXIS_SIGN.id(),
-                store::IMU_AXIS_ROLE.id(),
-                store::CONTROL_RIDER_REQUIRED.id(),
-                store::BOARD_BATTERY_FLOOR.id(),
-                store::CONTROL_GAIN_MAX.at(0).id(),
-                store::CONTROL_DRIVE_TURN.at(0).id(),
-                store::CONTROL_POS_CLAMP.id(),
-            ]
-        );
+    fn the_arm_row_is_the_registrys_arm_effect_keys() {
+        let arm: std::vec::Vec<store::Key> = store::REGISTRY
+            .iter()
+            .filter(|r| r.effect == store::Effect::Arm)
+            .map(|r| r.key())
+            .collect();
+        assert_eq!(ARM_ROW.as_slice(), arm.as_slice());
+        let mut ids: std::vec::Vec<u8> = ARM_ROW.iter().map(|k| k.field_id).collect();
+        ids.dedup();
+        assert_eq!(ids, ROW_IDS);
+    }
+
+    /// `specs/machine-settings.md` section 9, test 4, end to end over a real store: a persisted
+    /// write of an arm-effect field sets `FLAG_REARM` until the next arm, a boot-effect field sets
+    /// `FLAG_REBOOT` until boot, and a live field sets neither (its write moves only the machine
+    /// digest). The firmware's one persist consumer recomputes `Digests::of` exactly as here.
+    #[test]
+    fn a_persisted_write_sets_the_flag_of_its_effect_class() {
+        use linkctl::CyclicState as C;
+        use orchestrator::{Digests, Machine, N_LINKS};
+        let mut flash = crate::test_flash::TestFlash::erased();
+        let mut s = store::Store::mount(&mut flash).unwrap();
+        let mut m = Machine::new(Digests::of(&s), [false; N_LINKS]);
+        let machine0 = m.digest();
+        // Live: the tune lane's field. Neither flag, the machine digest moves.
+        s.set(store::CONTROL_SF_GAINS.at(0), 1_000).unwrap();
+        m.persisted(Digests::of(&s));
+        assert_eq!(m.flags(), 0);
+        assert_ne!(m.digest(), machine0);
+        // Arm: the turn bound. FLAG_REARM until the arm-time re-read installs it.
+        s.set(store::CONTROL_DRIVE_TURN.at(0), 2_000).unwrap();
+        m.persisted(Digests::of(&s));
+        assert_eq!(m.flags(), C::FLAG_REARM);
+        m.armed();
+        assert_eq!(m.flags(), 0);
+        // A per-motor arm field at motor 0, the one the row reads.
+        s.set(store::CONTROL_SIDE.at(0), 1).unwrap();
+        m.persisted(Digests::of(&s));
+        assert_eq!(m.flags(), C::FLAG_REARM);
+        m.armed();
+        // Boot: a pin. FLAG_REBOOT, which an arm does not clear.
+        s.set(store::BOARD_SELF_HOLD, 0x20).unwrap();
+        m.persisted(Digests::of(&s));
+        assert_eq!(m.flags(), C::FLAG_REBOOT);
+        m.armed();
+        assert_eq!(m.flags(), C::FLAG_REBOOT);
+        // The next boot runs what the store holds: both clear.
+        let m = Machine::new(Digests::of(&s), [false; N_LINKS]);
+        assert_eq!(m.flags(), 0);
+        // A board-owned write (the walk's address) waits for nothing: the walk adopts it at once.
+        let mut m = m;
+        s.set(store::NODE_ADDRESS, 3).unwrap();
+        m.persisted(Digests::of(&s));
+        assert_eq!(m.flags(), 0);
     }
 
     /// **Fail closed on a refused IMU frame.** A staged frame `imu::Config::staged` refuses makes
@@ -1588,7 +1609,7 @@ mod tests {
     /// different field than the one that actually refused.
     #[test]
     fn a_refused_imu_frame_refuses_the_whole_rederivation() {
-        let values = |sign: [i32; 6], roles: [u8; 2]| ArmValues {
+        let values = |sign: [i32; 3], roles: [u8; 2]| ArmValues {
             method_byte: 0,
             direction_byte: 0,
             align_offset_byte: 2,
@@ -1609,7 +1630,7 @@ mod tests {
         // A reflection (an odd number of negated axes) and a role pair naming one chip axis twice:
         // both are frames `staged` refuses, and both refuse the arm.
         for (sign, roles) in [
-            ([1, 1, -1, -1, 1, -1], GOOD_ROLES),
+            ([1, 1, -1], GOOD_ROLES),
             (GOOD_SIGN, [2, 2]),
             (GOOD_SIGN, [0, 9]),
         ] {
@@ -1648,7 +1669,7 @@ mod tests {
             current_limit_ma: 12_000,
             current_cal: 455,
             // Deliberately a reflection: with no IMU it is never staged, so it cannot refuse.
-            imu_sign: [1, 1, -1, -1, 1, -1],
+            imu_sign: [1, 1, -1],
             imu_roles: [2, 2],
             rider_required_byte: 0,
             battery_floor: 0,

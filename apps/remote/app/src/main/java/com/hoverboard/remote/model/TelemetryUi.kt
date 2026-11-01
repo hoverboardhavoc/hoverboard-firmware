@@ -191,14 +191,39 @@ data class TelemetryUi(
      * Each fault bit set in the cyclic mask, in bit order (`specs/link-control.md`,
      * `CYCLIC_STATE`): bits 0 to 2, 4, 5 and 8 to 11. The mask also carries the mode fault (bit 6)
      * and the power request (bit 7), which are not faults and are left out so that an armed board
-     * does not light FAULT by holding its own power request. Bit 3 is retired and bits 12 to 15
-     * are unallocated; a board setting one is not named.
+     * does not light FAULT by holding its own power request. Bit 3 is retired, bits 12 and 13 are
+     * the configuration and machine bits, which are not faults, and bits 14 and 15 are unallocated;
+     * a board setting one is not named here.
      */
     val faultCauses: List<FaultCause>
         get() {
             val mask = cyclic?.fault ?: 0
             return FaultCause.entries.filter { mask and it.bit != 0 }
         }
+
+    /**
+     * An arm-effect setting was written since the board last armed, so it takes effect at the next
+     * arm (`FLAG_REARM`, `specs/machine-settings.md` section 5). False while the board is silent.
+     */
+    val rearm: Boolean get() = cyclic?.rearm() ?: false
+
+    /**
+     * A boot-effect setting was written since the board started, so it takes effect when the board
+     * restarts (`FLAG_REBOOT`). False while the board is silent.
+     */
+    val reboot: Boolean get() = cyclic?.reboot() ?: false
+
+    /**
+     * The board finds the machine's boards in disagreement (`EV_MACHINE`, section 4.2): a configured
+     * link has heard no peer since boot, or the peer's machine settings differ. It refuses to arm.
+     */
+    val machineDisagrees: Boolean get() = (cyclic?.fault ?: 0) and CyclicState.EV_MACHINE != 0
+
+    /**
+     * Which of [machineDisagrees]'s causes holds (`FLAG_PEER_SILENT`, `specs/board-route.md` section
+     * 4): a configured link has heard nothing since the board started. False while the board is silent.
+     */
+    val peerSilent: Boolean get() = cyclic?.peerSilent() ?: false
 
     /** Fold a freshly decoded [CyclicState] in. Latest-wins: the board sends one state, cyclically. */
     fun merge(state: CyclicState): TelemetryUi = copy(cyclic = state)

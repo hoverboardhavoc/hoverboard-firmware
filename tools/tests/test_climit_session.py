@@ -54,13 +54,13 @@ class Parsers(unittest.TestCase):
     )
     READ_OUT = (
         "dst resolved: attached node 0x02 (port table)\n1 CONFIG op(s) on node 0x02\n"
-        "  CONFIG_READ 0x20:0 -> CFG_OK value U32(10000)\n"
+        "  CONFIG_READ 0x4E:0 -> CFG_OK value U32(10000)\n"
         "PASS: 1 CONFIG op(s) answered CFG_OK; a staged layout needs a REBOOT for the board's boot validator to judge it\n"
     )
     WRITE_OUT = (
         "dst resolved: attached node 0x02 (port table)\n1 CONFIG op(s) on node 0x02\n"
-        "  CONFIG_WRITE 0x20:0 = 2500 (U32) -> CFG_OK\n"
-        "  CONFIG_READ  0x20:0 -> CFG_OK value U32(2500)  (write -> read matches)\n"
+        "  CONFIG_WRITE 0x4E:0 = 2500 (U32) -> CFG_OK\n"
+        "  CONFIG_READ  0x4E:0 -> CFG_OK value U32(2500)  (write -> read matches)\n"
         "PASS: 1 CONFIG op(s) answered CFG_OK; a staged layout needs a REBOOT\n"
     )
 
@@ -71,27 +71,27 @@ class Parsers(unittest.TestCase):
         self.assertIsNone(cs.parse_dst("FAIL: walk resolved no attached node"))
 
     def test_config_read(self):
-        self.assertEqual(cs.parse_config_read(self.READ_OUT, 0x20), ("CFG_OK", 10000))
-        self.assertEqual(cs.parse_config_read(self.WRITE_OUT, 0x20), ("CFG_OK", 2500))
-        self.assertEqual(cs.parse_config_read("  CONFIG_READ 0x20:0 -> CFG_ARMED\n", 0x20), ("CFG_ARMED", None))
+        self.assertEqual(cs.parse_config_read(self.READ_OUT, 0x4E), ("CFG_OK", 10000))
+        self.assertEqual(cs.parse_config_read(self.WRITE_OUT, 0x4E), ("CFG_OK", 2500))
+        self.assertEqual(cs.parse_config_read("  CONFIG_READ 0x4E:0 -> CFG_ARMED\n", 0x4E), ("CFG_ARMED", None))
         self.assertEqual(cs.parse_config_read(self.READ_OUT, 0x21), (None, None))
 
     def test_a_default_answer_is_a_successful_read(self):
-        # A board that stores no 0x67 answers CFG_DEFAULT with the default (specs/cli-config.md
+        # A board that stores no 0x4C answers CFG_DEFAULT with the default (specs/cli-config.md
         # section 6.1); the stand-up reads it as the board's scale, not as a failure.
-        out = "  CONFIG_READ 0x67:0 -> CFG_DEFAULT value U16(455)\n"
+        out = "  CONFIG_READ 0x4C:0 -> CFG_DEFAULT value U16(455)\n"
         run = lambda cmd: type("R", (), {"returncode": 0, "stdout": out})()
         self.assertEqual(cs.read_current_cal(run, "h:1", config_bin="cfg"), (455, 455))
-        refused = "  CONFIG_READ 0x67:0 -> CFG_ARMED\n"
+        refused = "  CONFIG_READ 0x4C:0 -> CFG_ARMED\n"
         run = lambda cmd: type("R", (), {"returncode": 0, "stdout": refused})()
         with self.assertRaises(RuntimeError):
             cs.read_current_cal(run, "h:1", config_bin="cfg")
 
     def test_config_write(self):
-        self.assertTrue(cs.config_write_ok(self.WRITE_OUT, 0x20))
-        self.assertFalse(cs.config_write_ok(self.WRITE_OUT.replace("(write -> read matches)", "MISMATCH"), 0x20))
-        self.assertFalse(cs.config_write_ok(self.READ_OUT, 0x20))
-        self.assertFalse(cs.config_write_ok("  CONFIG_WRITE 0x20:0 = 2500 (U32) -> CFG_ARMED\n", 0x20))
+        self.assertTrue(cs.config_write_ok(self.WRITE_OUT, 0x4E))
+        self.assertFalse(cs.config_write_ok(self.WRITE_OUT.replace("(write -> read matches)", "MISMATCH"), 0x4E))
+        self.assertFalse(cs.config_write_ok(self.READ_OUT, 0x4E))
+        self.assertFalse(cs.config_write_ok("  CONFIG_WRITE 0x4E:0 = 2500 (U32) -> CFG_ARMED\n", 0x4E))
 
     def test_decode_canned_words(self):
         w = [0] * cs.CTRL_OBS_WORDS
@@ -140,14 +140,13 @@ class Parsers(unittest.TestCase):
 
     def test_decode_arm_refusals(self):
         """CTRL_OBS word 33 (motorcontroller/firmware/src/main.rs `arm_refusals` + `imu_frame_cause_byte`):
-        the two per-boot counts in their own byte lanes, and the three frame checks the cause byte
+        the two per-boot counts in their own byte lanes, and the two frame checks the cause byte
         can name."""
         self.assertEqual(swdobs.decode_arm_refusals(0), (0, 0, "no frame refusal"))
         n_re, n_cf, cause = swdobs.decode_arm_refusals(0x0080_0201)
         self.assertEqual((n_re, n_cf), (1, 2))
         self.assertIn("axis_sign", cause)
-        self.assertIn("accel", cause)
-        self.assertIn("gyro", swdobs.decode_arm_refusals(0x0083_0001)[2])
+        self.assertIn("sign triple", cause)
         self.assertIn("axis_role", swdobs.decode_arm_refusals(0x0084_0001)[2])
         # The saturated counts the firmware publishes after 255 refusals, read as absolutes.
         self.assertEqual(swdobs.decode_arm_refusals(0x0084_FFFF)[:2], (255, 255))
@@ -182,7 +181,7 @@ class Parsers(unittest.TestCase):
 class Rules(unittest.TestCase):
     def test_limit_counts(self):
         # BOTH board facts are arguments now, not constants: shared/store/src/field.rs
-        # MOTOR_CURRENT_CAL (0x67) and MOTOR_NOISE_FLOOR (0x6B), read off the board at stand-up.
+        # MOTOR_CURRENT_CAL (0x4C) and MOTOR_NOISE_FLOOR (0x4D), read off the board at stand-up.
         # 455 and 2,100 are their registered defaults.
         cpa, floor = cs.CURRENT_CAL_DEFAULT, cs.NOISE_FLOOR_DEFAULT
         self.assertEqual(cs.limit_counts(10_000, cpa, floor), 4550)
@@ -325,7 +324,7 @@ class Verdicts(unittest.TestCase):
         ok = cs.gate1_verdict([mk(peak=1300)], 455, floor)
         self.assertIn("clear of the measured peak", ok["lines"][3])
         # The band applies here too: the line reports what the firmware will floor at.
-        self.assertIn("staged noise floor (0x6B) 1000 counts", cs.gate1_verdict([mk(peak=400)], 455, 10)["lines"][3])
+        self.assertIn("staged noise floor (0x4D) 1000 counts", cs.gate1_verdict([mk(peak=400)], 455, 10)["lines"][3])
 
     def test_gate2(self):
         self.assertEqual(cs.gate2_verdict(series(5, peak=1200, sub=3), 1300)["verdict"], "PASS")
@@ -432,7 +431,7 @@ class Verdicts(unittest.TestCase):
     def test_the_rest_floor_fallback_is_the_boards_own_floor(self):
         """A skipped gate 1 leaves no measured floor, and the fallback has to be at least what that
         chain actually reads at rest, or every armed soak aborts on noise (it did, at 1400 against a
-        measured 2097 on 2026-10-09). So the fallback is the floor the BOARD carries (0x6B), not a
+        measured 2097 on 2026-10-09). So the fallback is the floor the BOARD carries (0x4D), not a
         tool constant that can only be right for one chain: the registered default still covers the
         2026-10-09 high-water, and a board that measured its own reports its own."""
         self.assertGreaterEqual(cs.NOISE_FLOOR_DEFAULT, 2097)
@@ -459,7 +458,7 @@ class Verdicts(unittest.TestCase):
     STRONG = {"floor_counts": 400, "ladder_peaks": (900, 1820)}
 
     def test_calibration_duty_corrected(self):
-        # The measurement is judged against the scale the BOARD carries (0x67), so the CONFIRMED
+        # The measurement is judged against the scale the BOARD carries (0x4C), so the CONFIRMED
         # band moves with it: 1820 counts at a 4.0 A reference is exactly the staged 455.
         r = cs.calibration(series(30, peak=1820, d0=1800), 3.2, None, cs.CURRENT_CAL_DEFAULT,
                            **self.STRONG)
@@ -479,8 +478,8 @@ class Verdicts(unittest.TestCase):
         self.assertEqual((r["verdict"], r["proposed"]), ("CORRECTION", 910))
         self.assertIn("NOT staged", r["recommendation"])
         # A correction is staged into the field, on this board, not edited into a source file.
-        self.assertIn("motor.current_cal (0x67) = 910", r["recommendation"])
-        self.assertIn("0x67=910", r["recommendation"])
+        self.assertIn("motor.current_cal (0x4C) = 910", r["recommendation"])
+        self.assertIn("0x4c=910", r["recommendation"])
 
     def test_calibration_duty_from_largest_channel(self):
         r = cs.calibration([mk(peak=1400, d0=0, d1=1125, d2=300)], 1.0, None, cs.CURRENT_CAL_DEFAULT,
@@ -604,9 +603,9 @@ ELF `motorcontroller/target/thumbv7m-none-eabi/release/firmware`, HEAD `abc123`.
 | trip demand | 32767 |
 | rotor, gates 3 to 5 | locked (strap, or both hands on the tyre) |
 | PSU current limit declared | 3.5 A (rule: at least 1.5 A, clearing the 0.60 A the link carries at the chop; never above 6 A) |
-| staged limit before the session (0x20) | 10000 mA |
-| counts per amp (0x67), read off the board | 455 |
-| noise floor (0x6B), read off the board | 2100 counts (no limit is enforced below it) |
+| staged limit before the session (0x4E) | 10000 mA |
+| counts per amp (0x4C), read off the board | 455 |
+| noise floor (0x4D), read off the board | 2100 counts (no limit is enforced below it) |
 | skipped | gate 2 |
 
 ## Outcome
@@ -830,7 +829,7 @@ class Teardown(unittest.TestCase):
         self.assertEqual(len(sh.log), n)
 
     def test_the_session_reads_the_boards_own_noise_floor(self):
-        """The floor the session reports and enforces comes off the BOARD (0x6B), not out of the
+        """The floor the session reports and enforces comes off the BOARD (0x4D), not out of the
         tool: a board carrying a quieter chain's floor floors its limit lower, and the record and the
         gate-1 line both say so. The whole point of the field is that this number differs per board,
         so a session that read a constant would report another chain's minimum as this one's."""
@@ -839,14 +838,14 @@ class Teardown(unittest.TestCase):
         s, sh = run_session(sim=sim)
         self.assertEqual((s.floor_raw, s.staged_floor), (1_444, 1_444))
         self.assertEqual(s.rec["staged_floor"], 1_444)
-        self.assertIn("| noise floor (0x6B), read off the board | 1444 counts",
+        self.assertIn("| noise floor (0x4D), read off the board | 1444 counts",
                       cs.render_record(s.rec))
         # The staged 2500 mA is 1137 counts at this board's scale, so the floor is what is enforced,
         # and it is this board's floor rather than the fleet default of 2,100.
         self.assertEqual(cs.limit_counts(2500, s.staged_cpa, s.staged_floor), 1_444)
         said = "\n".join(t for k, t in sh.log if k in ("say", "ask"))
-        self.assertIn("noise floor now (0x6B): 1444 counts", said)
-        # And an unreadable 0x6B aborts, as an unreadable 0x67 does: the limit arithmetic has three
+        self.assertIn("noise floor now (0x4D): 1444 counts", said)
+        # And an unreadable 0x4D aborts, as an unreadable 0x4C does: the limit arithmetic has three
         # inputs and a session that guessed one would report a minimum current the board does not use.
         sim2 = cs.SimBoard()
         with mock.patch.object(cs, "read_noise_floor", side_effect=RuntimeError("no answer")):
@@ -1059,9 +1058,9 @@ class DryRun(unittest.TestCase):
         self.assertIn("== dry run: RECORD.md would read ==", text)
         # Every command in order.
         order = ["cargo build", "bench-lock.sh acquire", "pinctrl set 4 op dl", "nohup sudo openocd",
-                 "ssh -N -o ExitOnForwardFailure=yes", "swd-mailbox-config 127.0.0.1:6666 --dst attached 0x20",
+                 "ssh -N -o ExitOnForwardFailure=yes", "swd-mailbox-config 127.0.0.1:6666 --dst attached 0x4e",
                  "--buttons 0 --rider 0 --hold 600", "--buttons 1 --rider 1 --hold 600",
-                 "0x20=2500", "pinctrl set 4 op dh", "--value 0 --hold 1",
+                 "0x4e=2500", "pinctrl set 4 op dh", "--value 0 --hold 1",
                  "pinctrl get 4", "sudo pkill -x openocd", "bench-lock.sh release"]
         i = 0
         for needle in order:
@@ -1103,8 +1102,8 @@ class DryRun(unittest.TestCase):
             self.assertEqual(cs.main(["--dry-run", "--cal-demand", "500"]), 2)
         # The refusal says why in the domain the limit actually lives in: counts, through the
         # board's own scale. It must not quote a milliamp-to-count equivalence of its own.
-        self.assertIn("the counts a milliamp buys are the board's own scale (0x67)", err.getvalue())
-        self.assertIn("floors the limit at that board's own measured noise floor, 0x6B", err.getvalue())
+        self.assertIn("the counts a milliamp buys are the board's own scale (0x4C)", err.getvalue())
+        self.assertIn("floors the limit at that board's own measured noise floor, 0x4D", err.getvalue())
 
 
 class Watchdog(unittest.TestCase):

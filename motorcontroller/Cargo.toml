@@ -27,14 +27,16 @@ members = [
 
 # What a bare `cargo build`, `cargo clippy` or `cargo test` here covers: every member but the ones
 # that need a chip feature. `hal` refuses to build without exactly one (specs/hal.md, section 3.2),
-# so it, and every image built on it, is built with `-p <crate> --features <chip>` (the `image-f103`
-# and `image-f130` aliases, tools/host-test.sh, CI's per-chip steps), never by the workspace sweep.
+# so it and the two test images on it (`dummy-test`, `store-test`) are built with
+# `-p <crate> --features <chip>` (CI's per-chip steps, tools/host-test.sh, tools/emulator-runner),
+# never by the workspace sweep. The
+# per-chip firmware images are the `firmware` crate with a chip feature (`cargo image-f103`,
+# `cargo image-f130`); its default feature is the universal image, which the sweep builds.
 default-members = [
     "attitude",
     "board",
     "commutation",
     "control",
-    "dummy-test",
     "firmware",
     "imu",
     "imu-bench",
@@ -43,7 +45,6 @@ default-members = [
     "orchestrator",
     "scheduler",
     "state",
-    "store-test",
     "test-shared",
     "vectors",
     "wdg-bench",
@@ -171,6 +172,9 @@ opt-level = "z"
 opt-level = "z"
 [profile.dev.package.swd-mailbox]
 opt-level = "z"
+# The per-chip images' HAL, a workspace member (so the `"*"` wildcard above does not reach it).
+[profile.dev.package.hal]
+opt-level = "z"
 
 # Speed-optimize the control-math crates in release while the shell stays size-optimized
 # (specs/integration.md, "Size and RAM budget"; the 2026-07-18 control-run cost defect). At
@@ -220,6 +224,11 @@ opt-level = "s"
 # per-call drain, a separate track.) Note: a per-package opt demonstrably still matters
 # post-merge (this line = a ~12% control-rate swing), so the leaf-opt rule above sets the pass
 # pipeline but does NOT make per-package levels irrelevant.
+# `hal`, the per-chip images' HAL, takes the same pin for the same reason: the polled I2C burst
+# and the serial and motor hot paths live in it, and the leaf-opt and per-package findings above
+# are about where that code is compiled, not which crate it is in.
+[profile.release.package.hal]
+opt-level = 3
 [profile.release.package.runtime-hal]
 opt-level = 3
 # The pin is per PACKAGE, so it also compiled runtime-hal's once-per-boot bring-up (the detect probe,

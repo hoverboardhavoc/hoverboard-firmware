@@ -808,7 +808,8 @@ pub const CYCLIC_EMIT_TICKS: u32 = 2;
 /// and commands nothing; a pivoting or throttle board sets neither and commands nothing. The
 /// field has one writer, [`control_dispatch_step`], which is why no role test is needed here.
 fn cyclic_state(state: &OrchestratorState) -> CyclicState {
-    let mut flags = 0u8;
+    // What the board runs against what it stores (`specs/machine-settings.md` section 5).
+    let mut flags = state.machine.flags();
     if state.rider_present {
         flags |= CyclicState::FLAG_RIDER;
     }
@@ -840,6 +841,7 @@ fn cyclic_state(state: &OrchestratorState) -> CyclicState {
         },
         // Unscaled, in the block's own Q12 (`specs/link-control.md`, `CYCLIC_STATE`).
         wheel_rate: state.block.wheel_rate_q12,
+        machine: state.machine.digest(),
     }
 }
 

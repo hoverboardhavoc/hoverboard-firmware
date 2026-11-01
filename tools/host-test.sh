@@ -3,9 +3,11 @@
 #
 # With no `-p`, it runs two suites, in this order: the motorcontroller workspace's (every crate only
 # the GD32 image links, and its test images), then the shared workspace's (the crates the bridge and
-# the host tools link as well). Together they are the suite the old single root workspace ran. With
+# the host tools link as well). Together they are the suite the old single root workspace ran. Then
+# it runs the HAL's (motorcontroller/hal) once per chip feature. With
 # `-p <package>` (repeatable, globs allowed), it runs the workspace that owns each named package,
-# found by the package's folder: motorcontroller/<package>, shared/<package> or tools/<package>.
+# found by the package's folder: motorcontroller/<package>, shared/<package> or tools/<package>
+# (`-p hal` runs the HAL once per chip).
 # Every other argument (cargo flags, a test-name filter, everything after `--`) goes to each run.
 #
 # Why this exists: motorcontroller/.cargo/config.toml sets `[build] target = "thumbv7m-none-eabi"`
@@ -33,6 +35,10 @@ set -euo pipefail
 # root suite did: cargo applies it to the `store` dependency of the members that have one.
 FEATURES="store/test-fields"
 WORKSPACES=(motorcontroller shared tools)
+# The HAL builds for exactly one chip (specs/hal.md section 3.2), so its host tests run once per chip
+# feature, after the suites above. `motorcontroller/Cargo.toml`'s default-members leave it out of
+# the plain motorcontroller run, which could not build it.
+HAL_CHIPS=(gd32f103c8 gd32f130c8 gd32f103rc)
 
 refuse_board_target() {
   echo "tools/host-test.sh: refusing '$1'." >&2
@@ -126,8 +132,10 @@ sel_shared=""
 sel_tools=""
 sel_of() { eval "printf '%s' \"\$sel_$1\""; }
 runs=()
+run_hal=0
 if [ "${#selected[@]}" = 0 ]; then
   runs=(motorcontroller shared)
+  run_hal=1
 else
   for p in "${selected[@]}"; do
     found=0
@@ -142,6 +150,18 @@ else
       exit 2
     fi
   done
+  # `hal` runs per chip below, never as a plain selection (it would not build).
+  kept=""
+  for p in $sel_motorcontroller; do
+    # shellcheck disable=SC2053
+    if [[ hal == $p ]]; then
+      run_hal=1
+    fi
+    if [ "$p" != hal ]; then
+      kept="$kept $p"
+    fi
+  done
+  sel_motorcontroller="$kept"
   for ws in "${WORKSPACES[@]}"; do
     [ -n "$(sel_of "$ws")" ] && runs+=("$ws")
   done
@@ -171,7 +191,7 @@ wants_features() {  # wants_features <workspace>
 # be expanded against the files in this directory.
 set -f
 status=0
-for ws in "${runs[@]}"; do
+for ws in ${runs[@]+"${runs[@]}"}; do
   cmd=(cargo test --target "$HOST_TARGET")
   if [ "${#selected[@]}" != 0 ]; then
     for p in $(sel_of "$ws"); do
@@ -190,4 +210,14 @@ for ws in "${runs[@]}"; do
     status=1
   fi
 done
+if [ "$run_hal" = 1 ]; then
+  for chip in "${HAL_CHIPS[@]}"; do
+    cmd=(cargo test --target "$HOST_TARGET" -p hal --features "$chip" ${rest[@]+"${rest[@]}"})
+    echo "+ (cd motorcontroller && ${cmd[*]})" >&2
+    if ! (cd -- "$root/motorcontroller" && "${cmd[@]}"); then
+      echo "tools/host-test.sh: the hal suite for $chip FAILED." >&2
+      status=1
+    fi
+  done
+fi
 exit "$status"

@@ -2,9 +2,9 @@
 //! brought its layout up.
 //!
 //! One record in RAM, written during boot and fixed after it. The firmware places it at the
-//! `BOARD_OBS` symbol, where an SWD read finds it, and serves its entries over the link as the
-//! read-only key `board.status` (`store::BOARD_STATUS`, 0x05). No entries means everything
-//! configured came up. The host tools decode the same bytes with [`decode`].
+//! `BOARD_OBS` symbol, where an SWD read finds it, and serves its entries over the link in the
+//! `STATUS` reply to `STATUS_READ` (`specs/machine-settings.md` section 6.1). No entries means
+//! everything configured came up. The host tools decode the same bytes with [`decode`].
 
 use crate::ABSENT;
 
@@ -116,7 +116,7 @@ impl StatusRecord {
         self.count == 0
     }
 
-    /// The recorded entries as bytes, [`ENTRY_LEN`] per entry: the value `board.status` answers.
+    /// The recorded entries as bytes, [`ENTRY_LEN`] per entry: what `STATUS` carries.
     pub fn entries(&self) -> &[u8] {
         let n = (self.count as usize).min(MAX_ENTRIES);
         self.entries.get(..n * ENTRY_LEN).unwrap_or(&[])
@@ -136,7 +136,7 @@ pub struct Entry {
     pub detail: u8,
 }
 
-/// Decode a `board.status` value into its entries. A trailing partial entry is ignored.
+/// Decode a `STATUS` payload into its entries. A trailing partial entry is ignored.
 pub fn decode(bytes: &[u8]) -> impl Iterator<Item = Entry> + '_ {
     bytes
         .as_chunks::<ENTRY_LEN>()

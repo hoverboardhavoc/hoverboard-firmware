@@ -8,6 +8,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.OdometerReading
@@ -44,7 +45,6 @@ class SetupSlotBusyScreenTest {
         override fun edit(key: Key, value: Value) { last = "edit" }
         override fun retry(key: Key) { last = "retry:$key" }
         override fun chooseFrame(value: Int) { last = "chooseFrame:$value" }
-        override fun chooseDriveMode(value: Int) { last = "chooseDriveMode:$value" }
         override fun chooseRightWheel(address: Int) { last = "chooseRightWheel:$address" }
         override fun editFrame(roles: List<Int>, signs: List<Int>) = Unit
         override fun setLevel() = Unit
@@ -67,6 +67,7 @@ class SetupSlotBusyScreenTest {
                             0x01 to BoardSetup(
                                 values = SetupFields.ALL.associate { it.key to it.def.default },
                                 writes = mapOf(mode to FieldWrite(Value.U8(1), WriteState.SlotBusy)),
+                                identity = identityOf(Walk.CLASS_MOTOR),
                             ),
                         ),
                     ),

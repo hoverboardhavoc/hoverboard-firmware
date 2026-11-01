@@ -21,6 +21,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
@@ -60,7 +61,6 @@ internal class Recorder : SetupActions {
     override fun edit(key: Key, value: Value) { edited += key to value }
     override fun retry(key: Key) { calls += "retry:$key" }
     override fun chooseFrame(value: Int) { calls += "chooseFrame:$value" }
-    override fun chooseDriveMode(value: Int) { calls += "chooseDriveMode:$value" }
     override fun chooseRightWheel(address: Int) { calls += "chooseRightWheel:$address" }
     override fun editFrame(roles: List<Int>, signs: List<Int>) { calls += "frame:$roles:$signs" }
     override fun setLevel() { calls += "setLevel" }
@@ -90,8 +90,8 @@ class SetupScreenTest {
 
     /**
      * A state with [board] selected and [other] found beside it, holding one [BoardSetup] for the
-     * selected board. Its class reads motor controller unless [values] says otherwise, so the screen
-     * shows every row, as it does for a board.
+     * selected board. Its `IDENTITY` says motor controller unless [nodeClass] says otherwise, so the
+     * screen shows every row, as it does for a board.
      */
     private fun setupState(
         board: Int,
@@ -99,17 +99,14 @@ class SetupScreenTest {
         writes: Map<Key, FieldWrite> = emptyMap(),
         notice: SetupNotice? = null,
         other: Int? = null,
+        nodeClass: Int = Walk.CLASS_MOTOR,
     ) = SetupState(
         addresses = listOfNotNull(board, other).sorted(),
         attached = other ?: board,
         target = board,
-        boards = mapOf(board to BoardSetup(values = withClass(values), writes = writes)),
+        boards = mapOf(board to BoardSetup(values = values, writes = writes, identity = identityOf(nodeClass, board))),
         notice = notice,
     )
-
-    /** [values] with a motor controller's `node.class` in it, unless it already names one. */
-    private fun withClass(values: Map<Key, Value>): Map<Key, Value> =
-        mapOf(SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.MOTOR_CONTROLLER)) + values
 
     /** The state with [f] folded into the selected board's part of it. */
     private fun SetupState.withBoard(f: (BoardSetup) -> BoardSetup) = copy(boards = mapOf(board!! to f(current)))
@@ -358,12 +355,12 @@ class SetupScreenTest {
         compose.onNodeWithText(s(R.string.setup_heading_component)).assertDoesNotExist()
         compose.onNodeWithText(s(R.string.setup_heading_forward)).performScrollTo().performClick()
 
-        assertTrue("frame:[3, 2]:[-1, -1, 1, -1, -1, 1]" in actions.calls)
+        assertTrue("frame:[3, 2]:[-1, -1, 1]" in actions.calls)
     }
 
     @Test
     fun theStoredFamilyYawIsNamedAndSelectedAsTheStockPose() {
-        val yaw = listOf(-1, -1, 1, -1, -1, 1)
+        val yaw = listOf(-1, -1, 1)
         val signs = SetupFields.AXIS_SIGN.mapIndexed { i, f -> f.key to Value.I32(yaw[i]) }
         show(setupState(board = 0x01, values = stored + signs))
 
@@ -397,7 +394,9 @@ class SetupScreenTest {
     /** A legal stored frame that is none of the 24 shows as custom with its raw values. */
     @Test
     fun aLegalFrameOutsideThePosesIsCustom() {
-        val mixed = listOf(-1, 1, -1, -1, -1, 1)
+        // Two signs unset and one set: the board runs a rotation (the reference fills the rest), but
+        // a partly unset map is no pose anyone picked.
+        val mixed = listOf(-1, 0, 0)
         val signs = SetupFields.AXIS_SIGN.mapIndexed { i, f -> f.key to Value.I32(mixed[i]) }
         show(setupState(board = 0x01, values = stored + signs))
 
@@ -478,10 +477,10 @@ class SetupScreenTest {
 
     @Test
     fun theFrameRefusalIsStatedAsNothingWritten() {
-        val refused = SetupNotice.FrameRefused(Orientation.Refusal.ACCEL_MIRRORED)
+        val refused = SetupNotice.FrameRefused(Orientation.Refusal.MIRRORED)
         show(setupState(board = 0x01, values = stored, notice = refused))
 
-        compose.onNodeWithText(s(R.string.setup_notice_accel_mirrored)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.setup_notice_mirrored)).assertIsDisplayed()
     }
 
     /** The rotation check needs the arm that puts a written orientation into effect, not a restart. */
@@ -621,26 +620,18 @@ class SetupScreenTest {
 
     /**
      * A bridge shows the keys every node has and nothing of a board's (`specs/hoverboard-bridge.md`, "The bridge
-     * as a node"): its name and its class read-only. No drive, IMU or calibration row,
-     * and no attitude flow.
+     * as a node"): its name. No drive, IMU or calibration row, and no attitude flow.
      */
     @Test
-    fun aBridgeShowsOnlyItsIdentityRowsWithItsClassReadOnly() {
-        val bridge = mapOf(
-            SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.BRIDGE),
-            SetupFields.DEVICE_NAME.key to Value.Str("hb-bridge-1a2b"),
-        )
-        show(setupState(board = 0x01, values = bridge, other = 0x02))
+    fun aBridgeShowsOnlyItsIdentityRows() {
+        val bridge = mapOf(SetupFields.DEVICE_NAME.key to Value.Str("hb-bridge-1a2b"))
+        show(setupState(board = 0x01, values = bridge, other = 0x02, nodeClass = Walk.CLASS_BRIDGE))
 
         for (row in SetupFields.BRIDGE) compose.onNodeWithTag(setupRowTag(row.key)).performScrollTo().assertExists()
         for (row in SetupFields.ALL - SetupFields.BRIDGE.toSet()) {
             compose.onNodeWithTag(setupRowTag(row.key)).assertDoesNotExist()
         }
         compose.onNodeWithText(s(R.string.setup_level_action)).assertDoesNotExist()
-        // The class is shown and cannot be edited: its row offers no control that writes.
-        val classRow = hasAnyAncestor(hasTestTag(setupRowTag(SetupFields.NODE_CLASS.key)))
-        compose.onAllNodes(classRow and hasSetTextAction()).assertCountEquals(0)
-        compose.onAllNodes(classRow and hasText(s(R.string.setup_set))).assertCountEquals(0)
         compose.onNode(selector("hb-bridge-1a2b 0x01")).assertExists()
     }
 }

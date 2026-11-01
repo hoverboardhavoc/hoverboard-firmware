@@ -33,7 +33,7 @@ sealed interface DiscoverOutcome {
     /**
      * The walk was abandoned (a request went unanswered through its whole budget, or the deadline
      * passed): [boards] is what it had reached by then. A node it adopted from a `PORTS` reply and
-     * never heard from itself is in it; the read of its `node.class` is what shows whether it
+     * never heard from itself is in it; its `IDENTIFY` is what shows whether it
      * answers.
      */
     data class Abandoned(override val boards: List<Int>) : DiscoverOutcome

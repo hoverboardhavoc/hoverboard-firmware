@@ -36,6 +36,7 @@ class FaultDisarmTest : RiderVmTest() {
         peerDemand = 0,
         wheelPos = 0,
         wheelRate = 0,
+        machine = 0,
         obs = QUIET_OBS,
     )
 
@@ -135,6 +136,31 @@ class FaultDisarmTest : RiderVmTest() {
         state = now()
         assertTrue(state.gridShows)
         assertEquals(CyclicState.EV_CONFIG or CyclicState.EV_MOTOR_HALL, state.lampWords[ONE_BOARD])
+    }
+
+    /**
+     * MACHINE (bit 13, `EV_MACHINE`, `specs/machine-settings.md` section 4.2) refuses the arm, as the
+     * board's off-inhibit does, and draws the grid while disarmed; on an armed machine it disarms
+     * nothing, because it never disengages a running board.
+     */
+    @Test
+    fun `machine refuses the arm and never disarms`() = runTest(dispatcher) {
+        connectAndArm()
+        transport.emitCyclicState(frame(CyclicState.EV_MACHINE))
+        runCurrent()
+        assertTrue(now().armed, "EV_MACHINE disengages nothing")
+        assertEquals(null, now().faultDisarm)
+
+        viewModel.onArmToggle()
+        runCurrent()
+        val state = now()
+        assertFalse(state.armed)
+        assertTrue(FaultLamp.MACHINE in state.lamps)
+        assertTrue(state.gridShows, "a lamp that refuses the arm takes the pad's place")
+        assertFalse(state.canArm)
+        viewModel.onArmToggle()
+        runCurrent()
+        assertFalse(now().armed, "the tap was refused by the model, not only by the control")
     }
 
     // --- the latch hold ------------------------------------------------------------------------

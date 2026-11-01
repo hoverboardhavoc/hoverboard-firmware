@@ -25,8 +25,8 @@ import org.junit.jupiter.api.Test
  */
 class WalkTest {
 
-    /** `store::MOTOR_CURRENT_LIMIT` (field 0x20, singleton index 0). */
-    private val motorCurrentLimit = Key(0x20, 0)
+    /** `store::MOTOR_CURRENT_LIMIT`, motor 0. */
+    private val motorCurrentLimit = Fields.MOTOR_CURRENT_LIMIT.key()
 
     @Test
     fun aRefusedAssignRecordsNothing() {
@@ -35,7 +35,7 @@ class WalkTest {
         // caller would then address a board that never adopted it.
         val c = Controller()
         assertTrue(c.nextRequest() != null) // NODE_HELLO
-        val hello = byteArrayOf(NO_ADDRESS.toByte(), Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())
+        val hello = byteArrayOf(NO_ADDRESS.toByte(), Walk.PROTO_VER.toByte(), 0x80.toByte())
         c.onReply(Pdu.of(Opcode.NodeHello, NO_ADDRESS, 0x80, hello).encode())
 
         val assign = Pdu.decode(c.nextRequest()!!)
@@ -60,7 +60,7 @@ class WalkTest {
         val group = 0x80
         val c = Controller()
         c.nextRequest()!! // NODE_HELLO
-        val hello = byteArrayOf(NO_ADDRESS.toByte(), Walk.PROTO_VER.toByte(), 0, 0, 0x10, 0x80.toByte())
+        val hello = byteArrayOf(NO_ADDRESS.toByte(), Walk.PROTO_VER.toByte(), 0x80.toByte())
         c.onReply(Pdu.of(Opcode.NodeHello, NO_ADDRESS, 0x80, hello).encode())
         c.nextRequest()!! // ASSIGN the gateway 0x01
         c.onReply(Pdu.of(Opcode.AssignAck, 0x01, 0x80, byteArrayOf(0x01, Walk.STATUS_OK.toByte())).encode())
@@ -235,7 +235,7 @@ class WalkTest {
     @Test
     fun aReWalkFromTheGatewayFindsABoardThatCameUpAfterTheWalk() {
         val m = Mesh()
-        val bridge = m.addBoard(2, nodeClass = Fields.NodeClass.BRIDGE, name = "offroad-master")
+        val bridge = m.addBoard(2, nodeClass = Walk.CLASS_BRIDGE, name = "offroad-master")
         m.attachController(bridge, 0)
         m.runWalk()
         assertEquals(listOf(0x01), m.controller.assignedAddrs())
@@ -464,7 +464,7 @@ class WalkTest {
         // and probe it, and then the held-up copy arrives, still showing port 1 unassigned.
         val c = Controller()
         c.nextRequest()!!
-        assertTrue(c.onReply(pdu(Opcode.NodeHello, NO_ADDRESS, 0x80, bytes(0, Walk.PROTO_VER, 0, 0, 0x10, 0x80))))
+        assertTrue(c.onReply(pdu(Opcode.NodeHello, NO_ADDRESS, 0x80, bytes(0, Walk.PROTO_VER, 0x80))))
         c.nextRequest()!!
         assertTrue(c.onReply(pdu(Opcode.AssignAck, 0x01, 0x80, bytes(0x01, Walk.STATUS_OK))))
         c.nextRequest()!! // Probe(0x01)
@@ -491,7 +491,7 @@ class WalkTest {
     fun anAssignAckNamingAnotherAddressIsIgnored() {
         val c = Controller()
         c.nextRequest()!!
-        assertTrue(c.onReply(pdu(Opcode.NodeHello, NO_ADDRESS, 0x80, bytes(0, Walk.PROTO_VER, 0, 0, 0x10, 0x80))))
+        assertTrue(c.onReply(pdu(Opcode.NodeHello, NO_ADDRESS, 0x80, bytes(0, Walk.PROTO_VER, 0x80))))
         c.nextRequest()!! // AssignGateway(0x01)
         for ((src, dst, named) in listOf(Triple(0x02, 0x80, 0x02), Triple(0x01, 0x80, 0x02), Triple(0x02, 0x80, 0x01), Triple(0x01, 0x81, 0x01))) {
             assertTrue(!c.onReply(pdu(Opcode.AssignAck, src, dst, bytes(named, Walk.STATUS_OK))), "src $src dst $dst names $named")
@@ -515,13 +515,32 @@ class WalkTest {
     fun aHelloReplyToAStaleGuestAddressIsIgnored() {
         val c = Controller()
         assertEquals(GUEST_FIRST, Pdu.decode(c.nextRequest()!!).src)
-        assertTrue(!c.onReply(pdu(Opcode.NodeHello, 0x01, 0x81, bytes(0x01, Walk.PROTO_VER, 0, 0, 0x10, 0x89))))
+        assertTrue(!c.onReply(pdu(Opcode.NodeHello, 0x01, 0x81, bytes(0x01, Walk.PROTO_VER, 0x89))))
         assertEquals(GUEST_FIRST, c.guestAddr)
         assertEquals(null, c.gatewayAddr())
         assertEquals(null, c.nextRequest(), "the Hello is still outstanding")
 
-        assertTrue(c.onReply(pdu(Opcode.NodeHello, 0x01, 0x80, bytes(0x01, Walk.PROTO_VER, 0, 0, 0x10, 0x88))))
+        assertTrue(c.onReply(pdu(Opcode.NodeHello, 0x01, 0x80, bytes(0x01, Walk.PROTO_VER, 0x88))))
         assertEquals(0x88, c.guestAddr)
         assertEquals(0x01, c.gatewayAddr())
+    }
+
+    /**
+     * The `NODE_HELLO` reply is `[node_id, proto_ver, your_addr]`, exactly three bytes
+     * (`specs/machine-settings.md` section 6.1): the old six-byte reply is not one, and the
+     * controller's own answer to a probe of its port is three bytes too.
+     */
+    @Test
+    fun theHelloReplyIsThreeBytes() {
+        val c = Controller()
+        c.nextRequest()!!
+        assertTrue(!c.onReply(pdu(Opcode.NodeHello, 0x01, 0x80, bytes(0x01, Walk.PROTO_VER, 0, 0, 0x10, 0x88))))
+        assertEquals(null, c.gatewayAddr())
+        assertTrue(c.onReply(pdu(Opcode.NodeHello, 0x01, 0x80, bytes(0x01, Walk.PROTO_VER, 0x88))))
+        assertEquals(0x88, c.guestAddr)
+
+        val probe = Pdu.of(Opcode.NodeHello, 0x01, NO_ADDRESS, byteArrayOf(Walk.KIND_PROBE.toByte())).encode()
+        val answer = Pdu.decode(c.replyToProbe(probe)!!)
+        assertEquals(listOf(0x88, Walk.PROTO_VER, NO_ADDRESS), answer.payload.map { it.toInt() and 0xFF })
     }
 }

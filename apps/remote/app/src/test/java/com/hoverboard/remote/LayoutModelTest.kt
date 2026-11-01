@@ -26,7 +26,7 @@ import org.junit.Test
  *
  * The properties here: the layout is read as one object, Apply writes the delta and nothing else
  * whenever the board is attached and disarmed, nothing judges the staged layout first (the board
- * reports what it could not bring up in `board.status` after the reboot), and a half-written layout
+ * reports what it could not bring up in its boot status record after the reboot), and a half-written layout
  * is finished by applying again.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -341,7 +341,6 @@ class LayoutModelTest {
             rig.stage(field, pin(name), motor = 0)
         }
         rig.stage(Fields.MOTOR_DEAD_TIME, 25, motor = 0)
-        rig.stage(Fields.MOTOR_CURRENT_SENSE, 1, motor = 0)
         val delta = rig.state.delta.map { it.key }
         assertFalse("the fleet pins it already holds are not in it", Fields.BOARD_BUZZER.key() in delta)
 

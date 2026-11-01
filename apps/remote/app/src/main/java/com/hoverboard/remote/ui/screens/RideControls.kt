@@ -142,7 +142,7 @@ private fun StatementLine(
  * One statement under the ARM control: its text, its tone, and what a tap opens, if anything: a
  * lamp's sheet, or Setup on a board at a row.
  */
-private data class Statement(
+internal data class Statement(
     val text: String,
     val tone: Tone,
     val lamp: FaultLamp? = null,
@@ -156,8 +156,8 @@ private data class Statement(
  */
 @Composable
 private fun statements(state: UiState): List<Statement> =
-    ridingStatements(state) + disarmStatements(state) + armStatements(state) + machineStatements(state) +
-        missingStatements(state)
+    ridingStatements(state) + disarmStatements(state) + armStatements(state) + runStatements(state) +
+        machineStatements(state) + missingStatements(state)
 
 /**
  * What is wrong while riding: a driven wheel that does not turn, and a lamp lit on a board the arm
@@ -173,7 +173,7 @@ private fun ridingStatements(state: UiState): List<Statement> = buildList {
             val lamp = FaultLamp.lit(word).firstOrNull { it.blocksArm } ?: continue
             val text = stringResource(
                 R.string.ride_lamp_lit_armed,
-                stringResource(lamp.title),
+                stringResource(state.lampTitle(lamp, listOf(board))),
                 boardName(state, board, inline = true),
             )
             add(Statement(text, Tone.WARNING, lamp))
@@ -252,14 +252,12 @@ private fun machineStatements(state: UiState): List<Statement> = buildList {
 /** A drive refusal's text: the Ride statement, or with [long] Setup's line (`specs/remote-ui.md` 3.1c). */
 @Composable
 internal fun refusalText(state: UiState, refusal: DriveRefusal, long: Boolean): String {
-    val mode = state.drive.stored?.name.orEmpty()
+    val mode = state.drive.derived?.name.orEmpty()
     return when (refusal) {
         DriveRefusal.UNREAD ->
             stringResource(if (long) R.string.drive_refusal_unread_long else R.string.drive_refusal_unread)
         DriveRefusal.DISAGREE ->
             stringResource(if (long) R.string.drive_refusal_disagree_long else R.string.drive_refusal_disagree)
-        DriveRefusal.UNKNOWN_MODE ->
-            stringResource(if (long) R.string.drive_refusal_unknown_mode_long else R.string.drive_refusal_unknown_mode)
         DriveRefusal.NOT_TWO -> stringResource(
             if (long) R.string.drive_refusal_not_two_long else R.string.drive_refusal_not_two,
             mode,
@@ -275,7 +273,7 @@ internal fun refusalText(state: UiState, refusal: DriveRefusal, long: Boolean): 
 /**
  * The control the mode puts under the thumb: the two-axis stick in the modes that steer
  * ([com.hoverboard.remote.model.DriveMode.hasTurnAxis]) and the throttle pad in the ones that send
- * one value per board. One or the other, never both, and under a drive refusal the stored mode's.
+ * one value per board. One or the other, never both, and under a drive refusal the derived mode's.
  *
  * Both are live only while connected AND armed, and both release through the same callback, so
  * whichever is on screen the finger-up path is one path.

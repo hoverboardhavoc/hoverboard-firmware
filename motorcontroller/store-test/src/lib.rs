@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Device-side helpers for the store firmware image: the RAM result/command channel and the
-//! build-feature-selected `Chip`.
+//! Device-side helpers for the store firmware image: the RAM result/command channel.
 //!
 //! The entry reads the host-packed `cmd` from `CMD_ADDR`, constructs the store's `FmcFlash` from the
-//! compile-time-selected `Chip`, runs the store `run` / `run_var` step, publishes a `TestResult`
-//! (scalar `output`, or the variable-value `buf`/`len`), and busy-spins (NEVER `wfi`).
-//!
-//! The `Chip` is selected by build feature (`chip1k` / `chip2k`), NEVER by runtime `detect_chip()`:
-//! detection's bus-fault probe is hardware-only and cannot run under Unicorn, so a detecting image
-//! would hang the CI gate (see the storage spec, Tier 2).
+//! compiled chip's `hal::Chip` (the build's chip feature: 1 KiB pages on the GD32F103C8 and
+//! GD32F130C8, 2 KiB on the GD32F103RC), runs the store `run` / `run_var` step, publishes a
+//! `TestResult` (scalar `output`, or the variable-value `buf`/`len`), and busy-spins (NEVER `wfi`).
 
 #![no_std]
 
@@ -68,32 +64,4 @@ pub fn publish_var(bytes: &[u8]) {
 fn publish_len(len: u16) {
     // SAFETY: RESULT_ADDR + 8 is the `len` field (u16) in the reserved RAM tail.
     unsafe { ptr::write_volatile((RESULT_ADDR + 8) as *mut u16, len) };
-}
-
-/// The build-feature-selected detected-`Chip` the store's `FmcFlash` is constructed from.
-///
-/// `chip1k` builds it from the public 1 KiB descriptor (the F103 reference part); `chip2k` builds it
-/// from `synthesize` behind `runtime-hal/detect-internals` (an F10x high-density 256 KiB / 2 KiB-page
-/// part, the 12-FET-class `Chip`, since the public descriptors are both 1 KiB). NEVER `detect_chip()`.
-///
-/// Target-only: it names `runtime-hal`, which the host build does not link.
-#[cfg(all(target_arch = "arm", feature = "chip1k", not(feature = "chip2k")))]
-pub fn selected_chip() -> runtime_hal::Chip {
-    runtime_hal::Chip::from_descriptor(runtime_hal::descriptor_f103())
-}
-
-/// The 2 KiB-page `Chip` (chip2k): an F10x high-density 256 KiB part, page size K2 (2 KiB), built
-/// through the HAL's `synthesize` (no public 2 KiB descriptor exists). `flash_kib = 256 > 128` selects
-/// K2; `adv_timers = 2` / `adc_count = 2` make a self-consistent high-density descriptor (the bench
-/// 12-FET shape). store_base resolves to 0x0803_F000 (top of the 256 KiB flash).
-#[cfg(all(target_arch = "arm", feature = "chip2k"))]
-pub fn selected_chip() -> runtime_hal::Chip {
-    use runtime_hal::detect::probe::Detected;
-    let detected = Detected {
-        family: runtime_hal::Family::F10x,
-        flash_kib: 256,
-        adv_timers: 2,
-        adc_count: 2,
-    };
-    runtime_hal::Chip::from_descriptor(runtime_hal::synthesize(&detected))
 }

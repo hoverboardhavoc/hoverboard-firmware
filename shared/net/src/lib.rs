@@ -33,5 +33,5 @@ pub use pdu::{
     NO_ADDRESS,
 };
 pub use walk::{
-    decode_tune, Controller, DeliveredPdu, Responder, TuneOp, OP_TUNE_READ, OP_TUNE_WRITE,
+    decode_tune, Controller, DeliveredPdu, Identity, Responder, TuneOp, OP_TUNE_READ, OP_TUNE_WRITE,
 };

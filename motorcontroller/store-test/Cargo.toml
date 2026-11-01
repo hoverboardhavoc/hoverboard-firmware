@@ -3,35 +3,29 @@ name = "store-test"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "The store firmware image (thumbv7m, cortex-m-rt) that runs the store `run`/`run_var` over the real FmcFlash and publishes TestResult. The exact image emulated under Unicorn (with an FMC board model) and flashed to silicon. Picks its Chip by build feature (chip1k / chip2k), never runtime detect_chip() (the bus-fault probe can't run under Unicorn)."
+description = "The store firmware image (thumbv7m, cortex-m-rt) that runs the store `run`/`run_var` over the real FmcFlash and publishes TestResult. The exact image emulated under Unicorn (with an FMC board model) and flashed to silicon. Built for one chip by feature (gd32f103c8, gd32f130c8: two 1 KiB pages; gd32f103rc: two 2 KiB pages) on the hal crate."
 
 [dependencies]
 # `test-fields` exposes the reserved test fields + the `run`/`run_var` scenario dispatch this image
-# calls (off in a production build of `store`). The chip1k/chip2k Chip selection is wired below.
+# calls (off in a production build of `store`). The chip is selected by feature, below.
 store = { path = "../../shared/store", features = ["test-fields"] }
 test-shared = { path = "../test-shared" }
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
 
-# The Chip is selected at COMPILE time, never via runtime detect_chip() (detection's hardware-only
-# bus-fault probe does not run under Unicorn). The runtime-hal dependency is target-gated like the
-# store's: the host build of this crate degrades to an empty main, so it never links the HAL.
+# The chip is the build's: exactly one chip feature below, forwarded to `hal` with the store's `hal`
+# adapter. Target-gated like the store's dependency: the host build of this crate degrades to an
+# empty main, so it never links the HAL. `hal` also supplies the chip's flash vector table.
 [target.'cfg(target_arch = "arm")'.dependencies]
-runtime-hal = { workspace = true }
-# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
-# `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
-# one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
-# `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.
-vectors = { path = "../vectors" }
+hal = { path = "../hal" }
 
+# One per chip (specs/hal.md section 3.2); none is the default, so the workspace sweep skips this
+# crate (`default-members`) and every build names its chip, as tools/emulator-runner's store
+# scenarios do.
 [features]
-# Default to chip1k so a bare `cargo build` (the CI thumbv7m gate) produces a usable image.
-default = ["chip1k"]
-# chip1k: build the Chip from the public 1 KiB descriptors (descriptor_f103 / descriptor_f130). The
-# store region is two 1 KiB pages. (The two 1 KiB bench parts and the emulated 1 KiB path.)
-chip1k = []
-# chip2k: build the Chip from `synthesize` behind runtime-hal/detect-internals (the public descriptors
-# are both 1 KiB, so the 2 KiB / F103RC Chip is synthesized). The store region is two 2 KiB pages.
-# Forwards `store/chip2k` so the store crate enables the HAL feature too.
-chip2k = ["store/chip2k"]
+gd32f103c8 = ["hal/gd32f103c8", "store/hal"]
+gd32f130c8 = ["hal/gd32f130c8", "store/hal"]
+# The 12-FET's part: 256 KiB of flash in 2 KiB pages, so the store region is two 2 KiB pages at
+# 0x0803_F000. No image runs on it yet; this build is the store's 2 KiB-page coverage.
+gd32f103rc = ["hal/gd32f103rc", "store/hal"]

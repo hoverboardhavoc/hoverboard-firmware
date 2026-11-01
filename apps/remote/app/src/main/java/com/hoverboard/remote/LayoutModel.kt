@@ -166,7 +166,7 @@ interface LayoutActions {
  * The thing being edited is ONE object, so there is no basket of independent values: [stage] edits
  * a copy of the whole layout, and [LayoutState.delta] is what it would take to make the board hold
  * it. Nothing judges the layout here. The firmware brings up each function from its own fields at
- * boot and lists what did not come up in `board.status`, which Setup's machine status shows
+ * boot and lists what did not come up in its boot status record, which Setup's machine status shows
  * (`specs/configured-links.md` sections 3 and 5).
  *
  * Writes go one field at a time, verified, because that is what the wire offers. A write that

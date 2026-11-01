@@ -6,6 +6,7 @@ import com.hoverboard.protocol.l3.BROADCAST
 import com.hoverboard.protocol.l3.Controller
 import com.hoverboard.protocol.l3.GUEST_FIRST
 import com.hoverboard.protocol.l3.GUEST_LAST
+import com.hoverboard.protocol.l3.Identity
 import com.hoverboard.protocol.l3.NO_ADDRESS
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
@@ -59,21 +60,17 @@ private class MockPort(private val tx: ArrayDeque<ByteArray>, private val rx: Ar
 /**
  * A tiny registry-checked key/value store (mirror of the firmware store's CONFIG-relevant behavior).
  *
- * [nodeClass] is the node's read-only `node.class` and [name] its `device.name` default: a registry
- * default each, served by a read and never stored, which is how a board answers them unwritten
- * (`shared/store/src/field.rs`, `NODE_CLASS` and `DEVICE_NAME`). A bridge is the same responder
- * with class `0x02` (`specs/hoverboard-bridge.md`, "The bridge as a node").
+ * [name] is the node's `device.name` default: served by a read and never stored, which is how a
+ * board answers it unwritten (`shared/store/src/field.rs`, `DEVICE_NAME`).
  */
-private class MockStore(nodeClass: Int, name: String) {
-    // The fields the walk, the CONFIG round-trip and a controller's node-class read touch.
+private class MockStore(name: String) {
+    // The fields the walk, the CONFIG round-trip and a controller's name read touch.
     private val registry = mapOf(
-        0x01 to Type.U8, // NODE_ADDRESS
-        0x03 to Type.U8, // NODE_CLASS (read-only)
-        0x10 to Type.Str, // DEVICE_NAME
-        0x20 to Type.U32, // MOTOR_CURRENT_LIMIT
+        Fields.NODE_ADDRESS.id to Fields.NODE_ADDRESS.type,
+        Fields.DEVICE_NAME.id to Fields.DEVICE_NAME.type,
+        Fields.MOTOR_CURRENT_LIMIT.id to Fields.MOTOR_CURRENT_LIMIT.type,
     )
-    private val readOnly = setOf(NODE_CLASS_KEY.fieldId)
-    private val defaults = mapOf(NODE_CLASS_KEY to Value.U8(nodeClass), DEVICE_NAME_KEY to Value.Str(name))
+    private val defaults = mapOf(DEVICE_NAME_KEY to Value.Str(name))
     private val map = HashMap<Key, Value>()
 
     fun getValue(key: Key): Value? = map[key]
@@ -81,21 +78,17 @@ private class MockStore(nodeClass: Int, name: String) {
     /** What a CONFIG_READ answers: the stored value, else the registry default where there is one. */
     fun readValue(key: Key): Value? = map[key] ?: defaults[key]
 
-    /** Set with registry type-checking; returns a CONFIG status (CFG_OK / UNKNOWN_KEY / TYPE_MISMATCH / READ_ONLY). */
+    /** Set with registry type-checking; returns a CONFIG status (CFG_OK / UNKNOWN_KEY / TYPE_MISMATCH). */
     fun setValue(key: Key, value: Value): Int {
         val regType = registry[key.fieldId] ?: return Walk.CFG_UNKNOWN_KEY
         if (value.kind() != regType) return Walk.CFG_TYPE_MISMATCH
-        if (key.fieldId in readOnly) return Walk.CFG_READ_ONLY
         map[key] = value
         return Walk.CFG_OK
     }
 }
 
-/** The `node.class` key (field 0x03), mirror of `store::NODE_CLASS`. */
-val NODE_CLASS_KEY = Key(0x03, 0)
-
-/** The `device.name` key (field 0x10), mirror of `store::DEVICE_NAME`. */
-val DEVICE_NAME_KEY = Key(0x10, 0)
+/** The `device.name` key, mirror of `store::DEVICE_NAME`. */
+val DEVICE_NAME_KEY = Fields.DEVICE_NAME.key()
 
 /** Source-learned multi-hop forwarder, a mirror of `shared/net/src/forward.rs`'s `Forwarder`. */
 private class Forwarder(var addr: Int, val nPorts: Int) {
@@ -154,13 +147,18 @@ private class Probe(val replyTo: Int, val nPorts: Int) {
 class MockBoard(
     nPorts: Int,
     private val portKinds: IntArray,
-    private val mcu: Int,
-    private val fwVer: Int,
-    nodeClass: Int = Fields.NodeClass.MOTOR_CONTROLLER,
+    mcu: Int,
+    fwVer: Int,
+    nodeClass: Int = Walk.CLASS_MOTOR,
     name: String = "Hoverboard",
+    uid: ByteArray = ByteArray(Identity.UID_LEN),
+    /** The boot status record's entries, as `STATUS` carries them; empty from a bridge. */
+    private val status: ByteArray = ByteArray(0),
 ) {
+    /** What `IDENTIFY` answers (`shared/net/src/walk.rs`, `Responder`'s identity). */
+    private val identity = Identity(nodeClass, mcu, fwVer, uid)
     private val fwd = Forwarder(NO_ADDRESS, nPorts)
-    private val store = MockStore(nodeClass, name)
+    private val store = MockStore(name)
     /** The next grant's offset in this board's guest slice (`shared/net/src/walk.rs`, `guest_slice`). */
     private var guestSlot = 0
     private var probe: Probe? = null
@@ -199,6 +197,8 @@ class MockBoard(
             Opcode.Assign -> onAssign(pdu, out)
             Opcode.ConfigRead -> onConfigRead(pdu, out)
             Opcode.ConfigWrite -> onConfigWrite(pdu, out)
+            Opcode.Identify -> reply(Opcode.Identity, pdu.src, identity.encode(), out)
+            Opcode.StatusRead -> reply(Opcode.Status, pdu.src, status, out)
             else -> Unit // controller-bound replies to a board are ignored
         }
     }
@@ -218,11 +218,7 @@ class MockBoard(
                 NO_ADDRESS
             }
             val nodeId = addr()
-            val reply = byteArrayOf(
-                nodeId.toByte(), Walk.PROTO_VER.toByte(),
-                (fwVer and 0xFF).toByte(), ((fwVer ushr 8) and 0xFF).toByte(),
-                mcu.toByte(), yourAddr.toByte(),
-            )
+            val reply = byteArrayOf(nodeId.toByte(), Walk.PROTO_VER.toByte(), yourAddr.toByte())
             emit(out, ingress, Pdu.of(Opcode.NodeHello, nodeId, pdu.src, reply))
         } else {
             val pr = probe ?: return
@@ -320,8 +316,12 @@ class MockBoard(
         for (b in v.encode()) out.add(b)
     }
 
-    private fun replyConfig(dst: Int, payload: ByteArray, out: MutableList<Emission>) {
-        fwd.originate(Pdu.of(Opcode.ConfigResp, addr(), dst, payload)) { port, f -> emit(out, port, f) }
+    private fun replyConfig(dst: Int, payload: ByteArray, out: MutableList<Emission>) =
+        reply(Opcode.ConfigResp, dst, payload, out)
+
+    /** Emit an [op] reply toward [dst] (the requester), routed by the learned table, as `Responder::reply`. */
+    private fun reply(op: Opcode, dst: Int, payload: ByteArray, out: MutableList<Emission>) {
+        fwd.originate(Pdu.of(op, addr(), dst, payload)) { port, f -> emit(out, port, f) }
     }
 }
 
@@ -345,11 +345,17 @@ class Mesh {
 
     fun addBoard(
         nPorts: Int,
-        nodeClass: Int = Fields.NodeClass.MOTOR_CONTROLLER,
+        nodeClass: Int = Walk.CLASS_MOTOR,
         name: String = "Hoverboard",
+        status: ByteArray = ByteArray(0),
     ): Int {
         val kinds = IntArray(MAX_PORTS) { Walk.PORT_UART }
-        val board = MockBoard(nPorts, kinds, mcu = 0x10, fwVer = 0x0001, nodeClass = nodeClass, name = name)
+        // A distinct factory id per board, as the fleet's are: the board's index in its last byte.
+        val uid = ByteArray(Identity.UID_LEN) { i -> if (i == Identity.UID_LEN - 1) (boards.size + 1).toByte() else 0x5A }
+        val board = MockBoard(
+            nPorts, kinds, mcu = Walk.MCU_F1X0, fwVer = 0x0001, nodeClass = nodeClass, name = name, uid = uid,
+            status = status,
+        )
         boards.add(BoardNode(board, arrayOfNulls(nPorts)))
         return boards.size - 1
     }
@@ -418,7 +424,7 @@ class Mesh {
                 val reply = ctrl.ctrl.replyToProbe(frame)
                 if (reply != null) {
                     ctrl.link!!.send(reply)
-                } else if (Pdu.decodeOrNull(frame)?.known() == Opcode.ConfigResp) {
+                } else if (Pdu.decodeOrNull(frame)?.known() in REPLIES) {
                     ctrl.inbox.add(frame)
                 } else if (!ctrl.ctrl.onReply(frame)) {
                     ctrl.refused.add(Pair(frame, ctrl.sent.lastOrNull()))
@@ -479,4 +485,15 @@ class Mesh {
     /** `CONFIG_READ(dst, key)` -> the CONFIG_RESP PDU bytes. */
     fun configRead(dst: Int, key: Key): ByteArray =
         controllerSend(ctrl.ctrl.buildConfigRead(dst, key)) ?: error("no CONFIG_RESP")
+
+    /** `IDENTIFY(dst)` -> the IDENTITY PDU bytes. */
+    fun identify(dst: Int): ByteArray = controllerSend(ctrl.ctrl.buildIdentify(dst)) ?: error("no IDENTITY")
+
+    /** `STATUS_READ(dst)` -> the STATUS PDU bytes. */
+    fun statusRead(dst: Int): ByteArray = controllerSend(ctrl.ctrl.buildStatusRead(dst)) ?: error("no STATUS")
+
+    private companion object {
+        /** The replies the controller captures rather than feeding to the walk. */
+        val REPLIES = setOf(Opcode.ConfigResp, Opcode.Identity, Opcode.Status)
+    }
 }

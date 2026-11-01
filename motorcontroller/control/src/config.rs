@@ -75,7 +75,7 @@ impl GainProfile {
 pub const GAIN_MIN: i16 = 0;
 
 /// The default inclusive upper bound of each state-feedback gain (`0 = gp`, `1 = gr`, `2 = gx`,
-/// `3 = gv`): the `store::CONTROL_GAIN_MAX` (0x7A) defaults, which `store`'s tests pin to this.
+/// `3 = gv`): the `store::CONTROL_GAIN_MAX` (0x28) defaults, which `store`'s tests pin to this.
 /// Four to ten times above the section-7 start gains `[3491, 4002, 197, 926]`, so the owner has
 /// room to tune without first moving the maxima, which are a field because the LQR's torque scale
 /// (assumption A1) is uncertain by a factor near one. The output clamp and the engagement envelope
@@ -100,9 +100,9 @@ pub const TUNED: usize = sf::GAINS + sf::REFERENCE_WORDS;
 /// The `store::CONTROL_SF_GAINS` field id. Declared here as well because `control` does not depend
 /// on `store` (the law is pure math); `store`'s own tests pin the two together, along with the
 /// defaults, so neither can drift.
-pub const SF_GAINS_FIELD: u8 = 0x79;
+pub const SF_GAINS_FIELD: u8 = 0x27;
 /// The `store::CONTROL_REFERENCE` field id; see [`SF_GAINS_FIELD`].
-pub const REFERENCE_FIELD: u8 = 0x7B;
+pub const REFERENCE_FIELD: u8 = 0x29;
 
 /// The shadow index of [`REFERENCE_FIELD`]'s index 0.
 const REFERENCE_AT: usize = sf::GAINS;
@@ -119,7 +119,7 @@ const MINIMA: [i16; TUNED] = [
 ];
 
 /// The live tunable words in RAM, as the running law sees them: the gain row (`CONTROL_SF_GAINS`,
-/// 0x79) and the reference row (`CONTROL_REFERENCE`, 0x7B), flat in that order.
+/// 0x27) and the reference row (`CONTROL_REFERENCE`, 0x29), flat in that order.
 ///
 /// **The write policy** (`specs/remote-ui.md` D3, the Betaflight model): a tune write changes the
 /// running value immediately and touches NO flash, so it is exempt from the armed refusal by
@@ -136,7 +136,7 @@ const MINIMA: [i16; TUNED] = [
 /// in, so a hand-poked out-of-range flash value cannot enter the law.
 ///
 /// **`max`** is the per-word inclusive upper bound: the boot- and arm-read `CONTROL_GAIN_MAX`
-/// (0x7A, each taken as `max(0, value)`) for the gain row, the compiled [`sf::REFERENCE_MAX`] for
+/// (0x28, each taken as `max(0, value)`) for the gain row, the compiled [`sf::REFERENCE_MAX`] for
 /// the reference row. Every range check here reads it, and the gain half is RE-READ at the next
 /// arm ([`GainShadow::re_apply_max`]; `specs/integration.md`, "When a stored value takes effect:
 /// the arm-time re-read").
@@ -568,7 +568,7 @@ pub mod fsm {
 /// The four-term state-feedback law (`specs/state-feedback.md`, `crate::sf`). OURS: every constant
 /// is a unit choice or a derived bound, and carries its derivation.
 pub mod sf {
-    /// Index order of the four gains (`store::CONTROL_SF_GAINS`, 0x79): pitch, pitch rate,
+    /// Index order of the four gains (`store::CONTROL_SF_GAINS`, 0x27): pitch, pitch rate,
     /// position, speed.
     pub const GAINS: usize = 4;
 
@@ -625,7 +625,7 @@ pub mod sf {
     /// point, and [`RAMP_CAPS`]' bound (a battery word of 2400 or more) holds.
     pub const NOMINAL_SCALE: i16 = 2960;
 
-    /// How many words the reference row carries (`store::CONTROL_REFERENCE`, 0x7B): `0 =
+    /// How many words the reference row carries (`store::CONTROL_REFERENCE`, 0x29): `0 =
     /// speed_max`, `1 = speed_slew`.
     pub const REFERENCE_WORDS: usize = 2;
 

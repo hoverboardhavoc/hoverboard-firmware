@@ -2,11 +2,12 @@ package com.hoverboard.remote
 
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.Refused
+import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Effect
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.model.TakesEffect
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -17,10 +18,10 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
- * The Machine section's rows (`specs/remote-ui.md` 3.2 and 3.7a): `machine.drive_mode` and
- * `control.frame` written to every motor controller with the same value, `control.side` written with
- * different values and in an order that cannot leave two right wheels, the verdicts the screen
- * shows, and the statements the arm control makes about them.
+ * The Machine section's rows (`specs/remote-ui.md` 3.7a): `machine.frame`, a machine field read once
+ * and written to every motor controller with the same value (`specs/machine-settings.md` section
+ * 7), motor 0's `side` written with different values and in an order that cannot leave two right
+ * wheels, the verdicts the screen shows, and the statements the arm control makes about them.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SetupMachineTest {
@@ -30,7 +31,7 @@ class SetupMachineTest {
     private val b2 = 0x02
     private val frame = SetupFields.CONTROL_FRAME.key
     private val side = SetupFields.CONTROL_SIDE.key
-    private val mode = SetupFields.DRIVE_MODE.key
+    private val mode = SetupFields.CONTROL_MODE.key
     private val rigid = Value.U8(Fields.ControlFrame.RIGID)
     private val left = Value.U8(Fields.ControlSide.LEFT)
     private val right = Value.U8(Fields.ControlSide.RIGHT)
@@ -50,12 +51,13 @@ class SetupMachineTest {
     // --- what the pair reads --------------------------------------------------------------------
 
     @Test
-    fun `the ride facts read the frame and the side on both boards`() = runTest {
+    fun `the ride facts read the frame once and the side on both boards`() = runTest {
         val rig = pair()
         val reads = rig.transport.reads
+        assertEquals(listOf(b1), reads.filter { it.second == frame }.map { it.first }, "a machine field is read once")
         for (board in listOf(b1, b2)) {
-            assertTrue(board to frame in reads, "the frame was not read on 0x%02X".format(board))
             assertTrue(board to side in reads, "the side was not read on 0x%02X".format(board))
+            assertEquals(Value.U8(Fields.ControlFrame.PIVOTING), rig.state.setupOf(board).values[frame])
         }
     }
 
@@ -96,9 +98,16 @@ class SetupMachineTest {
 
     // --- the arm control --------------------------------------------------------------------
 
+    /**
+     * Two different frames are seen once a board reports the copies disagree (`EV_MACHINE`): read
+     * once they are taken to agree, and the board's report has the frame read from each.
+     */
     @Test
     fun `two different frames refuse the arm and name each board's value`() = runTest {
         val rig = pair(store1 = mapOf(frame to rigid))
+        assertEquals(FramePair.Agree(rigid = true), rig.state.machine.frame, "read once")
+        rig.transport.emitCyclicState(QUIET_STATE.copy(fault = CyclicState.EV_MACHINE), b2)
+        runCurrent()
         assertEquals(FramePair.Differ(mapOf(b1 to true, b2 to false)), rig.state.machine.frame)
         assertEquals(MachineArm.FramesDiffer(mapOf(b1 to true, b2 to false)), rig.state.machine.armStatement)
         assertTrue(rig.state.machine.armStatement.refuses)
@@ -293,61 +302,38 @@ class SetupMachineTest {
         for (node in listOf(b1, b2)) {
             assertEquals(WriteState.Written, rig.state.setupOf(node).writes[frame]?.state)
         }
-        assertEquals(TakesEffect.NEXT_ARM, SetupFields.CONTROL_FRAME.takesEffect)
-        assertEquals(TakesEffect.NEXT_ARM, SetupFields.CONTROL_SIDE.takesEffect)
+        assertEquals(Effect.ARM, SetupFields.CONTROL_FRAME.takesEffect)
+        assertEquals(Effect.ARM, SetupFields.CONTROL_SIDE.takesEffect)
     }
 
-    // --- the drive mode (`specs/remote-ui.md` 3.2) ---------------------------------------------
+    // --- any machine field (`specs/machine-settings.md` section 7) ------------------------------
 
+    /** A machine row edited in Setup is the machine's: it goes to every motor controller. */
     @Test
-    fun `the ride facts read the drive mode on every motor controller`() = runTest {
+    fun `a machine row's edit goes to every motor controller with the same value`() = runTest {
         val rig = pair()
-        for (board in listOf(b1, b2)) {
-            assertTrue(board to mode in rig.transport.reads, "the drive mode was not read on 0x%02X".format(board))
-        }
-        assertEquals(ModePair.Agree(Fields.MachineDriveMode.SINGLE), rig.state.machine.mode)
-    }
-
-    @Test
-    fun `the drive mode goes to every motor controller with the same value`() = runTest {
-        val rig = pair()
-        rig.model.chooseDriveMode(Fields.MachineDriveMode.RIGID)
+        rig.model.edit(mode, Value.U8(Fields.ControlMode.BALANCE))
         flush()
 
-        val rigidMode = Value.U8(Fields.MachineDriveMode.RIGID)
-        assertEquals(listOf(Triple(b1, mode, rigidMode), Triple(b2, mode, rigidMode)), rig.transport.writes)
-        assertEquals(ModePair.Agree(Fields.MachineDriveMode.RIGID), rig.state.machine.mode)
+        val balance = Value.U8(Fields.ControlMode.BALANCE)
+        assertEquals(listOf(Triple(b1, mode, balance), Triple(b2, mode, balance)), rig.transport.writes)
         for (node in listOf(b1, b2)) assertEquals(WriteState.Written, rig.state.setupOf(node).writes[mode]?.state)
-        assertEquals(TakesEffect.APP_ONLY, SetupFields.DRIVE_MODE.takesEffect, "nothing on the board reads it")
     }
 
+    /** A board already holding the value is not written: no flash record appended for nothing. */
     @Test
-    fun `copies that disagree are badged, and one tap writes either value to all`() = runTest {
-        val rig = pair(
-            store1 = mapOf(mode to Value.U8(Fields.MachineDriveMode.BOUND)),
-            store2 = mapOf(mode to Value.U8(Fields.MachineDriveMode.DIFFERENTIAL)),
-        )
-        assertEquals(
-            ModePair.Differ(mapOf(b1 to Fields.MachineDriveMode.BOUND, b2 to Fields.MachineDriveMode.DIFFERENTIAL)),
-            rig.state.machine.mode,
-        )
+    fun `a machine write skips a board that already holds the value`() = runTest {
+        val rig = pair(store1 = mapOf(frame to rigid), store2 = mapOf(frame to Value.U8(Fields.ControlFrame.PIVOTING)))
+        rig.transport.emitCyclicState(QUIET_STATE.copy(fault = CyclicState.EV_MACHINE), b2)
+        runCurrent()
         assertTrue(rig.state.machine.disagrees)
 
-        rig.model.chooseDriveMode(Fields.MachineDriveMode.BOUND)
+        rig.model.chooseFrame(Fields.ControlFrame.RIGID)
         flush()
 
-        // Board 0x01 already holds BOUND, so only the other copy is written.
-        assertEquals(listOf(Triple(b2, mode, Value.U8(Fields.MachineDriveMode.BOUND))), rig.transport.writes)
-        assertEquals(ModePair.Agree(Fields.MachineDriveMode.BOUND), rig.state.machine.mode)
-        assertFalse(rig.state.machine.disagrees)
-    }
-
-    @Test
-    fun `a byte that names no drive mode is not written`() = runTest {
-        val rig = pair()
-        rig.model.chooseDriveMode(DRIVE_MODE_UNKNOWN)
-        flush()
-        assertTrue(rig.transport.writes.isEmpty())
+        assertEquals(listOf(Triple(b2, frame, rigid)), rig.transport.writes)
+        assertEquals(FramePair.Agree(rigid = true), rig.state.machine.frame)
+        assertTrue(rig.state.machineDifferences.isEmpty(), "the copies agree")
     }
 
     @Test
@@ -359,8 +345,7 @@ class SetupMachineTest {
         runCurrent()
 
         assertEquals(listOf(b2, B3), rig.state.motorControllers)
-        assertFalse(b1 to mode in rig.transport.reads, "a bridge was asked for a machine setting")
-        rig.model.chooseDriveMode(Fields.MachineDriveMode.BOUND)
+        assertFalse(b1 to frame in rig.transport.reads, "a bridge was asked for a machine setting")
         rig.model.chooseFrame(Fields.ControlFrame.RIGID)
         rig.model.chooseRightWheel(B3)
         flush()
@@ -368,8 +353,6 @@ class SetupMachineTest {
         assertTrue(rig.transport.writes.none { it.first == b1 }, "a bridge was written a machine setting")
         assertEquals(
             listOf(
-                Triple(b2, mode, Value.U8(Fields.MachineDriveMode.BOUND)),
-                Triple(B3, mode, Value.U8(Fields.MachineDriveMode.BOUND)),
                 Triple(b2, frame, rigid),
                 Triple(B3, frame, rigid),
                 Triple(B3, side, right),
@@ -382,8 +365,5 @@ class SetupMachineTest {
     private companion object {
         /** A third node, for the machine with a hoverboard bridge at the attach point. */
         const val B3 = 0x03
-
-        /** A drive-mode byte outside the vocabulary. */
-        const val DRIVE_MODE_UNKNOWN = 9
     }
 }

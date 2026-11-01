@@ -63,6 +63,8 @@ class MainViewModelTest : RiderVmTest() {
             transport.store[0x02 to Fields.CONTROL_FRAME.key()] = Value.U8(Fields.ControlFrame.PIVOTING)
             transport.setConnectionState(ConnectionState.CONNECTED)
             transport.setAttachedBoard(0x01, 0x02)
+            // Read once, the frame is taken to agree; a board's EV_MACHINE has it read from each.
+            transport.emitCyclicState(QUIET_STATE.copy(fault = CyclicState.EV_MACHINE), from = 0x02)
 
             val state = currentState()
             assertEquals(MachineArm.FramesDiffer(mapOf(0x01 to true, 0x02 to false)), state.machineArm)
@@ -492,7 +494,7 @@ class MainViewModelTest : RiderVmTest() {
         transport.store[0x01 to Fields.BOARD_BATTERY_CELLS.key()] = Value.U8(8)
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01)
-        transport.emitCyclicState(CyclicState(0, 0, 0, 3_300, 1, 0, 0, 0, 0, QUIET_OBS, 0))
+        transport.emitCyclicState(CyclicState(0, 0, 0, 3_300, 1, 0, 0, 0, 0, QUIET_OBS, 0, 0))
         advanceUntilIdle()
 
         val charge = currentState().batteryOf(0x01) as BatteryReading.Charge
@@ -532,6 +534,7 @@ class MainViewModelTest : RiderVmTest() {
                     peerDemand = 0,
                     wheelPos = 0,
                     wheelRate = 8_192,
+                    machine = 0,
                     obs = CyclicObs(
                         phasePeak = 980,
                         phaseMean = 410,
@@ -592,7 +595,7 @@ class MainViewModelTest : RiderVmTest() {
             transport.setAttachedBoard(0x01)
 
             transport.emitCyclicState(
-                CyclicState(0, 0, 100, 3_600, 1, 0, 0, 0, 0, QUIET_OBS, 0),
+                CyclicState(0, 0, 100, 3_600, 1, 0, 0, 0, 0, QUIET_OBS, 0, 0),
             )
             transport.emitCyclicState(
                 CyclicState(
@@ -605,7 +608,7 @@ class MainViewModelTest : RiderVmTest() {
                         chip = ChipTag.F130C8,
                         odometer = 1_284_310L,
                     ),
-                    -4_096,
+                    -4_096, 0,
                 ),
             )
 

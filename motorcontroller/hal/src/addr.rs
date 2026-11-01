@@ -31,11 +31,13 @@ pub enum PeriphLabel {
     Fwdgt = 17,
     Timer1 = 18,
     UniqueId = 19,
+    /// The DMA controller (DMA0 on the F10x, the one DMA on the F1x0).
+    Dma0 = 20,
 }
 
 impl PeriphLabel {
     /// How many labels there are (the table length).
-    pub const COUNT: usize = 20;
+    pub const COUNT: usize = 21;
 
     /// The label's table index.
     #[inline]
