@@ -1016,16 +1016,18 @@ pub struct HostLink {
 }
 
 /// One node the walk has placed: its address, its position (the relay it was reached through and
-/// that relay's port; `(0, EGRESS_SELF)` for the node on the controller's own link), and whether
+/// that relay's port; `(0, EGRESS_SELF)` for the node on the controller's own link), whether
 /// the address is one this controller handed out during this walk (`here`) rather than one the
-/// node answered with already holding it. Only a node placed `here` is ever moved to resolve a
-/// collision (`specs/l3.md`, "Discovery and address assignment", step 3).
+/// node answered with already holding it, and the medium kind of each port its `PORTS` reply
+/// reported, by port index (`None` until it is probed). Only a node placed `here` is ever moved to
+/// resolve a collision (`specs/l3.md`, "Discovery and address assignment", step 3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Placed {
     addr: u8,
     relay: u8,
     egress: u8,
     here: bool,
+    kinds: [Option<u8>; MAX_PORTS],
 }
 
 /// The transient controller. Sequential request/response (the acknowledged delivery class): it holds
@@ -1101,6 +1103,28 @@ impl Controller {
     /// it. Corroborates [`Self::gateway_addr`] from the fleet's side.
     pub fn host_link(&self) -> Option<HostLink> {
         self.host_link
+    }
+
+    /// The nodes the walk placed next to `addr`: the relay it was reached through, then every node
+    /// reached through it. A bridge's one walked neighbour is the board on its mailbox, since its
+    /// other ports hold controllers, which the walk does not place; this is how a tool finds the
+    /// board behind a bridge (`hoverboard-cli erase-store`).
+    pub fn neighbours(&self, addr: u8) -> Vec<u8, MAX_NODES> {
+        let mut v: Vec<u8, MAX_NODES> = self.parent_of(addr).into_iter().collect();
+        for p in self.assigned.iter().filter(|p| p.relay == addr) {
+            let _ = v.push(p.addr);
+        }
+        v
+    }
+
+    /// The first port of the node at `addr` whose medium is `kind` ([`PORT_SWD`], [`PORT_UART`],
+    /// [`PORT_BLE`]), as its `PORTS` reply reported it; `None` for a node not probed or with no
+    /// such port. A bridge's mailbox is its [`PORT_SWD`] port: the egress `hoverboard-cli
+    /// erase-store` gives the erased board its address back through.
+    pub fn port_of_kind(&self, addr: u8, kind: u8) -> Option<u8> {
+        let p = self.assigned.iter().find(|p| p.addr == addr)?;
+        let i = p.kinds.iter().position(|&k| k == Some(kind))?;
+        u8::try_from(i).ok()
     }
 
     /// The walk is finished: nothing queued and nothing outstanding.
@@ -1216,10 +1240,9 @@ impl Controller {
         match (task, pdu.known()) {
             (Task::Hello, Some(Opcode::NodeHello)) => p.len() >= 6,
             (Task::Probe { addr }, Some(Opcode::Ports)) => pdu.src == addr,
-            (
-                Task::AssignGateway { new_addr } | Task::AssignNeighbor { new_addr, .. },
-                Some(Opcode::AssignAck),
-            ) => p.len() >= 2 && pdu.src == new_addr && p[0] == new_addr,
+            (Task::AssignGateway { new_addr } | Task::AssignNeighbor { new_addr, .. }, _) => {
+                assign_ack_status(pdu, self.guest_addr, new_addr).is_some()
+            }
             _ => false,
         }
     }
@@ -1239,6 +1262,14 @@ impl Controller {
             // Bits 0-1 only: bit 7 is the link-group flag, which says nothing about the state.
             Some((p[0], p[1], p[2] & NB_STATE_MASK, p[3]))
         };
+        if let Some(placed) = self.assigned.iter_mut().find(|p| p.addr == probed) {
+            placed.kinds = [None; MAX_PORTS];
+            for (port, kind, _, _) in (0..n).map_while(entry) {
+                if let Some(k) = placed.kinds.get_mut(port as usize) {
+                    *k = Some(kind);
+                }
+            }
+        }
 
         // The parent's address on more than one port: the upstream link and a neighbour that
         // already held the address the parent was given this walk. Which port is upstream cannot
@@ -1382,24 +1413,19 @@ impl Controller {
     }
 
     fn build_request(&self, task: &Task) -> PduBuf {
-        let (op, dst, payload): (Opcode, u8, Vec<u8, 4>) = match *task {
-            Task::Hello => (Opcode::NodeHello, pdu::NO_ADDRESS, one(KIND_CONTROLLER)),
+        let src = self.guest_addr;
+        match *task {
+            Task::Hello => request(Opcode::NodeHello, src, pdu::NO_ADDRESS, &[KIND_CONTROLLER]),
             Task::AssignGateway { new_addr } => {
-                (Opcode::Assign, pdu::NO_ADDRESS, two(EGRESS_SELF, new_addr))
+                assign_request(src, pdu::NO_ADDRESS, EGRESS_SELF, new_addr)
             }
-            Task::Probe { addr } => (Opcode::ProbePorts, addr, Vec::new()),
+            Task::Probe { addr } => request(Opcode::ProbePorts, src, addr, &[]),
             Task::AssignNeighbor {
                 relay,
                 egress,
                 new_addr,
-            } => (Opcode::Assign, relay, two(egress, new_addr)),
-        };
-        let r = Pdu::from_op(op, self.guest_addr, dst, &payload);
-        let mut tmp = [0u8; MAX_PDU];
-        let n = r.encode(&mut tmp).unwrap_or(0);
-        let mut b: PduBuf = Vec::new();
-        let _ = b.extend_from_slice(&tmp[..n]);
-        b
+            } => assign_request(src, relay, egress, new_addr),
+        }
     }
 
     /// Allocate the next free board address (`0x01..=0x7F`), skipping any already handed out.
@@ -1424,6 +1450,7 @@ impl Controller {
                 relay,
                 egress,
                 here,
+                kinds: [None; MAX_PORTS],
             })
             .is_ok()
     }
@@ -1440,19 +1467,36 @@ impl Controller {
     }
 }
 
-/// A one-byte payload.
-fn one(b: u8) -> Vec<u8, 4> {
-    let mut v = Vec::new();
-    let _ = v.push(b);
-    v
+/// A controller request `op` from `src` to `dst`, encoded.
+fn request(op: Opcode, src: u8, dst: u8, payload: &[u8]) -> PduBuf {
+    let r = Pdu::from_op(op, src, dst, payload);
+    let mut tmp = [0u8; MAX_PDU];
+    let n = r.encode(&mut tmp).unwrap_or(0);
+    let mut b: PduBuf = Vec::new();
+    let _ = b.extend_from_slice(&tmp[..n]);
+    b
 }
 
-/// A two-byte payload.
-fn two(a: u8, b: u8) -> Vec<u8, 4> {
-    let mut v = Vec::new();
-    let _ = v.push(a);
-    let _ = v.push(b);
-    v
+/// `ASSIGN(egress, new_addr)` from the controller at `src` to `dst`, encoded: to a relay for the
+/// neighbour on its `egress` port (the directed form), or to the node on the controller's own link
+/// (`dst = 0x00`, `egress =` [`EGRESS_SELF`]). Every walk assignment is built here, and so is the
+/// one `hoverboard-cli erase-store` sends to give an erased board its address back.
+pub fn assign_request(src: u8, dst: u8, egress: u8, new_addr: u8) -> PduBuf {
+    request(Opcode::Assign, src, dst, &[egress, new_addr])
+}
+
+/// The status byte ([`STATUS_OK`], [`STATUS_ERR`]) of `pdu` when it is the `ASSIGN_ACK` for
+/// `new_addr` sent to the controller at `guest`: addressed to `guest`, from `new_addr`, and naming
+/// it in its payload (`specs/l3.md`, "A reply is bound to the request it answers"); `None` for any
+/// other frame.
+pub fn assign_ack_status(pdu: &Pdu, guest: u8, new_addr: u8) -> Option<u8> {
+    let p = pdu.payload;
+    (pdu.known() == Some(Opcode::AssignAck)
+        && pdu.dst == guest
+        && pdu.src == new_addr
+        && p.len() >= 2
+        && p[0] == new_addr)
+        .then(|| p[1])
 }
 
 #[cfg(test)]

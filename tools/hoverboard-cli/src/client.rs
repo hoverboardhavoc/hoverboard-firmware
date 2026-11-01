@@ -8,9 +8,9 @@
 use std::time::{Duration, Instant};
 
 use espsvc::{
-    BulkTx, Ctrl, EspInfo, Msg, Stage, Status, TargetId, MEM_MAX, OP_CLEAR_PROTECTION,
-    OP_FLASH_BEGIN, OP_FLASH_CHUNK, OP_INFO, OP_MEM_WRITE, OP_TARGET_CTRL, OP_UPDATE_BEGIN,
-    OP_UPDATE_CHUNK, OP_UPDATE_CONFIRM,
+    BulkTx, Ctrl, EspInfo, MailboxState, Msg, Stage, Status, TargetId, MEM_MAX,
+    OP_CLEAR_PROTECTION, OP_FLASH_BEGIN, OP_FLASH_CHUNK, OP_INFO, OP_MEM_WRITE, OP_STORE_ERASE,
+    OP_TARGET_CTRL, OP_UPDATE_BEGIN, OP_UPDATE_CHUNK, OP_UPDATE_CONFIRM,
 };
 use net::pdu::{Pdu, GUEST_FIRST, NO_ADDRESS};
 use sha2::{Digest, Sha256};
@@ -28,6 +28,8 @@ const ACK_WAIT: Duration = Duration::from_millis(400);
 /// How long the bridge may take, after the last byte of its own update, to check the slot and select
 /// it.
 const UPDATE_CHECK: Duration = Duration::from_secs(10);
+/// The interval between `ESP_INFO` requests while waiting for the mailbox.
+const MAILBOX_POLL: Duration = Duration::from_millis(200);
 /// How long the bridge may go between `FLASH_STATUS` reports while it programs.
 const STATUS_GAP: Duration = Duration::from_secs(30);
 
@@ -273,6 +275,30 @@ impl<W: Wire> Client<W> {
             Duration::from_secs(10),
             Self::result_for(OP_CLEAR_PROTECTION),
         )
+    }
+
+    /// `STORE_ERASE` (`specs/hoverboard-bridge.md`, "Erasing the store"). Sent once: it erases the
+    /// board's store and resets the board.
+    pub fn store_erase(&mut self) -> Result<(), ClientError> {
+        self.request(
+            &Msg::StoreErase,
+            1,
+            Duration::from_secs(10),
+            Self::result_for(OP_STORE_ERASE),
+        )
+    }
+
+    /// Ask `ESP_INFO` until the mailbox port reports [`MailboxState::Up`] or `within` has passed;
+    /// the last state reported, as its byte.
+    pub fn wait_mailbox(&mut self, within: Duration) -> Result<u8, ClientError> {
+        let t0 = Instant::now();
+        loop {
+            let state = self.info()?.mailbox;
+            if state == MailboxState::Up as u8 || t0.elapsed() >= within {
+                return Ok(state);
+            }
+            std::thread::sleep(MAILBOX_POLL);
+        }
     }
 
     /// `TARGET_CTRL`. Sent once: a reset repeated is a second reset.

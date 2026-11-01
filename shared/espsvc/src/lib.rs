@@ -20,6 +20,7 @@
 //! | `0x92` | [`Msg::MemRead`] | address `u32`, length `u16` (at most [`MEM_MAX`]) |
 //! | `0x93` | [`Msg::MemData`] | address `u32`, data |
 //! | `0x94` | [`Msg::MemWrite`] | address `u32`, data (word-aligned, whole words) |
+//! | `0x95` | [`Msg::StoreErase`] | none |
 //! | `0x98` | [`Msg::UpdateBegin`] | length `u32`, SHA-256 `[u8; 32]`, version `[u8; 3]` |
 //! | `0x99` | [`Msg::UpdateChunk`] | offset `u32`, data (at most [`CHUNK`] B) |
 //! | `0x9A` | [`Msg::UpdateAck`] | highest contiguous offset received `u32` |
@@ -61,6 +62,8 @@ pub const OP_MEM_READ: u8 = 0x92;
 pub const OP_MEM_DATA: u8 = 0x93;
 /// `MEM_WRITE`.
 pub const OP_MEM_WRITE: u8 = 0x94;
+/// `STORE_ERASE`.
+pub const OP_STORE_ERASE: u8 = 0x95;
 /// `ESP_UPDATE_BEGIN`.
 pub const OP_UPDATE_BEGIN: u8 = 0x98;
 /// `ESP_UPDATE_CHUNK`.
@@ -103,7 +106,7 @@ const _: () = assert!(HEADER_LEN + 4 + MEM_MAX <= MAX_PDU);
 pub enum Status {
     /// Done.
     Ok = 0,
-    /// The SWD engine is held by a flash or a protection clear.
+    /// The SWD engine is held by a flash, a store erase or a protection clear.
     Busy = 1,
     /// A malformed or out-of-range request (a length, an alignment, an offset).
     BadRequest = 2,
@@ -160,7 +163,9 @@ impl Status {
     pub fn describe(self) -> &'static str {
         match self {
             Status::Ok => "ok",
-            Status::Busy => "busy: a flash or a protection clear holds the SWD engine",
+            Status::Busy => {
+                "busy: a flash, a store erase or a protection clear holds the SWD engine"
+            }
             Status::BadRequest => "bad request",
             Status::NoTarget => "no target: SWD did not answer",
             Status::Armed => "armed: MOE is still set after the disarm write; cut the rail",
@@ -359,7 +364,7 @@ pub enum MailboxState {
     RegistryMismatch = 4,
     /// Attached, waiting for the firmware's `epoch_ack`.
     Attaching = 5,
-    /// Taken down while a flash or a protection clear holds the engine.
+    /// Taken down while a flash, a store erase or a protection clear holds the engine.
     Held = 6,
 }
 
@@ -480,6 +485,9 @@ pub enum Msg<'a> {
         /// The bytes, a whole number of words, at most [`MEM_MAX`].
         data: &'a [u8],
     },
+    /// `STORE_ERASE`: erase the board's store pages (`specs/hoverboard-bridge.md`, "Erasing the
+    /// store"), answered with [`Msg::Result`].
+    StoreErase,
     /// `ESP_UPDATE_BEGIN`.
     UpdateBegin {
         /// Image length in bytes.
@@ -571,6 +579,7 @@ impl<'a> Msg<'a> {
             Msg::MemRead { .. } => OP_MEM_READ,
             Msg::MemData { .. } => OP_MEM_DATA,
             Msg::MemWrite { .. } => OP_MEM_WRITE,
+            Msg::StoreErase => OP_STORE_ERASE,
             Msg::UpdateBegin { .. } => OP_UPDATE_BEGIN,
             Msg::UpdateChunk { .. } => OP_UPDATE_CHUNK,
             Msg::UpdateAck { .. } => OP_UPDATE_ACK,
@@ -592,7 +601,11 @@ impl<'a> Msg<'a> {
         let mut w = W { buf, n: 0 };
         let room = MAX_PDU - HEADER_LEN;
         match *self {
-            Msg::InfoReq | Msg::TargetIdReq | Msg::ClearProtection | Msg::UpdateConfirm => {}
+            Msg::InfoReq
+            | Msg::TargetIdReq
+            | Msg::ClearProtection
+            | Msg::StoreErase
+            | Msg::UpdateConfirm => {}
             Msg::Info(i) => {
                 w.put(&i.version);
                 w.put(&i.commit.to_le_bytes());
@@ -734,6 +747,10 @@ impl<'a> Msg<'a> {
             OP_CLEAR_PROTECTION => {
                 exact(0)?;
                 Msg::ClearProtection
+            }
+            OP_STORE_ERASE => {
+                exact(0)?;
+                Msg::StoreErase
             }
             OP_FLASH_BEGIN => {
                 exact(36)?;

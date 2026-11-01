@@ -246,6 +246,15 @@ pub fn dump_keys() -> Vec<Key> {
         .collect()
 }
 
+/// The keys a store erase loses that `dump` leaves out: the board-owned ones (`node.address` and
+/// each motor's `odometer`), which `erase-store` prints before it asks.
+pub fn board_owned_keys() -> Vec<Key> {
+    table_keys()
+        .into_iter()
+        .filter(|k| row_of(*k).is_some_and(|r| r.board_owned()))
+        .collect()
+}
+
 /// The keys `diff`, `apply` and `replace` read: every key the table names but `node.class` (which
 /// the node answers and never stores), and every key `files` name.
 pub fn plan_keys(files: &Files) -> Vec<Key> {

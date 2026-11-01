@@ -1570,7 +1570,9 @@ impl<'f> Machine<'f> {
     }
 
     /// Nothing moved: close the probe windows in flight, the boards' first and then the bridge's
-    /// (by letting the simulated clock run past it). Whether there was one.
+    /// (by letting the simulated clock run past it); with none, let 100 ms pass while the bridge's
+    /// port waits on the board (an attach not yet acknowledged, a header not yet written). Whether
+    /// there was one.
     pub fn tick(&mut self) -> bool {
         let mut ticked = false;
         if self.master.resp.probing() {
@@ -1590,6 +1592,10 @@ impl<'f> Machine<'f> {
                 .swd()
                 .pins()
                 .sleep_us(crate::node::PROBE_WINDOW_US + 1);
+            ticked = true;
+        }
+        if !ticked && self.port.state() != espsvc::MailboxState::Up {
+            self.port.swd().pins().sleep_us(100_000);
             ticked = true;
         }
         ticked

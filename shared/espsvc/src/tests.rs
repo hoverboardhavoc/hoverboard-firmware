@@ -65,6 +65,7 @@ fn every_message_round_trips_inside_one_pdu() {
             armed: true,
         }),
         Msg::ClearProtection,
+        Msg::StoreErase,
         Msg::FlashBegin {
             len: 58_000,
             sha256: [7; 32],
@@ -142,6 +143,11 @@ fn malformed_payloads_and_unknown_opcodes_are_refused() {
         Msg::decode(&pdu),
         Err(DecodeError::Malformed(OP_UPDATE_BEGIN)),
         "a FLASH_BEGIN-sized payload is not an update begin"
+    );
+    let pdu = Pdu::new(OP_STORE_ERASE, 1, 2, &[0]).unwrap();
+    assert_eq!(
+        Msg::decode(&pdu),
+        Err(DecodeError::Malformed(OP_STORE_ERASE))
     );
     let pdu = Pdu::new(OP_UPDATE_CONFIRM, 1, 2, &[0]).unwrap();
     assert_eq!(

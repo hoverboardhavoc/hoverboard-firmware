@@ -237,6 +237,31 @@ pub fn compact<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<u8, String> {
     exchange(wire, Opcode::ConfigCompact, src, dst, &[], [0, 0]).map(|r| r.status)
 }
 
+/// A directed `ASSIGN(egress, new_addr)` from `src` to `relay`, as the walk assigns a frontier node
+/// (`specs/l3.md`, "Discovery and address assignment", step 3), and the status of its
+/// `ASSIGN_ACK`. Resent on [`REPLY_WAIT`], [`TRIES`] times in all: a repeated `ASSIGN` re-persists
+/// the same address and is acknowledged again.
+pub fn assign<W: Wire>(
+    wire: &mut W,
+    src: u8,
+    relay: u8,
+    egress: u8,
+    new_addr: u8,
+) -> Result<u8, String> {
+    let req = net::walk::assign_request(src, relay, egress, new_addr);
+    for _ in 0..TRIES {
+        wire.send(&req);
+        let deadline = Instant::now() + REPLY_WAIT;
+        while let Some(pkt) = wire.recv(deadline.saturating_duration_since(Instant::now())) {
+            let Ok(p) = Pdu::decode(&pkt) else { continue };
+            if let Some(status) = net::walk::assign_ack_status(&p, src, new_addr) {
+                return Ok(status);
+            }
+        }
+    }
+    Err(format!("no ASSIGN_ACK from {new_addr:#04x}"))
+}
+
 /// Read `node.class` and `device.name` from every address the walk found, in address order.
 pub fn survey<W: Wire>(wire: &mut W, walked: &Controller) -> Vec<Found> {
     let src = walked.guest_addr();
