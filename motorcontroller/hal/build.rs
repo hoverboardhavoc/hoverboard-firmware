@@ -10,16 +10,28 @@
 //!   lists chips;
 //! - writes `interrupts.rs` (the `Interrupt` enum and the flash `__INTERRUPTS` table) and
 //!   `device.x` (a weak `DefaultHandler` alias per named vector) into `OUT_DIR`, both from the one
-//!   list below, which is the vendor startup file's vector list for the part.
+//!   list below, which is the vendor startup file's vector list for the part;
+//! - owns the chip's memory sizes (flash, page, SRAM): it writes them into `memory.rs`, which the
+//!   descriptor includes, and publishes them as this package's `links` metadata (`flash_kib`,
+//!   `page_bytes`, `ram_kib`), which an image's build script reads as `DEP_HAL_*` to size its
+//!   linker regions. One owner for the numbers the descriptor, the store placement and the link
+//!   all use.
 
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-/// One chip: its feature name, its model per peripheral, and its vendor vector list.
+/// One chip: its feature name, its memory sizes, its model per peripheral, and its vendor vector
+/// list.
 struct ChipRow {
     feature: &'static str,
+    /// Flash size, KiB.
+    flash_kib: u32,
+    /// Flash page size, bytes.
+    page_bytes: u32,
+    /// SRAM size, KiB.
+    ram_kib: u32,
     /// `(cfg name, model)` for every peripheral with more than one model.
     models: &'static [(&'static str, &'static str)],
     /// The device vectors in IRQ-number order, `None` where the vendor table holds a reserved 0.
@@ -247,6 +259,9 @@ const MODEL_CFGS: &[(&str, &[&str])] = &[
 const CHIPS: &[ChipRow] = &[
     ChipRow {
         feature: "gd32f103c8",
+        flash_kib: 64,
+        page_bytes: 1024,
+        ram_kib: 20,
         models: &[
             ("hal_gpio", "crl"),
             ("hal_clock", "f10x"),
@@ -258,6 +273,9 @@ const CHIPS: &[ChipRow] = &[
     },
     ChipRow {
         feature: "gd32f103rc",
+        flash_kib: 256,
+        page_bytes: 2048,
+        ram_kib: 48,
         models: &[
             ("hal_gpio", "crl"),
             ("hal_clock", "f10x"),
@@ -269,6 +287,9 @@ const CHIPS: &[ChipRow] = &[
     },
     ChipRow {
         feature: "gd32f130c8",
+        flash_kib: 64,
+        page_bytes: 1024,
+        ram_kib: 8,
         models: &[
             ("hal_gpio", "ctl"),
             ("hal_clock", "f1x0"),
@@ -311,6 +332,27 @@ fn main() {
 
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     fs::write(out.join("interrupts.rs"), interrupts_rs(chip.vectors)).expect("interrupts.rs");
+    let page = match chip.page_bytes {
+        1024 => "PageSize::K1",
+        2048 => "PageSize::K2",
+        other => panic!("no PageSize for a {other} B page"),
+    };
+    fs::write(
+        out.join("memory.rs"),
+        format!(
+            "/// Flash size, KiB (hal/build.rs, the chip table).\n\
+             pub(crate) const FLASH_KIB: u16 = {};\n\
+             /// Flash page size (hal/build.rs, the chip table).\n\
+             pub(crate) const FLASH_PAGE: PageSize = {page};\n\
+             /// SRAM size, KiB (hal/build.rs, the chip table).\n\
+             pub(crate) const RAM_KIB: u16 = {};\n",
+            chip.flash_kib, chip.ram_kib
+        ),
+    )
+    .expect("memory.rs");
+    println!("cargo:flash_kib={}", chip.flash_kib);
+    println!("cargo:page_bytes={}", chip.page_bytes);
+    println!("cargo:ram_kib={}", chip.ram_kib);
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("arm") {
         fs::write(out.join("device.x"), device_x(chip.vectors)).expect("device.x");
         println!("cargo:rustc-link-search={}", out.display());

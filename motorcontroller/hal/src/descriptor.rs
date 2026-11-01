@@ -11,6 +11,10 @@
 use crate::addr::{AddrTable, PeriphLabel};
 use crate::irq::Interrupt;
 
+// FLASH_KIB, FLASH_PAGE, RAM_KIB: the chip's memory sizes, owned by build.rs's chip table (which
+// also hands them to the images' linker scripts).
+include!(concat!(env!("OUT_DIR"), "/memory.rs"));
+
 /// The flash page size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageSize {
@@ -134,9 +138,9 @@ const F10X: AddrTable = COMMON
 pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     name: "GD32F103C8",
     addrs: F10X.with(PeriphLabel::Adc1, 0x4001_2800),
-    flash_kib: 64,
-    flash_page: PageSize::K1,
-    ram_kib: 20,
+    flash_kib: FLASH_KIB,
+    flash_page: FLASH_PAGE,
+    ram_kib: RAM_KIB,
     adv_timers: 1,
     adc_count: 2,
     bonding: [0xFFFF, 0xFFFF, 0xE000, 0x0003, 0, 0],
@@ -156,9 +160,9 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
         // ADC2 = ADC_BASE + 0x1800 (gd32f10x_adc.h), past the APB2 timer/USART block.
         .with(PeriphLabel::Adc2, 0x4001_3C00)
         .with(PeriphLabel::Timer7, 0x4001_3400),
-    flash_kib: 256,
-    flash_page: PageSize::K2,
-    ram_kib: 48,
+    flash_kib: FLASH_KIB,
+    flash_page: FLASH_PAGE,
+    ram_kib: RAM_KIB,
     adv_timers: 2,
     adc_count: 3,
     bonding: [0xFFFF, 0xFFFF, 0xFFFF, 0x0007, 0, 0],
@@ -182,9 +186,9 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
         .with(PeriphLabel::Gpiof, 0x4800_1400)
         .with(PeriphLabel::I2c1, 0x4000_5800)
         .with(PeriphLabel::UniqueId, 0x1FFF_F7AC),
-    flash_kib: 64,
-    flash_page: PageSize::K1,
-    ram_kib: 8,
+    flash_kib: FLASH_KIB,
+    flash_page: FLASH_PAGE,
+    ram_kib: RAM_KIB,
     adv_timers: 1,
     adc_count: 1,
     bonding: [0xFFFF, 0xFFFF, 0xE000, 0, 0, 0x00C3],

@@ -3,6 +3,10 @@ name = "hal"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
+# Not a native library: the key lets build.rs publish the chip's memory sizes to the build scripts of
+# the images that depend on this crate (`DEP_HAL_FLASH_KIB` and the rest; firmware/build.rs sizes the
+# per-chip linker regions from them).
+links = "hal"
 description = "The hoverboard HAL (specs/hal.md): one source for the GD32F103C8, GD32F130C8 and GD32F103RC, with the chip chosen at compile time by exactly one cargo feature. Each chip is a const descriptor plus one register model per peripheral; the image links the chip's flash vector table through cortex-m-rt's `device` feature. No detection, no RAM vector table."
 
 [dependencies]
