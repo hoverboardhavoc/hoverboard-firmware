@@ -339,18 +339,26 @@ fn a_streaming_read_takes_the_slots_the_bridge_keeps_up_with() {
         .unwrap();
         (got, c.wire().reads)
     };
-    // Fast: one sample per 50 ms slot, each one read.
+    // Fast: at most one sample per 50 ms slot, each one read. How many slots a run gets depends
+    // on how far the host's sleeps overshoot (a CI runner gave 5 in 500 ms), so the count is
+    // bounded above only; what is exact is that no slot holds two samples.
     let (fast, reads) = run(Duration::ZERO, 4);
-    assert!((9..=11).contains(&fast.len()), "{} samples", fast.len());
+    assert!((1..=11).contains(&fast.len()), "{} samples", fast.len());
     assert_eq!(reads as usize, fast.len());
     for (i, (at, data)) in fast.iter().enumerate() {
         assert!(*at >= Duration::from_millis(50) * i as u32, "{i}: {at:?}");
         assert_eq!(data, &vec![i as u8 + 1; 4]);
     }
+    for w in fast.windows(2) {
+        assert!(
+            w[1].0.as_millis() / 50 > w[0].0.as_millis() / 50,
+            "{fast:?}"
+        );
+    }
     // Slow: each read takes 120 ms, so it misses two slots in three; the samples are the reads,
     // each in the first slot after the last one ended.
     let (slow, reads) = run(Duration::from_millis(120), 4);
-    assert!((3..=5).contains(&slow.len()), "{} samples", slow.len());
+    assert!((1..=5).contains(&slow.len()), "{} samples", slow.len());
     assert_eq!(reads as usize, slow.len());
     for w in slow.windows(2) {
         assert!(w[1].0 >= w[0].0 + Duration::from_millis(120), "{slow:?}");
