@@ -1,5 +1,6 @@
 # Mode: with_polling, narrowed with assert_only to STAT and TDATA: the transmit handshake. The
-# bring-up before it is compared by bringup_usart1_115200_8n1_f1x0.
+# bring-up before it differs in style (the vendor's helpers clear then set each field, the HAL makes
+# one read-modify-write per field) and its end state is compared by bringup_usart1_115200_8n1_f1x0.
 #
 # STAT (0x1C) reads in order (each read the next value, the last one repeats):
 #   0x00  TBE poll: busy
@@ -41,4 +42,20 @@ body = '''
 '''
 
 [hal]
-pending = "the USART driver"
+body = '''
+    use hal::config::{Oversampling, UsartConfig, UsartFrame};
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let cfg = UsartConfig {
+            usart: PeriphLabel::Usart1,
+            baud: 115_200,
+            frame: UsartFrame::EIGHT_N_ONE,
+            oversampling: Oversampling::By16,
+        };
+        let usart = Usart::bring_up(&chip, &ClockConfig::REFERENCE_72M_IRC8M, &cfg).unwrap();
+        usart.write_byte(0x41);
+    }
+'''

@@ -34,4 +34,13 @@ body = '''
 '''
 
 [hal]
-pending = "the ADC driver"
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.configure_single(17, 7); // VREFINT at 239.5 cycles
+    }
+'''

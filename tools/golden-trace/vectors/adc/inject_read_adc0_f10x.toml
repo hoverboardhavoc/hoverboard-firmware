@@ -27,4 +27,15 @@ body = '''
 '''
 
 [hal]
-pending = "the ADC driver"
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.wait_eoic().unwrap();
+        adc.read_injected_data(0);
+        adc.read_injected_data(1);
+    }
+'''

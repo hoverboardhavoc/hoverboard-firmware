@@ -144,7 +144,7 @@ enum Script {
 struct State {
     accesses: Vec<Access>,
     scripts: HashMap<u32, Script>,
-    write_only: HashMap<u32, u32>,
+    reads_zero: HashMap<u32, u32>,
 }
 
 fn mask(size: usize) -> u32 {
@@ -176,15 +176,20 @@ pub fn run(
             (*addr, s)
         })
         .collect();
-    let write_only = target
+    let reads_zero = target
         .blocks
         .iter()
-        .flat_map(|b| b.write_only.iter().map(|(off, m)| (b.base + off, *m)))
+        .flat_map(|b| {
+            b.write_only
+                .keys()
+                .chain(b.self_clearing.keys())
+                .map(|off| (b.base + off, target.reads_zero(b.base + off)))
+        })
         .collect();
     let state = State {
         accesses: Vec::new(),
         scripts,
-        write_only,
+        reads_zero,
     };
     fn e(what: &'static str) -> impl Fn(unicorn_engine::uc_error) -> String {
         move |err| format!("unicorn: {what}: {err:?}")
@@ -244,7 +249,7 @@ pub fn run(
                 let _ = uc.mem_read(addr, &mut word);
                 let mut current = u32::from_le_bytes(word);
                 let data = uc.get_data_mut();
-                let write_only = data.write_only.get(&a).copied();
+                let reads_zero = data.reads_zero.get(&a).copied();
                 let scripted = match data.scripts.get_mut(&a) {
                     None => None,
                     Some(Script::Value(v)) => Some(*v),
@@ -258,14 +263,14 @@ pub fn run(
                 // The hook runs before the load, so the value written here is what it reads. An OR
                 // response puts its bits in memory, where a following read-modify-write writes them
                 // back, as it would write back a hardware status bit.
-                if let Some(m) = write_only {
+                if let Some(m) = reads_zero {
                     current &= !m;
                 }
                 let value = match scripted {
                     Some(v) => v,
                     None => current,
                 };
-                if scripted.is_some() || write_only.is_some() {
+                if scripted.is_some() || reads_zero.is_some() {
                     let _ = uc.mem_write(addr, &value.to_le_bytes());
                 }
                 uc.get_data_mut().accesses.push(Access {
@@ -306,7 +311,7 @@ mod tests {
         Target::parse(
             Family::Gd32f1x0,
             "[blocks.RCU_BASE]\nbase = 0x4002_1000\nsize = 0x400\nreset = { \"0x14\" = 0x14 }\n\
-             write_only = { \"0x18\" = 0xFF00 }\n",
+             write_only = { \"0x18\" = 0xF000 }\nself_clearing = { \"0x18\" = 0x0F00 }\n",
         )
         .unwrap()
     }
@@ -347,7 +352,7 @@ mod tests {
             0x7401, // strb r1, [r0, #0x10]
             0x6802, // ldr  r2, [r0]        (an OR response over the reset seed)
             0x6942, // ldr  r2, [r0, #0x14] (the seed)
-            0x6982, // ldr  r2, [r0, #0x18] (the write-only bits 15:8 read as 0)
+            0x6982, // ldr  r2, [r0, #0x18] (bits 15:8, write-only and self-clearing, read as 0)
             BX_LR,
         ]);
         let t = target();

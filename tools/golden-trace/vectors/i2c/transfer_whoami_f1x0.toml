@@ -1,5 +1,9 @@
-# Mode: with_polling, narrowed with assert_only to DATA, STAT0 and STAT1: the event handshake. The
-# bring-up before it is compared by bringup_i2c0_100k_f1x0.
+# Mode: with_polling, narrowed with assert_only to DATA, STAT0 and STAT1: the event handshake. Over
+# the whole block the two differ in style only: the vendor's i2c_clock_config ORs CKCFG from reset
+# where the HAL writes it (the bring-up's end state is compared by bringup_i2c0_100k_f1x0), and the
+# HAL sets CTL0.ACKEN at the start of each transfer phase, a rewrite of the value CTL0 already
+# holds here. Every CTL0 write the vendor makes (START, ACK off, STOP, ACK on) the HAL makes too, in
+# the same place between the polls.
 #
 # STAT0 (0x14) reads in order, each poll satisfied on its first read (each read the next value, the
 # last one repeats):
@@ -60,4 +64,24 @@ body = '''
 '''
 
 [hal]
-pending = "the I2C driver"
+body = '''
+    use hal::{Chip, ClockConfig, I2c, I2cMode, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let pins = (chip.pin(0x16).unwrap(), chip.pin(0x17).unwrap()); // SCL PB6, SDA PB7
+        let i2c = I2c::new(
+            &chip,
+            &ClockConfig::REFERENCE_72M_IRC8M,
+            PeriphLabel::I2c0,
+            pins,
+            I2cMode::standard(100_000),
+        )
+        .unwrap();
+        let mut who = [0u8; 1];
+        // write_read's sequence: a fresh write with no STOP, then a read behind a repeated START.
+        i2c.write_bytes(0x68, &[0x75], true, false).unwrap();
+        i2c.read_bytes(0x68, &mut who, false).unwrap();
+    }
+'''

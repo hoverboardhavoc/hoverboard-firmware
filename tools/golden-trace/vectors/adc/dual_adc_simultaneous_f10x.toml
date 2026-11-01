@@ -41,4 +41,12 @@ body = '''
 '''
 
 [hal]
-pending = "the ADC driver"
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        chip.dual_adc().configure_simultaneous(4, 5, 1); // ADC0 channel 4, ADC1 channel 5, 7.5 cycles
+    }
+'''

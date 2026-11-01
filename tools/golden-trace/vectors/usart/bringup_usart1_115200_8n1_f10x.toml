@@ -29,4 +29,19 @@ body = '''
 '''
 
 [hal]
-pending = "the USART driver"
+body = '''
+    use hal::config::{Oversampling, UsartConfig, UsartFrame};
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let cfg = UsartConfig {
+            usart: PeriphLabel::Usart1,
+            baud: 115_200,
+            frame: UsartFrame::EIGHT_N_ONE,
+            oversampling: Oversampling::By16,
+        };
+        let _usart = Usart::bring_up(&chip, &ClockConfig::REFERENCE_72M_IRC8M, &cfg).unwrap();
+    }
+'''

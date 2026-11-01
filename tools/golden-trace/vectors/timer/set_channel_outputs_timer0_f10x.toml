@@ -34,4 +34,43 @@ body = '''
 '''
 
 [hal]
-pending = "the timer driver"
+body = '''
+    use hal::config::{
+        BreakConfig, ClockDiv, OcMode, PwmAlign, PwmChannelConfig, PwmConfig, TrgoSource,
+    };
+    use hal::{Chip, PeriphLabel, PwmTimer};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        // Low side inverted (the vendor's OCN polarity low), both outputs idling high.
+        let pair = |high, low| PwmChannelConfig {
+            high,
+            low,
+            polarity: true,
+            idle_high: true,
+            idle_high_n: true,
+        };
+        let cfg = PwmConfig {
+            timer: PeriphLabel::Timer0,
+            channels: [pair(0x08, 0x1D), pair(0x09, 0x1E), pair(0x0A, 0x1F)],
+            period: 2250,
+            prescaler: 0,
+            dead_time: 0x1C,
+            brk: BreakConfig {
+                enabled: false,
+                level: false,
+            },
+            trigger_compare: 2249,
+            align: PwmAlign::Center2,
+            arse: true,
+            trigger_oc_mode: OcMode::Pwm0,
+            trigger_ch_enable: false,
+            crep: 0,
+            ckdiv: ClockDiv::Div2,
+            trgo_src: TrgoSource::Update,
+        };
+        let timer = PwmTimer::configure(&chip, &cfg).unwrap();
+        timer.handle().set_channel_outputs([true, false, true]);
+    }
+'''

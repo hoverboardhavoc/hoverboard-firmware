@@ -29,4 +29,13 @@ body = '''
 '''
 
 [hal]
-pending = "the ADC driver"
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.calibrate().unwrap();
+    }
+'''

@@ -61,9 +61,13 @@ pub struct Block {
     pub registers: BTreeMap<u32, String>,
     /// Reset values by offset, seeded into the emulator before a run.
     pub reset: BTreeMap<u32, u32>,
-    /// Write-only bits by offset: a load returns them as 0, as the silicon's undefined read of them
-    /// can, so a read-modify-write that would write back what it read shows in the trace.
+    /// Write-only bits by offset: a load returns them as 0 (the silicon's read of them is
+    /// undefined, so a read-modify-write that writes back what it read shows in the trace).
     pub write_only: BTreeMap<u32, u32>,
+    /// Self-clearing command bits by offset: a load returns them as 0 (the emulator completes the
+    /// command at once), and a final state does not include them (a written 1 is a command, not
+    /// a state the register keeps).
+    pub self_clearing: BTreeMap<u32, u32>,
 }
 
 /// A family's block table.
@@ -92,6 +96,8 @@ struct RawBlock {
     reset: BTreeMap<String, u32>,
     #[serde(default)]
     write_only: BTreeMap<String, u32>,
+    #[serde(default)]
+    self_clearing: BTreeMap<String, u32>,
 }
 
 /// Parse a number written `0x..` (hex) or in decimal, with optional `_` separators.
@@ -132,6 +138,7 @@ impl Target {
             offsets(&mut b.registers.keys())?;
             offsets(&mut b.reset.keys())?;
             offsets(&mut b.write_only.keys())?;
+            offsets(&mut b.self_clearing.keys())?;
             let registers = b
                 .registers
                 .iter()
@@ -142,11 +149,11 @@ impl Target {
                 .iter()
                 .map(|(k, v)| Ok((parse_u32(k)?, *v)))
                 .collect::<Result<_, String>>()?;
-            let write_only = b
-                .write_only
-                .iter()
-                .map(|(k, v)| Ok((parse_u32(k)?, *v)))
-                .collect::<Result<_, String>>()?;
+            let masks = |m: &BTreeMap<String, u32>| -> Result<BTreeMap<u32, u32>, String> {
+                m.iter().map(|(k, v)| Ok((parse_u32(k)?, *v))).collect()
+            };
+            let write_only = masks(&b.write_only)?;
+            let self_clearing = masks(&b.self_clearing)?;
             blocks.push(Block {
                 name,
                 base: b.base,
@@ -154,6 +161,7 @@ impl Target {
                 registers,
                 reset,
                 write_only,
+                self_clearing,
             });
         }
         blocks.sort_by_key(|b| b.base);
@@ -186,6 +194,22 @@ impl Target {
             Some(b) => format!("<{}>+0x{:02X}", b.name, addr - b.base),
             None => format!("0x{addr:08X}"),
         }
+    }
+
+    /// The bits a load from `addr` returns as 0: its write-only and self-clearing bits.
+    pub fn reads_zero(&self, addr: u32) -> u32 {
+        self.block_of(addr).map_or(0, |b| {
+            let off = addr - b.base;
+            b.write_only.get(&off).copied().unwrap_or(0)
+                | b.self_clearing.get(&off).copied().unwrap_or(0)
+        })
+    }
+
+    /// The self-clearing bits at `addr`.
+    pub fn self_clearing(&self, addr: u32) -> u32 {
+        self.block_of(addr).map_or(0, |b| {
+            b.self_clearing.get(&(addr - b.base)).copied().unwrap_or(0)
+        })
     }
 
     /// The register name at `addr`, if the table names it.

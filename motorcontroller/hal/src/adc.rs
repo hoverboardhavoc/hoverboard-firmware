@@ -275,15 +275,19 @@ impl Adc {
     }
 
     /// One conversion of `channel`: point regular rank 0 at it, start the conversion, wait for
-    /// `EOC`, read `RDATA`, clear `EOC` (so the next read waits for its own conversion). The
-    /// channel's sample time is the one [`Adc::configure_single`] set.
+    /// `EOC`, read `RDATA`. Reading `RDATA` clears `EOC` (GD32F1x0 User Manual 10.5.1, GD32F10x User
+    /// Manual 11.7.1), so the next read waits for its own conversion. The channel's sample time is
+    /// the one [`Adc::configure_single`] set.
+    ///
+    /// No separate `EOC` clear: it was a read-modify-write of `STAT`, whose flags clear on a
+    /// written 0, so an `EOIC` the injected group raised between its read and its write was
+    /// cleared with it. Found by `tools/golden-trace`'s `adc/transfer_vrefint_*`, where the vendor
+    /// sequence has no such write.
     pub fn read_channel(&self, channel: u8) -> Result<u16, AdcError> {
         regular_rank0(channel).apply(self.base);
         self.reg(CTL1).set_bits(CTL1_SWRCST);
         self.wait_stat(STAT_EOC)?;
-        let value = self.reg(RDATA).read() as u16;
-        self.reg(STAT).clear_bits(STAT_EOC);
-        Ok(value)
+        Ok(self.reg(RDATA).read() as u16)
     }
 
     /// Wait for the injected group's end of conversion (`STAT.EOIC`).

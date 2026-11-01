@@ -20,4 +20,14 @@ body = '''
 '''
 
 [hal]
-pending = "the USART driver"
+body = '''
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let pins = (chip.pin(0x02).unwrap(), chip.pin(0x03).unwrap()); // TX PA2, RX PA3
+        Usart::new(&chip, &ClockConfig::REFERENCE_72M_IRC8M, PeriphLabel::Usart1, pins, 115_200)
+            .unwrap();
+    }
+'''

@@ -5,7 +5,10 @@
 #
 # `registers` name the offsets for the comments in a rendered trace. `reset` is the value the
 # emulator seeds before a run, where a read-modify-write depends on it (every other register reads
-# 0); a vector overrides a seed with `reset_overrides`. `write_only` bits read as 0.
+# 0); a vector overrides a seed with `reset_overrides`. `write_only` bits read as 0 (the silicon's
+# read is undefined). `self_clearing` command bits read as 0 too (the emulator completes the
+# command at once; a vector that polls one scripts its reads instead), and a final_state comparison
+# leaves them out of the last written value.
 
 [blocks.AFIO_BASE]
 base = 0x4001_0000
@@ -51,12 +54,16 @@ registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "ISTAT", "0x0C" = "OCTL
 base = 0x4001_2400
 size = 0x400
 registers = { "0x00" = "STAT", "0x04" = "CTL0", "0x08" = "CTL1", "0x0C" = "SAMPT0", "0x10" = "SAMPT1", "0x2C" = "RSQ0", "0x30" = "RSQ1", "0x34" = "RSQ2", "0x38" = "ISQ", "0x3C" = "IDATA0", "0x40" = "IDATA1", "0x44" = "IDATA2", "0x48" = "IDATA3", "0x4C" = "RDATA" }
+# CTL1.RSTCLB and CLB (bits 3, 2): set by software, cleared by hardware when the step finishes.
+self_clearing = { "0x08" = 0x0000_000C }
 
 # The second ADC (F10x only), the same register block as ADC0.
 [blocks.ADC1_BASE]
 base = 0x4001_2800
 size = 0x400
 registers = { "0x00" = "STAT", "0x04" = "CTL0", "0x08" = "CTL1", "0x0C" = "SAMPT0", "0x10" = "SAMPT1", "0x2C" = "RSQ0", "0x30" = "RSQ1", "0x34" = "RSQ2", "0x38" = "ISQ", "0x3C" = "IDATA0", "0x40" = "IDATA1", "0x44" = "IDATA2", "0x48" = "IDATA3", "0x4C" = "RDATA" }
+# CTL1.RSTCLB and CLB (bits 3, 2): set by software, cleared by hardware when the step finishes.
+self_clearing = { "0x08" = 0x0000_000C }
 
 [blocks.TIMER0_BASE]
 base = 0x4001_2C00

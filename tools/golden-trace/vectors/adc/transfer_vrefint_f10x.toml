@@ -1,4 +1,6 @@
-# Mode: with_polling over the ADC0 block.
+# Mode: with_polling over the ADC0 block less SAMPT0. The vendor's one call that sets a regular
+# rank, adc_regular_channel_config, also rewrites the channel's sample time; the HAL's read points
+# the rank and keeps the sample time configure_single set (bringup_adc0_vrefint_f10x compares it).
 #
 # STAT (0x00) reads: 0x00000000 (EOC clear, busy), then 0x00000002 (EOC set). RDATA (0x4C) reads
 # 0x05D2, about 1.2 V on a 3.3 V reference (a placeholder, not a silicon capture). Reading RDATA
@@ -13,7 +15,7 @@ HAL: chip.adc() then read_channel(17).
 """
 family = "gd32f10x"
 mode = "with_polling"
-assert_only = ["<ADC0_BASE>"]
+ignore = ["<ADC0_BASE>+0x0C"]
 
 [read_responses]
 "<ADC0_BASE>+0x00" = [0x0000_0000, 0x0000_0002]
@@ -28,4 +30,13 @@ body = '''
 '''
 
 [hal]
-pending = "the ADC driver"
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.read_channel(17).unwrap();
+    }
+'''

@@ -1,5 +1,6 @@
-# Mode: with_polling, narrowed with assert_only to STAT and DATA: the full-duplex handshake. The
-# bring-up before it is compared by bringup_spi0_1m_mode0_f10x.
+# Mode: with_polling over the SPI0 block: the bring-up and the full-duplex handshake. The HAL's
+# bring-up makes the vendor's accesses (spi_init's one CTL0 read and write, the I2SCTL and SPIEN
+# read-modify-writes), so nothing is narrowed.
 #
 # STAT (0x08) reads in order (each read the next value, the last one repeats), per byte:
 #   0x00 busy, 0x02 TBE set; then 0x00 busy, 0x01 RBNE set
@@ -14,7 +15,7 @@ HAL: Spi::bring_up(...) then transfer_byte(0xA5); transfer_byte(0x5A).
 """
 family = "gd32f10x"
 mode = "with_polling"
-assert_only = ["<SPI0_BASE>+0x08..0x0C"]
+assert_only = ["<SPI0_BASE>"]
 
 [read_responses]
 "<SPI0_BASE>+0x08" = [0x00, 0x02, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01]
@@ -42,4 +43,27 @@ body = '''
 '''
 
 [hal]
-pending = "the SPI driver"
+body = '''
+    use hal::config::{NssMode, SpiConfig};
+    use hal::{Chip, ClockConfig, PeriphLabel, Spi};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let cfg = SpiConfig {
+            spi: PeriphLabel::Spi0,
+            sck: 0x05,
+            miso: 0x06,
+            mosi: 0x07,
+            nss: 0x04,
+            mode: 0,
+            data16: false,
+            target_hz: 1_000_000,
+            lsb_first: false,
+            nss_mode: NssMode::Software,
+        };
+        let spi = Spi::bring_up(&chip, &ClockConfig::REFERENCE_72M_IRC8M, &cfg).unwrap();
+        spi.transfer_byte(0xA5).unwrap();
+        spi.transfer_byte(0x5A).unwrap();
+    }
+'''

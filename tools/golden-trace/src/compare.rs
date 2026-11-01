@@ -5,8 +5,8 @@
 //! never equals two 16-bit writes over the same bytes):
 //!
 //! - `register_writes`: the ordered list of writes; reads are not compared.
-//! - `final_state`: the last write to each address (its width and value); order and intermediate
-//!   writes are not compared.
+//! - `final_state`: the last write to each address (its width and value, less the table's
+//!   self-clearing command bits); order and intermediate writes are not compared.
 //! - `with_polling`: the ordered list of reads and writes, so a poll the HAL drops or adds fails.
 //!
 //! A vector narrows the comparison to the accesses inside its `assert_only` ranges, or outside its
@@ -102,7 +102,13 @@ fn final_state(hal: &[Access], vendor: &[Access], target: &Target) -> Outcome {
     let last = |t: &[Access]| -> BTreeMap<u32, Access> {
         t.iter()
             .filter(|a| a.op == Op::Write)
-            .map(|a| (a.addr, *a))
+            .map(|a| {
+                let state = Access {
+                    value: a.value & !target.self_clearing(a.addr),
+                    ..*a
+                };
+                (a.addr, state)
+            })
             .collect()
     };
     let (h, v) = (last(hal), last(vendor));
@@ -287,6 +293,21 @@ mod tests {
         ];
         assert!(compare(Mode::FinalState, &restyled, &base(), &t).matched);
         assert!(!compare(Mode::RegisterWrites, &restyled, &base(), &t).matched);
+    }
+
+    #[test]
+    fn a_final_state_leaves_out_self_clearing_bits() {
+        let t = Target::parse(
+            Family::Gd32f10x,
+            "[blocks.ADC0_BASE]\nbase = 0x4001_2400\nsize = 0x400\n\
+             self_clearing = { \"0x08\" = 0x4 }\n",
+        )
+        .unwrap();
+        let command_last = vec![w(4, 0x4001_2408, 0x9801), w(4, 0x4001_2408, 0x9805)];
+        let state_last = vec![w(4, 0x4001_2408, 0x9805), w(4, 0x4001_2408, 0x9801)];
+        assert!(compare(Mode::FinalState, &state_last, &command_last, &t).matched);
+        let other = vec![w(4, 0x4001_2408, 0x9800)];
+        assert!(!compare(Mode::FinalState, &other, &command_last, &t).matched);
     }
 
     #[test]

@@ -32,4 +32,25 @@ body = '''
 '''
 
 [hal]
-pending = "the SPI driver"
+body = '''
+    use hal::config::{NssMode, SpiConfig};
+    use hal::{Chip, ClockConfig, PeriphLabel, Spi};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let cfg = SpiConfig {
+            spi: PeriphLabel::Spi0,
+            sck: 0x05,
+            miso: 0x06,
+            mosi: 0x07,
+            nss: 0x04,
+            mode: 0,
+            data16: false,
+            target_hz: 1_000_000,
+            lsb_first: false,
+            nss_mode: NssMode::Software,
+        };
+        let _spi = Spi::bring_up(&chip, &ClockConfig::REFERENCE_72M_IRC8M, &cfg).unwrap();
+    }
+'''
