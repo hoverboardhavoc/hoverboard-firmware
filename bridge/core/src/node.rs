@@ -312,6 +312,11 @@ impl<'f, F: Flash> Node<'f, F> {
         &self.store
     }
 
+    /// The store, for the one-off fleet move's key copy (`crate::keymove`).
+    pub fn store_mut(&mut self) -> &mut Store<'f, F> {
+        &mut self.store
+    }
+
     /// The responder, for routing-table inspection.
     pub fn responder(&self) -> &Responder {
         &self.resp

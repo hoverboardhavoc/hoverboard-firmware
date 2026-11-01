@@ -425,3 +425,35 @@ fn the_binary_watches_over_tcp_and_sends_nothing_after_the_attach() {
         Some(Opcode::NodeHello)
     );
 }
+
+/// The one-off fleet move (`specs/machine-settings.md` section 8): the CLI attaches on the old 6 B
+/// `NODE_HELLO` reply of a bridge still on the previous image, and on the 3 B one.
+#[test]
+fn attach_takes_a_six_and_a_three_byte_hello_reply() {
+    struct Bridge(Vec<u8>, VecDeque<Vec<u8>>);
+    impl Wire for Bridge {
+        fn send(&mut self, _: &[u8]) {
+            self.1
+                .push_back(pdu(Opcode::NodeHello.to_u8(), 0x03, GUEST_FIRST, &self.0));
+        }
+        fn recv(&mut self, _: Duration) -> Option<Vec<u8>> {
+            self.1.pop_front()
+        }
+        fn window(&self) -> usize {
+            espsvc::WINDOW_BLE
+        }
+    }
+    for reply in [
+        vec![0x03, PROTO_VER, 0x01, 0x00, 0x03, 0x98],
+        vec![0x03, PROTO_VER, 0x98],
+    ] {
+        let mut b = Bridge(reply, VecDeque::new());
+        assert_eq!(
+            attach(&mut b, 1, ms(1)),
+            Some(hoverboard_cli::guest::Attached {
+                guest: 0x98,
+                node: Some(0x03)
+            })
+        );
+    }
+}

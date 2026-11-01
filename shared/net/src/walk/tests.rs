@@ -2712,6 +2712,20 @@ fn the_hello_reply_is_three_bytes_both_ways() {
         &[0x01, PROTO_VER, 0x88, 0],
     ));
     assert!(!c.on_reply(&long), "a 4 B reply is not a hello reply");
+    // The one-off fleet move: the old 6 B reply is read as its own layout, `your_addr` last.
+    let mut old = Controller::new();
+    let _ = old.next_request();
+    let six = frame_of(&Pdu::from_op(
+        Opcode::NodeHello,
+        0x03,
+        GUEST_FIRST,
+        &[0x03, PROTO_VER, 0x01, 0x00, MCU_ESP32C3, 0x99],
+    ));
+    assert!(old.on_reply(&six));
+    assert_eq!(
+        (old.granted(), old.gateway_addr()),
+        (Some(0x99), Some(0x03))
+    );
     let ok = frame_of(&Pdu::from_op(
         Opcode::NodeHello,
         0x01,

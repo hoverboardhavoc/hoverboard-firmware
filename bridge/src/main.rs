@@ -145,10 +145,18 @@ async fn main(spawner: Spawner) {
         keys.ram_only();
     }
     let mounted = keys.persists();
-    let Ok(store) = store::Store::mount(keys) else {
+    let Ok(mut store) = store::Store::mount(keys) else {
         // An erased region always mounts; nothing to run on otherwise.
         panic!("the store did not mount on an erased region")
     };
+    // The app slots' platform: here, before the key move, which asks it whether the running slot
+    // waits for confirmation.
+    let mut platform = EspPlatform::new(FlashStorage::new(p.FLASH), table);
+    // The one-off fleet move (`specs/machine-settings.md` section 8): the four keys from their old
+    // ids to their new ones, before the name and Wi-Fi are read; the old records go only once the
+    // running slot is `Valid`.
+    let pending = hoverboard_bridge_core::svc::Platform::running(&mut platform).pending;
+    hoverboard_bridge_core::keymove::at_boot(&mut store, pending, &mut log_move);
     let default = DEFAULT_NAME.init(default_name(mac));
     let name = name(&store, default);
     // The Wi-Fi network and its transmit power, read once, as the name is
@@ -189,7 +197,6 @@ async fn main(spawner: Spawner) {
     // The service's state is placed in statics, not moved by value into the task: a task's
     // arguments pass through the stack of the spawning task, and with the update's sector buffer
     // that overran the 35 KB stack and stopped the boot silently.
-    let platform = EspPlatform::new(FlashStorage::new(p.FLASH), table);
     let build = build(khz);
     let fw_ver = u16::from_be_bytes([build.version[0], build.version[1]]);
     let node = NODE.init(Node::new(store, mounted, fw_ver, mac, default));
@@ -303,6 +310,17 @@ fn drain<const N: usize>(
     }
 }
 
+/// The one-off fleet move's console line for each key (`moved 0x11 -> 0x03`, `cleared 0x11`),
+/// never the value.
+fn log_move(_step: hoverboard_bridge_core::keymove::Step) {
+    match _step {
+        hoverboard_bridge_core::keymove::Step::Moved(_from, _to) => {
+            boot!("moved {:#04x} -> {:#04x}", _from, _to)
+        }
+        hoverboard_bridge_core::keymove::Step::Cleared(_old) => boot!("cleared {:#04x}", _old),
+    }
+}
+
 /// The service loop: controller bytes in, the node (the walk, forwarding, the mailbox, the
 /// commands), the GDB server, controller and GDB bytes out.
 #[embassy_executor::task]
@@ -362,6 +380,10 @@ async fn service(
         }
         let (port, svc) = gdb.parts();
         node.pump(router, port, svc);
+        // The one-off fleet move: the confirm marked the slot valid, so the old key records go.
+        if svc.take_confirmed() {
+            hoverboard_bridge_core::keymove::clear(node.store_mut(), &mut log_move);
+        }
         gdb.poll();
         while !wifi::GDB_OUT.is_full() {
             let mut buf = [0u8; wifi::PACKET];
