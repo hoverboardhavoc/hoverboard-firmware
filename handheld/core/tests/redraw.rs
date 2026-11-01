@@ -471,3 +471,76 @@ fn a_connect_row_redraws_alone_and_its_rssi_alone() {
     assert_eq!((bus.windows, written), (1, 240 * 33));
     assert_eq!(bus.transient(), 0);
 }
+
+/// What a full redraw of `v` shows.
+fn full(v: &View, o: Option<Overlay>) -> Vec<Rgb565> {
+    let mut bus = Bus::new();
+    let mut strip = vec![Rgb565::BLACK; panel::STRIP_LEN];
+    let mut cache = panel::Cache::default();
+    frame(&mut bus, &mut strip, &mut cache, v, o);
+    bus.shown
+}
+
+#[test]
+fn every_incremental_frame_ends_where_a_full_redraw_does() {
+    let mut views = vec![ride()];
+    let mut v = ride();
+    if let Body::Ride(r) = &mut v.body {
+        r.dial.speed = SpeedShow::Silent;
+        r.dial.lit = 0;
+        r.corners = [None, None];
+        r.pack.text = s("no pack voltage");
+        r.lower = Lower::Bars {
+            phase: [None, None],
+            band: ArmBand::CannotArm,
+        };
+    }
+    v.line = Some(Statement {
+        text: s("Walking the machine\u{2026}"),
+        tone: Tone::Muted,
+    });
+    views.push(v.clone());
+    views.push(ride());
+    // The speed alone between its widest forms, the ring unchanged.
+    let mut v = ride();
+    if let Body::Ride(r) = &mut v.body {
+        r.dial.speed = SpeedShow::Silent;
+    }
+    views.push(v.clone());
+    views.push(ride());
+    let mut v = ride();
+    speed(&mut v, "100");
+    v.top.low = true;
+    v.top.disconnect = Some(true);
+    views.push(v.clone());
+    speed(&mut v, "1.0");
+    if let Body::Ride(r) = &mut v.body {
+        r.dial.speed = SpeedShow::NoSpeed;
+        r.dial.caution = true;
+        r.lower = Lower::Bars {
+            phase: [None, None],
+            band: ArmBand::Holding(450),
+        };
+    }
+    views.push(v.clone());
+    if let Body::Ride(r) = &mut v.body {
+        r.lower = Lower::Bars {
+            phase: [None, None],
+            band: ArmBand::Holding(900),
+        };
+    }
+    views.push(v.clone());
+    views.push(ride());
+
+    let mut bus = Bus::new();
+    let mut strip = vec![Rgb565::BLACK; panel::STRIP_LEN];
+    let mut cache = panel::Cache::default();
+    for (i, v) in views.iter().enumerate() {
+        frame(&mut bus, &mut strip, &mut cache, v, None);
+        assert!(
+            bus.shown == full(v, None),
+            "view {i} after the ones before it"
+        );
+        assert_eq!(bus.transient(), 0, "view {i}");
+    }
+}

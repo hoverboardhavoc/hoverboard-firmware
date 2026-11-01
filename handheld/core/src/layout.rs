@@ -102,9 +102,10 @@ pub const RING_RADIUS: i32 = 76;
 pub const RING_STROKE: i32 = 10;
 /// The speed's centre inside the ring.
 pub const SPEED_CENTRE: (i32, i32) = (120, 100);
-/// The speed's own rectangle inside the ring: the figure, "km/h" and "R". A change of speed alone
+/// The speed's own rectangle inside the ring: the figure, "km/h", "R" and "no board reporting"
+/// (108 px, the widest). A change of speed alone
 /// redraws this and not the ring.
-pub const SPEED_BOX: Rect = Rect::new(72, 72, 168, 142);
+pub const SPEED_BOX: Rect = Rect::new(64, 72, 176, 142);
 /// The ring's segments: ten over 240 degrees from 150 degrees (clockwise, y down, 0 at three
 /// o'clock), each 24 degrees less [`RING_GAP_DEG`] at each end.
 pub const RING_SEGMENTS: u8 = 10;
