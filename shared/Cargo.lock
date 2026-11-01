@@ -252,7 +252,7 @@ dependencies = [
 [[package]]
 name = "runtime-hal"
 version = "0.1.0"
-source = "git+https://github.com/hoverboardhavoc/runtime-hal?branch=main#1bfcfa7e941f8e9356b89c095768d16d941e737f"
+source = "git+https://github.com/hoverboardhavoc/runtime-hal?branch=main#71c39e3aa374abd4652402e08b84658208946eff"
 dependencies = [
  "cortex-m",
  "embedded-hal 1.0.0",
