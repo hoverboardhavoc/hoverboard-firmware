@@ -8,6 +8,7 @@ pub mod drive;
 pub mod inbox;
 pub mod lamps;
 pub mod layout;
+pub mod mix;
 pub mod model;
 pub mod pump;
 pub mod readings;

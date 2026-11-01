@@ -8,6 +8,33 @@
 /// Sixteenths of a pixel per pixel.
 pub const SUB: i32 = 16;
 
+/// A panel point, in sixteenths of a pixel, portrait, y down.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Point {
+    pub const fn new(x: i32, y: i32) -> Point {
+        Point { x, y }
+    }
+
+    /// Whether `o` is within `max` (sixteenths of a pixel) of this point on both axes.
+    pub fn near(&self, o: &Point, max: i32) -> bool {
+        (self.x - o.x).abs() <= max && (self.y - o.y).abs() <= max
+    }
+
+    /// The point a quarter of the way to `o`: the lift machine's IIR.
+    fn toward(&self, o: &Point) -> Point {
+        Point::new(self.x + (o.x - self.x) / 4, self.y + (o.y - self.y) / 4)
+    }
+
+    fn add(&self, o: &Point) -> Point {
+        Point::new(self.x + o.x, self.y + o.y)
+    }
+}
+
 // --- The XPT2046 frame (section 4.2) -------------------------------------------------------------
 
 /// Z1 conversion, 12-bit differential, PENIRQ disabled while converting.
@@ -177,12 +204,12 @@ pub enum Sample {
 }
 
 /// Classify `r` (section 4.3). `touching` is whether a touch is in progress (the `Z_OFF`
-/// hysteresis); `near` is the point a new one must be within [`Limits::jump_max`] of, in
-/// sixteenths of a pixel (the filtered point while a touch is in progress), or `None`.
+/// hysteresis); `near` is the point a new one must be within [`Limits::jump_max`] of on both
+/// axes (the filtered point while a touch is in progress), or `None`.
 pub fn classify(
     r: &Reading,
     touching: bool,
-    near: Option<i32>,
+    near: Option<Point>,
     lim: &Limits,
     cal: &Calibration,
 ) -> Sample {
@@ -201,7 +228,7 @@ pub fn classify(
     }
     let (x, y) = cal.to_sub(mx, my);
     if let Some(n) = near {
-        if (y - n).abs() > lim.jump_max * SUB {
+        if !n.near(&Point::new(x, y), lim.jump_max * SUB) {
             return Sample::Up;
         }
     }
@@ -221,19 +248,20 @@ pub const PERIOD_MS: u32 = 2;
 /// With no sample for this long the touch is treated as Up (five periods: the sampler stalled).
 pub const STALL_MS: u32 = 10;
 
-/// The touch state.
+/// The touch state. `p0` is the touch-down point (`x0`, `y0`) and `pf` the filtered point (`xf`,
+/// `yf`), sections 4.4 and 4.8.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lift {
     /// Nothing on the panel.
     Idle,
-    /// `n` Valid samples so far, their `y` summed, the last one's `y`.
-    Pressing { n: u8, sum: i32, last: i32 },
-    /// A touch: its touch-down point `y0` and the filtered point `yf`.
-    Down { y0: i32, yf: i32 },
-    /// The touch dropped out at `since`; `resume` Valid samples near `yf` so far.
+    /// `n` Valid samples so far, their points summed, the last one's point.
+    Pressing { n: u8, sum: Point, last: Point },
+    /// A touch: its touch-down point and the filtered point.
+    Down { p0: Point, pf: Point },
+    /// The touch dropped out at `since`; `resume` Valid samples near `pf` so far.
     Lifting {
-        y0: i32,
-        yf: i32,
+        p0: Point,
+        pf: Point,
         since: u32,
         resume: u8,
     },
@@ -247,9 +275,9 @@ impl Lift {
     }
 
     /// The touch-down point and filtered point of a touch in `Down` or `Lifting`.
-    pub fn points(&self) -> Option<(i32, i32)> {
+    pub fn points(&self) -> Option<(Point, Point)> {
         match *self {
-            Lift::Down { y0, yf } | Lift::Lifting { y0, yf, .. } => Some((y0, yf)),
+            Lift::Down { p0, pf } | Lift::Lifting { p0, pf, .. } => Some((p0, pf)),
             _ => None,
         }
     }
@@ -290,7 +318,7 @@ impl Touch {
         let (touching, near) = match self.lift {
             Lift::Idle => (false, None),
             Lift::Pressing { last, .. } => (false, Some(last)),
-            Lift::Down { yf, .. } | Lift::Lifting { yf, .. } => (true, Some(yf)),
+            Lift::Down { pf, .. } | Lift::Lifting { pf, .. } => (true, Some(pf)),
         };
         let s = classify(r, touching, near, &self.limits, &self.cal);
         self.step(s, now);
@@ -308,44 +336,49 @@ impl Touch {
         }
         self.lift = match (self.lift, s) {
             (Lift::Idle, Sample::Up) => Lift::Idle,
-            (Lift::Idle, Sample::Valid { y, .. }) => Self::pressing(1, y, y),
-            (Lift::Pressing { .. }, Sample::Up) => Lift::Idle,
-            (Lift::Pressing { n, sum, .. }, Sample::Valid { y, .. }) => {
-                Self::pressing(n + 1, sum + y, y)
+            (Lift::Idle, Sample::Valid { x, y, .. }) => {
+                let p = Point::new(x, y);
+                Self::pressing(1, p, p)
             }
-            (Lift::Down { y0, yf }, Sample::Up) => Lift::Lifting {
-                y0,
-                yf,
+            (Lift::Pressing { .. }, Sample::Up) => Lift::Idle,
+            (Lift::Pressing { n, sum, .. }, Sample::Valid { x, y, .. }) => {
+                let p = Point::new(x, y);
+                Self::pressing(n + 1, sum.add(&p), p)
+            }
+            (Lift::Down { p0, pf }, Sample::Up) => Lift::Lifting {
+                p0,
+                pf,
                 since: now,
                 resume: 0,
             },
-            (Lift::Down { y0, yf }, Sample::Valid { y, .. }) => Lift::Down {
-                y0,
-                yf: yf + (y - yf) / 4,
+            (Lift::Down { p0, pf }, Sample::Valid { x, y, .. }) => Lift::Down {
+                p0,
+                pf: pf.toward(&Point::new(x, y)),
             },
-            (Lift::Lifting { y0, yf, since, .. }, Sample::Up) => Lift::Lifting {
-                y0,
-                yf,
+            (Lift::Lifting { p0, pf, since, .. }, Sample::Up) => Lift::Lifting {
+                p0,
+                pf,
                 since,
                 resume: 0,
             },
             (
                 Lift::Lifting {
-                    y0,
-                    yf,
+                    p0,
+                    pf,
                     since,
                     resume,
                 },
-                Sample::Valid { y, .. },
+                Sample::Valid { x, y, .. },
             ) => {
-                // A Valid sample here is within the jump bound of `yf` (the classifier's `near`).
-                let yf = yf + (y - yf) / 4;
+                // A Valid sample here is within the jump bound of `pf` on both axes (the
+                // classifier's `near`).
+                let pf = pf.toward(&Point::new(x, y));
                 if resume + 1 >= N_RESUME {
-                    Lift::Down { y0, yf }
+                    Lift::Down { p0, pf }
                 } else {
                     Lift::Lifting {
-                        y0,
-                        yf,
+                        p0,
+                        pf,
                         since,
                         resume: resume + 1,
                     }
@@ -354,10 +387,11 @@ impl Touch {
         };
     }
 
-    fn pressing(n: u8, sum: i32, last: i32) -> Lift {
+    fn pressing(n: u8, sum: Point, last: Point) -> Lift {
         if n >= N_DOWN {
-            let mean = sum / i32::from(n);
-            Lift::Down { y0: mean, yf: mean }
+            let d = i32::from(n);
+            let mean = Point::new(sum.x / d, sum.y / d);
+            Lift::Down { p0: mean, pf: mean }
         } else {
             Lift::Pressing { n, sum, last }
         }
@@ -376,7 +410,7 @@ impl Touch {
         }
         TouchView {
             drive: match self.lift {
-                Lift::Down { y0, yf } => Some((y0, yf)),
+                Lift::Down { p0, pf } => Some((p0, pf)),
                 _ => None,
             },
             overlay: self
@@ -390,10 +424,10 @@ impl Touch {
 /// What the touch means to the demand and the overlay.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TouchView {
-    /// `(y0, yf)` while the demand follows the finger (`Down`, the sampler live).
-    pub drive: Option<(i32, i32)>,
-    /// `((y0, yf), live)` while the overlay draws: `live` in `Down`, not in `Lifting`.
-    pub overlay: Option<((i32, i32), bool)>,
+    /// `(p0, pf)` while the demand follows the finger (`Down`, the sampler live).
+    pub drive: Option<(Point, Point)>,
+    /// `((p0, pf), live)` while the overlay draws: `live` in `Down`, not in `Lifting`.
+    pub overlay: Option<((Point, Point), bool)>,
 }
 
 #[cfg(test)]
@@ -533,14 +567,15 @@ mod tests {
         assert_ne!(c(&reading(1000, [2000, 2000, 2048], [100; 3])), Sample::Up);
         assert_ne!(c(&reading(400, [3995; 3], [2000; 3])), Sample::Up);
         // A jump past JUMP_MAX from the filtered point while a touch is in progress.
-        let near = Some(2000 * SUB - 25 * SUB);
-        assert_eq!(
-            classify(&good(), true, near, &LIMITS, &IDENT),
-            Sample::Up,
-            "jump"
-        );
-        let near = Some(2000 * SUB - 24 * SUB);
-        assert_ne!(classify(&good(), true, near, &LIMITS, &IDENT), Sample::Up);
+        let c = 2000 * SUB;
+        let jump = |dx: i32, dy: i32| {
+            let near = Some(Point::new(c + dx * SUB, c + dy * SUB));
+            classify(&good(), true, near, &LIMITS, &IDENT)
+        };
+        assert_eq!(jump(0, -25), Sample::Up, "a jump on y");
+        assert_eq!(jump(25, 0), Sample::Up, "a jump on x (section 4.8)");
+        assert_ne!(jump(0, -24), Sample::Up);
+        assert_ne!(jump(-24, 24), Sample::Up);
     }
 
     #[test]
@@ -548,22 +583,42 @@ mod tests {
         let r = reading(350, [2000; 3], [2000; 3]);
         assert_eq!(classify(&r, false, None, &LIMITS, &IDENT), Sample::Up);
         assert_ne!(
-            classify(&r, true, Some(2000 * SUB), &LIMITS, &IDENT),
+            classify(
+                &r,
+                true,
+                Some(Point::new(2000 * SUB, 2000 * SUB)),
+                &LIMITS,
+                &IDENT
+            ),
             Sample::Up
         );
         let r = reading(299, [2000; 3], [2000; 3]);
         assert_eq!(
-            classify(&r, true, Some(2000 * SUB), &LIMITS, &IDENT),
+            classify(
+                &r,
+                true,
+                Some(Point::new(2000 * SUB, 2000 * SUB)),
+                &LIMITS,
+                &IDENT
+            ),
             Sample::Up
         );
     }
 
     fn at(y: i32) -> Sample {
+        xy(0, y)
+    }
+
+    fn xy(x: i32, y: i32) -> Sample {
         Sample::Valid {
-            x: 0,
+            x: x * SUB,
             y: y * SUB,
             z: 1000,
         }
+    }
+
+    fn pt(x: i32, y: i32) -> Point {
+        Point::new(x * SUB, y * SUB)
     }
 
     /// Feed `samples` 2 ms apart from `t`, returning the time after the last.
@@ -588,8 +643,8 @@ mod tests {
         assert_eq!(
             t.lift,
             Lift::Down {
-                y0: 103 * SUB,
-                yf: 103 * SUB
+                p0: pt(0, 103),
+                pf: pt(0, 103)
             }
         );
         // An Up while pressing goes back to Idle.
@@ -624,7 +679,7 @@ mod tests {
         let now = feed(&mut t, now, &[Sample::Up; 10]); // 20 ms
         assert!(matches!(t.lift, Lift::Lifting { .. }));
         feed(&mut t, now, &[at(184), at(183)]);
-        let Lift::Down { y0: back, .. } = t.lift else {
+        let Lift::Down { p0: back, .. } = t.lift else {
             panic!("did not resume: {:?}", t.lift)
         };
         assert_eq!(back, y0);
@@ -639,8 +694,8 @@ mod tests {
         assert_eq!(
             t.lift,
             Lift::Down {
-                y0: 120 * SUB,
-                yf: 120 * SUB
+                p0: pt(0, 120),
+                pf: pt(0, 120)
             }
         );
     }
@@ -668,16 +723,17 @@ mod tests {
     #[test]
     fn every_non_idle_state_counts_as_finger_down() {
         assert!(!Lift::Idle.finger_down());
+        let o = Point::default();
         assert!(Lift::Pressing {
             n: 1,
-            sum: 0,
-            last: 0
+            sum: o,
+            last: o
         }
         .finger_down());
-        assert!(Lift::Down { y0: 0, yf: 0 }.finger_down());
+        assert!(Lift::Down { p0: o, pf: o }.finger_down());
         assert!(Lift::Lifting {
-            y0: 0,
-            yf: 0,
+            p0: o,
+            pf: o,
             since: 0,
             resume: 0
         }
@@ -700,9 +756,67 @@ mod tests {
         assert_eq!(
             t.lift,
             Lift::Down {
-                y0: 200 * SUB,
-                yf: 204 * SUB
+                p0: pt(0, 200),
+                pf: pt(0, 204)
             }
+        );
+    }
+
+    #[test]
+    fn x0_is_the_mean_of_the_n_down_points_and_xf_takes_the_same_iir() {
+        let mut t = Touch::default();
+        let now = feed(
+            &mut t,
+            0,
+            &[xy(100, 50), xy(102, 50), xy(104, 50), xy(106, 50)],
+        );
+        assert_eq!(
+            t.lift,
+            Lift::Down {
+                p0: pt(103, 50),
+                pf: pt(103, 50)
+            }
+        );
+        feed(&mut t, now, &[xy(119, 50)]);
+        assert_eq!(t.lift.points().unwrap().1, pt(107, 50));
+    }
+
+    #[test]
+    fn a_resume_needs_both_axes_within_jump_max() {
+        let mut t = Touch::new(LIMITS, IDENT);
+        let r = |x: u16, y: u16| reading(1000, [x; 3], [y; 3]);
+        let mut now = 0;
+        for _ in 0..N_DOWN {
+            t.sample(&r(2000, 2000), now);
+            now += 2;
+        }
+        let mut up = r(2000, 2000);
+        up.pen_down = false;
+        t.sample(&up, now);
+        // 30 px off on x alone: no resume.
+        t.sample(&r(2030, 2000), now + 2);
+        t.sample(&r(2030, 2000), now + 4);
+        assert!(matches!(t.lift, Lift::Lifting { .. }), "{:?}", t.lift);
+        // Within the bound on both: resumes with the same touch-down point.
+        t.sample(&r(2010, 2010), now + 6);
+        t.sample(&r(2010, 2010), now + 8);
+        let Lift::Down { p0, .. } = t.lift else {
+            panic!("{:?}", t.lift)
+        };
+        assert_eq!(p0, Point::new(2000 * SUB, 2000 * SUB));
+    }
+
+    #[test]
+    fn a_release_zeroes_both_axes_from_the_first_up_sample() {
+        let mut t = Touch::default();
+        let now = feed(&mut t, 0, &[xy(120, 160); N_DOWN as usize]);
+        let now = feed(&mut t, now, &[xy(160, 100)]);
+        assert!(t.view(now).drive.is_some());
+        let now = feed(&mut t, now, &[Sample::Up]);
+        assert_eq!(
+            t.view(now).drive,
+            None,
+            "no demand and no turn while lifting"
         );
     }
 }

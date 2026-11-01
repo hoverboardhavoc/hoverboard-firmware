@@ -1,10 +1,14 @@
 //! The relative throttle's mapping (`specs/handheld-remote.md` section 4.1): the touch-down point
-//! is zero, dragging up is forward, and a full demand is [`FULL_PX`] of travel.
+//! is zero, dragging up is forward, and a full demand is [`FULL_PX`] of travel. In DIFFERENTIAL
+//! the horizontal drag is the turn by the same rule (section 4.8): right is positive, and a full
+//! turn is [`FULL_PX_X`] of travel.
 
 use crate::touch::SUB;
 
 /// Pixels of travel per full demand.
 pub const FULL_PX: i32 = 120;
+/// Pixels of horizontal travel per full turn (section 4.8).
+pub const FULL_PX_X: i32 = 100;
 /// Pixels of travel that command nothing (a resistive panel's rest jitter).
 pub const DEAD_PX: i32 = 3;
 /// The full `DRIVE_CMD.value`: `i16::MAX`.
@@ -15,16 +19,34 @@ pub const FULL_SCALE: i32 = i16::MAX as i32;
 /// `mag = max(|dy| - DEAD_PX, 0) / (FULL_PX - DEAD_PX)`, at most 1. Linear, symmetric, never past
 /// +-32767 (the app's `Throttle.speedFor` rounding, `Throttle.kt`).
 pub fn demand(y0: i32, yf: i32) -> i16 {
-    let dy = y0 - yf;
-    let excess = (dy.abs() - DEAD_PX * SUB).max(0) as i64;
-    let den = ((FULL_PX - DEAD_PX) * SUB) as i64;
+    scaled(y0 - yf, FULL_PX)
+}
+
+/// The turn for a touch that went down at `x0` and is now at `xf`, sixteenths of a pixel (section
+/// 4.8): `dx = xf - x0`, right positive, with the dead band and rounding of [`demand`] and a full
+/// turn at [`FULL_PX_X`].
+pub fn turn(x0: i32, xf: i32) -> i16 {
+    scaled(xf - x0, FULL_PX_X)
+}
+
+/// `sign(d) * round_half_away(mag * 32767)`, `mag = max(|d| - DEAD_PX, 0) / (full_px - DEAD_PX)`
+/// at most 1, `d` in sixteenths of a pixel.
+fn scaled(d: i32, full_px: i32) -> i16 {
+    let excess = (d.abs() - DEAD_PX * SUB).max(0) as i64;
+    let den = ((full_px - DEAD_PX) * SUB) as i64;
     // Round half away from zero on the magnitude: (2 n + d) / 2 d.
     let mag = ((2 * excess * FULL_SCALE as i64 + den) / (2 * den)).min(FULL_SCALE as i64) as i16;
-    if dy < 0 {
+    if d < 0 {
         -mag
     } else {
         mag
     }
+}
+
+/// A demand or turn as a whole percent of full scale, rounded half away from zero.
+pub fn percent(v: i16) -> i8 {
+    let v = i32::from(v);
+    ((v * 100 + v.signum() * FULL_SCALE / 2) / FULL_SCALE) as i8
 }
 
 #[cfg(test)]
@@ -84,6 +106,39 @@ mod tests {
                 -demand(1000 * SUB, 1000 * SUB + d)
             );
         }
+    }
+
+    #[test]
+    fn the_turn_is_zero_at_x0_has_the_dead_band_and_is_full_at_full_px_x() {
+        assert_eq!(turn(px(120), px(120)), 0);
+        assert_eq!(turn(px(120), px(120 + DEAD_PX)), 0);
+        assert_eq!(turn(px(120), px(120 - DEAD_PX)), 0);
+        // One sixteenth past the band: 32767 / (97 * 16) = 21.1, rounded to 21.
+        assert_eq!(turn(px(120), px(120 + DEAD_PX) + 1), 21);
+        assert_eq!(turn(px(120), px(120 + FULL_PX_X)), 32767);
+        assert_eq!(turn(px(120), px(120 - FULL_PX_X)), -32767);
+        assert_eq!(turn(px(120), px(239)), 32767, "clamped past full");
+        // Halfway past the band, both ways the same.
+        let half = DEAD_PX * SUB + (FULL_PX_X - DEAD_PX) * SUB / 2;
+        assert_eq!(turn(px(120), px(120) + half), 16384);
+        assert_eq!(turn(px(120), px(120) - half), -16384);
+    }
+
+    #[test]
+    fn right_is_a_positive_turn() {
+        assert!(turn(px(100), px(150)) > 0);
+        assert!(turn(px(100), px(50)) < 0);
+    }
+
+    #[test]
+    fn percent_rounds_half_away() {
+        assert_eq!(percent(0), 0);
+        assert_eq!(percent(32767), 100);
+        assert_eq!(percent(-32767), -100);
+        assert_eq!(percent(16384), 50);
+        assert_eq!(percent(-16384), -50);
+        assert_eq!(percent(164), 1, "0.5 percent rounds up");
+        assert_eq!(percent(-164), -1);
     }
 
     #[test]

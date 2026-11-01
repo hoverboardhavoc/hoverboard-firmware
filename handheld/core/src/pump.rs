@@ -27,21 +27,39 @@ const _: () = assert!(
     3 * INPUTS_KEEPALIVE_TICKS as u32 * TICK_MS <= linkctl::INPUTS_TIMEOUT_TICKS * CONTROL_TICK_MS
 );
 
-/// What the rider asks for on this tick: the arm level, and the demand (only read while armed).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// What the rider asks for on this tick: the arm level, and each driven board's demand (only read
+/// while armed; a board not listed is demanded zero).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Command {
     pub armed: bool,
-    pub demand: i16,
+    pub demands: Vec<(u8, i16), MAX_BOARDS>,
 }
 
 impl Command {
-    /// The `DRIVE_CMD` this command sends: Throttle with the demand while armed (zero included),
-    /// Neutral 0 while disarmed. Steer is always 0.
-    pub fn drive(&self) -> DriveCmd {
+    /// The command while armed with every board in `demands` at its demand.
+    pub fn armed(demands: Vec<(u8, i16), MAX_BOARDS>) -> Command {
+        Command {
+            armed: true,
+            demands,
+        }
+    }
+
+    /// The demand for board `dst`.
+    pub fn demand_of(&self, dst: u8) -> i16 {
+        self.demands
+            .iter()
+            .find(|(d, _)| *d == dst)
+            .map_or(0, |(_, v)| *v)
+    }
+
+    /// The `DRIVE_CMD` this command sends to `dst`: Throttle with its demand while armed (zero
+    /// included), Neutral 0 while disarmed. Steer is always 0: the turn is in the per-board
+    /// demands (section 4.8), and the firmware's own steer mixer stays inert.
+    pub fn drive(&self, dst: u8) -> DriveCmd {
         if self.armed {
             DriveCmd {
                 kind: DriveKind::Throttle,
-                value: self.demand,
+                value: self.demand_of(dst),
                 steer: 0,
             }
         } else {
@@ -61,9 +79,32 @@ impl Command {
         }
     }
 
-    /// Whether going from `self` to `next` is a release: the demand to zero, or a disarm.
+    /// Whether going from `self` to `next` is a release: any board's demand to zero, or a disarm.
     fn released_by(&self, next: &Command) -> bool {
-        (self.armed && !next.armed) || (self.armed && self.demand != 0 && next.demand == 0)
+        self.armed
+            && (!next.armed
+                || self
+                    .demands
+                    .iter()
+                    .any(|&(dst, v)| v != 0 && next.demand_of(dst) == 0))
+    }
+}
+
+/// What one poll of the pump did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tick {
+    /// Nothing was due.
+    Idle,
+    /// A tick on the 50 ms cadence.
+    Cadence,
+    /// A release send: a board's demand went to zero, or a disarm, sent at once.
+    Release,
+}
+
+impl Tick {
+    /// Whether frames went into the outbox.
+    pub fn sent(self) -> bool {
+        self != Tick::Idle
     }
 }
 
@@ -146,20 +187,19 @@ impl Pump {
         *self = Pump::default();
     }
 
-    /// Run the schedule at `now` (ms) for `cmd` to `targets`, putting what is due in `out`.
-    /// Returns whether a tick went out: on the 50 ms cadence, or at once on a release (the demand
-    /// going to zero, or a disarm), from which the cadence continues.
-    pub fn poll(&mut self, now: u32, cmd: Command, targets: &Targets, out: &mut Outbox) -> bool {
+    /// Run the schedule at `now` (ms) for `cmd` to `targets`, putting what is due in `out`: a tick
+    /// on the 50 ms cadence, or at once on a release (any board's demand going to zero, or a
+    /// disarm), from which the cadence continues.
+    pub fn poll(&mut self, now: u32, cmd: Command, targets: &Targets, out: &mut Outbox) -> Tick {
         let release = self.last.released_by(&cmd);
-        self.last = cmd;
         let due = self.next.is_none_or(|t| now.wrapping_sub(t) as i32 >= 0);
         if !(due || release) {
-            return false;
+            self.last = cmd;
+            return Tick::Idle;
         }
         self.next = Some(now.wrapping_add(TICK_MS));
-        let d = cmd.drive();
         for &dst in targets.drive.iter() {
-            put(&mut out.drive, dst, d);
+            put(&mut out.drive, dst, cmd.drive(dst));
         }
         self.books.retain(|b| targets.arm.contains(&b.addr));
         for &dst in targets.arm.iter() {
@@ -192,7 +232,12 @@ impl Pump {
                 put(&mut out.inputs, dst, cmd.inputs());
             }
         }
-        true
+        self.last = cmd;
+        if release {
+            Tick::Release
+        } else {
+            Tick::Cadence
+        }
     }
 }
 
@@ -206,7 +251,13 @@ mod tests {
         Targets {
             drive: Vec::from_slice(&[2, 3]).unwrap(),
             arm: Vec::from_slice(&[2, 3]).unwrap(),
+            right: None,
         }
+    }
+
+    /// Armed, both boards at `v`.
+    fn at(v: i16) -> Command {
+        Command::armed(Vec::from_slice(&[(2, v), (3, v)]).unwrap())
     }
 
     /// Run the pump every 2 ms over `ms` from `start` with `cmd`; the times a tick went out and
@@ -216,7 +267,7 @@ mod tests {
         let mut now = start;
         while now < start + ms {
             let mut o = Outbox::default();
-            if p.poll(now, cmd, t, &mut o) {
+            if p.poll(now, cmd.clone(), t, &mut o).sent() {
                 ticks.push((now, o));
             }
             now += 2;
@@ -242,11 +293,8 @@ mod tests {
             }
             assert_eq!(o.drive.len(), 2);
         }
-        let armed = Command {
-            armed: true,
-            demand: 0,
-        };
-        assert_eq!(armed.drive().kind, DriveKind::Throttle);
+        let armed = at(0);
+        assert_eq!(armed.drive(2).kind, DriveKind::Throttle);
         assert_eq!(armed.inputs().buttons, Inputs::BUTTON_POWER);
         assert_eq!(armed.inputs().rider, 0);
     }
@@ -254,11 +302,7 @@ mod tests {
     #[test]
     fn inputs_go_three_times_on_a_change_then_every_tenth_tick() {
         let mut p = Pump::default();
-        let cmd = Command {
-            armed: true,
-            demand: 0,
-        };
-        let ticks = run(&mut p, 0, 2000, cmd, &both());
+        let ticks = run(&mut p, 0, 2000, at(0), &both());
         let with: StdVec<usize> = ticks
             .iter()
             .enumerate()
@@ -274,24 +318,21 @@ mod tests {
     fn the_release_send_goes_out_at_once_and_the_cadence_resumes_from_it() {
         let mut p = Pump::default();
         let t = both();
-        let drive = Command {
-            armed: true,
-            demand: 9000,
-        };
-        run(&mut p, 0, 120, drive, &t); // ticks at 0, 50, 100; next due at 150
+        run(&mut p, 0, 120, at(9000), &t); // ticks at 0, 50, 100; next due at 150
         let mut o = Outbox::default();
-        let release = Command {
-            armed: true,
-            demand: 0,
-        };
-        assert!(p.poll(121, release, &t, &mut o), "the release goes at once");
+        let release = at(0);
+        assert_eq!(
+            p.poll(121, release.clone(), &t, &mut o),
+            Tick::Release,
+            "the release goes at once"
+        );
         assert_eq!(o.drive[0].1.value, 0);
         let ticks = run(&mut p, 122, 120, release, &t);
         let at: StdVec<u32> = ticks.iter().map(|(t, _)| *t).collect();
         assert_eq!(at, [172, 222]);
         // A disarm is a release too, and carries the arm level 0 in the same tick.
         let mut o = Outbox::default();
-        assert!(p.poll(223, Command::default(), &t, &mut o));
+        assert_eq!(p.poll(223, Command::default(), &t, &mut o), Tick::Release);
         assert_eq!(o.drive[0].1.kind, DriveKind::Neutral);
         assert_eq!(o.inputs.len(), 2);
         assert_eq!(o.inputs[0].1.buttons, 0);
@@ -302,13 +343,9 @@ mod tests {
         let mut p = Pump::default();
         let t = both();
         let mut o = Outbox::default();
-        let c = |v| Command {
-            armed: true,
-            demand: v,
-        };
-        p.poll(0, c(1000), &t, &mut o);
-        p.poll(50, c(2000), &t, &mut o);
-        p.poll(100, c(3000), &t, &mut o);
+        p.poll(0, at(1000), &t, &mut o);
+        p.poll(50, at(2000), &t, &mut o);
+        p.poll(100, at(3000), &t, &mut o);
         assert_eq!(o.drive.len(), 2);
         assert!(o.drive.iter().all(|(_, d)| d.value == 3000));
         let pdus = o.take(0x80);
@@ -329,19 +366,56 @@ mod tests {
         let t = Targets {
             drive: Vec::from_slice(&[3]).unwrap(),
             arm: Vec::from_slice(&[2, 3]).unwrap(),
+            right: None,
         };
         let mut o = Outbox::default();
         p.poll(
             0,
-            Command {
-                armed: true,
-                demand: 5,
-            },
+            Command::armed(Vec::from_slice(&[(3, 5)]).unwrap()),
             &t,
             &mut o,
         );
         assert_eq!(o.drive.len(), 1);
         assert_eq!(o.drive[0].0, 3);
         assert_eq!(o.inputs.len(), 2);
+    }
+
+    #[test]
+    fn any_boards_demand_going_to_zero_is_a_release_send() {
+        let mut p = Pump::default();
+        let t = both();
+        let mut o = Outbox::default();
+        let two = |a, b| Command::armed(Vec::from_slice(&[(2, a), (3, b)]).unwrap());
+        assert_eq!(p.poll(0, two(9000, 7000), &t, &mut o), Tick::Cadence);
+        // One wheel's share of the mix goes to zero, the other does not: a release, at once.
+        assert_eq!(p.poll(10, two(9000, 0), &t, &mut o), Tick::Release);
+        assert_eq!((o.drive[0].1.value, o.drive[1].1.value), (9000, 0));
+        // A change between nonzero demands waits for the cadence.
+        assert_eq!(p.poll(20, two(8000, 100), &t, &mut o), Tick::Idle);
+        assert_eq!(p.poll(60, two(8000, 100), &t, &mut o), Tick::Cadence);
+        // Both to zero (the touch lifted): a release.
+        assert_eq!(p.poll(61, two(0, 0), &t, &mut o), Tick::Release);
+        // A demand that only changes in between ticks is not lost for the release check: it is
+        // the last command polled that counts.
+        assert_eq!(p.poll(62, two(500, 500), &t, &mut o), Tick::Idle);
+        assert_eq!(p.poll(63, two(500, 0), &t, &mut o), Tick::Release);
+    }
+
+    #[test]
+    fn steer_on_the_wire_is_zero_in_every_mode() {
+        let mut p = Pump::default();
+        let t = both();
+        let mut o = Outbox::default();
+        p.poll(
+            0,
+            Command::armed(Vec::from_slice(&[(2, -32767), (3, 32767)]).unwrap()),
+            &t,
+            &mut o,
+        );
+        assert!(o.drive.iter().all(|(_, d)| d.steer == 0));
+        assert_eq!(o.drive[0].1.value, -32767);
+        let mut o = Outbox::default();
+        p.poll(100, Command::default(), &t, &mut o);
+        assert!(o.drive.iter().all(|(_, d)| d.steer == 0));
     }
 }

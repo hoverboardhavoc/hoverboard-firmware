@@ -172,12 +172,12 @@ impl Arm {
     ) -> Option<Action> {
         let prev = core::mem::replace(&mut self.lift, lift);
         match (lift.points(), &mut self.touch) {
-            (Some((y0, yf)), None) => {
-                let zone = Zone::of(y0);
+            (Some((p0, pf)), None) => {
+                let zone = Zone::of(p0.y);
                 let mut t = Held {
                     zone,
                     at: now,
-                    left: Zone::of(yf) != Zone::Arm,
+                    left: Zone::of(pf.y) != Zone::Arm,
                     disarmed: false,
                 };
                 let mut action = None;
@@ -192,8 +192,8 @@ impl Arm {
                 self.touch = Some(t);
                 action
             }
-            (Some((_, yf)), Some(t)) => {
-                if Zone::of(yf) != Zone::Arm {
+            (Some((_, pf)), Some(t)) => {
+                if Zone::of(pf.y) != Zone::Arm {
                     t.left = true;
                 }
                 None
@@ -274,6 +274,7 @@ impl Arm {
 mod tests {
     use super::*;
     use crate::drive::Refusal;
+    use crate::touch::Point;
 
     /// A point in the arm zone and one above it, in sixteenths of a pixel.
     const IN: i32 = 270 * SUB;
@@ -290,13 +291,16 @@ mod tests {
     }
 
     fn down(y0: i32, yf: i32) -> Lift {
-        Lift::Down { y0, yf }
+        Lift::Down {
+            p0: Point::new(0, y0),
+            pf: Point::new(0, yf),
+        }
     }
 
     fn lifting(y0: i32, yf: i32, since: u32) -> Lift {
         Lift::Lifting {
-            y0,
-            yf,
+            p0: Point::new(0, y0),
+            pf: Point::new(0, yf),
             since,
             resume: 0,
         }
@@ -447,8 +451,8 @@ mod tests {
         a.on_touch(lifting(IN, IN, 1100), 1100, ok);
         let pressing = Lift::Pressing {
             n: 1,
-            sum: IN,
-            last: IN,
+            sum: Point::new(0, IN),
+            last: Point::new(0, IN),
         };
         assert_eq!(a.on_touch(pressing, 1140, ok), Some(Action::Armed));
     }

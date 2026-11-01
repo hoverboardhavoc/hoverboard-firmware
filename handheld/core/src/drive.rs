@@ -1,7 +1,8 @@
 //! Which boards a drive mode drives (`specs/handheld-remote.md` section 4.6): the app's
-//! `DriveInForce` (`apps/remote/.../model/Nodes.kt`) and `DriveFrame` (`model/DriveFrame.kt`)
-//! with the steer axis fixed at 0, plus the handheld's own refusal of SINGLE with two motor
-//! controllers.
+//! `DriveInForce` (`apps/remote/.../model/Nodes.kt`) and `DriveFrame` (`model/DriveFrame.kt`),
+//! plus the handheld's own refusal of SINGLE with two motor controllers. The turn is spent only in
+//! DIFFERENTIAL, as each wheel's share of the mix (section 4.8); `steer` on the wire is 0 in every
+//! mode.
 
 use heapless::Vec;
 
@@ -112,11 +113,39 @@ pub struct Board {
     pub leader: bool,
 }
 
-/// The boards a tick addresses: `drive` get a `DRIVE_CMD`, `arm` get the `INPUTS` arm level.
+/// The boards a tick addresses: `drive` get a `DRIVE_CMD`, `arm` get the `INPUTS` arm level. In
+/// DIFFERENTIAL, `right` is the board whose `control.side` is right: it gets the mix's right
+/// wheel, the other board the left wheel.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Targets {
     pub drive: Vec<u8, MAX_BOARDS>,
     pub arm: Vec<u8, MAX_BOARDS>,
+    pub right: Option<u8>,
+}
+
+impl Targets {
+    /// Whether the turn is spent (DIFFERENTIAL).
+    pub fn steers(&self) -> bool {
+        self.right.is_some()
+    }
+
+    /// Each driven board's demand for a forward demand `value` and a turn `turn`: in DIFFERENTIAL
+    /// its wheel of the mix (section 4.8), otherwise `value` with the turn ignored.
+    pub fn demands(&self, value: i16, turn: i16) -> Vec<(u8, i16), MAX_BOARDS> {
+        let pair = crate::mix::of(i32::from(value), i32::from(turn), crate::mix::FULL_SCALE);
+        self.drive
+            .iter()
+            .map(|&addr| {
+                let d = match self.right {
+                    None => value,
+                    // The mix holds each wheel inside +-32767.
+                    Some(r) if r == addr => pair.right as i16,
+                    Some(_) => pair.left as i16,
+                };
+                (addr, d)
+            })
+            .collect()
+    }
 }
 
 /// `control.side`'s right wheel (`shared/store/src/field.rs`, `CONTROL_SIDE`: 0 left, 1 right).
@@ -162,11 +191,14 @@ pub fn targets(mcs: &[Board], class_unread: bool) -> Result<Targets, Refusal> {
             let _ = t.drive.push(lead.addr);
         }
         DriveMode::Differential => {
-            let right = mcs.iter().filter(|b| b.side == Some(SIDE_RIGHT)).count();
-            if right != 1 || mcs.iter().any(|b| b.side.is_none()) {
+            let mut rights = mcs.iter().filter(|b| b.side == Some(SIDE_RIGHT));
+            let (Some(right), None) = (rights.next(), rights.next()) else {
+                return Err(Refusal::NoRightWheel);
+            };
+            if mcs.iter().any(|b| b.side.is_none()) {
                 return Err(Refusal::NoRightWheel);
             }
-            // The app's mix with s = 0 is left = right = v: the same value to both.
+            t.right = Some(right.addr);
             t.drive = mcs.iter().map(|b| b.addr).collect();
         }
         _ => t.drive = mcs.iter().map(|b| b.addr).collect(),
@@ -200,16 +232,46 @@ mod tests {
         // BOUND: both, both.
         let t = targets(&[b(2, 1), b(3, 1)], false).unwrap();
         assert_eq!((t.drive, t.arm), (v(&[2, 3]), v(&[2, 3])));
-        // DIFFERENTIAL: both, the same value; both armed.
+        // DIFFERENTIAL: both, the right wheel named; both armed.
         let mut r = b(3, 2);
         r.side = Some(SIDE_RIGHT);
         let t = targets(&[b(2, 2), r], false).unwrap();
+        assert_eq!(t.right, Some(3));
         assert_eq!((t.drive, t.arm), (v(&[2, 3]), v(&[2, 3])));
         // RIGID: the leader only; both armed.
         let mut lead = b(3, 3);
         lead.leader = true;
         let t = targets(&[b(2, 3), lead], false).unwrap();
         assert_eq!((t.drive, t.arm), (v(&[3]), v(&[2, 3])));
+        assert_eq!(t.right, None, "only DIFFERENTIAL names a right wheel");
+    }
+
+    #[test]
+    fn the_right_wheels_demand_goes_to_the_board_whose_side_is_right() {
+        // The right wheel at the lower address, so the order of `drive` does not decide it.
+        let mut r = b(2, 2);
+        r.side = Some(SIDE_RIGHT);
+        let t = targets(&[r, b(3, 2)], false).unwrap();
+        assert_eq!(t.right, Some(2));
+        // Positive turn: the left wheel faster (`DriveMix`, a turn to the right).
+        let d = t.demands(4000, 2000);
+        assert_eq!(d.as_slice(), &[(2, 3000), (3, 5000)]);
+        // No turn: both the same.
+        assert_eq!(t.demands(4000, 0).as_slice(), &[(2, 4000), (3, 4000)]);
+        // Full forward and full right: the offset keeps the difference.
+        assert_eq!(t.demands(32767, 32767).as_slice(), &[(2, 1), (3, 32767)]);
+    }
+
+    #[test]
+    fn bound_and_rigid_ignore_the_turn() {
+        let t = targets(&[b(2, 1), b(3, 1)], false).unwrap();
+        assert_eq!(t.demands(4000, 20_000).as_slice(), &[(2, 4000), (3, 4000)]);
+        let mut lead = b(3, 3);
+        lead.leader = true;
+        let t = targets(&[b(2, 3), lead], false).unwrap();
+        assert_eq!(t.demands(-500, -9000).as_slice(), &[(3, -500)]);
+        let t = targets(&[b(2, 0)], false).unwrap();
+        assert_eq!(t.demands(700, 30_000).as_slice(), &[(2, 700)]);
     }
 
     #[test]

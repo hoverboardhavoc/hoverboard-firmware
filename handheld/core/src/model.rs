@@ -15,7 +15,7 @@ use crate::arm::{Action, Arm, Conditions, Dropped, HoldShow, Refused, BOARDS_OFF
 use crate::drive::{self, Board, Refusal, Targets};
 use crate::inbox::Inbox;
 use crate::lamps::{self, Lamp, LampFacts, LatchHold};
-use crate::pump::{Command, Outbox, Pump};
+use crate::pump::{Command, Outbox, Pump, Tick};
 use crate::readings::attitude::Attitude;
 use crate::readings::battery::{self, BatteryReading};
 use crate::readings::current::{self, CurrentReading};
@@ -74,16 +74,27 @@ pub struct Model {
     pub rx_rate: u16,
     pub tx_rate: u16,
     pub heap_free: u32,
-    last_cmd: Command,
     released: bool,
 }
 
-/// The throttle overlay's state.
+/// The throttle overlay's state (section 5.7), in pixels.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Overlay {
     pub y0: i32,
     pub yf: i32,
     pub live: bool,
+    /// The demand, signed percent.
+    pub percent: i8,
+    /// In DIFFERENTIAL only: the turn zero line's `x0`, the mark's `xf`, and the turn as a signed
+    /// percent, right positive.
+    pub turn: Option<Turn>,
+}
+
+/// The overlay's turn (section 5.7, DIFFERENTIAL).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Turn {
+    pub x0: i32,
+    pub xf: i32,
     pub percent: i8,
 }
 
@@ -115,7 +126,6 @@ impl Model {
             rx_rate: 0,
             tx_rate: 0,
             heap_free: 0,
-            last_cmd: Command::default(),
             released: false,
         }
     }
@@ -283,15 +293,18 @@ impl Model {
         }
     }
 
-    /// The command the pump sends now: the arm level, and the throttle's demand while armed and
-    /// the touch is `Down`.
+    /// The command the pump sends now: the arm level, and while armed and the touch is `Down`,
+    /// each armed board's demand: the throttle's, or in DIFFERENTIAL its wheel's share of the mix
+    /// with the turn (section 4.8). `Lifting`, or a stalled sampler, demands zero on both axes.
     pub fn command(&self) -> Command {
-        let armed = self.arm.armed();
-        let demand = match (armed, self.touch.drive) {
-            (true, Some((y0, yf))) => throttle::demand(y0, yf),
-            _ => 0,
+        if !self.arm.armed() {
+            return Command::default();
+        }
+        let (value, turn) = match self.touch.drive {
+            Some((p0, pf)) => (throttle::demand(p0.y, pf.y), throttle::turn(p0.x, pf.x)),
+            None => (0, 0),
         };
-        Command { armed, demand }
+        Command::armed(self.armed_targets.demands(value, turn))
     }
 
     /// Run the pump at `now` (section 3.6). Returns whether a tick went out, so the caller sends at
@@ -308,15 +321,13 @@ impl Model {
         } else {
             self.drive().unwrap_or_default()
         };
-        let cmd = self.command();
-        let release = (self.last_cmd.armed && !cmd.armed)
-            || (self.last_cmd.armed && self.last_cmd.demand != 0 && cmd.demand == 0);
-        self.last_cmd = cmd;
-        let sent = self.pump.poll(now, cmd, &targets, &mut self.outbox);
-        if sent && release {
+        let tick = self
+            .pump
+            .poll(now, self.command(), &targets, &mut self.outbox);
+        if tick == Tick::Release {
             self.released = true;
         }
-        sent
+        tick.sent()
     }
 
     /// Whether the last tick that went out was a release send, and clear it (the binary logs the
@@ -371,18 +382,23 @@ impl Model {
         if !self.arm.armed() {
             return None;
         }
-        let ((y0, yf), live) = self.touch.overlay?;
-        let demand = if live {
-            i32::from(throttle::demand(y0, yf))
+        let ((p0, pf), live) = self.touch.overlay?;
+        let (demand, turn) = if live {
+            (throttle::demand(p0.y, pf.y), throttle::turn(p0.x, pf.x))
         } else {
-            0
+            (0, 0)
         };
+        let px = |v: i32| v / crate::touch::SUB;
         Some(Overlay {
-            y0: y0 / crate::touch::SUB,
-            yf: yf / crate::touch::SUB,
+            y0: px(p0.y),
+            yf: px(pf.y),
             live,
-            percent: ((demand * 100 + demand.signum() * throttle::FULL_SCALE / 2)
-                / throttle::FULL_SCALE) as i8,
+            percent: throttle::percent(demand),
+            turn: self.armed_targets.steers().then(|| Turn {
+                x0: px(p0.x),
+                xf: px(pf.x),
+                percent: throttle::percent(turn),
+            }),
         })
     }
 
@@ -905,6 +921,7 @@ pub struct Statement {
 mod tests {
     extern crate std;
     use super::*;
+    use crate::touch::{Point, SUB};
     use net::pdu::{Opcode, Pdu};
     use std::vec::Vec as StdVec;
 
@@ -919,7 +936,7 @@ mod tests {
 
     /// A bench machine: bridge 0x01, motor controllers 0x02 and 0x03 (BOUND, sides left and
     /// right, 15 pole pairs, 165 mm, 10 cells Li-ion), answering what the model sends.
-    fn answer(req: &[u8], guest: u8) -> Option<StdVec<u8>> {
+    fn answer(req: &[u8], guest: u8, mode: u8) -> Option<StdVec<u8>> {
         let p = Pdu::decode(req).unwrap();
         let op = |o: Opcode| o.to_u8();
         match p.known()? {
@@ -949,7 +966,7 @@ mod tests {
                     } else if f == store::CONTROL_SIDE.key().field_id {
                         (store::Type::U8, std::vec![if p.dst == 3 { 1 } else { 0 }])
                     } else if f == store::MACHINE_DRIVE_MODE.key().field_id {
-                        (store::Type::U8, std::vec![1])
+                        (store::Type::U8, std::vec![mode])
                     } else if f == store::field::MOTOR_POLE_PAIRS.key().field_id {
                         (store::Type::U8, std::vec![15])
                     } else if f == store::field::WHEEL_DIAMETER_MM.key().field_id {
@@ -990,6 +1007,11 @@ mod tests {
     /// Run the model connected to the bench machine for `ms`, both boards streaming. Each reply
     /// is handed back at once, in the same 10 ms step.
     fn run(m: &mut Model, start: u32, ms: u32, fault: u16) -> u32 {
+        run_mode(m, start, ms, fault, 1)
+    }
+
+    /// [`run`] with the boards storing drive mode `mode`.
+    fn run_mode(m: &mut Model, start: u32, ms: u32, fault: u16, mode: u8) -> u32 {
         let mut now = start;
         while now < start + ms {
             let mut sends = Sends::new();
@@ -1000,7 +1022,7 @@ mod tests {
             m.poll(now, &mut sends);
             let mut pending: StdVec<StdVec<u8>> = sends.iter().map(|s| s.to_vec()).collect();
             while let Some(r) = pending.pop() {
-                if let Some(a) = answer(&r, 0x81) {
+                if let Some(a) = answer(&r, 0x81, mode) {
                     let mut more = Sends::new();
                     m.on_pdu(&a, now, &mut more);
                     pending.extend(more.iter().map(|s| s.to_vec()));
@@ -1013,13 +1035,13 @@ mod tests {
 
     /// Hold the arm band from `now` for 1.1 s and release it; the time of the confirming sample.
     fn hold_band(m: &mut Model, now: u32) -> u32 {
-        let y = 270 * crate::touch::SUB;
-        m.on_touch(Lift::Down { y0: y, yf: y }, now);
+        let p = Point::new(120 * SUB, 270 * SUB);
+        m.on_touch(Lift::Down { p0: p, pf: p }, now);
         let up = now + 1060;
         m.on_touch(
             Lift::Lifting {
-                y0: y,
-                yf: y,
+                p0: p,
+                pf: p,
                 since: up,
                 resume: 0,
             },
@@ -1162,22 +1184,27 @@ mod tests {
         m.outbox = Outbox::default();
         assert_eq!(m.drive_trace(), None);
         hold_band(&mut m, now);
-        use crate::touch::SUB;
+        let (p0, pf) = (
+            Point::new(120 * SUB, 200 * SUB),
+            Point::new(180 * SUB, 80 * SUB),
+        );
         m.touch = TouchView {
-            drive: Some((200 * SUB, 80 * SUB)),
+            drive: Some((p0, pf)),
             overlay: None,
         };
-        assert_eq!(m.command().demand, 32767);
+        // BOUND: the same value to both, the turn ignored.
+        assert_eq!(m.command().demands.as_slice(), &[(2, 32767), (3, 32767)]);
         assert!(m.run_pump(now + 50));
         assert_eq!(m.outbox.drive[0].1.value, 32767);
-        m.touch.overlay = Some(((200 * SUB, 80 * SUB), true));
+        m.touch.overlay = Some(((p0, pf), true));
         assert_eq!(
             m.overlay(),
             Some(Overlay {
                 y0: 200,
                 yf: 80,
                 live: true,
-                percent: 100
+                percent: 100,
+                turn: None,
             })
         );
         assert!(!m.take_release());
@@ -1187,7 +1214,7 @@ mod tests {
         // A release goes out at once, and is reported as one.
         m.outbox = Outbox::default();
         m.touch.drive = None;
-        m.touch.overlay = Some(((200 * SUB, 80 * SUB), false));
+        m.touch.overlay = Some(((p0, pf), false));
         assert!(m.run_pump(now + 60));
         assert_eq!(m.outbox.drive[0].1.value, 0);
         assert!(m.take_release());
@@ -1200,7 +1227,7 @@ mod tests {
 
     #[test]
     fn the_band_follows_a_hold_and_a_tap_disarms() {
-        use crate::touch::SUB;
+        let at = |y: i32| Point::new(120 * SUB, y);
         let mut m = Model::new(Some([0; 6]));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
@@ -1214,8 +1241,8 @@ mod tests {
             band
         };
         assert_eq!(band(&m, now), ArmBand::CanArm);
-        let y = 270 * SUB;
-        m.on_touch(Lift::Down { y0: y, yf: y }, now);
+        let y = at(270 * SUB);
+        m.on_touch(Lift::Down { p0: y, pf: y }, now);
         assert_eq!(band(&m, now + 520), ArmBand::Holding(500));
         assert_eq!(band(&m, now + 1000), ArmBand::Release);
         assert_eq!(band(&m, now + 5001), ArmBand::CanArm, "past the maximum");
@@ -1226,17 +1253,93 @@ mod tests {
         let mut m = Model::new(Some([0; 6]));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
-        let t = 100 * SUB;
-        m.on_touch(Lift::Down { y0: t, yf: t }, now);
+        let t = at(100 * SUB);
+        m.on_touch(Lift::Down { p0: t, pf: t }, now);
         assert_eq!(band(&m, now + 520), ArmBand::CanArm);
         m.on_touch(Lift::Idle, now + 600);
         // Armed, an arm-zone touch-down disarms, and the release goes out at once.
         let now = hold_band(&mut m, now + 700);
         assert!(m.run_pump(now));
-        m.on_touch(Lift::Down { y0: y, yf: y }, now + 10);
+        m.on_touch(Lift::Down { p0: y, pf: y }, now + 10);
         assert!(!m.arm.armed());
         assert!(m.run_pump(now + 10));
         assert!(m.take_release());
         assert_eq!(m.outbox.drive[0].1.kind, linkctl::DriveKind::Neutral);
+    }
+
+    /// The bench machine set to DIFFERENTIAL (board 0x03 the right wheel), armed.
+    fn differential() -> (Model, u32) {
+        let mut m = Model::new(Some([0; 6]));
+        m.connected(0);
+        let mut now = run_mode(&mut m, 0, 4000, 0, 2);
+        assert_eq!(m.drive().unwrap().right, Some(3));
+        now = hold_band(&mut m, now);
+        assert!(m.arm.armed());
+        (m, now)
+    }
+
+    #[test]
+    fn differential_mixes_the_turn_into_each_wheel_with_steer_zero_on_the_wire() {
+        let (mut m, now) = differential();
+        // Up 61 px (half demand) and right 51.5 px (half turn): left = v + s/2, right = v - s/2.
+        let p0 = Point::new(120 * SUB, 200 * SUB);
+        let pf = Point::new(120 * SUB + 3 * SUB + 97 * SUB / 2, 200 * SUB - 61 * SUB);
+        m.touch = TouchView {
+            drive: Some((p0, pf)),
+            overlay: Some(((p0, pf), true)),
+        };
+        let v = throttle::demand(p0.y, pf.y);
+        let s = throttle::turn(p0.x, pf.x);
+        assert_eq!(s, 16384);
+        let want = crate::mix::of(v.into(), s.into(), crate::mix::FULL_SCALE);
+        assert!(m.run_pump(now + 50));
+        let sent = |a: u8| m.outbox.drive.iter().find(|(d, _)| *d == a).unwrap().1;
+        assert_eq!(i32::from(sent(2).value), want.left, "the left wheel");
+        assert_eq!(i32::from(sent(3).value), want.right, "the right wheel");
+        assert!(
+            sent(2).value > sent(3).value,
+            "a drag right runs the left wheel faster"
+        );
+        assert!(m.outbox.drive.iter().all(|(_, d)| d.steer == 0));
+        let o = m.overlay().unwrap();
+        assert_eq!(
+            o.turn,
+            Some(Turn {
+                x0: 120,
+                xf: 171,
+                percent: 50
+            })
+        );
+        // The release: both wheels to zero from the first Up sample, and sent at once.
+        m.outbox = Outbox::default();
+        m.touch.drive = None;
+        m.touch.overlay = Some(((p0, pf), false));
+        assert!(m.run_pump(now + 52));
+        assert!(m.take_release());
+        assert!(m
+            .outbox
+            .drive
+            .iter()
+            .all(|(_, d)| d.value == 0 && d.steer == 0));
+        assert_eq!(m.overlay().unwrap().turn.unwrap().percent, 0);
+    }
+
+    #[test]
+    fn a_drag_left_runs_the_right_wheel_faster() {
+        let (mut m, now) = differential();
+        let p0 = Point::new(120 * SUB, 200 * SUB);
+        let pf = Point::new(60 * SUB, 170 * SUB);
+        m.touch.drive = Some((p0, pf));
+        assert!(m.run_pump(now + 50));
+        let sent = |a: u8| {
+            m.outbox
+                .drive
+                .iter()
+                .find(|(d, _)| *d == a)
+                .unwrap()
+                .1
+                .value
+        };
+        assert!(sent(3) > sent(2), "{} {}", sent(2), sent(3));
     }
 }
