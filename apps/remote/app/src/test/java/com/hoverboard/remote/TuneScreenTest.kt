@@ -21,6 +21,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
@@ -105,7 +106,7 @@ class TuneScreenTest {
         bounds: Map<Key, Int> = boundDefaults,
     ) = TuneState(
         target = 0x01,
-        motors = motors.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+        motors = motors.map { NodeInfo(it, Walk.CLASS_MOTOR, "Hoverboard") },
         boards = mapOf(0x01 to g.copy(bounds = bounds)),
     )
 

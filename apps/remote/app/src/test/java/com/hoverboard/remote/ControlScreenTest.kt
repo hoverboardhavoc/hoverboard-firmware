@@ -21,6 +21,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.up
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
@@ -54,6 +55,8 @@ import com.hoverboard.remote.ui.screens.RIDE_REVERSE_TAG
 import com.hoverboard.remote.ui.screens.RIDE_SPEED_TAG
 import com.hoverboard.remote.ui.screens.RIDE_STATEMENT_TAG
 import com.hoverboard.remote.ui.screens.RIDE_TRIP_TAG
+import com.hoverboard.remote.ui.screens.RIDE_TURN_TAG
+import com.hoverboard.remote.ui.screens.RideTopBarStatus
 import com.hoverboard.remote.ui.screens.lampTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
@@ -164,7 +167,7 @@ class ControlScreenTest {
         show(
             UiState(
                 connectionState = ConnectionState.CONNECTED,
-                nodes = listOf(NodeInfo(0x01, Fields.NodeClass.BRIDGE, "esp")),
+                nodes = listOf(NodeInfo(0x01, Walk.CLASS_BRIDGE, "esp")),
                 attachedNode = 0x01,
             ),
         )
@@ -190,7 +193,7 @@ class ControlScreenTest {
     /** A pair holding two frames refuses the arm: the warning, and the ARM label faint. */
     @Test
     fun aPairWithTwoDifferentFramesSaysItCannotArm() {
-        val frames = Machine(FramePair.Differ(mapOf(0x01 to true, 0x02 to false)), SidePair.NoneRight, ModePair.Unknown)
+        val frames = Machine(FramePair.Differ(mapOf(0x01 to true, 0x02 to false)), SidePair.NoneRight)
         val state = ride(armed = false, mode = DriveMode.SINGLE, other = 0x02).copy(machine = frames)
         assertTrue(!state.canArm)
         show(state)
@@ -203,13 +206,13 @@ class ControlScreenTest {
     @Test
     fun theMachineCautionsHaveTheirLines() {
         val pair = ride(armed = false, mode = DriveMode.SINGLE, other = 0x02)
-        show(pair.copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.NoneRight, ModePair.Unknown)))
+        show(pair.copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.NoneRight)))
         compose.onNodeWithText(s(R.string.ride_side_none_right)).assertIsDisplayed()
 
-        update(pair.copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.BothRight, ModePair.Unknown)))
+        update(pair.copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.BothRight)))
         compose.onNodeWithText(s(R.string.ride_side_both_right)).assertIsDisplayed()
 
-        update(pair.copy(machine = Machine(FramePair.Unknown, SidePair.Unknown, ModePair.Unknown, peerFound = true)))
+        update(pair.copy(machine = Machine(FramePair.Unknown, SidePair.Unknown, peerFound = true)))
         compose.onNodeWithText(s(R.string.ride_frame_unread)).assertIsDisplayed()
 
         update(ride(armed = false, mode = DriveMode.SINGLE).copy(machine = Machine.UNKNOWN))
@@ -495,7 +498,7 @@ class ControlScreenTest {
         var toggles = 0
         val off = UiState(
             connectionState = ConnectionState.CONNECTED,
-            nodes = listOf(NodeInfo(0x01, Fields.NodeClass.BRIDGE, "offroad-master")),
+            nodes = listOf(NodeInfo(0x01, Walk.CLASS_BRIDGE, "offroad-master")),
             attachedNode = 0x01,
             deviceName = "offroad-master",
             boardsOff = true,
@@ -583,6 +586,40 @@ class ControlScreenTest {
         compose.onNodeWithTag(FRAME_STATS_TAG).assertDoesNotExist()
     }
 
+    // --- what the boards run, and the turn axis (`specs/machine-settings.md` sections 5 and 7) ---
+
+    /** A board that does not yet run what it stores says when it will, under the arm control. */
+    @Test
+    fun aBoardThatDoesNotRunWhatItStoresSaysWhen() {
+        show(ride(armed = false, mode = DriveMode.SINGLE).reporting(0x01, board(flags = CyclicState.FLAG_REARM)))
+        compose.onNodeWithText("takes effect at the next arm", substring = true).assertIsDisplayed()
+
+        update(ride(armed = false, mode = DriveMode.SINGLE).reporting(0x01, board(flags = CyclicState.FLAG_REBOOT)))
+        compose.onNodeWithText("restart the board", substring = true).assertIsDisplayed()
+    }
+
+    /** The turn axis is offered on a pivoting pair, flips on a tap while disarmed, and not otherwise. */
+    @Test
+    fun theTurnAxisIsOfferedOnAPairAndFlipsOnATap() {
+        var asked: Boolean? = null
+        val topBar = mutableStateOf(ride(armed = false, mode = DriveMode.BOUND, other = 0x02))
+        compose.setContent {
+            HoverboardRemoteTheme { RideTopBarStatus(topBar.value, onTurnAxis = { asked = it }) }
+        }
+        compose.onNodeWithTag(RIDE_TURN_TAG).assertTextEquals(s(R.string.ride_turn_off)).performClick()
+        assertEquals(true, asked)
+
+        asked = null
+        topBar.value = ride(armed = true, mode = DriveMode.BOUND, other = 0x02)
+        compose.waitForIdle()
+        compose.onNodeWithTag(RIDE_TURN_TAG).performClick()
+        assertEquals("refused while armed", null, asked)
+
+        topBar.value = ride(armed = false, mode = DriveMode.SINGLE)
+        compose.waitForIdle()
+        compose.onNodeWithTag(RIDE_TURN_TAG).assertDoesNotExist()
+    }
+
     // --- fixtures ------------------------------------------------------------------------------
 
     /** A board's frame: [fault] its word, [battery] centivolts, at rest in OFF. */
@@ -598,6 +635,7 @@ class ControlScreenTest {
             peerDemand = 0,
             wheelPos = 0,
             wheelRate = 0,
+            machine = 0,
             obs = QUIET_OBS,
         ),
     )
@@ -616,13 +654,13 @@ class ControlScreenTest {
         return UiState(
             connectionState = ConnectionState.CONNECTED,
             armed = armed,
-            nodes = boards.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME) },
+            nodes = boards.map { NodeInfo(it, Walk.CLASS_MOTOR, BOARD_NAME) },
             attachedNode = 0x01,
             selected = 0x01,
-            drive = DriveInForce(targets, stored = mode, refusal = null),
+            drive = DriveInForce(targets, derived = mode, refusal = null),
             driving = targets,
             telemetryByBoard = boards.associateWith { board() },
-            machine = Machine(FramePair.Agree(rigid = false), SidePair.OneRight(0x02), ModePair.Agree(mode.byte)),
+            machine = Machine(FramePair.Agree(rigid = false), SidePair.OneRight(0x02)),
         )
     }
 

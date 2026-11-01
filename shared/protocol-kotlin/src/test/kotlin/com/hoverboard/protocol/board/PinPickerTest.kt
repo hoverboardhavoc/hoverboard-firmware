@@ -59,8 +59,8 @@ class PinPickerTest {
 
     @Test
     fun aNonPinSlotOffersNoPins() {
-        // The model, the dead time and the current-sense declaration are choices, not pins.
-        for (key in listOf(Fields.IMU_MODEL.key(), Fields.MOTOR_DEAD_TIME.key(0), Fields.MOTOR_CURRENT_SENSE.key(0))) {
+        // The model, the dead time and the current calibration are choices, not pins.
+        for (key in listOf(Fields.IMU_MODEL.key(), Fields.MOTOR_DEAD_TIME.key(0), Fields.MOTOR_CURRENT_CAL.key(0))) {
             val s = checkNotNull(Layout.forKey(key))
             assertFalse(s.isPin)
             assertEquals(emptyList<Pin>(), candidatePins(s, board, chip))

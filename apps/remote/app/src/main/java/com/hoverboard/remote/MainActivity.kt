@@ -252,7 +252,7 @@ private fun Connected(
         onLeaveDrive = viewModel::onThrottleRelease,
         armed = state.armed,
         onDisconnect = viewModel::disconnect,
-        rideStatus = { RideTopBarStatus(state) },
+        rideStatus = { RideTopBarStatus(state, onTurnAxis = viewModel::setTurnAxis) },
         ride = {
             ControlScreen(
                 state = state,

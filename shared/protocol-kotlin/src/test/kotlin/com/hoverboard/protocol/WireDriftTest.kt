@@ -115,6 +115,10 @@ class WireDriftTest {
         assertEquals(0x32, Opcode.ConfigResp.value, "shared/net/src/pdu.rs, Opcode::ConfigResp")
         assertEquals(0x33, Opcode.ConfigWriteMulti.value, "shared/net/src/pdu.rs, Opcode::ConfigWriteMulti")
         assertEquals(0x36, Opcode.ConfigCompact.value, "shared/net/src/pdu.rs, Opcode::ConfigCompact")
+        assertEquals(0x08, Opcode.Identify.value, "shared/net/src/pdu.rs, Opcode::Identify")
+        assertEquals(0x09, Opcode.Identity.value, "shared/net/src/pdu.rs, Opcode::Identity")
+        assertEquals(0x0A, Opcode.StatusRead.value, "shared/net/src/pdu.rs, Opcode::StatusRead")
+        assertEquals(0x0B, Opcode.Status.value, "shared/net/src/pdu.rs, Opcode::Status")
 
         assertNull(Opcode.fromU8(0x04), "0x04 is a reserved hole: specs/l3.md, Discovery and address assignment")
         assertNull(Opcode.fromU8(0x05), "0x05 is a reserved hole: specs/l3.md, Discovery and address assignment")
@@ -165,7 +169,8 @@ class WireDriftTest {
     fun theAppendedBlockLengthsMatchTheFirmware() {
         assertEquals(12, CyclicObs.LEN, "shared/linkctl/src/lib.rs, CyclicObs::LEN")
         assertEquals(28, CyclicState.WHEEL_RATE_OFF, "shared/linkctl/src/lib.rs, CyclicState::WHEEL_RATE_OFF")
-        assertEquals(32, CyclicState.ENCODED_LEN, "shared/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
+        assertEquals(32, CyclicState.MACHINE_OFF, "shared/linkctl/src/lib.rs, CyclicState::MACHINE_OFF")
+        assertEquals(34, CyclicState.ENCODED_LEN, "shared/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
     }
 
     /**
@@ -197,6 +202,7 @@ class WireDriftTest {
             peerDemand = -28500,
             wheelPos = -0x1235,
             wheelRate = -0x0102_0304,
+            machine = 0xBEEF,
             obs = CyclicObs(
                 phasePeak = 0x0304,
                 phaseMean = -3,
@@ -224,6 +230,7 @@ class WireDriftTest {
             0x02, // chip: F130C8
             0x0D, 0x0C, 0x0B, 0x0A, // odometer 0x0A0B0C0D
             0xFC.toByte(), 0xFC.toByte(), 0xFD.toByte(), 0xFE.toByte(), // wheelRate, from offset 28
+            0xEF.toByte(), 0xBE.toByte(), // machine 0xBEEF, from offset 32
         )
         assertArrayEquals(expected, sample.encode())
         assertEquals(CyclicState.ENCODED_LEN, sample.encode().size)
@@ -253,6 +260,7 @@ class WireDriftTest {
                 peerDemand = 0,
                 wheelPos = 0,
                 wheelRate = 0,
+                machine = 0,
                 obs = CyclicObs(
                     phasePeak = 0,
                     phaseMean = 0,
@@ -287,6 +295,7 @@ class WireDriftTest {
             0xB2.toByte(), 0xA1.toByte(), 0x03, 0x11, 0x09, 0x81.toByte(), 0xAC.toByte(), 0x90.toByte(),
             0xCB.toByte(), 0xED.toByte(), 0x04, 0x03, 0xFD.toByte(), 0xFF.toByte(), 0xC1.toByte(), 0x08, 0x7B, 0x02,
             0x0D, 0x0C, 0x0B, 0x0A, 0xFC.toByte(), 0xFC.toByte(), 0xFD.toByte(), 0xFE.toByte(),
+            0xEF.toByte(), 0xBE.toByte(),
         )
         assertEquals(CyclicState.ENCODED_LEN, whole.size)
         assertNotNull(CyclicState.decode(whole), "the one length decodes")
@@ -350,6 +359,8 @@ class WireDriftTest {
         assertEquals(0x01, CyclicState.FLAG_RIDER, "shared/linkctl/src/lib.rs, CyclicState::FLAG_RIDER")
         assertEquals(0x02, CyclicState.FLAG_LEADER, "shared/linkctl/src/lib.rs, CyclicState::FLAG_LEADER")
         assertEquals(0x04, CyclicState.FLAG_FOLLOWER, "shared/linkctl/src/lib.rs, CyclicState::FLAG_FOLLOWER")
+        assertEquals(0x08, CyclicState.FLAG_REARM, "shared/linkctl/src/lib.rs, CyclicState::FLAG_REARM")
+        assertEquals(0x10, CyclicState.FLAG_REBOOT, "shared/linkctl/src/lib.rs, CyclicState::FLAG_REBOOT")
         assertEquals(0x0F17, CyclicState.FAULT_A_BITS, "motorcontroller/orchestrator/src/events.rs, FAULT_A_BITS")
         // FAULT_A_BITS | EV_LATCH_B: Fault A and Fault B, what holds a board in OFF.
         assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS, "motorcontroller/orchestrator/src/events.rs, EV_LATCH_B")
@@ -366,6 +377,8 @@ class WireDriftTest {
         assertEquals(0x200, CyclicState.EV_MOTOR_CAL, "$ev, EV_MOTOR_CAL")
         assertEquals(0x400, CyclicState.EV_MOTOR_PERIOD, "$ev, EV_MOTOR_PERIOD")
         assertEquals(0x800, CyclicState.EV_MOTOR_ARM, "$ev, EV_MOTOR_ARM")
+        assertEquals(0x1000, CyclicState.EV_CONFIG, "$ev, EV_CONFIG")
+        assertEquals(0x2000, CyclicState.EV_MACHINE, "$ev, EV_MACHINE")
         assertEquals(
             0x80,
             CyclicState.FLAG_LOCKDOWN,
@@ -533,22 +546,24 @@ class WireDriftTest {
     }
 
     /**
-     * `node.class` and its refusal (`specs/l3.md`, "Node class" and "Tier-1 wire encoding"): field
-     * `0x03`, `u8`, `0x01` on a board, read-only, and status `6` for the refused write. The
-     * `PORTS` state mask is bits 0-1, leaving bit 7 for the link-group flag.
+     * The node's identity (`specs/machine-settings.md` section 6.1; `shared/net/src/walk.rs`,
+     * `Identity`): `IDENTITY` is 16 B, `class, mcu, fw_ver (u16 LE), uid (12 B)`, a motor
+     * controller's class `0x01` and a bridge's `0x02`; the `NODE_HELLO` reply is 3 B. The `PORTS`
+     * state mask is bits 0-1, leaving bit 7 for the link-group flag.
      */
     @Test
-    fun nodeClassAndItsRefusalMatchTheSpec() {
-        val c = com.hoverboard.protocol.store.Fields.NODE_CLASS
-        assertEquals(0x03, c.id)
-        assertEquals(Type.U8, c.type)
-        assertEquals(com.hoverboard.protocol.store.Value.U8(0x01), c.default)
-        assertTrue(c.readOnly)
-        assertEquals(6, com.hoverboard.protocol.l3.Walk.CFG_READ_ONLY)
-        assertEquals(
-            com.hoverboard.protocol.config.CfgRefusal.READ_ONLY,
-            com.hoverboard.protocol.config.CfgRefusal.fromCode(6),
-        )
+    fun theIdentityLayoutAndTheHelloLengthMatchTheSpec() {
+        val uid = ByteArray(com.hoverboard.protocol.l3.Identity.UID_LEN) { (0x80 + it).toByte() }
+        val identity = com.hoverboard.protocol.l3.Identity(0x01, 0x02, 0x0304, uid)
+        assertArrayEquals(byteArrayOf(0x01, 0x02, 0x04, 0x03) + uid, identity.encode())
+        assertEquals(16, identity.encode().size)
+        assertEquals(identity, com.hoverboard.protocol.l3.Identity.decode(identity.encode()))
+        assertNull(com.hoverboard.protocol.l3.Identity.decode(identity.encode().copyOf(15)), "short is refused")
+        assertNull(com.hoverboard.protocol.l3.Identity.decode(identity.encode().copyOf(17)), "long is refused")
+        assertEquals(0x01, com.hoverboard.protocol.l3.Walk.CLASS_MOTOR)
+        assertEquals(0x02, com.hoverboard.protocol.l3.Walk.CLASS_BRIDGE)
+        assertEquals(3, com.hoverboard.protocol.l3.HELLO_REPLY_LEN)
+        assertNull(com.hoverboard.protocol.config.CfgRefusal.fromCode(6), "status 6 (read-only) is gone")
         assertEquals(0x03, com.hoverboard.protocol.l3.Walk.NB_STATE_MASK)
         assertEquals(0, com.hoverboard.protocol.l3.Walk.NB_STATE_MASK and 0x80, "bit 7 is not state")
     }
@@ -611,26 +626,27 @@ class WireDriftTest {
     // --- The BLE transport budget ---------------------------------------------------------------
 
     /**
-     * A CYCLIC_STATE PDU from the bridge is ONE stream frame, carried in TWO BLE notifications.
+     * A CYCLIC_STATE PDU from the bridge is ONE stream frame, carried in THREE BLE notifications.
      *
      * ```
-     * CYCLIC_STATE payload            32 B   shared/linkctl, CyclicState::ENCODED_LEN
+     * CYCLIC_STATE payload            34 B   shared/linkctl, CyclicState::ENCODED_LEN
      * + L3 header                      3 B   shared/net, HEADER_LEN
-     *                                = 35 B PDU
-     * bridge frame capacity 128 -> one fragment, L2 frame = frag-hdr 1 + 35 = 36 B
-     * stream = SOF 1 + len 1 + 36 + CRC 2 = 40 B, notified as 20 B + 20 B
+     *                                = 37 B PDU
+     * bridge frame capacity 128 -> one fragment, L2 frame = frag-hdr 1 + 37 = 38 B
+     * stream = SOF 1 + len 1 + 38 + CRC 2 = 42 B, notified as 20 B + 20 B + 2 B
      * ```
      *
      * The bridge's controller links frame at 128 and notify at most 20 B
-     * (`bridge/core/src/router.rs` (FRAME, NOTIFY_MAX)), so a frame spans
-     * notifications and the rider reassembles it from the byte stream. The Rust side asserts the 40 B by
-     * `stage_of_a_cyclic_state_pdu_is_one_frame_on_a_128_byte_link` in `shared/link/src/link.rs`.
+     * (`bridge/core/src/router.rs` (FRAME, NOTIFY_MAX)), so a frame spans notifications and the
+     * rider reassembles it from the byte stream. The Rust side prices the same staging in
+     * `stage_of_a_cyclic_state_pdu_is_one_frame_on_a_128_byte_link` in `shared/link/src/link.rs`,
+     * which still prices the 32 B payload from before the machine digest (40 B, two notifications).
      *
      * The app's own outgoing frame capacity stays 16, so each frame it writes is one 20 B ATT
      * write; that is pinned here beside the inbound arithmetic.
      */
     @Test
-    fun aCyclicStatePduIsOneBridgeFrameInTwoNotifications() {
+    fun aCyclicStatePduIsOneBridgeFrameInThreeNotifications() {
         assertEquals(
             16,
             BleStreamTransport.DEFAULT_FRAME_CAPACITY,
@@ -648,6 +664,7 @@ class WireDriftTest {
             peerDemand = 0,
             wheelPos = 0,
             wheelRate = 0,
+            machine = 0x1234,
             obs = CyclicObs(
                 phasePeak = 980,
                 phaseMean = 410,
@@ -664,18 +681,18 @@ class WireDriftTest {
             payload = cyclic.encode(),
         )
         val pduBytes = pdu.encode()
-        assertEquals(35, pduBytes.size, "3 B L3 header + 32 B CYCLIC_STATE")
+        assertEquals(37, pduBytes.size, "3 B L3 header + 34 B CYCLIC_STATE")
 
         val bridge = BleStreamTransport(frameCapacity = BRIDGE_FRAME)
         Link(bridge).send(pduBytes)
         val wire = bridge.drainOutgoing()!!
-        assertEquals(40, wire.size, "one stream frame")
-        assertEquals(36, wire[1].toInt() and 0xFF, "frag-hdr + the whole 35 B PDU")
+        assertEquals(42, wire.size, "one stream frame")
+        assertEquals(38, wire[1].toInt() and 0xFF, "frag-hdr + the whole 37 B PDU")
 
         // The rider receives it as the bridge notifies it, in 20 B pieces.
         val rxTransport = BleStreamTransport()
         val notifications = wire.toList().chunked(NOTIFY_MAX)
-        assertEquals(listOf(20, 20), notifications.map { it.size })
+        assertEquals(listOf(20, 20, 2), notifications.map { it.size })
         for (n in notifications) rxTransport.onReceive(n.toByteArray())
         val recovered = Pdu.decode(Link(rxTransport).pollRecv()!!)
         assertEquals(OP_CYCLIC_STATE, recovered.opcode)

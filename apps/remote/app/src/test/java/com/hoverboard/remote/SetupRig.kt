@@ -67,7 +67,13 @@ internal fun TestScope.tick(ms: Long) {
  * model watches is per board.
  */
 internal fun SetupRig.emitBoot(bootTag: Int, from: Int? = null) =
-    transport.emitCyclicState(CyclicState(0, 0, 0, 0, 0, 0, 0, 0, 0, QUIET_OBS.copy(bootTag = bootTag), 0), from)
+    transport.emitCyclicState(CyclicState(0, 0, 0, 0, 0, 0, 0, 0, 0, QUIET_OBS.copy(bootTag = bootTag), 0, 0), from)
 
-internal fun SetupRig.emitAttitude(pitch: Int, roll: Int, obs: CyclicObs = QUIET_OBS, from: Int? = null) =
-    transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, 0, 0, obs, 0), from)
+internal fun SetupRig.emitAttitude(
+    pitch: Int,
+    roll: Int,
+    obs: CyclicObs = QUIET_OBS,
+    from: Int? = null,
+    flags: Int = 0,
+) =
+    transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, flags, 0, 0, obs, 0, 0), from)

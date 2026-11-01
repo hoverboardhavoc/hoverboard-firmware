@@ -487,7 +487,8 @@ pub const IMU_MODEL: Field<u8> = Field::new(0x13, 0);
 /// default 0 = uncalibrated). i32: the imu crate's bias word (counts fit i16, the type matches
 /// the consumer).
 pub const IMU_GYRO_BIAS: IndexedField<i32, 3> = IndexedField::new(0x14, [0, 0, 0]);
-/// Per-axis IMU sign map, indexed 0..5 = `[ax, ay, az, gx, gy, gz]` (`specs/imu.md`, section 7.1;
+/// Per-axis IMU sign map, indexed 0..2 = `[x, y, z]`, applied to the accelerometer and the gyro
+/// alike (`specs/machine-settings.md` section 3.1; `specs/imu.md`, section 7.1;
 /// staged into `imu::Config.sign` at bring-up beside [`IMU_GYRO_BIAS`]).
 ///
 /// **Why this is a field and not a constant.** The sign map is the rotation between the IMU chip's

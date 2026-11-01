@@ -6,15 +6,17 @@ import com.hoverboard.remote.R
 
 /**
  * One lamp of the Ride screen's fault grid (`specs/remote-ui.md` 3.1b): one per cause that stops a
- * board arming, which is one bit of [CyclicState.ARM_BLOCKING_BITS], in the grid's order, and
- * CONFIG last.
+ * board arming, which is one bit of [REFUSING_BITS], in the grid's order, then CONFIG.
  *
  * A board's own `CYCLIC_STATE.fault` word blocks its arm when it carries any of the first nine
  * bits: the mode machine holds a board in OFF while Fault A or Fault B is asserted, and Fault B is
- * motor 1's latch alone. CONFIG is bit 12 ([CyclicState.EV_CONFIG]): a configured function did not
- * come up at boot. It blocks nothing ([blocksArm] false), so it never draws the grid by itself and
- * never disarms. Bit 6 (the mode fault, a readback) and bit 7 (the power request itself) are in the
- * word and are not lamps; bit 3 and bits 13 to 15 name nothing.
+ * motor 1's latch alone. MACHINE is bit 13 ([CyclicState.EV_MACHINE], `specs/machine-settings.md`
+ * section 4.2): the boards of the machine do not agree, which refuses the arm (the mode machine's
+ * off-inhibit) and disengages nothing, so the app never disarms for it. CONFIG is bit 12
+ * ([CyclicState.EV_CONFIG]): a configured function did not come up at boot. It blocks nothing
+ * ([blocksArm] false), so it never draws the grid by itself and never disarms. Bit 6 (the mode
+ * fault, a readback) and bit 7 (the power request itself) are in the word and are not lamps; bit 3
+ * and bits 14 and 15 name nothing.
  *
  * @param bit the lamp's bit mask in the fault word.
  * @param label the name the lamp carries in the grid.
@@ -76,6 +78,14 @@ enum class FaultLamp(
         "ARM",
         R.string.lamp_arm_title, R.string.lamp_arm_when, R.string.lamp_arm_blocks, R.string.lamp_arm_fix,
     ),
+    MACHINE(
+        CyclicState.EV_MACHINE,
+        "MACHINE",
+        R.string.lamp_machine_title,
+        R.string.lamp_machine_when,
+        R.string.lamp_machine_blocks,
+        R.string.lamp_machine_fix,
+    ),
     CONFIG(
         CyclicState.EV_CONFIG,
         "CONFIG",
@@ -90,14 +100,22 @@ enum class FaultLamp(
     val held: Boolean get() = bit and LATCH_BITS != 0
 
     /** Whether this lamp's bit stops a board arming: every lamp but CONFIG. */
-    val blocksArm: Boolean get() = bit and CyclicState.ARM_BLOCKING_BITS != 0
+    val blocksArm: Boolean get() = bit and REFUSING_BITS != 0
 
     companion object {
         /** The two latch bits the app holds lit ([held]): the board clears a latch about 8 ms after it trips. */
         const val LATCH_BITS = CyclicState.EV_LATCH_A or CyclicState.EV_LATCH_B
 
-        /** Every bit a lamp draws: the arm-blocking ones and CONFIG. */
-        const val LAMP_BITS = CyclicState.ARM_BLOCKING_BITS or CyclicState.EV_CONFIG
+        /**
+         * The bits of a board's own fault word that refuse its arm: Fault A and Fault B
+         * ([CyclicState.ARM_BLOCKING_BITS], which also disengage a running board) and
+         * [CyclicState.EV_MACHINE], the off-inhibit, which does not. The arm control and the grid
+         * read this; the fault disarm reads [CyclicState.ARM_BLOCKING_BITS] alone.
+         */
+        const val REFUSING_BITS = CyclicState.ARM_BLOCKING_BITS or CyclicState.EV_MACHINE
+
+        /** Every bit a lamp draws: the ones that refuse the arm, and CONFIG. */
+        const val LAMP_BITS = REFUSING_BITS or CyclicState.EV_CONFIG
 
         /** The lamp for one bit mask of the fault word, or null for a bit that is not a lamp. */
         fun of(bit: Int): FaultLamp? = entries.firstOrNull { it.bit == bit }
@@ -109,7 +127,7 @@ enum class FaultLamp(
 
 /**
  * What the app knows about one motor controller that decides which lamps apply on it: its
- * address and its stored `imu.model` (0x60), null while unread.
+ * address and its stored `imu.model`, null while unread.
  */
 data class LampFacts(val address: Int, val imuModel: Int?) {
     /** Whether the board has an IMU fitted. Unread counts as fitted, so an unread fact never hides a lamp. */
@@ -128,7 +146,7 @@ data class LampFacts(val address: Int, val imuModel: Int?) {
  *   loss level run only on a board whose IMU answered at power-up, in Throttle as in Balance.
  * - LATCH 2 never applies: no board drives a second motor, so it shows only while its bit is set.
  * - CONFIG never applies either: it shows only on a board whose boot left a configured function
- *   down, which is its bit.
+ *   down, which is its bit. MACHINE likewise shows only while a board reports it.
  * - LATCH and the four motor causes apply on every motor controller: the motor bring-up they gate
  *   on is not visible over the link.
  *
@@ -146,20 +164,26 @@ fun shownLamps(facts: List<LampFacts>, words: Map<Int, Int>): List<FaultLamp> {
 private fun applies(lamp: FaultLamp, facts: List<LampFacts>): Boolean = when (lamp) {
     FaultLamp.LINK -> facts.size == 2
     FaultLamp.TILT, FaultLamp.IMU -> facts.any { it.imuFitted }
-    FaultLamp.LATCH_2, FaultLamp.CONFIG -> false
+    FaultLamp.LATCH_2, FaultLamp.MACHINE, FaultLamp.CONFIG -> false
     FaultLamp.LATCH, FaultLamp.HALL, FaultLamp.CAL, FaultLamp.PERIOD, FaultLamp.ARM -> facts.isNotEmpty()
 }
 
 /**
- * The grid's column count for [shown] lamps: four, or five when nine or ten are shown, so the grid
- * is never more than two rows (the fleet's fullest machine applies eight; the ninth and tenth are
- * LATCH 2 and CONFIG lit).
+ * The grid's column count for [shown] lamps: four, five when nine or ten are shown, and six for
+ * eleven, so the grid is never more than two rows (the fleet's fullest machine applies eight; the
+ * ninth to eleventh are LATCH 2, MACHINE and CONFIG lit).
  */
-fun lampColumns(shown: Int): Int = if (shown > FOUR_COLUMN_MAX) FIVE_COLUMNS else FOUR_COLUMNS
+fun lampColumns(shown: Int): Int = when {
+    shown > FIVE_COLUMN_MAX -> SIX_COLUMNS
+    shown > FOUR_COLUMN_MAX -> FIVE_COLUMNS
+    else -> FOUR_COLUMNS
+}
 
 private const val FOUR_COLUMNS = 4
 private const val FIVE_COLUMNS = 5
+private const val SIX_COLUMNS = 6
 private const val FOUR_COLUMN_MAX = 8
+private const val FIVE_COLUMN_MAX = 10
 
 /**
  * Why the app dropped the arm level by itself for a board fault (`specs/remote-ui.md` 3.1): the

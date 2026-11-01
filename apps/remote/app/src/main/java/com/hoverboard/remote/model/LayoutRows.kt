@@ -76,11 +76,6 @@ object LayoutRows {
         Choice(Fields.ImuModel.CLONE_2E, R.string.layout_choice_imu_clone),
     )
 
-    private val senseDeclarations = listOf(
-        Choice(CURRENT_SENSE_ABSENT, R.string.layout_choice_sense_absent),
-        Choice(CURRENT_SENSE_PRESENT, R.string.layout_choice_sense_present),
-    )
-
     /** Every row, in screen order. */
     val ALL: List<LayoutRow> = buildList {
         fun row(
@@ -150,10 +145,9 @@ object LayoutRows {
                 note = R.string.layout_note_dead_time, noteArgs = listOf(DEAD_TIME_MIN_DTG),
             )
             row(
-                Fields.MOTOR_CURRENT_SENSE, m, R.string.layout_field_current_sense, LayoutGroup.MOTOR,
-                editor = LayoutEditor.Choices(senseDeclarations), note = R.string.layout_note_phase,
+                Fields.MOTOR_PHASE_A, m, R.string.layout_field_phase_a, LayoutGroup.MOTOR,
+                note = R.string.layout_note_phase,
             )
-            row(Fields.MOTOR_PHASE_A, m, R.string.layout_field_phase_a, LayoutGroup.MOTOR)
             row(Fields.MOTOR_PHASE_B, m, R.string.layout_field_phase_b, LayoutGroup.MOTOR)
         }
     }
@@ -164,10 +158,6 @@ object LayoutRows {
 
     /** The row editing [slot], or null when the screen has none. */
     fun forSlot(slot: LayoutSlot): LayoutRow? = ALL.firstOrNull { it.slot.key == slot.key }
-
-    /** `motor.current_sense`'s two values: the firmware reads any nonzero byte as present. */
-    const val CURRENT_SENSE_ABSENT = 0
-    const val CURRENT_SENSE_PRESENT = 1
 
     /** The dead time is a raw DTG byte, so the type is its only upper bound. */
     const val DEAD_TIME_MAX = 255L

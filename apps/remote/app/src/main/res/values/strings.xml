@@ -40,12 +40,9 @@
 
     <!-- Ride screen, Setup's machine status section -->
 
-    <!-- Drive mode (specs/remote-ui.md 3.2): a machine setting stored on the motor controllers
-         (machine.drive_mode), edited under Machine on Setup. Setup's machine status section shows the one in force. -->
-    <string name="drive_mode_single">Single board</string>
-    <string name="drive_mode_bound">Bound (both boards)</string>
-    <string name="drive_mode_differential">Differential (steer)</string>
-    <string name="drive_mode_rigid">Rigid body (one machine)</string>
+    <!-- Drive mode (specs/machine-settings.md section 7): derived from the stored control mode and
+         frame, the number of motor controllers and the Ride screen's turn-axis setting. Setup's
+         machine status section shows the one in force. -->
     <string name="drive_mode_rigid_not_leading">Both boards are set to one rigid machine, but neither is running as its leader yet. Set both to Balance under Drive on the Setup tab, and arm once so a new setting takes hold.</string>
 
     <!-- Per-board chips. %1$s is the board's label (its name and address), %2$s what that board
@@ -256,6 +253,7 @@
     <string name="setup_effect_arm">Takes effect the next time the board is armed.</string>
     <string name="setup_effect_boot">Takes effect the next time the board starts up.</string>
     <string name="setup_effect_app">Takes effect here at once. The board stores this one for the app and never acts on it itself.</string>
+    <string name="setup_effect_live">Takes effect on the board as it is written.</string>
     <string name="setup_set">Set</string>
     <string name="setup_invalid">Not a value this field takes</string>
     <string name="setup_too_long">Too long: at most %1$d bytes fit one write</string>
@@ -272,7 +270,6 @@
     <string name="setup_write_refused_type">The board stores this field as a different type.</string>
     <string name="setup_write_refused_store">The board could not store this (flash full or failed).</string>
     <string name="setup_write_refused_no_space">The board is out of space for configuration, so this was not stored.</string>
-    <string name="setup_write_refused_read_only">The board refused this write: the field is read-only.</string>
     <string name="setup_write_refused_commit">The board could not commit its compacted configuration page, so this was not stored.</string>
     <string name="setup_write_refused_secret">The board does not give this field\'s value back.</string>
     <!-- %1$s is the value written, %2$s the value the board echoed. -->
@@ -295,8 +292,6 @@
     <string name="setup_group_tuning">Tuning</string>
 
     <string name="setup_field_device_name">Device name</string>
-    <string name="setup_field_node_class">Node class</string>
-    <string name="setup_field_drive_mode">Drive mode (every board must match)</string>
     <string name="setup_field_node_address">Node address</string>
     <string name="setup_field_control_mode">Control mode</string>
     <string name="setup_field_rider_required">Rider required (balance mode)</string>
@@ -325,12 +320,9 @@
     <string name="setup_field_gyro_bias_x">Gyro bias X (counts)</string>
     <string name="setup_field_gyro_bias_y">Gyro bias Y (counts)</string>
     <string name="setup_field_gyro_bias_z">Gyro bias Z (counts)</string>
-    <string name="setup_field_sign_ax">Sign, accel X</string>
-    <string name="setup_field_sign_ay">Sign, accel Y</string>
-    <string name="setup_field_sign_az">Sign, accel Z</string>
-    <string name="setup_field_sign_gx">Sign, gyro X</string>
-    <string name="setup_field_sign_gy">Sign, gyro Y</string>
-    <string name="setup_field_sign_gz">Sign, gyro Z</string>
+    <string name="setup_field_sign_x">Sign, X (accel and gyro)</string>
+    <string name="setup_field_sign_y">Sign, Y (accel and gyro)</string>
+    <string name="setup_field_sign_z">Sign, Z (accel and gyro)</string>
     <string name="setup_field_role_up">Axis role, UP (chip axis 1 to 3)</string>
     <string name="setup_field_role_pitch">Axis role, PITCH_RATE (chip axis 1 to 3)</string>
 
@@ -356,8 +348,6 @@
     <string name="setup_range">Takes %1$s to %2$s.</string>
     <string name="setup_range_unset">Takes %1$s to %2$s, or %3$s.</string>
     <string name="setup_note_device_name">The Bluetooth module takes a new name only after it is power-cycled out of data mode.</string>
-    <string name="setup_note_node_class">1 = motor controller, 2 = bridge. The node\'s own firmware reports it; it cannot be written.</string>
-    <string name="setup_note_drive_mode">The raw byte behind the Drive mode control under Machine, for a bench with only one board powered. Set it the same on every board. Nothing on the board reads it: the app drives by it.</string>
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
     <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control drives a current instead of a voltage and has not been proven on a wheel yet; set both boards of a machine to the same method. A board whose current sensing was not calibrated at start-up falls back to six-step.</string>
     <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
@@ -421,14 +411,7 @@
     <!-- %1$s is a board label, %2$s its frame; %3$s and %4$s the other board's. -->
     <!-- One board's value in a disagreement: %1$s the board's label, %2$s its value. -->
     <string name="setup_machine_value">%1$s: %2$s.</string>
-    <string name="setup_machine_mode">Drive mode</string>
-    <string name="setup_machine_mode_body">How the app drives this machine. Single board: the stick drives the board picked at the top of Tune or Setup. Bound: both boards get the same demand. Differential: the stick steers by driving the two wheels apart, which needs the right wheel set below. Rigid body: one command to the board leading the rigid frame. Every board stores the same value, so the setting travels with the machine.</string>
-    <string name="setup_machine_mode_unknown">Not read on every board.</string>
-    <!-- A stored byte that names no drive mode this app knows. -->
-    <string name="setup_machine_mode_raw">unknown (%1$d)</string>
-    <!-- The one-tap write of one value to every board. %1$s is a drive mode label. -->
-    <string name="setup_machine_mode_use">Use %1$s on every board</string>
-    <string name="setup_machine_unknown">Not read on both boards.</string>
+            <string name="setup_machine_unknown">Not read on both boards.</string>
     <!-- %1$s is a board label: its name and address. -->
     <string name="setup_machine_side_right">Right wheel: %1$s</string>
     <string name="setup_machine_side_none">Neither board is the right wheel. Both are set to the left, which is how a board leaves the factory.</string>
@@ -498,8 +481,7 @@
 
     <string name="setup_retry">Try again</string>
     <string name="setup_notice_not_a_sign">A sign must be -1, 0 (unset) or +1. Nothing was written.</string>
-    <string name="setup_notice_accel_mirrored">The accelerometer signs would form a mirrored frame (determinant -1). Nothing was written.</string>
-    <string name="setup_notice_gyro_mirrored">The gyro signs would form a mirrored frame (determinant -1). Nothing was written.</string>
+    <string name="setup_notice_mirrored">The signs would form a mirrored frame (determinant -1). Nothing was written.</string>
     <string name="setup_notice_roles">The axis roles would name one chip axis twice or a value outside 0 to 3. Nothing was written.</string>
     <!-- %1$s is a field label. -->
     <string name="setup_notice_out_of_range">%1$s does not take that value.</string>
@@ -574,7 +556,6 @@
     <string name="layout_field_gate_lo_b">Gate, low side B</string>
     <string name="layout_field_gate_lo_c">Gate, low side C</string>
     <string name="layout_field_dead_time">Dead time (DTG)</string>
-    <string name="layout_field_current_sense">Phase-current sense</string>
     <string name="layout_field_phase_a">Phase A sense</string>
     <string name="layout_field_phase_b">Phase B sense</string>
 
@@ -582,7 +563,7 @@
     <string name="layout_note_imu">Both pins and a model, or none: a half-staged IMU does not come up, and the board lists it in its status.</string>
     <string name="layout_note_gates">All six gates with a dead time at or above the floor, or none, and the six have to be one advanced timer\'s complementary set. The board lists a gate group it could not bring up in its status.</string>
     <string name="layout_note_halls">All three halls, or none.</string>
-    <string name="layout_note_phase">Both pins exactly when the sense is declared present, and both on an analog pin.</string>
+    <string name="layout_note_phase">Phase-current sense is fitted exactly when both pins are set, and both on an analog pin.</string>
     <string name="layout_note_dead_time">%1$d DTG ticks or more once the gates are configured; 0 only with them unset. A shorter one lets both FETs of a leg conduct.</string>
 
     <string name="layout_absent">not set</string>
@@ -596,8 +577,6 @@
     <string name="layout_choice_imu_none">None fitted</string>
     <string name="layout_choice_imu_mpu6050">MPU-6050</string>
     <string name="layout_choice_imu_clone">MPU-6050 clone</string>
-    <string name="layout_choice_sense_absent">None</string>
-    <string name="layout_choice_sense_present">Present</string>
 
     <string name="layout_notice_armed">The board is armed. A layout is written to flash, which it refuses while armed.</string>
     <string name="layout_notice_not_attached">No board is attached, so nothing was sent.</string>
@@ -652,6 +631,10 @@
     <string name="lamp_config_title">Configuration incomplete</string>
     <string name="lamp_config_when">A function this board\'s stored settings configure did not come up when the board started: a group with only some of its pins set, a pin the chip cannot use for it or that is not a pin at all, a dead time below the floor, or a part that did not answer. The board leaves that function off and runs the rest. It stays lit until the board starts with the setting corrected.</string>
     <string name="lamp_config_blocks">Nothing. The board arms as usual, without the function that did not come up.</string>
+    <string name="lamp_machine_title">Boards disagree</string>
+    <string name="lamp_machine_when">This board has a link to another motor controller configured, and either it has not heard that board since it started, or that board holds different machine settings (the control mode, the frame, the method, the pack, the balance gains and limits).</string>
+    <string name="lamp_machine_blocks">Arming. It never stops a machine that is already running.</string>
+    <string name="lamp_machine_fix">Power the other board on. If both are on, Setup lists the machine settings that differ, board by board: set each one again under Setup, which writes every board.</string>
     <string name="lamp_config_fix">Setup lists, under this board, what did not come up and why. Correct that setting, then power the board off and on.</string>
 
     <!-- The Ride screen, 8a (`specs/remote-ui.md` 3.1). -->
@@ -706,15 +689,13 @@
     <string name="ride_off_action">Switch it on.</string>
     <string name="ride_off_waiting">Connected to %1$s, waiting for the boards…</string>
     <!-- The drive refusal (`specs/remote-ui.md` 3.1c): the Ride statement, then Setup's line. -->
-    <string name="drive_refusal_unread">Reading the drive mode from every board.</string>
-    <string name="drive_refusal_disagree">Cannot arm: the boards store different drive modes.</string>
-    <string name="drive_refusal_unknown_mode">Cannot arm: the boards store an unknown drive mode.</string>
+    <string name="drive_refusal_unread">Reading the control mode and frame.</string>
+    <string name="drive_refusal_disagree">Cannot arm: the boards store different control modes or frames.</string>
     <string name="drive_refusal_not_two">Cannot arm: %1$s needs two boards, %2$d found.</string>
     <string name="drive_refusal_no_leader">Cannot arm: no single board leads the rigid frame.</string>
     <string name="drive_refusal_no_right">Cannot arm: no single board is the right wheel.</string>
-    <string name="drive_refusal_unread_long">Cannot arm yet: the drive mode has not been read from every board.</string>
-    <string name="drive_refusal_disagree_long">Cannot arm: the boards store different drive modes. Pick one under Machine.</string>
-    <string name="drive_refusal_unknown_mode_long">Cannot arm: the boards store a drive mode this app does not know.</string>
+    <string name="drive_refusal_unread_long">Cannot arm yet: the control mode and frame the drive mode comes from have not been read.</string>
+    <string name="drive_refusal_disagree_long">Cannot arm: the boards store different control modes or frames. Set the frame under Machine and the control mode under Drive, which writes every board.</string>
     <string name="drive_refusal_not_two_long">Cannot arm: %1$s needs two boards and %2$d were found.</string>
     <string name="drive_refusal_no_leader_long">Cannot arm: RIGID needs exactly one board leading the rigid frame, and none is (or both are). A board takes a new frame or control mode when it arms or powers up, and arming is refused here, so power the boards off and on.</string>
     <string name="drive_refusal_no_right_long">Cannot arm: DIFFERENTIAL needs exactly one board set as the right wheel. Pick it under Machine.</string>
@@ -740,8 +721,23 @@
     <string name="status_not_turning">Not turning: the app has asked for drive for 1 s and the wheel reports no rotation.</string>
     <string name="board_mode_demoted">MODE %1$s: the board is not running the control mode it stores (Balance with no working IMU runs Throttle), or both boards claim the rigid lead.</string>
 
-    <!-- One line per board.status entry (specs/configured-links.md section 5), named the way hoverboard-cli status names it. %1$s is the function, %2$s why it did not come up. -->
+    <!-- One line per boot status record entry (specs/configured-links.md section 5), named the way hoverboard-cli board status names it. %1$s is the function, %2$s why it did not come up. -->
     <string name="status_config_line">%1$s: %2$s</string>
+    <string name="status_rearm">A setting this board reads when it arms was written since it last armed: it takes effect at the next arm.</string>
+    <string name="status_reboot">A setting this board reads when it starts was written since it started: restart the board for it to take effect.</string>
+    <!-- Ride statements: %1$s names the board. -->
+    <string name="ride_rearm">%1$s: takes effect at the next arm.</string>
+    <string name="ride_reboot">%1$s: restart the board.</string>
+    <!-- The Ride screen's turn-axis setting (`specs/machine-settings.md` section 7). -->
+    <string name="ride_turn_on">STEER ON</string>
+    <string name="ride_turn_off">STEER OFF</string>
+    <!-- Setup's list of machine settings that differ (EV_MACHINE). -->
+    <string name="setup_machine_differ_title">The boards hold different machine settings:</string>
+    <!-- %1$s names the setting, %2$s is each board's value. -->
+    <string name="setup_machine_differ_line">%1$s: %2$s</string>
+    <!-- A machine setting with no row of its own: %1$s the field id, %2$d the index. -->
+    <string name="setup_machine_differ_raw">field %1$s[%2$d]</string>
+    <string name="setup_machine_differ_unread">A board reports the boards do not agree, and no setting read so far differs: the other board may be off, or not heard yet.</string>
     <string name="status_config_unread">A configured function did not come up when this board started, and the list of what did not has not been read.</string>
     <!-- The functions an entry names. %1$d is the motor or the link. -->
     <string name="status_fn_gate">motors[%1$d] gate</string>

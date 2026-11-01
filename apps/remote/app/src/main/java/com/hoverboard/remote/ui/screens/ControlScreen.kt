@@ -2,6 +2,7 @@ package com.hoverboard.remote.ui.screens
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -229,11 +230,14 @@ private fun TripLine(state: UiState, blank: Boolean) {
 /**
  * What Ride's top bar carries (`specs/remote-ui.md` 3.1): a link dot per board slot at the start,
  * in [FgMuted] while the phone hears that board and the caution glyph while it is silent, each with
- * its slot label; and at the end, before the overflow icon, LAMP TEST during the lamp test, else
- * BATTERY LOW with the caution glyph while the pack is low, else nothing.
+ * its slot label; then, on a machine where it applies ([UiState.turnAxisApplies]), the turn-axis
+ * setting (`specs/machine-settings.md` section 7: STEER ON drives DIFFERENTIAL, STEER OFF BOUND),
+ * which a tap flips while disarmed ([onTurnAxis]); and at the end, before the overflow icon, LAMP
+ * TEST during the lamp test, else BATTERY LOW with the caution glyph while the pack is low, else
+ * nothing.
  */
 @Composable
-fun RideTopBarStatus(state: UiState, modifier: Modifier = Modifier) {
+fun RideTopBarStatus(state: UiState, modifier: Modifier = Modifier, onTurnAxis: (Boolean) -> Unit = {}) {
     Row(modifier = modifier.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         for (slot in state.slots.all) {
             val heard = state.telemetryOf(slot.address) != null
@@ -252,6 +256,17 @@ fun RideTopBarStatus(state: UiState, modifier: Modifier = Modifier) {
                 modifier = Modifier.testTag(linkDotTag(slot.address)),
             )
             Spacer(Modifier.width(10.dp))
+        }
+        if (state.turnAxisApplies) {
+            Text(
+                stringResource(if (state.turnAxis) R.string.ride_turn_on else R.string.ride_turn_off),
+                style = ride(12.sp, FontWeight.Bold, letterSpacing = 0.8.sp),
+                color = if (state.armed) FgFaint else FgMuted,
+                modifier = Modifier
+                    .clickable(enabled = !state.armed) { onTurnAxis(!state.turnAxis) }
+                    .padding(vertical = 8.dp)
+                    .testTag(RIDE_TURN_TAG),
+            )
         }
         Spacer(Modifier.weight(1f))
         when {
@@ -310,6 +325,9 @@ const val FRAME_STATS_TAG = "frame_stats"
 
 /** Test tag on the trip line. */
 const val RIDE_TRIP_TAG = "ride_trip"
+
+/** Test tag on the top bar's turn-axis setting (STEER ON or STEER OFF). */
+const val RIDE_TURN_TAG = "ride_turn"
 
 /** Test tag on the top bar's chip (LAMP TEST or BATTERY LOW). */
 const val RIDE_CHIP_TAG = "ride_chip"

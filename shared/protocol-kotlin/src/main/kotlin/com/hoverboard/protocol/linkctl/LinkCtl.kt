@@ -119,7 +119,7 @@ private fun wrU32(b: ByteArray, at: Int, v: Long) {
 /** A wire `i32`: the `u32` read narrowed back to its signed bits. */
 private fun rdI32(b: ByteArray, at: Int): Int = rdU32(b, at).toInt()
 
-// --- CYCLIC_STATE (32 B: 16 B committed + a 12 B appended block + the i32 wheelRate) ----------
+// --- CYCLIC_STATE (34 B: 16 B committed + a 12 B appended block + the i32 wheelRate + the u16 machine digest)
 
 /**
  * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
@@ -248,8 +248,9 @@ data class CyclicObs(
 /**
  * Board state, emitted cyclically. Mirror of `shared/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 32 bytes and only 32 (`shared/linkctl/src/lib.rs`, `CyclicState::encode`): the 16
- * committed words, the 12-byte appended [CyclicObs] block and the `i32` [wheelRate]:
+ * Wire layout, 34 bytes and only 34 (`shared/linkctl/src/lib.rs`, `CyclicState::encode`): the 16
+ * committed words, the 12-byte appended [CyclicObs] block, the `i32` [wheelRate] and the `u16`
+ * [machine] digest:
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
@@ -257,12 +258,22 @@ data class CyclicObs(
  * off 6..8   u16 LE  battery      CENTIVOLTS, 0 = unknown (motorcontroller/orchestrator/src/battery.rs, battery_source)
  * off 8      u8      mode
  * off 9..11  u16 LE  fault        the gating-producer level mask, 0 = every producer clear
- * off 11     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit7 lockdown
+ * off 11     u8      flags        bit0 rider, bit1 rigid leader, bit2 rigid follower, bit3 re-arm,
+ *                                 bit4 reboot, bit7 lockdown
  * off 12..14 i16 LE  peerDemand   the torque a rigid LEADER commands its peer to apply, else 0
  * off 14..16 i16 LE  wheelPos     the low 16 bits of the wheel's signed hall-edge position
  * off 16..28         the CyclicObs block
  * off 28..32 i32 LE  wheelRate    the period-measured wheel rate, Q12 of wheelSpeed's unit
+ * off 32..34 u16 LE  machine      the board's machine digest
  * ```
+ *
+ * [machine] is the board's machine digest (`shared/linkctl/src/lib.rs`, `CyclicState::machine`;
+ * `specs/machine-settings.md` section 4.1): a CRC-16 over the effective value of every machine
+ * field. Two boards whose digests differ hold different machine settings, and a board whose
+ * configured link's peer reports another digest raises [EV_MACHINE]. Held as an unsigned value.
+ *
+ * [FLAG_REARM] and [FLAG_REBOOT] say whether the board runs what it stores (section 5): an
+ * arm-effect field written since it last armed, a boot-effect field written since it booted.
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
  * no rescaling: the `SPEED` cell saturated into an i16 (`motorcontroller/firmware/src/motor.rs`,
@@ -275,8 +286,8 @@ data class CyclicObs(
  * (`motorcontroller/orchestrator/src/dispatch.rs`, `cyclic_state`, from `motorcontroller/orchestrator/src/events.rs`,
  * `Levels`): one bit per producer, so a reader sees which producers are asserted right now rather
  * than a code it could miss between emissions. Not every bit is a fault: the mask also carries the
- * mode fault, the power request and the configuration bit ([EV_CONFIG]), and [FAULT_A_BITS] is the
- * group that is. [faultA] applies it.
+ * mode fault, the power request, the configuration bit ([EV_CONFIG]) and the machine bit
+ * ([EV_MACHINE]), and [FAULT_A_BITS] is the group that is. [faultA] applies it.
  *
  * [peerDemand] is the +-28500 stock-native torque a rigid-frame LEADER commands its peer to apply
  * (`shared/linkctl/src/lib.rs`, `CyclicState::peer_demand`), and 0 from every other board; [leader]
@@ -311,6 +322,7 @@ data class CyclicState(
     val wheelPos: Int,
     val obs: CyclicObs,
     val wheelRate: Int,
+    val machine: Int,
 ) {
     /** Rider-present flag, bit0. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
     fun riderPresent(): Boolean = flags and FLAG_RIDER != 0
@@ -320,6 +332,12 @@ data class CyclicState(
 
     /** Rigid-frame follower flag, bit2. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
     fun follower(): Boolean = flags and FLAG_FOLLOWER != 0
+
+    /** Re-arm flag, bit3: an arm-effect field is written and not yet running. `CyclicState::rearm`. */
+    fun rearm(): Boolean = flags and FLAG_REARM != 0
+
+    /** Reboot flag, bit4: a boot-effect field is written and not yet running. `CyclicState::reboot`. */
+    fun reboot(): Boolean = flags and FLAG_REBOOT != 0
 
     /**
      * Whether any FAULT-A producer is asserted: [fault] masked by [FAULT_A_BITS], which is what
@@ -347,6 +365,7 @@ data class CyclicState(
         wrU16(out, 14, wheelPos)
         obs.encode().copyInto(out, LEN)
         wrU32(out, WHEEL_RATE_OFF, wheelRate.toLong())
+        wrU16(out, MACHINE_OFF, machine)
         return out
     }
 
@@ -361,10 +380,13 @@ data class CyclicState(
          * The ONE on-wire length of a `CYCLIC_STATE` payload: what the firmware emits and the only
          * length [decode] accepts. `shared/linkctl/src/lib.rs`, `CyclicState::ENCODED_LEN`.
          */
-        const val ENCODED_LEN = LEN + CyclicObs.LEN + Int.SIZE_BYTES
+        const val ENCODED_LEN = LEN + CyclicObs.LEN + Int.SIZE_BYTES + Short.SIZE_BYTES
 
         /** The offset of [wheelRate]. `shared/linkctl/src/lib.rs`, `CyclicState::WHEEL_RATE_OFF`. */
         const val WHEEL_RATE_OFF = LEN + CyclicObs.LEN
+
+        /** The offset of [machine]. `shared/linkctl/src/lib.rs`, `CyclicState::MACHINE_OFF`. */
+        const val MACHINE_OFF = WHEEL_RATE_OFF + Int.SIZE_BYTES
 
         /** `flags` bit0: rider present. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
         const val FLAG_RIDER = 1 shl 0
@@ -374,6 +396,18 @@ data class CyclicState(
 
         /** `flags` bit2: rigid-frame follower. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_FOLLOWER`. */
         const val FLAG_FOLLOWER = 1 shl 2
+
+        /**
+         * `flags` bit3: an arm-effect field was written since the board last armed, so it does not
+         * yet run what it stores; cleared when it arms or boots. `CyclicState::FLAG_REARM`.
+         */
+        const val FLAG_REARM = 1 shl 3
+
+        /**
+         * `flags` bit4: a boot-effect field was written since the board booted; cleared when it
+         * boots. `CyclicState::FLAG_REBOOT`.
+         */
+        const val FLAG_REBOOT = 1 shl 4
 
         /** [fault] bit 0: comms loss. `motorcontroller/orchestrator/src/events.rs`, `EV_COMMS_LOSS`. */
         const val EV_COMMS_LOSS = 1 shl 0
@@ -410,10 +444,19 @@ data class CyclicState(
 
         /**
          * [fault] bit 12: a configured function did not come up at boot, so the board's
-         * `board.status` has an entry (`specs/configured-links.md` section 5). Set for the whole
+         * boot status record (`STATUS_READ`) has an entry (`specs/configured-links.md` section 5). Set for the whole
          * run; not in [FAULT_A_BITS], so it blocks nothing. `events.rs`, `EV_CONFIG`.
          */
         const val EV_CONFIG = 1 shl 12
+
+        /**
+         * [fault] bit 13: the boards of the machine do not agree (`specs/machine-settings.md`
+         * section 4.2): a configured link has heard no peer since boot, or its peer's [machine]
+         * digest differs. It blocks the board ARMING (the mode machine's off-inhibit) and does
+         * nothing else: not in [FAULT_A_BITS] nor [ARM_BLOCKING_BITS], so it never disengages a
+         * running machine. `events.rs`, `EV_MACHINE`.
+         */
+        const val EV_MACHINE = 1 shl 13
 
         /**
          * The FAULT-A group of the [fault] mask: comms loss, the tilt cutout, IMU loss, motor 0's
@@ -425,8 +468,9 @@ data class CyclicState(
                 EV_MOTOR_HALL or EV_MOTOR_CAL or EV_MOTOR_PERIOD or EV_MOTOR_ARM
 
         /**
-         * The bits of a board's own [fault] word that stop that board arming: Fault A and motor 1's
-         * latch, which is Fault B alone. The mode machine holds a board in OFF while either is
+         * The bits of a board's own [fault] word that stop that board arming AND disengage it: Fault
+         * A and motor 1's latch, which is Fault B alone. [EV_MACHINE] also refuses an arm, through
+         * the off-inhibit, and is not here because it never disengages. The mode machine holds a board in OFF while either is
          * asserted (`motorcontroller/state/src/mode.rs`, `ModeMachine::tick`; `motorcontroller/orchestrator/src/events.rs`,
          * `Levels::fault_a` and `Levels::fault_b`), so this is [FAULT_A_BITS] or [EV_LATCH_B]: bits
          * 0, 1, 2, 4, 5 and 8 to 11. The remote app's fault lamps and its fault disarm read this and
@@ -464,6 +508,7 @@ data class CyclicState(
                 wheelPos = rdI16(b, 14),
                 obs = CyclicObs.decode(b, LEN),
                 wheelRate = rdI32(b, WHEEL_RATE_OFF),
+                machine = rdU16(b, MACHINE_OFF),
             )
         }
     }

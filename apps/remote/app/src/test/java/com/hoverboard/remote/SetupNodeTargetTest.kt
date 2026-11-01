@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
@@ -25,24 +26,26 @@ class SetupNodeTargetTest {
 
     private val board = 0x01
     private val other = 0x02
-    private val mode = SetupFields.CONTROL_MODE.key
+    /** A wheel field, so a write of it is the selected board's own (a machine field goes to every one). */
+    private val direction = SetupFields.MOTOR_DIRECTION.key
     private val limit = SetupFields.MOTOR_CURRENT_LIMIT.key
+    private val mode = SetupFields.CONTROL_MODE.key
 
     /** The one boot-read field here, so its row is the one that waits on a restart. */
     private val deadTime = SetupFields.MOTOR_DEAD_TIME.key
     private val trims = SetupFields.LEVEL_TRIM.map { it.key }
-    private val nodeClass = SetupFields.NODE_CLASS.key
     private val name = SetupFields.DEVICE_NAME.key
 
     private fun telemetry(rig: SetupRig, pitch: Int, roll: Int, from: Int? = null) =
-        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, 0, 0, QUIET_OBS, 0), from)
+        rig.transport.emitCyclicState(CyclicState(pitch, roll, 0, 0, 0, 0, 0, 0, 0, QUIET_OBS, 0, 0), from)
 
     // --- the node list (`specs/remote-ui.md` section 2) -----------------------------------------
 
     /**
      * The connect sequence through a bridge: the walk found a bridge on the phone's link and two motor
-     * controllers behind it. Every node's class and name come first, and only the nodes that answered
-     * motor controller are then asked for the machine's facts. The bridge is asked nothing else.
+     * controllers behind it. Every node's identity and name come first, and only the nodes that
+     * answered motor controller are then asked for the machine's facts: a machine field once, the
+     * rest from each. The bridge is asked nothing else.
      */
     @Test
     fun `the attach read takes class and name from every node, then motor facts from motor controllers only`() =
@@ -56,21 +59,19 @@ class SetupNodeTargetTest {
             runCurrent()
 
             val reads = rig.transport.reads
-            assertEquals(
-                listOf(0x01, 0x02, 0x03).flatMap { listOf(it to nodeClass, it to name) },
-                reads.take(6),
-                "what each node is, before anything else",
-            )
-            assertEquals(listOf(0x01 to nodeClass, 0x01 to name), reads.filter { it.first == 0x01 })
+            assertEquals(listOf(0x01, 0x02, 0x03), rig.transport.identifies, "what each node is, before anything else")
+            assertEquals(listOf(0x01, 0x02, 0x03).map { it to name }, reads.take(3))
+            assertEquals(listOf(0x01 to name), reads.filter { it.first == 0x01 })
             for (field in SetupFields.MOTOR_FACTS) {
                 val asked = reads.filter { it.second == field.key }.map { it.first }
-                assertEquals(listOf(0x02, 0x03), asked, field.key.toString())
+                val expected = if (field.machine) listOf(0x02) else listOf(0x02, 0x03)
+                assertEquals(expected, asked, field.key.toString())
             }
             assertEquals(
                 listOf(
-                    NodeInfo(0x01, Fields.NodeClass.BRIDGE, "hb-bridge-1a2b"),
-                    NodeInfo(0x02, Fields.NodeClass.MOTOR_CONTROLLER, "rover-r"),
-                    NodeInfo(0x03, Fields.NodeClass.MOTOR_CONTROLLER, "rover-l"),
+                    NodeInfo(0x01, Walk.CLASS_BRIDGE, "hb-bridge-1a2b"),
+                    NodeInfo(0x02, Walk.CLASS_MOTOR, "rover-r"),
+                    NodeInfo(0x03, Walk.CLASS_MOTOR, "rover-l"),
                 ),
                 rig.state.nodes,
             )
@@ -88,17 +89,15 @@ class SetupNodeTargetTest {
         assertEquals(listOf(0x01, 0x02), rig.state.motorControllers)
         assertEquals(0x02, rig.state.selectedMotor)
         assertEquals(0x02, rig.state.board)
-        assertEquals(
-            listOf(0x01, 0x02).flatMap { listOf(it to nodeClass, it to name) },
-            rig.transport.reads.take(4),
-        )
+        assertEquals(listOf(0x01, 0x02), rig.transport.identifies)
+        assertEquals(listOf(0x01, 0x02).map { it to name }, rig.transport.reads.take(2))
     }
 
-    /** A node that does not answer its class shows its address alone and is asked nothing more. */
+    /** A node that does not answer `IDENTIFY` shows its address alone and is asked nothing more. */
     @Test
-    fun `a node whose class read has not answered shows its address alone`() = runTest {
+    fun `a node whose identity has not answered shows its address alone`() = runTest {
         val rig = SetupRig(this)
-        rig.transport.unreadable += nodeClass
+        rig.transport.unidentifiable += listOf(board, other)
         rig.transport.setAttachedBoard(board, other)
         runCurrent()
 
@@ -110,10 +109,7 @@ class SetupNodeTargetTest {
 
     // --- a bridge's Setup (`specs/remote-ui.md` 3.4) --------------------------------------------
 
-    /**
-     * A bridge shows the keys every node has: its name and its class read-only. Its
-     * read pass asks for nothing else, and the class row takes no edit.
-     */
+    /** A bridge shows the key every node has, its name, and its read pass asks for nothing else. */
     @Test
     fun `a bridge shows and reads only the keys every node has`() = runTest {
         val rig = SetupRig(this)
@@ -128,9 +124,6 @@ class SetupNodeTargetTest {
         val bridgeReads = rig.transport.reads.filter { it.first == 0x01 }.map { it.second }.toSet()
         assertEquals(SetupFields.BRIDGE.map { it.key }.toSet(), bridgeReads)
 
-        rig.model.edit(nodeClass, Value.U8(Fields.NodeClass.MOTOR_CONTROLLER))
-        flush()
-        assertTrue(rig.transport.writes.isEmpty(), "node.class is read-only on every node")
         assertEquals(0x02, rig.state.selectedMotor, "picking the bridge leaves the motor controller selected")
     }
 
@@ -139,10 +132,10 @@ class SetupNodeTargetTest {
     @Test
     fun `selecting another node reads and writes its own store at its own address`() = runTest {
         val rig = shownRig(board, other)
-        rig.transport.store[other to mode] = Value.U8(1)
-        rig.model.edit(mode, Value.U8(1))
+        rig.transport.store[other to direction] = Value.U8(1)
+        rig.model.edit(direction, Value.U8(1))
         flush()
-        assertEquals(listOf(Triple(board, mode, Value.U8(1))), rig.transport.writes)
+        assertEquals(listOf(Triple(board, direction, Value.U8(1))), rig.transport.writes)
         val readsBefore = rig.transport.reads.size
 
         rig.model.selectTarget(other)
@@ -151,7 +144,7 @@ class SetupNodeTargetTest {
         assertEquals(other, rig.state.board)
         assertEquals(other, rig.state.selectedMotor, "picking a motor controller makes it the one SINGLE drives")
         assertEquals(SetupFields.ALL.map { other to it.key }, rig.transport.reads.drop(readsBefore))
-        assertEquals(Value.U8(1), rig.state.values[mode], "the other board's own value")
+        assertEquals(Value.U8(1), rig.state.values[direction], "the other board's own value")
         assertTrue(rig.state.writes.isEmpty(), "the first board's write record showed under the other")
 
         rig.model.edit(limit, Value.U32(15_000))
@@ -161,7 +154,7 @@ class SetupNodeTargetTest {
         rig.model.selectTarget(board)
         runCurrent()
         assertEquals(board, rig.state.board)
-        assertEquals(setOf(mode), rig.state.writes.keys, "the first board's write record was lost")
+        assertEquals(setOf(direction), rig.state.writes.keys, "the first board's write record was lost")
         assertEquals(readsBefore + SetupFields.ALL.size, rig.transport.reads.size, "the first board was read again")
     }
 
@@ -248,21 +241,63 @@ class SetupNodeTargetTest {
         val rig = shownRig(board, other)
         rig.model.selectTarget(other)
         runCurrent()
-        rig.model.edit(mode, Value.U8(1))
+        rig.model.edit(direction, Value.U8(1))
         flush()
-        assertEquals(WriteState.Written, rig.state.writes[mode]?.state)
+        assertEquals(WriteState.Written, rig.state.writes[direction]?.state)
 
         rig.transport.setAttachedBoard(null)
         assertTrue(rig.state.nodes.isEmpty())
         rig.transport.setAttachedBoard(board, other)
         runCurrent()
         assertEquals(other, rig.state.board, "the selection outlives the drop")
-        assertEquals(setOf(mode), rig.state.writes.keys)
+        assertEquals(setOf(direction), rig.state.writes.keys)
 
         rig.transport.setAttachedBoard(null)
         rig.transport.setAttachedBoard(board, 0x03)
         runCurrent()
         assertEquals(board, rig.state.board, "the node picked is gone, so the attached board is edited")
-        assertFalse(rig.state.writes.containsKey(mode), "0x03 never had 0x02's record")
+        assertFalse(rig.state.writes.containsKey(direction), "0x03 never had 0x02's record")
+    }
+
+    // --- machine fields (`specs/machine-settings.md` section 7) ----------------------------------
+
+    /**
+     * A machine field is one value for the machine: read once, it stands for every motor controller,
+     * and an edit of it on any board is written to every one.
+     */
+    @Test
+    fun `a machine field is read once and written to every motor controller`() = runTest {
+        val rig = shownRig(board, other)
+        rig.transport.store[board to mode] = Value.U8(1)
+        rig.transport.store[other to mode] = Value.U8(1)
+        rig.model.selectTarget(other)
+        runCurrent()
+        assertEquals(Value.U8(1), rig.state.setupOf(board).values[mode])
+        assertEquals(Value.U8(1), rig.state.setupOf(other).values[mode])
+
+        rig.model.edit(mode, Value.U8(0))
+        flush()
+        assertEquals(
+            listOf(Triple(board, mode, Value.U8(0)), Triple(other, mode, Value.U8(0))),
+            rig.transport.writes.filter { it.second == mode },
+        )
+    }
+
+    /**
+     * A board that reports `EV_MACHINE` has the machine fields read from each motor controller, so
+     * Setup can list the ones that differ by board.
+     */
+    @Test
+    fun `EV_MACHINE reads the machine fields apart and lists what differs`() = runTest {
+        val rig = shownRig(board, other)
+        rig.transport.store[other to mode] = Value.U8(1)
+        assertTrue(rig.state.machineDifferences.isEmpty(), "read once, the copies are taken to agree")
+
+        rig.transport.emitCyclicState(QUIET_STATE.copy(fault = CyclicState.EV_MACHINE), other)
+        runCurrent()
+
+        assertTrue(rig.state.machineApart)
+        assertEquals(mapOf(board to Value.U8(0), other to Value.U8(1)), rig.state.machineDifferences[mode])
+        assertEquals(setOf(mode), rig.state.machineDifferences.keys)
     }
 }

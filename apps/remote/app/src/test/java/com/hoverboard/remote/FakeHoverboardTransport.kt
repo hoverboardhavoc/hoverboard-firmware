@@ -1,19 +1,25 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.ConfigReadResult
 import com.hoverboard.protocol.config.ConfigWriteResult
+import com.hoverboard.protocol.config.IdentifyResult
+import com.hoverboard.protocol.config.Identified
 import com.hoverboard.protocol.config.Malformed
 import com.hoverboard.protocol.config.ReadValue
 import com.hoverboard.protocol.config.Refused
 import com.hoverboard.protocol.config.StagedValue
+import com.hoverboard.protocol.config.StatusEntries
+import com.hoverboard.protocol.config.StatusReadResult
 import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.TuneReadResult
 import com.hoverboard.protocol.config.TuneVerified
 import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.l3.ConfigResp
+import com.hoverboard.protocol.l3.Identity
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.linkctl.CyclicObs
@@ -109,18 +115,51 @@ class FakeHoverboardTransport(
      * caller's [defaults] entry, the way a real board answers a registered field's default.
      *
      * Every node starts out answering what every board running this firmware answers unwritten:
-     * `node.class` motor controller, its default `device.name`, `machine.drive_mode` SINGLE and
-     * `board.battery.chemistry` li_ion, and an empty `board.status` (everything configured came
-     * up). A test about a bridge, a stored mode or a status entry says so in [store].
+     * its default `device.name`, `machine.mode` throttle, `machine.frame` pivoting and
+     * `machine.battery.chemistry` li_ion. A test about a stored mode says so in [store].
      */
     val store: MutableMap<Pair<Int, Key>, Value> = mutableMapOf()
     val defaults: MutableMap<Key, Value> = mutableMapOf(
-        Fields.NODE_CLASS.key() to Fields.NODE_CLASS.default,
         Fields.DEVICE_NAME.key() to Fields.DEVICE_NAME.default,
-        Fields.MACHINE_DRIVE_MODE.key() to Fields.MACHINE_DRIVE_MODE.default,
+        Fields.CONTROL_MODE.key() to Fields.CONTROL_MODE.default,
+        Fields.CONTROL_FRAME.key() to Fields.CONTROL_FRAME.default,
         Fields.BOARD_BATTERY_CHEMISTRY.key() to Fields.BOARD_BATTERY_CHEMISTRY.default,
-        Fields.BOARD_STATUS.key() to Fields.BOARD_STATUS.default,
     )
+
+    /**
+     * Each node's class as its `IDENTITY` reports it, by address; a node not in the map is a motor
+     * controller, which is what every board running this firmware answers. A test about a bridge
+     * says so ([makeBridge]).
+     */
+    val classes: MutableMap<Int, Int> = mutableMapOf()
+
+    /** Nodes whose `IDENTIFY` goes unanswered. */
+    val unidentifiable: MutableSet<Int> = mutableSetOf()
+
+    /** Every `IDENTIFY` sent, in order, as the target. */
+    val identifies: MutableList<Int> = mutableListOf()
+
+    override suspend fun identify(target: Int): IdentifyResult? {
+        if (_attachedBoard.value == null) return null
+        identifies.add(target)
+        if (target in unidentifiable) return TimedOut
+        return Identified(identityOf(classes[target] ?: Walk.CLASS_MOTOR, target))
+    }
+
+    /**
+     * Each node's boot status record, by address, as `STATUS_READ` answers it: empty (everything
+     * configured came up) for a node not in the map. A test about a status entry says so here.
+     */
+    val statuses: MutableMap<Int, List<BoardStatus.Entry>> = mutableMapOf()
+
+    /** Nodes whose `STATUS_READ` goes unanswered. */
+    val statusSilent: MutableSet<Int> = mutableSetOf()
+
+    override suspend fun readStatus(target: Int): StatusReadResult? {
+        if (_attachedBoard.value == null) return null
+        if (target in statusSilent) return TimedOut
+        return StatusEntries(statuses[target].orEmpty())
+    }
 
     /** Whether the fake board refuses writes with `CFG_ARMED`, as a real one does while armed. */
     var boardArmed: Boolean = false
@@ -331,9 +370,9 @@ class FakeHoverboardTransport(
         return _nodes.value
     }
 
-    /** Make the node at [address] a hoverboard bridge: its `node.class` reads `0x02`. */
+    /** Make the node at [address] a hoverboard bridge: its `IDENTITY` reports class `0x02`. */
     fun makeBridge(address: Int) {
-        store[address to Fields.NODE_CLASS.key()] = Value.U8(Fields.NodeClass.BRIDGE)
+        classes[address] = Walk.CLASS_BRIDGE
     }
 
     /**
@@ -421,6 +460,12 @@ internal val DRIVING_OBS = QUIET_OBS.copy(
 )
 
 /** A board at rest in OFF, level, with no fault and a 37.8 V pack: what a powered board sends. */
+/** What a node of [nodeClass] says in its `IDENTITY`, as the fake board answers it, for a state built by hand. */
+internal fun identityOf(nodeClass: Int, address: Int = 0x01): Identity {
+    val uid = ByteArray(Identity.UID_LEN) { if (it == Identity.UID_LEN - 1) address.toByte() else 0x5A }
+    return Identity(nodeClass, Walk.MCU_F1X0, 1, uid)
+}
+
 internal val QUIET_STATE = CyclicState(
     pitch = 0,
     roll = 0,
@@ -432,6 +477,7 @@ internal val QUIET_STATE = CyclicState(
     peerDemand = 0,
     wheelPos = 0,
     wheelRate = 0,
+    machine = 0,
     obs = QUIET_OBS,
 )
 

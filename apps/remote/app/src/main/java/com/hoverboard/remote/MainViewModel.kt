@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.linkctl.CyclicState
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.BoardScanner
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.ble.LinkConfig
@@ -94,8 +96,11 @@ import kotlinx.coroutines.launch
  * @param attachedNode the node on the phone's own link, or null while none is attached.
  * @param selected the motor controller the Tune/Setup selectors point at: the one SINGLE drives and
  *   the panel reports ([SetupState.selectedMotor]).
- * @param drive the drive mode in force and the boards it addresses, read from the machine's stored
- *   setting ([DriveInForce]).
+ * @param drive the drive mode in force and the boards it addresses, derived from what the machine
+ *   stores and [turnAxis] ([DriveInForce]).
+ * @param turnAxis the Ride screen's setting: whether a machine of two or more motor controllers that
+ *   is not rigid uses the pad's turn axis (DIFFERENTIAL) or not (BOUND), `specs/machine-settings.md`
+ *   section 7.
  * @param driving what the drive addresses NOW: the targets latched when the machine was armed, so a
  *   copy or a leader flag that changes under an armed machine does not move the arm to other
  *   boards, and [drive]'s targets while disarmed.
@@ -114,13 +119,17 @@ import kotlinx.coroutines.launch
  *   ([SetupState.wheelGeometryOf]): what turns that wheel's counted hall edges into a distance.
  * @param speedFacts each REPORTING motor controller's wheel rate with its geometry and side
  *   ([SetupState.speedFactsOf]), in address order: what [speed] is computed from.
- * @param sides each board's stored `control.side`, from the same read: what places it in a Ride
+ * @param sides each board's stored motor 0 `side`, from the same read: what places it in a Ride
  *   slot ([slots]).
  * @param batteryFloor each board's `board.battery.floor`, centivolts, from the same read: where the
  *   Ride ring turns caution ([batteryLow]).
  * @param imuModel each board's `imu.model`, from the same read: 0 is no IMU fitted.
- * @param boardStatus each board's `board.status` entries, from the same read: the functions its
- *   last boot configured and could not bring up; empty when they all came up, absent while unread.
+ * @param boardStatus each board's boot status record entries (`STATUS_READ`), from the same read:
+ *   the functions its last boot configured and could not bring up; empty when they all came up,
+ *   absent while unread.
+ * @param machineDifferences the machine settings whose copies differ, each with every motor
+ *   controller's value ([SetupState.machineDifferences]): what Setup lists while a board reports
+ *   the boards disagree (`EV_MACHINE`, `specs/machine-settings.md` section 7).
  * @param currentLimit each board's `motors.0.current.limit`, milliamps, from the same read: what a
  *   Ride phase bar is full at.
  * @param faultDisarm why the app dropped the arm level by itself for a board fault, kept until the
@@ -151,6 +160,7 @@ data class UiState(
     val attachedNode: Int? = null,
     val selected: Int? = null,
     val drive: DriveInForce = DriveInForce.NONE,
+    val turnAxis: Boolean = false,
     val driving: DriveTargets = DriveTargets.NONE,
     val telemetryByBoard: Map<Int, TelemetryUi> = emptyMap(),
     /** Per source address, the frames heard and the longest gap: the debug-build stream line. */
@@ -167,6 +177,7 @@ data class UiState(
     val batteryFloor: Map<Int, Int> = emptyMap(),
     val imuModel: Map<Int, Int> = emptyMap(),
     val boardStatus: Map<Int, List<BoardStatus.Entry>> = emptyMap(),
+    val machineDifferences: Map<Key, Map<Int, Value>> = emptyMap(),
     val currentLimit: Map<Int, Int> = emptyMap(),
     val faultDisarm: FaultDisarm? = null,
     val latchHeld: Map<Int, Int> = emptyMap(),
@@ -240,19 +251,32 @@ data class UiState(
     /** The Ride screen's two board slots ([rideSlots]). */
     val slots: RideSlots get() = rideSlots(motorControllers.map { it.address }) { sides[it] }
 
+    /** Whether a motor controller reports the machine's boards disagree (`EV_MACHINE`). */
+    val machineDisagrees: Boolean get() = reporting.any { telemetryByBoard[it]?.machineDisagrees == true }
+
     /** The motor controllers the phone hears, in address order. */
     val reporting: List<Int> get() = motorControllers.map { it.address }.filter { it in telemetryByBoard }
 
-    /** The board at [address]'s live fault word, its arm-blocking bits only; 0 while it is silent. */
+    /**
+     * The board at [address]'s live fault word, its bits that refuse an arm only
+     * ([FaultLamp.REFUSING_BITS]); 0 while it is silent.
+     */
     fun blockingOf(address: Int): Int =
-        (telemetryByBoard[address]?.cyclic?.fault ?: 0) and CyclicState.ARM_BLOCKING_BITS
+        (telemetryByBoard[address]?.cyclic?.fault ?: 0) and FaultLamp.REFUSING_BITS
 
     /**
-     * Whether a board the arm would arm reports an arm-blocking bit, which that board would refuse
-     * anyway (`specs/remote-ui.md` 3.1): the arm is refused and the pad's lines dim. A lamp the app
-     * only HOLDS lit is not a bit any board reports, so it refuses nothing.
+     * Whether a board the arm would arm reports a bit that refuses the arm, which that board would
+     * refuse anyway (`specs/remote-ui.md` 3.1): the arm is refused and the pad's lines dim. A lamp
+     * the app only HOLDS lit is not a bit any board reports, so it refuses nothing.
      */
     val armBlocked: Boolean get() = driving.boards.any { blockingOf(it) != 0 }
+
+    /**
+     * Whether the Ride screen offers the turn-axis setting: a machine of two or more motor
+     * controllers whose derived mode is not RIGID (`specs/machine-settings.md` section 7).
+     */
+    val turnAxisApplies: Boolean
+        get() = motorControllers.size >= 2 && drive.derived in TURN_AXIS_MODES
 
     /**
      * Each reporting board's fault word as the grid draws it: its live lamp bits
@@ -269,12 +293,12 @@ data class UiState(
         get() = shownLamps(motorControllers.map { LampFacts(it.address, imuModel[it.address]) }, lampWords)
 
     /**
-     * Whether the fault grid is drawn: an arm-blocking lamp is lit, or the lamp test is on
+     * Whether the fault grid is drawn: a lamp that refuses the arm is lit, or the lamp test is on
      * (`specs/remote-ui.md` 3.1b). CONFIG alone does not draw it: its bit is set for the whole
      * run and blocks nothing, and the grid takes the drive pad's place.
      */
     val gridShows: Boolean
-        get() = lampTest || lampWords.values.any { it and CyclicState.ARM_BLOCKING_BITS != 0 }
+        get() = lampTest || lampWords.values.any { it and FaultLamp.REFUSING_BITS != 0 }
 
     /** The battery ring's board and reading ([ringReading]). */
     val ring: Pair<Int?, BatteryReading> get() = ringReading(reporting, ::batteryOf)
@@ -327,6 +351,9 @@ data class UiState(
 
     private companion object {
         const val PERCENT = 100
+
+        /** The two modes the turn-axis setting chooses between. */
+        val TURN_AXIS_MODES = setOf(DriveMode.BOUND, DriveMode.DIFFERENTIAL)
     }
 }
 
@@ -507,6 +534,7 @@ class MainViewModel(
         val selected: Int?,
         val machine: Machine,
         val drive: DriveInForce,
+        val turnAxis: Boolean,
         val setup: SetupState,
         val telemetry: Map<Int, TelemetryUi>,
     )
@@ -523,13 +551,14 @@ class MainViewModel(
     }
 
     private val boards =
-        combine(setup.state, transport.telemetry) { st, byBoard ->
+        combine(setup.state, transport.telemetry, settings.turnAxis) { st, byBoard, turn ->
             Boards(
                 attached = st.attached,
                 nodes = st.nodes,
                 selected = st.selectedMotor,
                 machine = st.machine,
-                drive = st.driveInForce(byBoard),
+                drive = st.driveInForce(byBoard, turn),
+                turnAxis = turn,
                 setup = st,
                 telemetry = byBoard,
             )
@@ -565,6 +594,7 @@ class MainViewModel(
                 selected = b.selected,
                 machine = b.machine,
                 drive = b.drive,
+                turnAxis = b.turnAxis,
                 driving = driving,
                 riderWaiver = b.setup.riderWaiver(driving.boards),
                 telemetryByBoard = b.telemetry,
@@ -579,6 +609,7 @@ class MainViewModel(
                 batteryFloor = b.setup.rideFacts(mcs, SetupFields.BATTERY_FLOOR),
                 imuModel = b.setup.rideFacts(mcs, SetupFields.IMU_MODEL),
                 boardStatus = mcs.mapNotNull { a -> b.setup.setupOf(a).status?.let { a to it } }.toMap(),
+                machineDifferences = b.setup.machineDifferences,
                 currentLimit = b.setup.rideFacts(mcs, SetupFields.MOTOR_CURRENT_LIMIT),
             )
         }.combine(picker) { ui, p ->
@@ -655,12 +686,12 @@ class MainViewModel(
             .onEach { (pick, travel) -> trip.update { it.next(pick, travel) } }
             .launchIn(viewModelScope)
         // What the drive addresses follows what the session reads: the nodes' classes, the stored
-        // mode and side, and the leader flags. Re-sent on every change, so a disarmed frame reaches
-        // the boards the mode in force names as soon as the reads that name them answer, and an
-        // armed RIGID frame follows its leader.
+        // mode, frame and side, the turn-axis setting, and the leader flags. Re-sent on every
+        // change, so a disarmed frame reaches the boards the mode in force names as soon as the
+        // reads that name them answer, and an armed RIGID frame follows its leader.
         // Each board's fault word is read here before the send, so a blocking bit on a board the
         // app arms takes the arm level off the wire on the frame that carried it.
-        combine(setup.state, transport.telemetry, ::Pair)
+        combine(setup.state, transport.telemetry, settings.turnAxis) { st, byBoard, _ -> st to byBoard }
             .onEach { (_, byBoard) ->
                 onFaultWords(byBoard)
                 sendCurrent()
@@ -683,7 +714,7 @@ class MainViewModel(
      */
     private fun onFaultWords(byBoard: Map<Int, TelemetryUi>) {
         val words = byBoard.mapValues { (_, t) -> (t.cyclic?.fault ?: 0) and CyclicState.ARM_BLOCKING_BITS }
-        if (words.values.any { it != 0 }) endLampTest()
+        if (byBoard.values.any { (it.cyclic?.fault ?: 0) and FaultLamp.REFUSING_BITS != 0 }) endLampTest()
         local.update { l ->
             val held = l.latchHeld.toMutableMap()
             for ((board, word) in words) {
@@ -707,7 +738,7 @@ class MainViewModel(
         if (lampTestDone || transport.connectionState.value != ConnectionState.CONNECTED) return
         lampTestDone = true
         val blocking = transport.telemetry.value.values.any {
-            (it.cyclic?.fault ?: 0) and CyclicState.ARM_BLOCKING_BITS != 0
+            (it.cyclic?.fault ?: 0) and FaultLamp.REFUSING_BITS != 0
         }
         if (blocking) return
         lampTestOn.value = true
@@ -791,6 +822,17 @@ class MainViewModel(
     fun setDeviceName(name: String) = settings.setDeviceName(name)
 
     /**
+     * Use the pad's turn axis or not, on a machine of two or more motor controllers that is not
+     * rigid (`specs/machine-settings.md` section 7): DIFFERENTIAL with it, BOUND without. Kept by the
+     * app with its [LinkSettings]. Refused while armed: the arm latched the boards and the mode, and
+     * a mode changed under the thumb is not one the rider armed into.
+     */
+    fun setTurnAxis(on: Boolean) {
+        if (local.value.armed) return
+        settings.setTurnAxis(on)
+    }
+
+    /**
      * Disarm, let the disarming command reach the board, then drop the link.
      *
      * The wait is the whole point. Tearing the link down first would leave the board armed for the
@@ -851,12 +893,12 @@ class MainViewModel(
         // see it (`specs/remote-ui.md` 3.7a). Refused here as well as on the control, so the gate is
         // not the rendering's. So is a drive that addresses no motor controller: nothing to arm.
         val st = setup.state.value
-        val targets = st.driveInForce(transport.telemetry.value).targets
+        val targets = st.driveInForce(transport.telemetry.value, settings.turnAxis.value).targets
         val refused = local.value.engaged || disconnecting.value || st.machine.armStatement.refuses
-        // A board the arm would arm reports an arm-blocking bit: it would refuse the arm itself
-        // (`specs/remote-ui.md` 3.1b). A lamp the app only holds lit refuses nothing.
+        // A board the arm would arm reports a bit that refuses the arm: it would refuse the arm
+        // itself (`specs/remote-ui.md` 3.1b). A lamp the app only holds lit refuses nothing.
         val telemetry = transport.telemetry.value
-        val blocked = targets.boards.any { (telemetry[it]?.cyclic?.fault ?: 0) and CyclicState.ARM_BLOCKING_BITS != 0 }
+        val blocked = targets.boards.any { (telemetry[it]?.cyclic?.fault ?: 0) and FaultLamp.REFUSING_BITS != 0 }
         if (refused || blocked || targets.boards.isEmpty()) return
         // A fresh arm answers the "the app disarmed this" lines, so it goes with the press that
         // makes them stale rather than lingering over a machine that is armed again; the same tap
@@ -999,7 +1041,7 @@ class MainViewModel(
         // Taken from the models' own latest state rather than from [uiState], which is a
         // `WhileSubscribed` flow whose value is the initial one until something collects it.
         val telemetry = transport.telemetry.value
-        val targets = l.armedTargets ?: setup.state.value.driveInForce(telemetry).targets
+        val targets = l.armedTargets ?: setup.state.value.driveInForce(telemetry, settings.turnAxis.value).targets
         val leader = rigidLeader(targets.boards, telemetry)
         val frame = DriveFrame.of(targets, command, steer = l.steer, leader = leader)
         transport.sendCommand(frame)

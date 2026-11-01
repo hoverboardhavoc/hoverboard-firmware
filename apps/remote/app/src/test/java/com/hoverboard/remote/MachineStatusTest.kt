@@ -19,6 +19,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.linkctl.CyclicObs
@@ -39,6 +40,11 @@ import com.hoverboard.remote.ui.screens.statusBoardTag
 import com.hoverboard.remote.ui.screens.statusEntryTag
 import com.hoverboard.remote.ui.screens.RIGID_NOT_LEADING_TAG
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
+import com.hoverboard.remote.ui.screens.MACHINE_DIFFER_TAG
+import com.hoverboard.remote.ui.screens.statusRearmTag
+import com.hoverboard.remote.ui.screens.statusRebootTag
+import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -419,6 +425,7 @@ class MachineStatusTest {
         peerDemand = 0,
         wheelPos = 0,
         wheelRate = 0,
+        machine = 0,
         obs = QUIET_OBS,
     )
 
@@ -436,7 +443,7 @@ class MachineStatusTest {
         val reports = listOfNotNull(telemetry?.let { 0x01 to it }, peer?.let { 0x02 to it }).toMap()
         val state = UiState(
             connectionState = ConnectionState.CONNECTED,
-            nodes = addresses.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+            nodes = addresses.map { NodeInfo(it, Walk.CLASS_MOTOR, "Hoverboard") },
             attachedNode = 0x01,
             telemetryByBoard = reports,
             countsPerAmp = countsPerAmp?.let { c -> addresses.associateWith { c } }.orEmpty(),
@@ -477,23 +484,23 @@ class MachineStatusTest {
     @Test
     fun aRigidPairThatIsNotLeadingIsToldWhy() {
         val configured = pair(DriveInForce.NONE)
-            .copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.OneRight(0x01), ModePair.Unknown))
+            .copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.OneRight(0x01)))
         showState(configured)
         compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertIsDisplayed()
     }
 
     @Test
     fun aPivotingPairIsNotToldAboutTheRigidLead() {
-        val pivoting = Machine(FramePair.Agree(rigid = false), SidePair.NoneRight, ModePair.Unknown)
+        val pivoting = Machine(FramePair.Agree(rigid = false), SidePair.NoneRight)
         showState(pair(DriveInForce.NONE).copy(machine = pivoting))
         compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertDoesNotExist()
     }
 
-    // --- board.status: what each board's boot could not bring up ------------------------------
+    // --- the boot status record: what each board's boot could not bring up ------------------------------
 
     /**
-     * Each `board.status` entry is one warning line under its own board, named the way
-     * `hoverboard-cli status` names it (`specs/configured-links.md` section 5).
+     * Each boot status record entry is one warning line under its own board, named the way
+     * `hoverboard-cli board status` names it (`specs/configured-links.md` section 5).
      */
     @Test
     fun eachStatusEntryIsALineUnderItsBoard() {
@@ -531,7 +538,7 @@ class MachineStatusTest {
             entry(Fields.LED_GREEN.id, 0, BoardStatus.Reason.SWD_PIN, 0x0D),
             entry(Fields.IMU_SCL_PIN.id, 0, BoardStatus.Reason.NOT_UP, 0),
             entry(Fields.LINK_TX.id, 0, BoardStatus.Reason.NOT_UP, 7),
-            entry(Fields.IMU_AXIS_SIGN.id, 0, BoardStatus.Reason.IMU_FRAME, 3),
+            entry(Fields.IMU_AXIS_SIGN.id, 0, BoardStatus.Reason.IMU_FRAME, 0),
             BoardStatus.Entry(0x99, 2, 9, 1),
         )
         showState(pair(DriveInForce.NONE).copy(boardStatus = mapOf(0x01 to entries)))
@@ -540,10 +547,10 @@ class MachineStatusTest {
             "battery sense: stored byte 0x40 is not a pin",
             "motors[0] hall: incomplete: hall.c is not set",
             "motors[0] current sense: the chip does not route PC13",
-            "led.green: PA13 is an SWD pin",
+            "leds.green: PA13 is an SWD pin",
             "IMU: did not answer its probe",
             "link[0]: did not come up (HAL error 7)",
-            "IMU: the IMU frame is not a rotation (axis_sign from index 3)",
+            "IMU: the IMU frame is not a rotation (axis_sign from index 0)",
             "field 0x99[2]: reason 9, detail 1",
         )) {
             compose.onNodeWithText(text).performScrollTo().assertIsDisplayed()
@@ -640,9 +647,63 @@ class MachineStatusTest {
     private var composed = false
 
     /** A connected pair at 0x01 and 0x02, both at rest, with [drive] in force. */
+    // --- whether a board runs what it stores (`specs/machine-settings.md` section 5) -------------
+
+    /** Each board says, from its own flags, when what was written takes effect. */
+    @Test
+    fun eachBoardsRearmAndRebootFlagsAreStated() {
+        show(
+            telemetry = TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_REARM)),
+            peer = TelemetryUi().merge(cyclic(flags = CyclicState.FLAG_REBOOT)),
+        )
+        compose.onNodeWithTag(statusRearmTag(0x01)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag(statusRebootTag(0x01)).assertDoesNotExist()
+        compose.onNodeWithTag(statusRebootTag(0x02)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag(statusRearmTag(0x02)).assertDoesNotExist()
+    }
+
+    // --- boards that disagree (`EV_MACHINE`, `specs/machine-settings.md` section 7) -----------
+
+    /** While a board reports `EV_MACHINE`, the machine settings that differ are listed by board. */
+    @Test
+    fun theMachineSettingsThatDifferAreListedByBoard() {
+        val mode = SetupFields.CONTROL_MODE.key
+        val state = pair(DriveInForce.NONE).copy(
+            telemetryByBoard = mapOf(
+                0x01 to TelemetryUi().merge(cyclic()),
+                0x02 to TelemetryUi().merge(cyclic(fault = CyclicState.EV_MACHINE)),
+            ),
+            machineDifferences = mapOf(mode to mapOf(0x01 to Value.U8(0), 0x02 to Value.U8(1))),
+        )
+        showState(state)
+        compose.onNodeWithTag(MACHINE_DIFFER_TAG).performScrollTo().assertIsDisplayed()
+        val label = context.getString(R.string.setup_field_control_mode)
+        compose.onNodeWithText(
+            context.getString(R.string.setup_machine_differ_line, label, "Hoverboard 0x01 0, Hoverboard 0x02 1"),
+        ).performScrollTo().assertIsDisplayed()
+    }
+
+    /** With no copy read apart yet, the line says the other board may be off. */
+    @Test
+    fun aDisagreementWithNothingReadApartSaysSo() {
+        val state = pair(DriveInForce.NONE).copy(
+            telemetryByBoard = mapOf(0x01 to TelemetryUi().merge(cyclic(fault = CyclicState.EV_MACHINE))),
+        )
+        showState(state)
+        compose.onNodeWithText(context.getString(R.string.setup_machine_differ_unread))
+            .performScrollTo().assertIsDisplayed()
+    }
+
+    /** No board reporting it, nothing is said. */
+    @Test
+    fun agreeingBoardsListNothing() {
+        showState(pair(DriveInForce.NONE))
+        compose.onNodeWithTag(MACHINE_DIFFER_TAG).assertDoesNotExist()
+    }
+
     private fun pair(drive: DriveInForce) = UiState(
         connectionState = ConnectionState.CONNECTED,
-        nodes = listOf(0x01, 0x02).map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+        nodes = listOf(0x01, 0x02).map { NodeInfo(it, Walk.CLASS_MOTOR, "Hoverboard") },
         attachedNode = 0x01,
         drive = drive,
         driving = drive.targets,

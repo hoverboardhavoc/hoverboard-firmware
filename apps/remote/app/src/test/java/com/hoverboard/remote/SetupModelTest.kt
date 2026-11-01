@@ -8,6 +8,7 @@ import com.hoverboard.protocol.config.WriteMismatch
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.ConfigResp
+import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
@@ -52,20 +53,20 @@ class SetupModelTest {
     private fun state(rig: SetupRig, key: Key): WriteState? = rig.state.setupOf(board).writes[key]?.state
 
     /**
-     * What an attach reads before the screen is ever shown: what the node is and what it is called
-     * (`specs/remote-ui.md` section 2), then, because it is a motor controller, the machine facts
-     * (the drive mode, the two Machine fields the arm control states, the pack and the rider
-     * requirement), the counts per amp the Ride screen's current display needs (3.6), the two
-     * facts the Travel section converts hall edges with (3.6c) and the board's `board.status`
-     * (3.1c). With one node in the session they are read on the attached board alone.
+     * What an attach reads before the screen is ever shown: what the node is (`IDENTIFY`, not a
+     * read) and what it is called (`specs/remote-ui.md` section 2), then, because it is a motor
+     * controller, the machine facts (the control mode and frame the drive mode is derived from, the
+     * side the arm control states, the pack and the rider requirement), the counts per amp the Ride
+     * screen's current display needs (3.6) and the two facts the Travel section converts hall edges
+     * with (3.6c); its boot status record is a `STATUS_READ` (3.1c). With one node in the session
+     * they are read on the attached board alone.
      */
-    private val rideFacts = SetupFields.IDENTITY.map { board to it.key } +
+    private val rideFacts = listOf(board to SetupFields.DEVICE_NAME.key) +
         SetupFields.MOTOR_FACTS.map { board to it.key } +
         listOf(
             board to Fields.MOTOR_CURRENT_CAL.key(),
             board to Fields.MOTOR_POLE_PAIRS.key(),
             board to Fields.WHEEL_DIAMETER_MM.key(),
-            board to Fields.BOARD_STATUS.key(),
         )
 
     @Test
@@ -136,15 +137,18 @@ class SetupModelTest {
     }
 
     /**
-     * 3.1c: each board's `board.status` is read on attach with the ride facts and decoded into its
-     * entries, per board, apart from the Setup rows; an empty one is a board whose functions all
-     * came up, and one that could not be read is unread rather than empty.
+     * 3.1c: each board's boot status record is read on attach with the ride facts (`STATUS_READ`,
+     * `specs/machine-settings.md` section 6.1), per board, apart from the Setup rows; an empty one is
+     * a board whose functions all came up, and one that could not be read is unread rather than
+     * empty.
      */
     @Test
     fun `each board's status is read on attach and decoded`() = runTest {
         val rig = SetupRig(this)
-        val status = Fields.BOARD_STATUS.key()
-        rig.transport.store[other to status] = Value.Bytes(byteArrayOf(0x4D, 0, 5, 10, 0x56, 1, 3, 0x16))
+        rig.transport.statuses[other] = listOf(
+            BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.DEAD_TIME.code, 10),
+            BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED.code, 0x16),
+        )
 
         rig.transport.setAttachedBoard(board, other)
         runCurrent()
@@ -157,13 +161,12 @@ class SetupModelTest {
             ),
             rig.state.setupOf(other).status,
         )
-        assertFalse(status in rig.state.setupOf(other).values, "a field with no row is not a Setup value")
     }
 
     @Test
     fun `a status read that fails leaves the status unread`() = runTest {
         val rig = SetupRig(this)
-        rig.transport.unreadable += Fields.BOARD_STATUS.key()
+        rig.transport.statusSilent += board
 
         rig.transport.setAttachedBoard(board)
         runCurrent()
@@ -451,7 +454,7 @@ class SetupModelTest {
             rig.transport.reads.drop(readsBefore),
             "no re-read after the restart",
         )
-        assertEquals(Value.U8(2), rig.state.running[method], "the re-read did not learn what the board now runs")
+        assertEquals(Value.U8(2), rig.state.values[method], "the re-read did not learn what the board now stores")
     }
 
     @Test
@@ -526,7 +529,7 @@ class SetupModelTest {
         rig.model.editFrame(identity.roles, mirrored)
         flush()
 
-        assertEquals(SetupNotice.FrameRefused(Orientation.Refusal.ACCEL_MIRRORED), rig.state.notice)
+        assertEquals(SetupNotice.FrameRefused(Orientation.Refusal.MIRRORED), rig.state.notice)
         assertTrue(rig.transport.writes.isEmpty())
     }
 
@@ -561,7 +564,7 @@ class SetupModelTest {
      */
     @Test
     fun `the stored roles decide whether the stored signs are a rotation`() = runTest {
-        val legalUnderXY = listOf(1, 1, -1, 1, 1, -1)
+        val legalUnderXY = listOf(1, 1, -1)
         val rig = SetupRig(this)
         signs.forEachIndexed { i, k -> rig.transport.store[board to k] = Value.I32(legalUnderXY[i]) }
         rig.transport.store[board to roles[0]] = Value.U8(1)
@@ -598,7 +601,7 @@ class SetupModelTest {
             assertEquals(WriteState.Unanswered, state(rig, signs[2]))
             val stored = checkNotNull(rig.state.storedSigns)
             val roleMap = checkNotNull(rig.state.storedRoles)
-            assertEquals(Orientation.Refusal.ACCEL_MIRRORED, Orientation.check(stored, roleMap))
+            assertEquals(Orientation.Refusal.MIRRORED, Orientation.check(stored, roleMap))
             assertTrue(rig.state.storedFrameUnsafe)
 
             // An edit of another field still writes: it is its own transaction.
@@ -676,6 +679,9 @@ class SetupModelTest {
         rig.model.setLevel()
         flush()
         assertEquals(WriteState.Written, state(rig, trims[0]))
+        // The board says a boot-effect field was written since it started (`FLAG_REBOOT`).
+        rig.emitAttitude(pitch = 305, roll = -50, flags = CyclicState.FLAG_REBOOT)
+        runCurrent()
 
         rig.model.setLevel()
 
@@ -689,11 +695,22 @@ class SetupModelTest {
         rig.emitAttitude(pitch = 305, roll = -50)
         rig.model.editFrame(identity.roles, identity.signs)
         flush()
+        // The board says an arm-effect field was written since it last armed (`FLAG_REARM`).
+        rig.emitAttitude(pitch = 305, roll = -50, flags = CyclicState.FLAG_REARM)
+        runCurrent()
 
         rig.model.setLevel()
 
         assertEquals(SetupNotice.LevelUnavailable(Blocked.AWAITING_ARM), rig.state.notice)
         assertTrue(trims.none { it in rig.state.writes })
+
+        // The board armed since: it runs the frame, the flag is clear, and the level goes ahead.
+        rig.emitAttitude(pitch = 305, roll = -50)
+        runCurrent()
+        assertTrue(rig.state.orientationSettled)
+        rig.model.setLevel()
+        flush()
+        assertEquals(WriteState.Written, state(rig, trims[0]))
     }
 
     @Test
@@ -789,6 +806,8 @@ class SetupModelTest {
         rig.emitAttitude(pitch = 0, roll = 0)
         rig.model.editFrame(identity.roles, identity.signs)
         flush()
+        rig.emitAttitude(pitch = 0, roll = 0, flags = CyclicState.FLAG_REARM)
+        runCurrent()
 
         rig.model.checkLevel()
 
@@ -818,7 +837,7 @@ class SetupModelTest {
         assertEquals(Orientation.REFERENCE, reference.state.storedSigns)
         assertEquals(Orientation.Face.COMPONENT_DOWN, reference.state.storedPose?.face)
 
-        val yaw = storing(listOf(-1, -1, 1, -1, -1, 1))
+        val yaw = storing(listOf(-1, -1, 1))
         assertEquals(listOf(0, 0), yaw.state.storedRoles)
         assertEquals(Orientation.STOCK_POSE, yaw.state.storedPose)
     }

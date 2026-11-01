@@ -1,13 +1,15 @@
 package com.hoverboard.protocol.imu
 
 /**
- * The IMU orientation as the `IMU_AXIS_SIGN` (0x65) and `IMU_AXIS_ROLE` (0x68) fields can hold it,
+ * The IMU orientation as the `IMU_AXIS_SIGN` and `IMU_AXIS_ROLE` fields can hold it,
  * and the rule that decides which frames are legal: a mirror of `imu::Config::default()`,
  * `imu::DEFAULT_ROLES`, `imu::Config::staged` (the unset rule and its refusal order),
  * `imu::Config::frame_is_rotation` and `imu::Config::triple_is_rotation` in `motorcontroller/imu/src/lib.rs`,
  * which `RustSourceDriftTest` pins.
  *
- * The sign field is six signs, `[ax, ay, az, gx, gy, gz]`, per CHIP axis. The roles field is
+ * The sign field is three signs, `[x, y, z]`, per CHIP axis, applied to the accelerometer and the
+ * gyro alike (`specs/machine-settings.md` section 3.1): the firmware builds the six-wide map it runs
+ * by repeating the triple, so the gyro frame cannot differ from the accelerometer's. The roles field is
  * `[UP, PITCH_RATE]`, the chip axis (`1 = X`, `2 = Y`, `3 = Z`) playing each body role, with FORWARD
  * the remaining one. Under the default roles the frame is a diagonal map, so the sign field alone
  * can express only the four proper diagonal rotations (identity and the three 180 degree turns). A
@@ -20,17 +22,15 @@ package com.hoverboard.protocol.imu
  * into the two fields and [poseOf] reads two stored fields back as a pose.
  */
 object Orientation {
-    /** Number of indices in the sign map (`ax, ay, az, gx, gy, gz`). */
-    const val INDICES = 6
-
-    /** Indices per vector (the accel triple is 0..2, the gyro triple 3..5). */
-    const val PER_VECTOR = 3
+    /** Number of indices in the staged sign map (`x, y, z`). */
+    const val INDICES = 3
 
     /**
-     * The compiled reference map (`imu::Config::default().sign`): the stock board's mount, a
-     * 180 degree rotation about Y. What an UNSET (0) index falls back to; not a fleet constant.
+     * The compiled reference triple (`imu::Config::default().sign`, whose six entries repeat it for
+     * the accelerometer and the gyro): the stock board's mount, a 180 degree rotation about Y. What
+     * an UNSET (0) index falls back to; not a fleet constant.
      */
-    val REFERENCE: List<Int> = listOf(-1, 1, -1, -1, 1, -1)
+    val REFERENCE: List<Int> = listOf(-1, 1, -1)
 
     /**
      * The compiled axis roles `[UP, PITCH_RATE]` = `[Z, Y]` (`imu::DEFAULT_ROLES`): the stock flat
@@ -60,7 +60,7 @@ object Orientation {
     fun frameIsRotation(roles: List<Int>, triple: List<Int>): Boolean {
         val order = bodyOrder(roles) ?: return false
         val parity = if (order[2] == (order[1] + 1) % 3) 1 else -1
-        return triple.size == PER_VECTOR && triple.all { it == 1 || it == -1 } &&
+        return triple.size == INDICES && triple.all { it == 1 || it == -1 } &&
             triple[0] * triple[1] * triple[2] == parity
     }
 
@@ -71,8 +71,9 @@ object Orientation {
     fun tripleIsRotation(triple: List<Int>): Boolean = frameIsRotation(DEFAULT_ROLES, triple)
 
     /**
-     * The map a board RUNS for a staged six-index value: each staged 0 (unset) falls back to that
-     * index of [REFERENCE], every other value is taken as staged. The mirror of `imu::Config::staged`.
+     * The triple a board RUNS for a staged three-index value: each staged 0 (unset) falls back to
+     * that index of [REFERENCE], every other value is taken as staged. The mirror of
+     * `imu::Config::staged`.
      */
     fun effective(staged: List<Int>): List<Int> {
         require(staged.size == INDICES) { "a sign map has $INDICES indices, got ${staged.size}" }
@@ -93,25 +94,24 @@ object Orientation {
         /** A role is outside `1..3`, or the two roles name the same chip axis. */
         ROLES,
 
-        /** The accel triple read through the roles is a reflection, or a sign is not +-1. */
+        /**
+         * The sign triple read through the roles is a reflection, or a sign is not +-1. The Rust
+         * keeps the accelerometer's name: the gyro shares the triple, so one check covers both.
+         */
         ACCEL,
-
-        /** The gyro triple read through the roles is a reflection, or a sign is not +-1. */
-        GYRO,
     }
 
     /**
      * The refusal `imu::Config::staged` returns for a staged sign map and staged roles, or null
-     * when the board accepts the frame: the unset rule on both fields, then the roles, the accel
-     * triple and the gyro triple checked in that order.
+     * when the board accepts the frame: the unset rule on both fields, then the roles and the sign
+     * triple checked in that order.
      */
     fun frameError(stagedSigns: List<Int>, stagedRoles: List<Int>): FrameError? {
         val signs = effective(stagedSigns)
         val roles = effectiveRoles(stagedRoles)
         return when {
             bodyOrder(roles) == null -> FrameError.ROLES
-            !frameIsRotation(roles, signs.subList(0, PER_VECTOR)) -> FrameError.ACCEL
-            !frameIsRotation(roles, signs.subList(PER_VECTOR, INDICES)) -> FrameError.GYRO
+            !frameIsRotation(roles, signs) -> FrameError.ACCEL
             else -> null
         }
     }
@@ -124,15 +124,12 @@ object Orientation {
         /** A role outside `0..3`, or the two roles (after the unset rule) name the same chip axis. */
         ROLES,
 
-        /** The accel triple, read through the roles, is a reflection (determinant -1). */
-        ACCEL_MIRRORED,
-
-        /** The gyro triple, read through the roles, is a reflection (determinant -1). */
-        GYRO_MIRRORED,
+        /** The sign triple, read through the roles, is a reflection (determinant -1). */
+        MIRRORED,
     }
 
     /**
-     * Check a staged six-index sign map together with the staged `[UP, PITCH_RATE]` roles the way the
+     * Check a staged three-index sign map together with the staged `[UP, PITCH_RATE]` roles the way the
      * board will run them, or null when the frame is legal: every sign is -1, 0 or +1, and
      * [frameError] accepts the pair. The client refuses an out-of-range sign itself
      * ([Refusal.NOT_A_SIGN]) where the board folds it into the triple's refusal, so the notice can
@@ -143,8 +140,7 @@ object Orientation {
         return when (frameError(stagedSigns, stagedRoles)) {
             null -> null
             FrameError.ROLES -> Refusal.ROLES
-            FrameError.ACCEL -> Refusal.ACCEL_MIRRORED
-            FrameError.GYRO -> Refusal.GYRO_MIRRORED
+            FrameError.ACCEL -> Refusal.MIRRORED
         }
     }
 
@@ -226,23 +222,20 @@ object Orientation {
      * composition `M = boardToBody(pose) * diag(STANDARD_CHIP_TO_BOARD)` is a signed permutation,
      * and `body = P * S * chip` (`specs/imu.md`, the `IMU_AXIS_ROLE` entry) factors it: UP is the
      * chip axis in `M`'s body-Z row, PITCH_RATE the one in its body-Y row, and each chip axis's sign
-     * is the nonzero entry of its column, the same for the accel and the gyro triples. Every sign is
-     * staged explicitly: the stock pose stages `[-1, -1, +1, -1, -1, +1]`, never the unset fallback.
+     * is the nonzero entry of its column. Every sign is staged explicitly: the stock pose stages
+     * `[-1, -1, +1]`, never the unset fallback.
      */
     fun frameOf(pose: Pose): Frame {
         val r = boardToBody(pose)
         fun axisOf(row: List<Int>): Int = row.indexOfFirst { it != 0 }
         val roles = listOf(axisOf(r[2]) + 1, axisOf(r[1]) + 1)
-        val signs = (0 until INDICES).map { i ->
-            val chip = i % PER_VECTOR
-            r.sumOf { it[chip] } * STANDARD_CHIP_TO_BOARD[chip]
-        }
+        val signs = (0 until INDICES).map { chip -> r.sumOf { it[chip] } * STANDARD_CHIP_TO_BOARD[chip] }
         return Frame(roles, signs)
     }
 
     /**
      * The pose two staged fields make the board run, or null when any sign is unset (0) or the frame
-     * is none of the 24 (a mirrored one, or a proper rotation with different accel and gyro triples).
+     * is none of the 24 (a mirrored one).
      * An unset sign runs the compiled fallback, which is no pose this family's user picked
      * ([fallbackPose]), so it is not read as one. An unset ROLE does resolve ([effectiveRoles]): the
      * compiled roles are the stock-mount roles on every family, and staging a pose leaves a role

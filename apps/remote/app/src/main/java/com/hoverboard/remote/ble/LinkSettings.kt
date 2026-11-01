@@ -101,6 +101,23 @@ class LinkSettings(private val prefs: SharedPreferences) {
         _selectedBoard.value = null
     }
 
+    private val _turnAxis = MutableStateFlow(prefs.getBoolean(KEY_TURN_AXIS, false))
+
+    /**
+     * Whether the Ride pad's turn axis is used on a machine of two or more motor controllers that is
+     * not rigid (`specs/machine-settings.md` section 7): DIFFERENTIAL with it, BOUND without. The
+     * drive mode is derived, not stored on the boards, and this is the one part of it that is the
+     * app's to choose, so the app keeps it beside the board it is for. Off until set.
+     */
+    val turnAxis: StateFlow<Boolean> = _turnAxis.asStateFlow()
+
+    /** Use the turn axis ([on]) or not, persisted at once. */
+    fun setTurnAxis(on: Boolean) {
+        if (on == _turnAxis.value) return
+        prefs.edit().putBoolean(KEY_TURN_AXIS, on).apply()
+        _turnAxis.value = on
+    }
+
     /** Which board the next scan is for: the pinned one if there is one, else the name. */
     fun target(): BoardTarget =
         _selectedBoard.value?.let { BoardTarget.Pinned(it.address) }
@@ -117,5 +134,6 @@ class LinkSettings(private val prefs: SharedPreferences) {
         const val KEY_DEVICE_NAME = "device_name"
         const val KEY_SELECTED_ADDRESS = "selected_address"
         const val KEY_SELECTED_NAME = "selected_name"
+        const val KEY_TURN_AXIS = "turn_axis"
     }
 }

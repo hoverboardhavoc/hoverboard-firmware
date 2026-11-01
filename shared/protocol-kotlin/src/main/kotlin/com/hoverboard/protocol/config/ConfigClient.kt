@@ -2,6 +2,7 @@ package com.hoverboard.protocol.config
 
 import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.ConfigResp
+import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Retransmit
 import com.hoverboard.protocol.l3.Walk
@@ -31,9 +32,6 @@ enum class CfgRefusal(val code: Int) {
 
     /** A write refused because the board is armed. Reads are never refused for this. */
     ARMED(Walk.CFG_ARMED),
-
-    /** A write to a read-only field (`node.class`): the value is the firmware's own. */
-    READ_ONLY(Walk.CFG_READ_ONLY),
 
     /** The region is out of space: the board compacted and the value still does not fit. */
     NO_SPACE(Walk.CFG_NO_SPACE),
@@ -103,7 +101,8 @@ data class Malformed(val resp: ConfigResp) :
  * The request went unanswered through the engine's whole retransmit budget. A write that times out
  * may or may not have been applied; a read of the same key settles it.
  */
-data object TimedOut : ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWriteResult
+data object TimedOut :
+    ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWriteResult, IdentifyResult, StatusReadResult
 
 /**
  * Another operation was in flight, so this one was not sent. The caller decides whether to try
@@ -111,12 +110,13 @@ data object TimedOut : ConfigReadResult, ConfigWriteResult, TuneReadResult, Tune
  * sharing the same [ConfigExchange]: the config and tune lanes share the engine's one outstanding
  * request.
  */
-data object Busy : ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWriteResult
+data object Busy :
+    ConfigReadResult, ConfigWriteResult, TuneReadResult, TuneWriteResult, IdentifyResult, StatusReadResult
 
 /**
- * The engine's one outstanding request, shared by every client that sends a request answered by
- * `CONFIG_RESP`: [ConfigClient] (`CONFIG_READ` / `CONFIG_WRITE`) and [TuneClient] (`TUNE_READ` /
- * `TUNE_WRITE`).
+ * The engine's one outstanding request, shared by every client: [ConfigClient] (`CONFIG_READ` /
+ * `CONFIG_WRITE`), [TuneClient] (`TUNE_READ` / `TUNE_WRITE`) and [NodeClient] (`IDENTIFY`,
+ * `STATUS_READ`).
  *
  * One per session, because the engine arms ONE request for retransmit and both lanes answer with
  * the same opcode: a `CONFIG_READ` and a `TUNE_READ` of the same key to the same board get replies
@@ -164,23 +164,49 @@ class ConfigExchange(
     private val inFlight = Mutex()
 
     /**
-     * (board, key) -> the engine-clock time before which a request of that key must not be sent,
-     * because a request of it was re-sent and the re-send's reply may still arrive. Touched only by
-     * the one operation in flight.
+     * (board, request) -> the engine-clock time before which that request must not be sent again,
+     * because it was re-sent and the re-send's reply may still arrive. A request is named by its
+     * key for the config and tune lanes, and by its opcode for `IDENTIFY` and `STATUS_READ`.
+     * Touched only by the one operation in flight.
      */
-    private val settling = HashMap<Pair<Int, Key>, Long>()
+    private val settling = HashMap<Pair<Int, Any>, Long>()
 
     /**
      * Send one request to [target] about [key] (staged by [send] under [lock]) and wait for its
      * response: the response, or [Busy] if another operation holds the slot, or [TimedOut] once the
      * engine reports the retransmit budget exhausted.
      */
-    internal suspend fun request(key: Key, target: Int, send: BleWalkEngine.() -> Unit): Outcome {
+    internal suspend fun request(key: Key, target: Int, send: BleWalkEngine.() -> Unit): Outcome =
+        when (val o = ask(key, target, send) { takeMatching(key, target) }) {
+            Asked.Busy -> Outcome.Busy
+            Asked.TimedOut -> Outcome.TimedOut
+            is Asked.Answered -> Outcome.Answered(o.value)
+        }
+
+    /**
+     * Send one empty node request to [target] ([request] is `IDENTIFY` or `STATUS_READ`, staged by
+     * [send]) and wait for its [reply] from that node: the reply's payload, or [Busy] / [TimedOut]
+     * as for [request]. The same slot, so a node request never interleaves with a config one.
+     */
+    internal suspend fun requestReply(
+        request: Opcode,
+        reply: Opcode,
+        target: Int,
+        send: BleWalkEngine.() -> Unit,
+    ): Asked<ByteArray> = ask(request, target, send) { takeReply(reply, target) }
+
+    /** The one-request-in-flight core of [request] and [requestReply]. */
+    private suspend fun <T : Any> ask(
+        id: Any,
+        target: Int,
+        send: BleWalkEngine.() -> Unit,
+        take: () -> T?,
+    ): Asked<T> {
         require(isBoard(target)) { "target 0x${Integer.toHexString(target)} is not a board address" }
-        if (!inFlight.tryLock()) return Outcome.Busy
+        if (!inFlight.tryLock()) return Asked.Busy
         try {
-            settle(target to key)
-            return exchange(key, target, send)?.let { Outcome.Answered(it) } ?: Outcome.TimedOut
+            settle(target to id)
+            return exchange(target to id, send, take)?.let { Asked.Answered(it) } ?: Asked.TimedOut
         } finally {
             inFlight.unlock()
         }
@@ -201,7 +227,7 @@ class ConfigExchange(
     }
 
     /** Wait out [id]'s settle window, if one is open. The drain before the send discards what came in it. */
-    private suspend fun settle(id: Pair<Int, Key>) {
+    private suspend fun settle(id: Pair<Int, Any>) {
         while (true) {
             val until = settling[id] ?: return
             val left = until - engine.nowMs()
@@ -220,16 +246,24 @@ class ConfigExchange(
         data object Busy : Outcome
     }
 
-    private suspend fun exchange(key: Key, target: Int, send: BleWalkEngine.() -> Unit): ConfigResp? {
+    /** What one request in the slot came to: its answer [T], or why there is none. */
+    internal sealed interface Asked<out T> {
+        data class Answered<T>(val value: T) : Asked<T>
+        data object TimedOut : Asked<Nothing>
+        data object Busy : Asked<Nothing>
+    }
+
+    private suspend fun <T : Any> exchange(id: Pair<Int, Any>, send: BleWalkEngine.() -> Unit, take: () -> T?): T? {
         synchronized(lock) {
             while (engine.takeConfigResp() != null) Unit // stale responses from earlier exchanges
+            while (engine.takeNodeReply() != null) Unit
             engine.send()
         }
         var resent = 0
         try {
             while (true) {
                 synchronized(lock) {
-                    takeMatching(key, target)?.let { return it }
+                    take()?.let { return it }
                     when (engine.serviceRetransmit()) {
                         Retransmit.EXHAUSTED -> return null
                         Retransmit.SENT -> resent++
@@ -239,7 +273,7 @@ class ConfigExchange(
                 delay(POLL_IDLE_MS)
             }
         } finally {
-            if (resent > 0) settling[target to key] = engine.nowMs() + resent * engine.replyTimeoutMs
+            if (resent > 0) settling[id] = engine.nowMs() + resent * engine.replyTimeoutMs
         }
     }
 
@@ -250,6 +284,15 @@ class ConfigExchange(
             val pdu = Pdu.decodeOrNull(bytes) ?: continue
             val resp = ConfigResp.parse(pdu) ?: continue
             if (pdu.src == target && resp.fieldId == key.fieldId && resp.index == key.index) return resp
+        }
+    }
+
+    /** Drain the node-reply inbox up to the first [op] from [target]; discard the rest. */
+    private fun takeReply(op: Opcode, target: Int): ByteArray? {
+        while (true) {
+            val bytes = engine.takeNodeReply() ?: return null
+            val pdu = Pdu.decodeOrNull(bytes) ?: continue
+            if (pdu.src == target && pdu.known() == op) return pdu.payload
         }
     }
 

@@ -43,7 +43,6 @@ class BoardLayoutTest {
         deadTime = 25,
         direction = 0,
         alignOffset = 3,
-        currentSense = 1,
         currentCal = 455,
         phaseA = 0x10, // PB0
         phaseB = 0x00, // PA0
@@ -131,6 +130,6 @@ class BoardLayoutTest {
         assertEquals(Fields.MOTOR_HALL_B.key(1), Layout.forField(Fields.MOTOR_HALL_B, 1)?.key)
         assertEquals(Fields.MOTOR_HALL_B.key(0), Layout.forField(Fields.MOTOR_HALL_B)?.key)
         assertEquals(Fields.BOARD_SELF_HOLD.key(), Layout.LATCH.key)
-        assertNull(Layout.forField(Fields.IMU_AXIS_SIGN), "the frame is not a layout field")
+        assertNull(Layout.forField(Fields.IMU_AXIS_SIGN.at(0)), "the frame is not a layout field")
     }
 }
