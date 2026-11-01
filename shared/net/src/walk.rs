@@ -121,12 +121,6 @@ pub const CLASS_BRIDGE: u8 = 0x02;
 /// is one byte, `[kind]`, so the length tells the two apart.
 pub const HELLO_REPLY_LEN: usize = 3;
 
-/// The ONE-OFF fleet move (`specs/machine-settings.md` section 8, reverted once the fleet has
-/// moved): the length of the old `NODE_HELLO` reply, `[node_id, proto_ver, fw_ver_lo, fw_ver_hi,
-/// mcu, your_addr]`, which a bridge on the previous image answers. A controller reads it as that
-/// layout, so `bridge update` can start on such a bridge.
-const OLD_HELLO_REPLY_LEN: usize = 6;
-
 /// The length of a factory unique ID in `IDENTITY` (`specs/machine-settings.md` section 6.1): a
 /// GD32's 96-bit ID, or a bridge's 6-byte MAC followed by six zero bytes.
 pub const UID_LEN: usize = 12;
@@ -1255,8 +1249,7 @@ impl Controller {
         match task {
             Task::Hello => {
                 let node_id = pdu.payload[0];
-                // The old 6 B reply carries `your_addr` last (`OLD_HELLO_REPLY_LEN`).
-                let your_addr = pdu.payload[pdu.payload.len() - 1];
+                let your_addr = pdu.payload[2];
                 self.guest_addr = your_addr; // adopt the granted guest address
                 self.granted = true;
                 if node_id == pdu::NO_ADDRESS {
@@ -1304,9 +1297,7 @@ impl Controller {
         }
         let p = pdu.payload;
         match (task, pdu.known()) {
-            (Task::Hello, Some(Opcode::NodeHello)) => {
-                p.len() == HELLO_REPLY_LEN || p.len() == OLD_HELLO_REPLY_LEN
-            }
+            (Task::Hello, Some(Opcode::NodeHello)) => p.len() == HELLO_REPLY_LEN,
             (Task::Probe { addr }, Some(Opcode::Ports)) => pdu.src == addr,
             (Task::AssignGateway { new_addr } | Task::AssignNeighbor { new_addr, .. }, _) => {
                 assign_ack_status(pdu, self.guest_addr, new_addr).is_some()

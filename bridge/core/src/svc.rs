@@ -118,9 +118,6 @@ pub struct Service<'a, Pl: Platform> {
     update: &'a mut Update,
     /// An update is in the next boot's slot: the firmware resets once the reply is out.
     reboot: bool,
-    /// The one-off fleet move (`specs/machine-settings.md` section 8): `ESP_UPDATE_CONFIRM`
-    /// marked the running slot valid, so the old key records may go ([`crate::keymove::clear`]).
-    confirmed: bool,
     gdb: GdbStatus,
     gdb_load: GdbLoad,
 }
@@ -163,7 +160,6 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
             clear_user: None,
             update,
             reboot: false,
-            confirmed: false,
             gdb: GdbStatus {
                 connected: false,
                 halted: false,
@@ -298,12 +294,6 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
     /// An update finished and its slot is the next boot's: reset once the last reply has gone.
     pub fn reboot_requested(&self) -> bool {
         self.reboot
-    }
-
-    /// The one-off fleet move: whether `ESP_UPDATE_CONFIRM` has marked the running slot valid
-    /// since this was last asked.
-    pub fn take_confirmed(&mut self) -> bool {
-        core::mem::take(&mut self.confirmed)
     }
 
     /// The platform.
@@ -472,7 +462,6 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
             }
             Msg::UpdateConfirm => {
                 let r = self.platform.confirm();
-                self.confirmed |= r.is_ok();
                 result(out, src, op, r.map_or_else(|e| e, |()| Status::Ok));
             }
             // Replies are not commands.
