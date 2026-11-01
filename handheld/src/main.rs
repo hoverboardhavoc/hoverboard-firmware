@@ -45,7 +45,6 @@ use mipidsi::options::{ColorOrder, Orientation};
 use static_cell::StaticCell;
 use trouble_host::prelude::ExternalController;
 
-use handheld_core::arm::Button;
 use handheld_core::model::{Model, TouchDebug};
 use handheld_core::touch::{median_spread, Lift, Touch, PERIOD_MS};
 
@@ -224,13 +223,8 @@ async fn main(spawner: Spawner) {
     let irq = Input::new(p.GPIO36, InputConfig::default().with_pull(Pull::None));
     let touch = xpt2046::Xpt2046::new(tspi, tcs, irq);
 
-    // BOOT (IO0): R2 pulls it up; pressed is low.
-    let boot = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::None));
-
     let sampler = SAMPLER.init(InterruptExecutor::new(sw.software_interrupt1));
-    sampler
-        .start(Priority::Priority1)
-        .must_spawn(sample(touch, boot));
+    sampler.start(Priority::Priority1).must_spawn(sample(touch));
 
     // The test pattern stays on the panel: no view, no link.
     #[cfg(feature = "test-pattern")]
@@ -259,9 +253,8 @@ type TouchDev = xpt2046::Xpt2046<
 /// The touch sampler: every 2 ms on a timer, PENIRQ then the conversions, classified and
 /// stepped through the lift machine; what it means goes to the model.
 #[embassy_executor::task]
-async fn sample(mut dev: TouchDev, boot: Input<'static>) {
+async fn sample(mut dev: TouchDev) {
     let mut touch = Touch::default();
-    let mut button = Button::default();
     let mut ticker = Ticker::every(Duration::from_millis(PERIOD_MS as u64));
     let mut count = 0u16;
     let mut since = now_ms();
@@ -293,17 +286,10 @@ async fn sample(mut dev: TouchDev, boot: Input<'static>) {
             rate,
         };
         let v = touch.view(now);
-        let edge = button.poll(boot.is_low(), now);
-        let fault = button.fault();
         let sent = with(|m| {
             m.touch = v;
             m.touch_debug = debug;
-            if let Some(e) = edge {
-                m.on_button(e);
-            }
-            if m.button_fault && !fault {
-                m.button_released();
-            }
+            m.on_touch(touch.lift, now);
             let sent = m.run_pump(now);
             // Under the lock, with the frames it stamps: the link takes both together.
             if m.take_release() {

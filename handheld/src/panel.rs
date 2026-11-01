@@ -108,6 +108,8 @@ pub struct Cache {
     corners: [Drawn<u64>; 2],
     pack: Drawn<u64>,
     lower: Drawn<u64>,
+    /// The arm band as last drawn, while the phase bars show.
+    band: Option<ArmBand>,
     line: Drawn<u64>,
     armed: Drawn<bool>,
 }
@@ -307,7 +309,12 @@ fn draw_ride<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: &Ride, c: &mut Cache) 
     if c.pack.update(hash(&r.pack)) {
         draw_pack(d, &r.pack);
     }
-    if c.lower.update(hash(&r.lower)) {
+    // The band is cached apart from the phase bars, so a hold's progress redraws only the band.
+    let (key, band) = match &r.lower {
+        Lower::Bars { phase, band } => (hash(&(0u8, phase)), Some(*band)),
+        Lower::Grid(cells) => (hash(&(1u8, cells)), None),
+    };
+    if c.lower.update(key) {
         fill(d, layout::LAMP_GRID, BG);
         match &r.lower {
             Lower::Bars { phase, band } => {
@@ -316,6 +323,12 @@ fn draw_ride<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: &Ride, c: &mut Cache) 
                 draw_band(d, *band);
             }
             Lower::Grid(cells) => draw_grid(d, cells),
+        }
+        c.band = band;
+    } else if let Some(b) = band {
+        if c.band != Some(b) {
+            update_band(d, c.band, b);
+            c.band = Some(b);
         }
     }
 }
@@ -536,19 +549,46 @@ fn draw_phase<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: Rect, b: Option<&Phas
     }
 }
 
-fn draw_band<D: DrawTarget<Color = Rgb565>>(d: &mut D, b: ArmBand) {
+/// One look of the arm band: its fill, outline and outline width, the label and the line under it
+/// (empty for none), and their colours.
+struct BandLook {
+    fill: Rgb565,
+    stroke: Rgb565,
+    width: u32,
+    label: &'static str,
+    sub: &'static str,
+    lc: Rgb565,
+    sc: Rgb565,
+}
+
+/// The hold's two looks: the progress fill, and the rest of the band (the can-arm look).
+const HOLD_FILLED: BandLook = BandLook {
+    fill: PRIMARY,
+    stroke: PRIMARY,
+    width: 2,
+    label: "ARM",
+    sub: "hold 1 s",
+    lc: BG,
+    sc: BG,
+};
+const HOLD_EMPTY: BandLook = BandLook {
+    fill: BG,
+    stroke: PRIMARY,
+    width: 2,
+    label: "ARM",
+    sub: "hold 1 s",
+    lc: PRIMARY,
+    sc: FG_MUTED,
+};
+
+fn draw_look<D: DrawTarget<Color = Rgb565>>(d: &mut D, k: &BandLook) {
     let r = Widget::ArmBand.rect();
-    let (fillc, stroke, width, label, sub, lc, sc) = match b {
-        ArmBand::Armed => (PRIMARY, PRIMARY, 2, "ARMED", "BOOT to disarm", BG, BG),
-        ArmBand::CanArm => (BG, PRIMARY, 2, "ARM", "press BOOT", PRIMARY, FG_MUTED),
-        ArmBand::CannotArm => (BG, BORDER, 1, "ARM", "", FG_FAINT, FG_FAINT),
-    };
     let _ = RoundedRectangle::with_equal_corners(er(r), Size::new(8, 8))
         .into_styled(
             PrimitiveStyleBuilder::new()
-                .fill_color(fillc)
-                .stroke_color(stroke)
-                .stroke_width(width)
+                .fill_color(k.fill)
+                .stroke_color(k.stroke)
+                .stroke_width(k.width)
                 .build(),
         )
         .draw(d);
@@ -556,18 +596,102 @@ fn draw_band<D: DrawTarget<Color = Rgb565>>(d: &mut D, b: ArmBand) {
         MonoTextStyleBuilder::new()
             .font(font)
             .text_color(fg)
-            .background_color(fillc)
+            .background_color(k.fill)
             .build()
     };
     let ts = TextStyleBuilder::new()
         .alignment(Alignment::Center)
         .baseline(Baseline::Top)
         .build();
-    let y = if sub.is_empty() { r.y0 + 8 } else { r.y0 + 3 };
-    let _ = Text::with_text_style(label, Point::new(120, y), on(&FONT_10X20, lc), ts).draw(d);
-    if !sub.is_empty() {
-        let _ =
-            Text::with_text_style(sub, Point::new(120, r.y0 + 23), on(&FONT_6X10, sc), ts).draw(d);
+    let y = if k.sub.is_empty() { r.y0 + 8 } else { r.y0 + 3 };
+    let _ = Text::with_text_style(k.label, Point::new(120, y), on(&FONT_10X20, k.lc), ts).draw(d);
+    if !k.sub.is_empty() {
+        let _ = Text::with_text_style(k.sub, Point::new(120, r.y0 + 23), on(&FONT_6X10, k.sc), ts)
+            .draw(d);
+    }
+}
+
+/// `look` drawn over the band's columns `x0..x1` only.
+fn draw_look_cols<D: DrawTarget<Color = Rgb565>>(d: &mut D, look: &BandLook, x0: i32, x1: i32) {
+    if x1 <= x0 {
+        return;
+    }
+    let r = Widget::ArmBand.rect();
+    let cols = er(Rect::new(x0, r.y0, x1, r.y1));
+    draw_look(&mut d.clipped(&cols), look);
+}
+
+/// The progress fill's right edge for a hold of `ms`.
+fn fill_edge(ms: u16) -> i32 {
+    let r = Widget::ArmBand.rect();
+    r.x0 + r.width() * i32::from(ms) / handheld_core::arm::ARM_HOLD_MS as i32
+}
+
+/// How far the progress fill reaches in `b`, for a band that shows the hold's looks.
+fn hold_ms(b: ArmBand) -> Option<u16> {
+    match b {
+        ArmBand::CanArm => Some(0),
+        ArmBand::Holding(ms) => Some(ms),
+        _ => None,
+    }
+}
+
+/// The band as section 5.3 draws it.
+fn draw_band<D: DrawTarget<Color = Rgb565>>(d: &mut D, b: ArmBand) {
+    let r = Widget::ArmBand.rect();
+    match b {
+        ArmBand::Armed => draw_look(
+            d,
+            &BandLook {
+                fill: PRIMARY,
+                stroke: PRIMARY,
+                width: 2,
+                label: "ARMED",
+                sub: "tap to disarm",
+                lc: BG,
+                sc: BG,
+            },
+        ),
+        ArmBand::CanArm | ArmBand::Holding(_) => {
+            let edge = fill_edge(hold_ms(b).unwrap_or(0));
+            draw_look_cols(d, &HOLD_FILLED, r.x0, edge);
+            draw_look_cols(d, &HOLD_EMPTY, edge, r.x1);
+        }
+        ArmBand::Release => draw_look(
+            d,
+            &BandLook {
+                fill: PRIMARY,
+                stroke: PRIMARY,
+                width: 2,
+                label: "RELEASE TO ARM",
+                sub: "",
+                lc: BG,
+                sc: BG,
+            },
+        ),
+        ArmBand::CannotArm => draw_look(
+            d,
+            &BandLook {
+                fill: BG,
+                stroke: BORDER,
+                width: 1,
+                label: "ARM",
+                sub: "",
+                lc: FG_FAINT,
+                sc: FG_FAINT,
+            },
+        ),
+    }
+}
+
+/// Go from the band as drawn, `prev`, to `next`: a hold's fill that grew draws only the columns it
+/// gained (section 5.3); anything else redraws the band.
+fn update_band<D: DrawTarget<Color = Rgb565>>(d: &mut D, prev: Option<ArmBand>, next: ArmBand) {
+    match (prev.and_then(hold_ms), hold_ms(next)) {
+        (Some(a), Some(b)) if b >= a => {
+            draw_look_cols(d, &HOLD_FILLED, fill_edge(a), fill_edge(b));
+        }
+        _ => draw_band(d, next),
     }
 }
 

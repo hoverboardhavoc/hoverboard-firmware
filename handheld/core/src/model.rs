@@ -3,7 +3,7 @@
 //! latch holds and the lamp test, and from them every widget's state ([`View`]).
 //!
 //! The binary's tasks call into one [`Model`] behind a lock: the link task with what the radio
-//! delivers and the time, the sampler with the touch and the button, the view task for a
+//! delivers and the time, the sampler with the touch, the view task for a
 //! [`View`] to draw.
 
 use core::fmt::Write;
@@ -11,7 +11,7 @@ use core::fmt::Write;
 use heapless::{String, Vec};
 use linkctl::{CyclicState, ARM_BLOCKING_BITS};
 
-use crate::arm::{Arm, Conditions, Dropped, Edge, Refused, BOARDS_OFF_MS};
+use crate::arm::{Action, Arm, Conditions, Dropped, HoldShow, Refused, BOARDS_OFF_MS};
 use crate::drive::{self, Board, Refusal, Targets};
 use crate::inbox::Inbox;
 use crate::lamps::{self, Lamp, LampFacts, LatchHold};
@@ -24,7 +24,7 @@ use crate::readings::slots::{self, RideSlot, RideSlots};
 use crate::readings::speed::{self, SpeedFacts, SpeedReading};
 use crate::session::{Fact, Phase, Sends, Session, CLASS_MOTOR};
 use crate::throttle;
-use crate::touch::TouchView;
+use crate::touch::{Lift, TouchView};
 
 /// How long the lamp test runs after the first ride facts read, ms (section 5.6).
 pub const LAMP_TEST_MS: u32 = 2000;
@@ -63,7 +63,6 @@ pub struct Model {
     armed_targets: Targets,
     pub pump: Pump,
     pub outbox: Outbox,
-    pub button_fault: bool,
     pub touch: TouchView,
     pub touch_debug: TouchDebug,
     pub latch: LatchHold,
@@ -104,9 +103,7 @@ impl Model {
             armed_targets: Targets::default(),
             pump: Pump::default(),
             outbox: Outbox::default(),
-            button_fault: false,
             touch: TouchView {
-                finger_down: false,
                 drive: None,
                 overlay: None,
             },
@@ -264,8 +261,6 @@ impl Model {
             })
         });
         Conditions {
-            button_fault: self.button_fault,
-            finger_down: self.touch.finger_down,
             ready: matches!(self.link, Link::Connected { .. }) && self.session.ready(),
             frames_differ: self.frames_differ(),
             drive: drive.as_ref().err().copied(),
@@ -274,28 +269,18 @@ impl Model {
         }
     }
 
-    /// A BOOT edge (section 4.5). A press clears the latch holds; an arm latches its targets.
-    pub fn on_button(&mut self, e: Edge) {
-        match e {
-            Edge::Fault => self.button_fault = true,
-            Edge::Release { .. } | Edge::Press => {}
-        }
-        if let Edge::Press = e {
-            self.latch.clear_on_boot_press();
-        }
-        let cond = self.conditions();
-        if let Some(crate::arm::Action::Armed) = self.arm.on_edge(e, || cond) {
+    /// The lift machine's state after the sample taken at `now` (section 4.5): an arm-zone
+    /// touch-down disarms; a confirmed release of a hold arms, clearing the latch holds and
+    /// latching the arm targets.
+    pub fn on_touch(&mut self, lift: Lift, now: u32) {
+        let mut arm = self.arm;
+        let action = arm.on_touch(lift, now, || self.conditions());
+        self.arm = arm;
+        if let Some(Action::Armed) = action {
+            self.latch.clear_on_arm();
             self.armed_targets = self.drive().unwrap_or_default();
             self.lamp_test_until = None;
         }
-        if let Edge::Release { .. } = e {
-            self.button_fault = false;
-        }
-    }
-
-    /// The button has been high long enough to end a fault.
-    pub fn button_released(&mut self) {
-        self.button_fault = false;
     }
 
     /// The command the pump sends now: the arm level, and the throttle's demand while armed and
@@ -559,10 +544,14 @@ impl Model {
         };
         let band = if self.arm.armed() {
             ArmBand::Armed
-        } else if self.conditions().refusal().is_none() {
-            ArmBand::CanArm
-        } else {
+        } else if self.conditions().refusal().is_some() {
             ArmBand::CannotArm
+        } else {
+            match self.arm.hold(now) {
+                None => ArmBand::CanArm,
+                Some(HoldShow::Progress(ms)) => ArmBand::Holding(ms),
+                Some(HoldShow::Release) => ArmBand::Release,
+            }
         };
         Lower::Bars {
             phase: [bar(slots.left), bar(slots.right)],
@@ -591,10 +580,6 @@ impl Model {
     fn statement(&self, slots: &RideSlots) -> Option<Statement> {
         let mut text: String<64> = String::new();
         let say = |text: String<64>, tone| Some(Statement { text, tone });
-        if self.button_fault {
-            let _ = text.push_str("BOOT held.");
-            return say(text, Tone::Fg);
-        }
         if let Some(Dropped::Fault { bit, board }) = self.arm.fault_disarm {
             let title = Lamp::of(bit).map_or("fault", |l| l.title());
             let _ = write!(
@@ -604,10 +589,6 @@ impl Model {
                 self.board_name(slots, board)
             );
             return say(text, Tone::Warning);
-        }
-        if !self.arm.armed() && self.touch.finger_down {
-            let _ = text.push_str("Release the screen to arm.");
-            return say(text, Tone::Muted);
         }
         if self.frames_differ() {
             let _ = text.push_str("Cannot arm: the boards are set to different frames.");
@@ -850,6 +831,10 @@ pub struct PhaseBar {
 pub enum ArmBand {
     Armed,
     CanArm,
+    /// Can arm, a hold in progress for this long, ms, under `ARM_HOLD`: the progress fill.
+    Holding(u16),
+    /// Can arm, the hold has reached `ARM_HOLD`: "RELEASE TO ARM".
+    Release,
     CannotArm,
 }
 
@@ -987,6 +972,24 @@ mod tests {
         now
     }
 
+    /// Hold the arm band from `now` for 1.1 s and release it; the time of the confirming sample.
+    fn hold_band(m: &mut Model, now: u32) -> u32 {
+        let y = 270 * crate::touch::SUB;
+        m.on_touch(Lift::Down { y0: y, yf: y }, now);
+        let up = now + 1060;
+        m.on_touch(
+            Lift::Lifting {
+                y0: y,
+                yf: y,
+                since: up,
+                resume: 0,
+            },
+            up,
+        );
+        m.on_touch(Lift::Idle, up + 40);
+        up + 40
+    }
+
     #[test]
     fn the_cards_then_the_ride_view() {
         let m = Model::new(None);
@@ -1050,8 +1053,7 @@ mod tests {
         let mut m = Model::new(Some([0; 6]));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
-        m.on_button(Edge::Press);
-        m.on_button(Edge::Release { held: 100 });
+        hold_band(&mut m, now);
         assert!(m.arm.armed());
         let now = run(&mut m, now, 400, linkctl::EV_LATCH_A);
         assert!(!m.arm.armed());
@@ -1066,7 +1068,7 @@ mod tests {
             panic!()
         };
         assert!(matches!(r.lower, Lower::Grid(_)));
-        // The latch is held lit after the board clears it, until the next BOOT press.
+        // The latch is held lit after the board clears it, until the next arm.
         let now = run(&mut m, now, 400, 0);
         assert!(matches!(
             m.view(now).body,
@@ -1075,7 +1077,9 @@ mod tests {
                 ..
             })
         ));
-        m.on_button(Edge::Press);
+        // The held latch refuses no arm, and the arm clears it.
+        let now = hold_band(&mut m, now);
+        assert!(m.arm.armed());
         assert!(matches!(
             m.view(now).body,
             Body::Ride(Ride {
@@ -1091,8 +1095,7 @@ mod tests {
         let mut m = Model::new(Some([0; 6]));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
-        m.on_button(Edge::Press);
-        m.on_button(Edge::Release { held: 100 });
+        hold_band(&mut m, now);
         assert!(m.arm.armed());
         // The boards go quiet: they leave the inbox 1.2 s after their last frame, and the card
         // and the disarm follow 1 s later.
@@ -1115,11 +1118,9 @@ mod tests {
         assert_eq!(m.outbox.drive.len(), 2);
         assert_eq!(m.outbox.drive[0].1.kind, linkctl::DriveKind::Neutral);
         m.outbox = Outbox::default();
-        m.on_button(Edge::Press);
-        m.on_button(Edge::Release { held: 100 });
+        hold_band(&mut m, now);
         use crate::touch::SUB;
         m.touch = TouchView {
-            finger_down: true,
             drive: Some((200 * SUB, 80 * SUB)),
             overlay: None,
         };
@@ -1152,17 +1153,44 @@ mod tests {
     }
 
     #[test]
-    fn the_statement_line_says_release_the_screen_and_boot_held() {
+    fn the_band_follows_a_hold_and_a_tap_disarms() {
+        use crate::touch::SUB;
         let mut m = Model::new(Some([0; 6]));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
-        m.touch.finger_down = true;
-        assert_eq!(m.view(now).line.unwrap().text, "Release the screen to arm.");
-        m.on_button(Edge::Press);
-        m.on_button(Edge::Fault);
-        assert_eq!(m.view(now).line.unwrap().text, "BOOT held.");
-        m.button_released();
-        m.touch.finger_down = false;
-        assert_eq!(m.view(now).line, None);
+        let band = |m: &Model, at: u32| {
+            let Body::Ride(r) = m.view(at).body else {
+                panic!()
+            };
+            let Lower::Bars { band, .. } = r.lower else {
+                panic!()
+            };
+            band
+        };
+        assert_eq!(band(&m, now), ArmBand::CanArm);
+        let y = 270 * SUB;
+        m.on_touch(Lift::Down { y0: y, yf: y }, now);
+        assert_eq!(band(&m, now + 520), ArmBand::Holding(500));
+        assert_eq!(band(&m, now + 1000), ArmBand::Release);
+        assert_eq!(band(&m, now + 5001), ArmBand::CanArm, "past the maximum");
+        // A hold the conditions refuse shows no progress (no motor controller in the inbox).
+        m.inbox.clear();
+        assert_eq!(band(&m, now + 520), ArmBand::CannotArm);
+        // A throttle touch while disarmed does nothing.
+        let mut m = Model::new(Some([0; 6]));
+        m.connected(0);
+        let now = run(&mut m, 0, 4000, 0);
+        let t = 100 * SUB;
+        m.on_touch(Lift::Down { y0: t, yf: t }, now);
+        assert_eq!(band(&m, now + 520), ArmBand::CanArm);
+        m.on_touch(Lift::Idle, now + 600);
+        // Armed, an arm-zone touch-down disarms, and the release goes out at once.
+        let now = hold_band(&mut m, now + 700);
+        assert!(m.run_pump(now));
+        m.on_touch(Lift::Down { y0: y, yf: y }, now + 10);
+        assert!(!m.arm.armed());
+        assert!(m.run_pump(now + 10));
+        assert!(m.take_release());
+        assert_eq!(m.outbox.drive[0].1.kind, linkctl::DriveKind::Neutral);
     }
 }

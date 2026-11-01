@@ -10,7 +10,7 @@ name = "handheld"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "Handheld remote firmware for the ESP32 Cheap Yellow Display (specs/handheld-remote.md): BLE central to a hoverboard bridge, the Ride view, BOOT to arm, a relative whole-screen throttle."
+description = "Handheld remote firmware for the ESP32 Cheap Yellow Display (specs/handheld-remote.md): BLE central to a hoverboard bridge, the Ride view, an on-screen arm band, a relative throttle."
 
 [[bin]]
 name = "handheld"

@@ -237,7 +237,8 @@ pub enum Lift {
 }
 
 impl Lift {
-    /// Whether the arm rule counts this as a finger down: every state but [`Lift::Idle`].
+    /// Whether this counts as a finger down (section 4.4): every state but [`Lift::Idle`]. The arm
+    /// rule arms only once a touch has gone back to `Idle` (section 4.5).
     pub fn finger_down(&self) -> bool {
         !matches!(self, Lift::Idle)
     }
@@ -360,19 +361,17 @@ impl Touch {
     }
 
     /// The state as the consumers read it at `now` (ms): a sampler that has produced nothing for
-    /// [`STALL_MS`] reads as Up, which is a release. Whether the finger counts as down, and the
-    /// points of a live touch (`Down` only: `Lifting` demands zero).
+    /// [`STALL_MS`] reads as Up, which is a release. The points of a live touch (`Down` only:
+    /// `Lifting` demands zero).
     pub fn view(&self, now: u32) -> TouchView {
         let stalled = self.at.is_none_or(|t| now.wrapping_sub(t) >= STALL_MS);
         if stalled {
             return TouchView {
-                finger_down: self.lift.finger_down(),
                 drive: None,
                 overlay: self.lift.points().map(|p| (p, false)),
             };
         }
         TouchView {
-            finger_down: self.lift.finger_down(),
             drive: match self.lift {
                 Lift::Down { y0, yf } => Some((y0, yf)),
                 _ => None,
@@ -385,11 +384,9 @@ impl Touch {
     }
 }
 
-/// What the touch means to the arm rule, the demand and the overlay.
+/// What the touch means to the demand and the overlay.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TouchView {
-    /// Every state but Idle: refuses an arm.
-    pub finger_down: bool,
     /// `(y0, yf)` while the demand follows the finger (`Down`, the sampler live).
     pub drive: Option<(i32, i32)>,
     /// `((y0, yf), live)` while the overlay draws: `live` in `Down`, not in `Lifting`.
@@ -602,7 +599,7 @@ mod tests {
         let now = feed(&mut t, now, &[Sample::Up]);
         assert!(matches!(t.lift, Lift::Lifting { .. }));
         assert_eq!(t.view(now).drive, None);
-        assert!(t.view(now).finger_down);
+        assert!(t.lift.finger_down());
     }
 
     #[test]

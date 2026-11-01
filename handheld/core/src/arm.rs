@@ -1,83 +1,71 @@
-//! Arm and disarm on the BOOT button (`specs/handheld-remote.md` section 4.5), and what drops the
-//! arm level by itself (section 4.7). The arm level is held locally, latching, in RAM only: every
-//! boot starts disarmed and nothing re-arms by itself.
+//! Arm and disarm on the arm band (`specs/handheld-remote.md` section 4.5), and what drops the arm
+//! level by itself (section 4.7). The arm level is held locally, latching, in RAM only: every boot
+//! starts disarmed and nothing re-arms by itself.
+//!
+//! A touch belongs to a zone by its touch-down point alone: a `Down` with `y0 >= ARM_ZONE_Y` is an
+//! arm-zone touch, any other a throttle touch. While disarmed, an arm-zone touch
+//! held for [`ARM_HOLD_MS`] to [`ARM_HOLD_MAX_MS`] with `yf` in the zone the whole time arms on the
+//! sample that confirms its release. While armed, an arm-zone touch disarms on its `Down`.
 
-/// IO0 low for this long is a press; high for this long is a release, ms.
-pub const DEBOUNCE_MS: u32 = 20;
-/// The shortest press that arms, ms.
-pub const PRESS_MIN_MS: u32 = 50;
-/// The longest press that arms; a low held past it is a button fault, ms.
-pub const PRESS_MAX_MS: u32 = 1500;
+use crate::touch::{Lift, SUB};
+
+/// The arm zone's top edge: every panel point with `y` at or past it, the full width, px.
+pub const ARM_ZONE_Y: i32 = 250;
+/// The shortest hold that arms, from the touch's `Down` to the sample that confirms its release, ms.
+pub const ARM_HOLD_MS: u32 = 1000;
+/// The longest hold that arms (a longer one is a resting palm), ms.
+pub const ARM_HOLD_MAX_MS: u32 = 5000;
+/// The hold's progress fill moves in steps of this, so it redraws at most this often, ms
+/// (section 5.3).
+pub const FILL_STEP_MS: u32 = 50;
 /// With no motor controller in the inbox for this long while connected, the arm drops (the app's
 /// `BOARDS_OFF_MS`), ms.
 pub const BOARDS_OFF_MS: u32 = 1000;
 
-/// What the debounced button did on one sample.
+/// Which control a touch works, decided by its touch-down point.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Edge {
-    /// A press started (IO0 low for [`DEBOUNCE_MS`]).
-    Press,
-    /// The press ended after `held` ms, measured edge to edge.
-    Release { held: u32 },
-    /// The low has lasted past [`PRESS_MAX_MS`]: a button fault until IO0 is high again.
-    Fault,
+pub enum Zone {
+    /// `y0` in the arm zone: the arm band.
+    Arm,
+    /// `y0` above the arm zone: the throttle.
+    Throttle,
 }
 
-/// The BOOT button's debouncer, polled every 2 ms.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Button {
-    /// The debounced level: pressed.
-    pressed: bool,
-    /// When the raw level last changed, and to what (low = true).
-    raw: Option<(bool, u32)>,
-    /// When the press that is held started (its low edge).
-    since: u32,
-    /// The held press has run past [`PRESS_MAX_MS`].
-    fault: bool,
+impl Zone {
+    /// The zone of a point `y`, in sixteenths of a pixel.
+    pub fn of(y: i32) -> Zone {
+        if y >= ARM_ZONE_Y * SUB {
+            Zone::Arm
+        } else {
+            Zone::Throttle
+        }
+    }
 }
 
-impl Button {
-    /// Whether a button fault is in force (IO0 low past [`PRESS_MAX_MS`], until it is high again).
-    pub fn fault(&self) -> bool {
-        self.fault
-    }
+/// One touch as the arm rule follows it, from its `Down` until its release is confirmed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Held {
+    zone: Zone,
+    /// When it went `Down`, ms.
+    at: u32,
+    /// `yf` has left the arm zone at some sample.
+    left: bool,
+    /// Its `Down` disarmed the machine, so its release does not arm.
+    disarmed: bool,
+}
 
-    /// Feed IO0's level at `now` (ms; `low` is pressed).
-    pub fn poll(&mut self, low: bool, now: u32) -> Option<Edge> {
-        let changed_at = match self.raw {
-            Some((level, at)) if level == low => at,
-            _ => {
-                self.raw = Some((low, now));
-                now
-            }
-        };
-        let stable = now.wrapping_sub(changed_at) >= DEBOUNCE_MS;
-        if stable && low != self.pressed {
-            self.pressed = low;
-            if low {
-                self.since = changed_at;
-                return Some(Edge::Press);
-            }
-            let held = changed_at.wrapping_sub(self.since);
-            let was_fault = self.fault;
-            self.fault = false;
-            return (!was_fault).then_some(Edge::Release { held });
-        }
-        if self.pressed && low && !self.fault && now.wrapping_sub(self.since) > PRESS_MAX_MS {
-            self.fault = true;
-            return Some(Edge::Fault);
-        }
-        None
-    }
+/// What the arm band shows of a hold in progress (section 5.3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HoldShow {
+    /// Held this long, ms, in [`FILL_STEP_MS`] steps, under [`ARM_HOLD_MS`].
+    Progress(u16),
+    /// Held [`ARM_HOLD_MS`] or more: a release now arms.
+    Release,
 }
 
 /// Why an arm is refused, in the statement line's order (section 5.4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refused {
-    /// A button fault is in force ("BOOT held.").
-    ButtonFault,
-    /// The touch is not Idle ("Release the screen to arm.").
-    FingerDown,
     /// The link is not connected, or the walk or the ride facts have not finished.
     NotReady,
     /// The motor controllers store different frames (the app's `MachineArm.FramesDiffer`).
@@ -93,8 +81,6 @@ pub enum Refused {
 /// What the arm rule reads at the moment of a release.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Conditions {
-    pub button_fault: bool,
-    pub finger_down: bool,
     /// Connected, walked and the ride facts read.
     pub ready: bool,
     pub frames_differ: bool,
@@ -108,11 +94,7 @@ pub struct Conditions {
 impl Conditions {
     /// The first refusal that holds, or `None` when the arm may go ahead.
     pub fn refusal(&self) -> Option<Refused> {
-        if self.button_fault {
-            Some(Refused::ButtonFault)
-        } else if self.finger_down {
-            Some(Refused::FingerDown)
-        } else if !self.ready {
+        if !self.ready {
             Some(Refused::NotReady)
         } else if self.frames_differ {
             Some(Refused::FramesDiffer)
@@ -128,7 +110,7 @@ impl Conditions {
     }
 }
 
-/// Why the arm level dropped without a BOOT press (section 4.7).
+/// Why the arm level dropped without an arm-zone touch (section 4.7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dropped {
     /// The link went away.
@@ -136,23 +118,37 @@ pub enum Dropped {
     /// No motor controller in the inbox for [`BOARDS_OFF_MS`].
     BoardsOff,
     /// A board the arm arms reported an arm-blocking bit: the bit and the board, kept for the
-    /// statement until the next BOOT press (the app's `faultDisarm`).
+    /// statement until the next arm (the app's `faultDisarm`).
     Fault { bit: u16, board: u8 },
 }
 
-/// The arm level and the press bookkeeping.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// The arm level and the bookkeeping of the touch that works it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Arm {
     armed: bool,
-    /// The press now held disarmed the machine, so its release does not arm.
-    press_disarmed: bool,
-    /// The last fault disarm's cause, until the next BOOT press.
+    /// The lift state of the last sample.
+    lift: Lift,
+    /// The touch now down, from its `Down`.
+    touch: Option<Held>,
+    /// The last fault disarm's cause, until the next arm.
     pub fault_disarm: Option<Dropped>,
-    /// The last refused arm, until the next BOOT press.
+    /// The last refused arm, until the next arm-zone touch.
     pub refused: Option<Refused>,
 }
 
-/// What a BOOT edge did.
+impl Default for Arm {
+    fn default() -> Self {
+        Arm {
+            armed: false,
+            lift: Lift::Idle,
+            touch: None,
+            fault_disarm: None,
+            refused: None,
+        }
+    }
+}
+
+/// What a touch did to the arm.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Armed,
@@ -166,37 +162,98 @@ impl Arm {
         self.armed
     }
 
-    /// Apply a button edge, reading `cond` for an arm.
-    pub fn on_edge(&mut self, e: Edge, cond: impl FnOnce() -> Conditions) -> Option<Action> {
-        match e {
-            Edge::Press => {
-                self.fault_disarm = None;
-                self.refused = None;
-                if self.armed {
-                    self.armed = false;
-                    self.press_disarmed = true;
-                    return Some(Action::Disarmed);
+    /// Follow the touch through one sample: `lift` is the lift machine's state after the sample
+    /// taken at `now` (ms). `cond` is read only for an arm.
+    pub fn on_touch(
+        &mut self,
+        lift: Lift,
+        now: u32,
+        cond: impl FnOnce() -> Conditions,
+    ) -> Option<Action> {
+        let prev = core::mem::replace(&mut self.lift, lift);
+        match (lift.points(), &mut self.touch) {
+            (Some((y0, yf)), None) => {
+                let zone = Zone::of(y0);
+                let mut t = Held {
+                    zone,
+                    at: now,
+                    left: Zone::of(yf) != Zone::Arm,
+                    disarmed: false,
+                };
+                let mut action = None;
+                if zone == Zone::Arm {
+                    self.refused = None;
+                    if self.armed {
+                        self.armed = false;
+                        t.disarmed = true;
+                        action = Some(Action::Disarmed);
+                    }
                 }
-                self.press_disarmed = false;
+                self.touch = Some(t);
+                action
+            }
+            (Some((_, yf)), Some(t)) => {
+                if Zone::of(yf) != Zone::Arm {
+                    t.left = true;
+                }
                 None
             }
-            Edge::Fault => None,
-            Edge::Release { held } => {
-                let disarmed = core::mem::take(&mut self.press_disarmed);
-                if disarmed || self.armed || !(PRESS_MIN_MS..=PRESS_MAX_MS).contains(&held) {
+            (None, Some(_)) => {
+                let t = self.touch.take()?;
+                // The release is confirmed on the sample that leaves `Lifting` (a new press may
+                // start on that same sample).
+                if !matches!(prev, Lift::Lifting { .. }) {
                     return None;
                 }
-                match cond().refusal() {
-                    Some(r) => {
-                        self.refused = Some(r);
-                        Some(Action::Refused(r))
-                    }
-                    None => {
-                        self.armed = true;
-                        Some(Action::Armed)
-                    }
-                }
+                self.release(t, now, cond)
             }
+            (None, None) => None,
+        }
+    }
+
+    fn release(&mut self, t: Held, now: u32, cond: impl FnOnce() -> Conditions) -> Option<Action> {
+        let held = now.wrapping_sub(t.at);
+        if t.zone != Zone::Arm
+            || t.left
+            || t.disarmed
+            || self.armed
+            || !(ARM_HOLD_MS..=ARM_HOLD_MAX_MS).contains(&held)
+        {
+            return None;
+        }
+        match cond().refusal() {
+            Some(r) => {
+                self.refused = Some(r);
+                Some(Action::Refused(r))
+            }
+            None => {
+                self.armed = true;
+                self.fault_disarm = None;
+                Some(Action::Armed)
+            }
+        }
+    }
+
+    /// The hold in progress at `now` (ms), while disarmed: an arm-zone touch that has stayed in the
+    /// zone, did not disarm, and has not run past [`ARM_HOLD_MAX_MS`]. Whether the arm would be
+    /// refused is the caller's to judge.
+    pub fn hold(&self, now: u32) -> Option<HoldShow> {
+        if self.armed {
+            return None;
+        }
+        let t = self.touch?;
+        if t.zone != Zone::Arm || t.left || t.disarmed {
+            return None;
+        }
+        let held = now.wrapping_sub(t.at);
+        if held > ARM_HOLD_MAX_MS {
+            None
+        } else if held >= ARM_HOLD_MS {
+            Some(HoldShow::Release)
+        } else {
+            Some(HoldShow::Progress(
+                (held / FILL_STEP_MS * FILL_STEP_MS) as u16,
+            ))
         }
     }
 
@@ -218,61 +275,12 @@ mod tests {
     use super::*;
     use crate::drive::Refusal;
 
-    /// Hold IO0 at `low` from `from` for `ms`, 2 ms a poll; the edges seen.
-    fn hold(b: &mut Button, low: bool, from: u32, ms: u32) -> ([Option<Edge>; 2], u32) {
-        let mut seen = [None, None];
-        let mut k = 0;
-        let mut t = from;
-        while t < from + ms {
-            if let Some(e) = b.poll(low, t) {
-                if k < 2 {
-                    seen[k] = Some(e);
-                }
-                k += 1;
-            }
-            t += 2;
-        }
-        (seen, t)
-    }
-
-    fn press(ms: u32) -> (Button, [Option<Edge>; 2], [Option<Edge>; 2]) {
-        let mut b = Button::default();
-        let (_, t) = hold(&mut b, false, 0, 100);
-        let (down, t) = hold(&mut b, true, t, ms);
-        let (up, _) = hold(&mut b, false, t, 100);
-        (b, down, up)
-    }
-
-    #[test]
-    fn the_press_length_window() {
-        let (_, d, u) = press(48);
-        assert_eq!(d[0], Some(Edge::Press));
-        assert_eq!(u[0], Some(Edge::Release { held: 48 }));
-        let (_, _, u) = press(50);
-        assert_eq!(u[0], Some(Edge::Release { held: 50 }));
-        let (_, _, u) = press(1500);
-        assert_eq!(u[0], Some(Edge::Release { held: 1500 }));
-        // Past 1.5 s: a fault, and no release edge.
-        let (b, d, u) = press(1504);
-        assert_eq!(d, [Some(Edge::Press), Some(Edge::Fault)]);
-        assert_eq!(u[0], None);
-        assert!(!b.fault(), "the fault ends when IO0 is high again");
-    }
-
-    #[test]
-    fn a_bounce_shorter_than_the_debounce_is_not_a_press() {
-        let mut b = Button::default();
-        let (_, t) = hold(&mut b, false, 0, 100);
-        let (e, t) = hold(&mut b, true, t, 18);
-        assert_eq!(e[0], None);
-        let (e, _) = hold(&mut b, false, t, 100);
-        assert_eq!(e[0], None);
-    }
+    /// A point in the arm zone and one above it, in sixteenths of a pixel.
+    const IN: i32 = 270 * SUB;
+    const ABOVE: i32 = 120 * SUB;
 
     fn ok() -> Conditions {
         Conditions {
-            button_fault: false,
-            finger_down: false,
             ready: true,
             frames_differ: false,
             drive: None,
@@ -281,23 +289,57 @@ mod tests {
         }
     }
 
+    fn down(y0: i32, yf: i32) -> Lift {
+        Lift::Down { y0, yf }
+    }
+
+    fn lifting(y0: i32, yf: i32, since: u32) -> Lift {
+        Lift::Lifting {
+            y0,
+            yf,
+            since,
+            resume: 0,
+        }
+    }
+
+    /// A touch at `y`, `Down` at `at`, held until its release is confirmed at `at + held`
+    /// (`Lifting` for the last 40 ms). Every action it caused.
+    fn touch(
+        a: &mut Arm,
+        y: i32,
+        at: u32,
+        held: u32,
+        cond: Conditions,
+    ) -> (Option<Action>, Option<Action>) {
+        let first = a.on_touch(down(y, y), at, || cond);
+        let up = at + held - 40;
+        assert_eq!(a.on_touch(lifting(y, y, up), up, || cond), None);
+        let last = a.on_touch(Lift::Idle, at + held, || cond);
+        (first, last)
+    }
+
+    fn armed() -> Arm {
+        let mut a = Arm::default();
+        touch(&mut a, IN, 0, 1100, ok());
+        assert!(a.armed());
+        a
+    }
+
     #[test]
-    fn the_window_arms_and_refuses_by_length() {
-        for (held, arms) in [(49, false), (50, true), (1500, true), (1501, false)] {
+    fn the_hold_window() {
+        for (held, arms) in [(999, false), (1000, true), (5000, true), (5001, false)] {
             let mut a = Arm::default();
-            a.on_edge(Edge::Press, ok);
-            let r = a.on_edge(Edge::Release { held }, ok);
+            let (first, last) = touch(&mut a, IN, 100, held, ok());
+            assert_eq!(first, None, "{held} ms");
             assert_eq!(a.armed(), arms, "{held} ms");
-            assert_eq!(r.is_some(), arms);
+            assert_eq!(last, arms.then_some(Action::Armed), "{held} ms");
         }
     }
 
     #[test]
     fn each_refusal_alone_refuses() {
         type Case = (fn(&mut Conditions), Refused);
-        let cases: [Case; 7] = [
-            (|c| c.button_fault = true, Refused::ButtonFault),
-            (|c| c.finger_down = true, Refused::FingerDown),
+        let cases: [Case; 5] = [
             (|c| c.ready = false, Refused::NotReady),
             (|c| c.frames_differ = true, Refused::FramesDiffer),
             (
@@ -310,67 +352,135 @@ mod tests {
         for (set, want) in cases {
             let mut c = ok();
             set(&mut c);
+            assert_eq!(c.refusal(), Some(want));
             let mut a = Arm::default();
-            a.on_edge(Edge::Press, || c);
-            assert_eq!(
-                a.on_edge(Edge::Release { held: 100 }, || c),
-                Some(Action::Refused(want))
-            );
+            let (_, last) = touch(&mut a, IN, 0, 1100, c);
+            assert_eq!(last, Some(Action::Refused(want)));
             assert!(!a.armed());
             assert_eq!(a.refused, Some(want));
+            // The next arm-zone touch clears it.
+            a.on_touch(down(IN, IN), 2000, ok);
+            assert_eq!(a.refused, None);
         }
+        assert_eq!(ok().refusal(), None);
     }
 
     #[test]
-    fn a_press_that_disarms_does_not_arm_and_disarm_is_never_refused() {
-        let mut a = Arm::default();
-        a.on_edge(Edge::Press, ok);
-        a.on_edge(Edge::Release { held: 100 }, ok);
-        assert!(a.armed());
-        let bad = || Conditions {
-            finger_down: true,
+    fn disarm_is_never_refused_and_the_touch_that_disarms_does_not_arm() {
+        let bad = Conditions {
+            ready: false,
             blocked: true,
             ..ok()
         };
-        assert_eq!(a.on_edge(Edge::Press, bad), Some(Action::Disarmed));
+        let mut a = armed();
+        // Disarms on `Down`, before any hold, whatever the conditions.
+        assert_eq!(
+            a.on_touch(down(IN, IN), 5000, || bad),
+            Some(Action::Disarmed)
+        );
         assert!(!a.armed());
-        assert_eq!(a.on_edge(Edge::Release { held: 100 }, ok), None);
+        assert_eq!(a.hold(6500), None, "no hold shown for it");
+        a.on_touch(lifting(IN, IN, 6500), 6500, ok);
+        assert_eq!(a.on_touch(Lift::Idle, 6540, ok), None);
         assert!(!a.armed());
+        // A new hold arms again.
+        touch(&mut a, IN, 7000, 1100, ok());
+        assert!(a.armed());
     }
 
     #[test]
-    fn a_touch_in_any_non_idle_state_at_release_refuses() {
-        use crate::touch::Lift;
-        for lift in [
-            Lift::Pressing {
-                n: 1,
-                sum: 0,
-                last: 0,
-            },
-            Lift::Down { y0: 0, yf: 0 },
-            Lift::Lifting {
-                y0: 0,
-                yf: 0,
-                since: 0,
-                resume: 0,
-            },
-        ] {
-            let c = Conditions {
-                finger_down: lift.finger_down(),
-                ..ok()
-            };
-            let mut a = Arm::default();
-            a.on_edge(Edge::Press, || c);
-            a.on_edge(Edge::Release { held: 100 }, || c);
-            assert!(!a.armed(), "{lift:?}");
-        }
-    }
-
-    #[test]
-    fn a_fault_disarm_keeps_its_cause_until_the_next_press() {
+    fn a_touch_that_leaves_the_zone_during_the_hold_does_not_arm() {
         let mut a = Arm::default();
-        a.on_edge(Edge::Press, ok);
-        a.on_edge(Edge::Release { held: 100 }, ok);
+        a.on_touch(down(IN, IN), 0, ok);
+        a.on_touch(down(IN, 240 * SUB), 300, ok);
+        assert_eq!(a.hold(300), None);
+        a.on_touch(down(IN, IN), 400, ok);
+        a.on_touch(lifting(IN, IN, 1500), 1500, ok);
+        assert_eq!(a.on_touch(Lift::Idle, 1540, ok), None);
+        assert!(!a.armed());
+    }
+
+    #[test]
+    fn a_throttle_touch_never_arms_or_disarms() {
+        // Disarmed: a throttle touch dragged down into the zone and held does nothing.
+        let mut a = Arm::default();
+        assert_eq!(a.on_touch(down(ABOVE, ABOVE), 0, ok), None);
+        a.on_touch(down(ABOVE, 280 * SUB), 200, ok);
+        assert_eq!(a.hold(1500), None);
+        a.on_touch(lifting(ABOVE, 280 * SUB, 1500), 1500, ok);
+        assert_eq!(a.on_touch(Lift::Idle, 1540, ok), None);
+        assert!(!a.armed());
+        // Armed: the same drag stays a throttle drag and does not disarm.
+        let mut a = armed();
+        assert_eq!(a.on_touch(down(ABOVE, ABOVE), 3000, ok), None);
+        assert_eq!(a.on_touch(down(ABOVE, 300 * SUB), 3200, ok), None);
+        assert!(a.armed());
+        a.on_touch(lifting(ABOVE, 300 * SUB, 3300), 3300, ok);
+        assert_eq!(a.on_touch(Lift::Idle, 3340, ok), None);
+        assert!(a.armed());
+    }
+
+    #[test]
+    fn arming_happens_on_the_idle_transition_not_before() {
+        let mut a = Arm::default();
+        let mut read = false;
+        a.on_touch(down(IN, IN), 0, || {
+            read = true;
+            ok()
+        });
+        a.on_touch(down(IN, IN), 1500, ok);
+        assert!(!a.armed(), "held past ARM_HOLD, still down");
+        assert_eq!(a.hold(1500), Some(HoldShow::Release));
+        a.on_touch(lifting(IN, IN, 1600), 1600, ok);
+        a.on_touch(lifting(IN, IN, 1600), 1620, ok);
+        assert!(!a.armed(), "lifting, not yet confirmed");
+        assert!(!read, "the conditions are read only at the release");
+        assert_eq!(a.on_touch(Lift::Idle, 1640, ok), Some(Action::Armed));
+        assert!(a.armed());
+        assert_eq!(a.hold(1640), None);
+    }
+
+    #[test]
+    fn a_new_press_on_the_confirming_sample_still_arms() {
+        let mut a = Arm::default();
+        a.on_touch(down(IN, IN), 0, ok);
+        a.on_touch(lifting(IN, IN, 1100), 1100, ok);
+        let pressing = Lift::Pressing {
+            n: 1,
+            sum: IN,
+            last: IN,
+        };
+        assert_eq!(a.on_touch(pressing, 1140, ok), Some(Action::Armed));
+    }
+
+    #[test]
+    fn a_lifting_dropout_during_the_hold_that_resumes_keeps_the_hold() {
+        let mut a = Arm::default();
+        a.on_touch(down(IN, IN), 0, ok);
+        a.on_touch(lifting(IN, IN, 300), 300, ok);
+        assert_eq!(a.hold(320), Some(HoldShow::Progress(300)));
+        a.on_touch(down(IN, IN), 320, ok);
+        assert_eq!(a.hold(980), Some(HoldShow::Progress(950)));
+        a.on_touch(lifting(IN, IN, 1000), 1000, ok);
+        assert_eq!(a.on_touch(Lift::Idle, 1040, ok), Some(Action::Armed));
+    }
+
+    #[test]
+    fn the_hold_shows_progress_in_steps_then_release_then_nothing_past_the_maximum() {
+        let mut a = Arm::default();
+        a.on_touch(down(IN, IN), 10, ok);
+        assert_eq!(a.hold(10), Some(HoldShow::Progress(0)));
+        assert_eq!(a.hold(59), Some(HoldShow::Progress(0)));
+        assert_eq!(a.hold(60), Some(HoldShow::Progress(50)));
+        assert_eq!(a.hold(1009), Some(HoldShow::Progress(950)));
+        assert_eq!(a.hold(1010), Some(HoldShow::Release));
+        assert_eq!(a.hold(5010), Some(HoldShow::Release));
+        assert_eq!(a.hold(5011), None, "a resting palm");
+    }
+
+    #[test]
+    fn a_fault_disarm_keeps_its_cause_until_the_next_arm() {
+        let mut a = armed();
         let why = Dropped::Fault {
             bit: linkctl::EV_LATCH_A,
             board: 2,
@@ -378,10 +488,12 @@ mod tests {
         assert!(a.drop_for(why));
         assert!(!a.armed());
         assert_eq!(a.fault_disarm, Some(why));
-        a.on_edge(Edge::Press, ok);
+        // A short tap keeps it; an arm clears it.
+        touch(&mut a, IN, 3000, 200, ok());
+        assert_eq!(a.fault_disarm, Some(why));
+        touch(&mut a, IN, 4000, 1100, ok());
         assert_eq!(a.fault_disarm, None);
         // A link drop keeps no cause.
-        a.on_edge(Edge::Release { held: 100 }, ok);
         assert!(a.drop_for(Dropped::Link));
         assert_eq!(a.fault_disarm, None);
         assert!(!a.drop_for(Dropped::Link), "already disarmed");

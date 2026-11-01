@@ -53,7 +53,7 @@ pub const LAMPS: [Lamp; 10] = [
     Lamp::Config,
 ];
 
-/// The two latch bits the handheld holds lit until the next BOOT press (`FaultLamp.kt`,
+/// The two latch bits the handheld holds lit until the next arm (`FaultLamp.kt`,
 /// `LATCH_BITS`): the board clears a latch about 8 ms after it trips.
 pub const LATCH_BITS: u16 = EV_LATCH_A | EV_LATCH_B;
 
@@ -217,7 +217,7 @@ pub fn grid_cell(index: usize) -> (usize, usize) {
 
 /// The LATCH and LATCH 2 hold (`MainViewModel.kt`, `onFaultWords` and `LocalState.latchHeld`;
 /// `specs/remote-ui.md` 3.1b): a latch bit seen once stays lit, per board and per bit, until the
-/// next BOOT press. It survives the grid hiding and showing; a disconnect drops it by starting a
+/// next arm. It survives the grid hiding and showing; a disconnect drops it by starting a
 /// new [`LatchHold::new`]. Held bits are not a bit any board reports, so they refuse no arm
 /// (`specs/handheld-remote.md` 4.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,9 +254,9 @@ impl LatchHold {
         (fault & LAMP_BITS) | self.held(address)
     }
 
-    /// Drops every hold: the BOOT press that ends a hold also arms (`specs/remote-ui.md` 3.1b, the
-    /// app's ARM tap).
-    pub fn clear_on_boot_press(&mut self) {
+    /// Drops every hold: the arm ends a hold (`specs/remote-ui.md` 3.1b, the app's ARM tap;
+    /// `specs/handheld-remote.md` 4.5).
+    pub fn clear_on_arm(&mut self) {
         self.held = [0; 256];
     }
 }
@@ -420,7 +420,7 @@ mod tests {
     /// grid shows"; the app tests it through the view model (`MainViewModel.kt`, `onFaultWords`),
     /// with no model test to copy. The bits are `FaultLampTest.kt`'s.
     #[test]
-    fn a_latch_is_held_until_the_next_boot_press() {
+    fn a_latch_is_held_until_the_next_arm() {
         let mut hold = LatchHold::new();
         hold.observe(0x01, EV_LATCH_A | EV_MOTOR_HALL);
         assert_eq!(hold.held(0x01), EV_LATCH_A, "only latch bits are held");
@@ -437,7 +437,7 @@ mod tests {
         assert!(grid_shows(&words, false));
         hold.observe(0x02, EV_LATCH_B);
         assert_eq!(hold.held(0x02), EV_LATCH_B);
-        hold.clear_on_boot_press();
+        hold.clear_on_arm();
         assert_eq!(hold, LatchHold::default());
         assert_eq!(
             hold.lamp_word(0x01, EV_CONFIG | (1 << 6)),
