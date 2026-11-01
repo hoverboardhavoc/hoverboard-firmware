@@ -235,6 +235,9 @@ const MODEL_CFGS: &[(&str, &[&str])] = &[
     // The F10x USART (one DATA register) and the F1x0 USART (separate RDATA/TDATA, the ISR/ICR
     // style status).
     ("hal_usart", &["f10x", "f1x0"]),
+    // The DMA request map: which channel carries each USART's receive and transmit, and so which
+    // vector (the F10x one vector per channel, the F1x0 channels grouped in pairs).
+    ("hal_dma", &["f10x", "f1x0"]),
     // The vendor vector list the chip links.
     ("hal_vectors", &["f10x_md", "f10x_hd", "f1x0"]),
 ];
@@ -246,6 +249,7 @@ const CHIPS: &[ChipRow] = &[
             ("hal_gpio", "crl"),
             ("hal_clock", "f10x"),
             ("hal_usart", "f10x"),
+            ("hal_dma", "f10x"),
             ("hal_vectors", "f10x_md"),
         ],
         vectors: F10X_MD,
@@ -256,6 +260,7 @@ const CHIPS: &[ChipRow] = &[
             ("hal_gpio", "crl"),
             ("hal_clock", "f10x"),
             ("hal_usart", "f10x"),
+            ("hal_dma", "f10x"),
             ("hal_vectors", "f10x_hd"),
         ],
         vectors: F10X_HD,
@@ -266,6 +271,7 @@ const CHIPS: &[ChipRow] = &[
             ("hal_gpio", "ctl"),
             ("hal_clock", "f1x0"),
             ("hal_usart", "f1x0"),
+            ("hal_dma", "f1x0"),
             ("hal_vectors", "f1x0"),
         ],
         vectors: F1X0,

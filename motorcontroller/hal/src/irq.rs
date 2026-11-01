@@ -5,8 +5,8 @@
 //! The table is the vendor's vector list for the part (build.rs), linked by cortex-m-rt's `device`
 //! feature. Nothing is copied to RAM and `VTOR` is never written (specs/hal.md, section 5). An image
 //! defines its own handlers by name (`#[interrupt] fn ADC0_1()`, `#[exception] fn SysTick()`); the
-//! HAL defines the vectors its serial drivers own (the USART receive and DMA channel vectors, in
-//! [`crate::usart_rx`] and [`crate::usart_tx`]).
+//! HAL defines the vectors its serial drivers own: the USART vectors in [`crate::usart_rx`] and
+//! the DMA channel vectors in the crate's `dma` module.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -68,15 +68,24 @@ pub fn unmask_irq(irq: Interrupt) {
     unsafe { cortex_m::peripheral::NVIC::unmask(irq) }
 }
 
+const DWT_CYCCNT: u32 = 0xE000_1004;
+
 /// Start the DWT cycle counter (`DEMCR.TRCENA`, `DWT_CTRL.CYCCNTENA`), for pass-scale timing
-/// windows read by an attached bench.
+/// windows read by an attached bench, and the transmit deadline of [`crate::usart_tx::DmaTx`].
+/// It zeroes the counter.
 pub fn enable_cycle_counter() {
     const DEMCR: u32 = 0xE000_EDFC;
     const DWT_CTRL: u32 = 0xE000_1000;
-    const DWT_CYCCNT: u32 = 0xE000_1004;
     Reg32::new(DEMCR, 0).set_bits(1 << 24);
     Reg32::new(DWT_CYCCNT, 0).write(0);
     Reg32::new(DWT_CTRL, 0).set_bits(1);
+}
+
+/// The DWT cycle counter, free-running at the core clock once [`enable_cycle_counter`] has
+/// started it.
+#[inline]
+pub(crate) fn cycle_count() -> u32 {
+    Reg32::new(DWT_CYCCNT, 0).read()
 }
 
 /// An ISR entry counter. Each counted vector has one writer (its own handler, at a fixed priority,

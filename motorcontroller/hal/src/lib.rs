@@ -30,11 +30,16 @@ pub mod clock;
 pub mod config;
 pub mod dbg;
 pub mod descriptor;
+mod dma;
 pub mod error;
 pub mod gpio;
 pub mod irq;
 pub mod pincap;
 pub mod reg;
+pub mod serial;
+pub mod usart;
+pub mod usart_rx;
+pub mod usart_tx;
 
 pub use addr::{AddrTable, PeriphLabel};
 pub use chip::{Chip, ClockPath, IrqLayout};
@@ -49,3 +54,7 @@ pub use gpio::{Floating, Input, InputGroup, Output, Pin, PullDown, PullUp, PushP
 /// the attribute itself, so an image writes `use hal::interrupt;` and `#[interrupt] fn ADC0_1()`.
 pub use irq::Interrupt as interrupt;
 pub use irq::Interrupt;
+pub use serial::SplitSerial;
+pub use usart::Usart;
+pub use usart_rx::{supports_rx, RingBufferedRx};
+pub use usart_tx::DmaTx;
