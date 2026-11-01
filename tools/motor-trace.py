@@ -5,7 +5,7 @@ The core is NEVER halted: this reads RAM through the MEM-AP the same way the SWD
 so the 16 kHz period ISR and the 250 Hz control task keep running underneath the sampling.
 
 Usage:
-    tools/motor-trace.py [--board master|slave] [--hz 10] [--csv FILE] [--elf PATH]
+    tools/motor-trace.py [--board master|slave] [--hz 10] [--csv FILE] (--chip CHIP | --elf PATH)
     tools/motor-trace.py --attach HOST:PORT     # use an OpenOCD that is already running
 
 Ctrl-C to stop. It stops the OpenOCD it started and releases the bench lock it took.
@@ -25,11 +25,11 @@ import sys
 import time
 
 from swdobs import (
-    BOARDS, CTRL_MAGIC, DEFAULT_ELF, LOCAL_BOARDS, MOTOR_CURRENT_OFFSET, REPO,
+    BOARDS, CTRL_MAGIC, LOCAL_BOARDS, MOTOR_CURRENT_OFFSET, REPO,
     W_FOC_DQ_MEAN, W_FOC_PHASE_MEAN, W_FOC_REF_VQ, W_GATING_PRE_ENV, W_MOTOR_RATE_Q,
     W_PITCH_MILLI, W_ROLL_MILLI, W_SF_REF, W_SF_TERMS_PR, W_TORQUE_MODE, W_WHEEL_POS_OWN,
     W_WHEEL_POS_PEER, Ocd, i16_pair, motor_block, read_current_cal, resolve_symbols, s16, s32,
-    sh, start_local_ocd, start_remote_ocd, stop_local_ocd, stop_remote_ocd,
+    add_image_args as swdobs_image_args, image_elf, sh, start_local_ocd, start_remote_ocd, stop_local_ocd, stop_remote_ocd,
 )
 
 
@@ -95,10 +95,11 @@ def main():
     ap.add_argument("--board", choices=sorted(BOARDS), default="master")
     ap.add_argument("--hz", type=float, default=10.0)
     ap.add_argument("--csv", default=None)
-    ap.add_argument("--elf", default=DEFAULT_ELF)
+    swdobs_image_args(ap)
     ap.add_argument("--attach", default=None, help="HOST:PORT of a running OpenOCD TCL port")
     args = ap.parse_args()
 
+    args.elf = image_elf(args)
     addrs = resolve_symbols(args.elf)
     base, span, off = motor_block(addrs)
 

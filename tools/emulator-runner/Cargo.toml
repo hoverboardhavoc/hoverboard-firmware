@@ -14,7 +14,7 @@ unicorn-engine = { version = "2", optional = true }
 # The store crate serves two roles here: the LIB reads the store region's placement rule from its one
 # owner (store::geometry), and the store-scenario tests build crafted region images with the store's
 # OWN codec (record::encode), byte-identical to what the firmware writes. The host build of `store` is
-# base-only (its runtime-hal/FmcFlash dep is target-gated), so this pulls in no HAL. `test-fields`
+# base-only (its hal/FmcFlash dep is target-gated), so this pulls in no HAL. `test-fields`
 # exposes the scenario ids + reserved test fields the store scenarios reference.
 store = { path = "../../shared/store", features = ["test-fields"] }
 

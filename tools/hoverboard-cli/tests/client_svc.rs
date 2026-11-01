@@ -736,29 +736,38 @@ fn the_binary_runs_a_multi_chunk_read_and_a_flash_through_the_boards_bridge() {
     assert!(g.booted, "booted");
 }
 
-/// A bundle packed from `elf` as the universal image, with `targets` in place of its table's when
-/// given.
+/// A bundle of the two mainboard images, each an ELF of `code` carrying its own image's guard
+/// names, packed against the firmware crate's tables; `f130_targets` replaces the GD32F130C8
+/// image's targets when given.
 fn bundle_file(
     name: &str,
-    elf: &[u8],
-    targets: Option<Vec<hoverboard_cli::bundle::Target>>,
+    code: &[u8],
+    f130_targets: Option<Vec<hoverboard_cli::bundle::Target>>,
 ) -> String {
     use hoverboard_cli::bundle::{image_table, pack, PackEntry};
-    let mut table = image_table(
-        include_str!("../../../motorcontroller/firmware/Cargo.toml"),
-        "mainboard-gd32",
-    )
-    .unwrap();
-    if let Some(t) = targets {
-        table.targets = t;
-    }
-    let z = pack(
-        &[PackEntry {
-            name: "mainboard-gd32",
-            table,
-            guards: common::release_guards(),
+    use hoverboard_cli::elf;
+    let toml = include_str!("../../../motorcontroller/firmware/Cargo.toml");
+    let entry = |image: &'static str| {
+        let guards = elf::guards_for(common::GUARD_FILE, image).unwrap();
+        let elf = common::Fixture::new(code, guards.code_floor, common::names_of(&guards)).build();
+        let mut table = image_table(toml, image).unwrap();
+        if let (Some(t), "mainboard-gd32f130c8") = (&f130_targets, image) {
+            table.targets = t.clone();
+        }
+        (image, table, guards, elf)
+    };
+    let images = [entry("mainboard-gd32f103c8"), entry("mainboard-gd32f130c8")];
+    let entries: Vec<PackEntry> = images
+        .iter()
+        .map(|(name, table, guards, elf)| PackEntry {
+            name,
+            table: table.clone(),
+            guards: guards.clone(),
             elf,
-        }],
+        })
+        .collect();
+    let z = pack(
+        &entries,
         "c0eb25917cd904d5d9ba9307f56cb8251cbb61dd",
         "2026-11-01T17:03:58Z",
     )
@@ -772,10 +781,13 @@ fn bundle_file(
 fn the_binary_flashes_the_image_a_bundle_holds_for_the_chip() {
     let img = image(5 * 1024 + 11);
     // Named .elf: the content says it is a bundle.
-    let path = bundle_file("bundle-named-elf.elf", &common::flashable_elf(&img), None);
+    let path = bundle_file("bundle-named-elf.elf", &img, None);
     let f10x: Prep = |g| g.family = Family::F10x;
     let f1x0: Prep = |g| g.family = Family::F1x0;
-    for (prep, name) in [(f10x, "gd32f10x"), (f1x0, "gd32f1x0")] {
+    for (prep, name, chip) in [
+        (f10x, "gd32f10x", "gd32f103c8"),
+        (f1x0, "gd32f1x0", "gd32f130c8"),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server =
@@ -788,8 +800,8 @@ fn the_binary_flashes_the_image_a_bundle_holds_for_the_chip() {
         assert!(!ok, "{out}");
         assert!(err.contains("give --yes"), "{err}");
         let line = format!(
-            "image mainboard-gd32 for the chip ({name} 64 KiB), from the bundle built from commit \
-             c0eb25917cd904d5d9ba9307f56cb8251cbb61dd"
+            "image mainboard-{chip} for the chip ({name} 64 KiB), from the bundle built from \
+             commit c0eb25917cd904d5d9ba9307f56cb8251cbb61dd"
         );
         assert!(out.contains(&line), "{out}");
 
@@ -819,7 +831,7 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     let img = image(1024);
     let path = bundle_file(
         "bundle-32k.hbfw",
-        &common::flashable_elf(&img),
+        &img,
         Some(vec![Target {
             family: F::Gd32f1x0,
             flash_kib: 32,
@@ -839,7 +851,7 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     assert!(!ok);
     assert!(err.contains("would refuse a gd32f1x0 32 KiB part"), "{err}");
     // The chip is not the image's: refused naming both.
-    let other = bundle_file("bundle-64k.hbfw", &common::flashable_elf(&img), None);
+    let other = bundle_file("bundle-64k.hbfw", &img, None);
     let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &other, "--yes"], limit);
     assert!(!ok);
     assert!(
@@ -856,13 +868,14 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
 fn firmware_info_prints_the_manifest_and_reads_no_board() {
     let limit = Duration::from_secs(20);
     let elf = common::flashable_elf(&image(64));
-    let path = bundle_file("info.hbfw", &elf, None);
+    let path = bundle_file("info.hbfw", &image(64), None);
     let (ok, out, err) = cli(&["firmware", "info", &path], limit);
     assert!(ok, "{err}");
     assert_eq!(
         out,
         "commit  c0eb25917cd904d5d9ba9307f56cb8251cbb61dd\nbuilt   2026-11-01T17:03:58Z\n\
-         image   mainboard-gd32 (board): gd32f10x 64 KiB, gd32f1x0 64 KiB; 40000 B flashed\n"
+         image   mainboard-gd32f103c8 (board): gd32f10x 64 KiB; 40000 B flashed\n\
+         image   mainboard-gd32f130c8 (board): gd32f1x0 64 KiB; 40000 B flashed\n"
     );
     let elf_path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("info.elf");
     std::fs::write(&elf_path, &elf).unwrap();

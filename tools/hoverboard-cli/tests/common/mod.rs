@@ -8,9 +8,9 @@ pub const GUARD_FILE: &str = include_str!("../../../image-guard-syms.sh");
 /// Where the images are linked.
 pub const BASE: u32 = 0x0800_0000;
 
-/// The universal image's guards, as the packer reads them.
+/// The GD32F130C8 mainboard image's guards, as the packer reads them.
 pub fn release_guards() -> Guards {
-    elf::guards_for(GUARD_FILE, "mainboard-gd32").unwrap()
+    elf::guards_for(GUARD_FILE, "mainboard-gd32f130c8").unwrap()
 }
 
 /// Guard patterns as names an image would carry: text symbols with the patterns' text (anchors
@@ -41,7 +41,7 @@ pub fn names_of(g: &Guards) -> (Vec<String>, Vec<String>) {
     names_for(&all)
 }
 
-/// The universal image's guard names (required and hot).
+/// The GD32F130C8 mainboard image's guard names (required and hot).
 pub fn all_required() -> (Vec<String>, Vec<String>) {
     names_of(&release_guards())
 }
@@ -228,7 +228,7 @@ impl Fixture {
     }
 }
 
-/// An ELF that passes the universal image's guards: `code` (padded to the code floor, all of it
+/// An ELF that passes the GD32F130C8 mainboard image's guards: `code` (padded to the code floor, all of it
 /// data to the `wfi` scan) at the flash base, and every guard name.
 pub fn flashable_elf(code: &[u8]) -> Vec<u8> {
     let g = release_guards();

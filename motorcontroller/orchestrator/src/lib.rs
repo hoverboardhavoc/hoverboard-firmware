@@ -798,7 +798,7 @@ pub struct BoardIdentity {
     /// a board that rebooted from one that did not; a wrap needs exactly 256 boots between two
     /// observations.
     pub boot_tag: u8,
-    /// The part `detect_chip` identified at boot.
+    /// The part this image is built for (its chip descriptor's `chip_tag`).
     pub chip: ChipTag,
     /// Whether the boot status record has an entry (`specs/configured-links.md` section 5): some
     /// configured function did not come up. Published as [`events::EV_CONFIG`] for the whole run.

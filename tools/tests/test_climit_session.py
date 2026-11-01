@@ -177,6 +177,25 @@ class Parsers(unittest.TestCase):
         with self.assertRaises(SystemExit):
             swdobs.parse_nm("20000ac8 00000088 B CTRL_OBS\n")
 
+    def test_image_args(self):
+        # One image per chip, so --chip names the ELF and --elf overrides it; neither is a refusal,
+        # never a default chip.
+        import argparse
+        ap = argparse.ArgumentParser()
+        swdobs.add_image_args(ap)
+        for chip in swdobs.CHIPS:
+            elf = swdobs.image_elf(ap.parse_args(["--chip", chip]))
+            self.assertEqual(elf, os.path.join(swdobs.REPO, "motorcontroller", "target", chip,
+                                               "thumbv7m-none-eabi", "release", "firmware"))
+        self.assertEqual(swdobs.image_elf(ap.parse_args(["--chip", "gd32f103c8", "--elf", "x.elf"])), "x.elf")
+        self.assertIsNone(swdobs.image_elf(ap.parse_args([])))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            ap.parse_args(["--chip", "gd32f999"])
+        with self.assertRaises(SystemExit) as e:
+            swdobs.resolve_symbols_sized(None, who="t")
+        self.assertIn("--chip gd32f103c8|gd32f130c8", str(e.exception.code))
+        self.assertIn("--elf", str(e.exception.code))
+
 
 class Rules(unittest.TestCase):
     def test_limit_counts(self):

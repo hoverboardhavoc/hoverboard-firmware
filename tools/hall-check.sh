@@ -13,10 +13,15 @@
 # load-bearing.
 #
 # Usage:
-#   tools/hall-check.sh                  # master board (the one with the motor staged)
-#   tools/hall-check.sh --board slave
-#   tools/hall-check.sh --keep-rail      # leave the rail ON for a follow-on session
-#   tools/hall-check.sh --addr 0x20000d50  # CTRL_OBS override (default: resolved from the ELF)
+#   tools/hall-check.sh --chip gd32f103c8                # master board (the one with the motor staged)
+#   tools/hall-check.sh --board slave --chip gd32f130c8
+#   tools/hall-check.sh --chip <chip> --keep-rail        # leave the rail ON for a follow-on session
+#   tools/hall-check.sh --addr 0x20000d50                # CTRL_OBS override (no ELF read)
+#
+# CTRL_OBS is resolved from the ELF of the image on the board, and its address differs between the
+# two images, so the chip must be named: --chip gd32f103c8|gd32f130c8 reads
+# motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware, --elf <path> reads another ELF.
+# There is no default chip; with none of --chip, --elf or --addr the tool refuses.
 #
 # Env overrides: PI_HOST (default pi@192.168.0.248), BENCH_OWNER (default $USER, else hoverboardhavoc).
 set -euo pipefail
@@ -24,14 +29,16 @@ set -euo pipefail
 BOARD=master
 KEEP_RAIL=0
 ADDR=""
-ELF="motorcontroller/target/thumbv7m-none-eabi/release/firmware"
+CHIP=""
+ELF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --board) BOARD="${2:?--board needs master|slave}"; shift 2 ;;
     --keep-rail) KEEP_RAIL=1; shift ;;
     --addr) ADDR="${2:?--addr needs a hex address}"; shift 2 ;;
+    --chip) CHIP="${2:?--chip needs gd32f103c8|gd32f130c8}"; shift 2 ;;
     --elf) ELF="${2:?--elf needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "hall-check: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -43,6 +50,16 @@ esac
 
 PI="${PI_HOST:-pi@192.168.0.248}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -z "$ELF" ] && [ -n "$CHIP" ]; then
+  case "$CHIP" in
+    gd32f103c8|gd32f130c8) ELF="$(cd "$SCRIPT_DIR/.." && pwd)/motorcontroller/target/$CHIP/thumbv7m-none-eabi/release/firmware" ;;
+    *) echo "hall-check: --chip must be gd32f103c8|gd32f130c8 (got '$CHIP')" >&2; exit 2 ;;
+  esac
+fi
+if [ -z "$ADDR" ] && [ -z "$ELF" ]; then
+  echo "hall-check: name the image on the board: --chip gd32f103c8|gd32f130c8, or --elf <path> (or --addr)" >&2
+  exit 2
+fi
 LOCK="$SCRIPT_DIR/bench-lock.sh"
 OWNER="${BENCH_OWNER:-${USER:-hoverboardhavoc}}"
 TOOK_LOCK=0
@@ -66,7 +83,7 @@ trap cleanup EXIT
 if [ -z "$ADDR" ]; then
   NM="$(ls ~/.rustup/toolchains/*/lib/rustlib/*/bin/llvm-nm 2>/dev/null | head -1)"
   [ -n "$NM" ] || NM=$(command -v arm-none-eabi-nm || command -v nm)
-  [ -f "$ELF" ] || { echo "hall-check: no ELF at $ELF (build it, or pass --addr)" >&2; exit 1; }
+  [ -f "$ELF" ] || { echo "hall-check: no ELF at $ELF (build it with cargo image-f103/image-f130, or pass --addr)" >&2; exit 1; }
   ADDR="0x$("$NM" "$ELF" | awk '$3=="CTRL_OBS"{print $1}')"
   [ "$ADDR" != "0x" ] || { echo "hall-check: CTRL_OBS not found in $ELF" >&2; exit 1; }
 fi

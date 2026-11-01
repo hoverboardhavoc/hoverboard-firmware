@@ -348,8 +348,8 @@ class Links(unittest.TestCase):
     def pins(self, links):
         return [None if l is None else (l["tx"], l["rx"]) for l in links]
 
-    def test_the_routing_table_mirrors_runtime_hals_rows(self):
-        # runtime-hal src/pincap.rs, USART_PINS (ce6ea27): PA2/PA3 USART1 and PB6/PB7 USART0 on
+    def test_the_routing_table_mirrors_the_hals_rows(self):
+        # motorcontroller/hal/src/pincap.rs, USART_PINS: PA2/PA3 USART1 and PB6/PB7 USART0 on
         # both families, PB10/PB11 USART2 on the F10x only.
         for family in ("F1x0", "F10x"):
             self.assertEqual(rp.usart_route(family, "PA2", "PA3"), "USART1", family)
@@ -379,7 +379,7 @@ class Links(unittest.TestCase):
         self.assertEqual(self.pins(links), [("PB6", "PB7"), ("PB10", "PB11")])
 
     def test_an_unroutable_pair_stays_unmapped_with_its_reason(self):
-        # Layout 2.1.3: USART1 on PA2/PA15, which runtime-hal does not route. Link 0 stays empty
+        # Layout 2.1.3: USART1 on PA2/PA15, which the hal does not route. Link 0 stays empty
         # (links are numbered before routability is asked) and its USART0 is still link 1.
         values = dict(self.USART0, USART1_TX="PA2", USART1_RX="PA15")
         links, empty, reasons = rp.link_assignment(values, "F1x0")

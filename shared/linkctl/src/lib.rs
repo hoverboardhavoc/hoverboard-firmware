@@ -167,15 +167,15 @@ fn rd_i32(b: &[u8], off: usize) -> i32 {
 // --- CYCLIC_STATE (34 B: 16 B committed + a 12 B appended block + the i32 wheel_rate + the u16
 // machine digest) --------------------------------------------------------------------------------
 
-/// The part a board reports in [`CyclicObs::chip`]: what `detect_chip` identified at boot
+/// The part a board reports in [`CyclicObs::chip`]: the chip its image is built for
 /// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 23). A controller needs it to
 /// know which capability table predicts this board's layout verdict, and the board is the only
 /// thing that knows: the three fleet parts differ in pin bonding, gate maps and ADC channels,
 /// and nothing else on the wire distinguishes them.
 ///
 /// The tags are OUR allocation, not a silicon id: the GD32 parts carry no readable part number,
-/// so the firmware derives the tag from what the detect probe MEASURED (the family discriminator
-/// plus the per-instance advanced-timer count, [`ChipTag::from_detected`]).
+/// so each image reports the tag its chip's descriptor carries (`hal::descriptor::DESCRIPTOR`'s
+/// `chip_tag`, specs/hal.md section 4.2).
 ///
 /// [`ChipTag::Unknown`] is the fail-safe for a byte this build does not allocate, exactly as
 /// [`DriveKind::Neutral`] is for an unknown kind byte: a controller that cannot name the part
@@ -210,29 +210,6 @@ impl ChipTag {
             _ => ChipTag::Unknown,
         }
     }
-
-    /// The fleet part these two MEASURED detection facts name: whether the family probe matched
-    /// F10x (false = F1x0) and the per-instance advanced-timer count the probe counted
-    /// (`runtime_hal::McuDescriptor::adv_timers`).
-    ///
-    /// Those two answer it for the whole fleet: the F1x0 family has one 48-pin member here, and
-    /// the two F10x members differ by exactly the second advanced timer (the 12-FET's TIMER7
-    /// drives its second motor's gates, which is also why the count is the fact a layout cares
-    /// about). The flash density would separate them too, but the timer count is the capability
-    /// the parts are told apart BY everywhere else in this tree.
-    ///
-    /// A combination the fleet has no member for is [`ChipTag::Unknown`] rather than the nearest
-    /// part: a guessed part is a wrong capability table, and the layout editor would predict a
-    /// verdict the board will not give.
-    #[inline]
-    pub const fn from_detected(f10x_family: bool, adv_timers: u8) -> ChipTag {
-        match (f10x_family, adv_timers) {
-            (true, 1) => ChipTag::F103C8,
-            (true, 2) => ChipTag::F103RC,
-            (false, 1) => ChipTag::F130C8,
-            _ => ChipTag::Unknown,
-        }
-    }
 }
 
 /// The APPENDED observation block (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets
@@ -261,7 +238,7 @@ pub struct CyclicObs {
     /// did not. The full `u32` is not carried: a wrap needs exactly 256 boots between two
     /// observations.
     pub boot_tag: u8,
-    /// The part `detect_chip` identified at boot ([`ChipTag`]).
+    /// The part the board's image is built for ([`ChipTag`]).
     pub chip: ChipTag,
     /// This wheel's LIVE lifetime travel, in ABSOLUTE hall edges: the total the board's store
     /// last recorded plus every edge counted since it booted (`specs/odometer.md`). Reversing
@@ -879,20 +856,6 @@ mod tests {
         for byte in [4u8, 0x7F, 0xFF] {
             assert_eq!(ChipTag::from_u8(byte), ChipTag::Unknown, "byte {byte:#04x}");
         }
-    }
-
-    /// The fleet's three parts from the two facts the detect probe MEASURES, and `Unknown` for a
-    /// combination no fleet part has, rather than the nearest one.
-    #[test]
-    fn chip_tag_from_the_measured_detection_facts() {
-        assert_eq!(ChipTag::from_detected(true, 1), ChipTag::F103C8);
-        assert_eq!(ChipTag::from_detected(true, 2), ChipTag::F103RC);
-        assert_eq!(ChipTag::from_detected(false, 1), ChipTag::F130C8);
-        // No fleet member: an F1x0 with two advanced timers, or a count the probe cannot have
-        // measured. A guessed part is a wrong capability table.
-        assert_eq!(ChipTag::from_detected(false, 2), ChipTag::Unknown);
-        assert_eq!(ChipTag::from_detected(true, 0), ChipTag::Unknown);
-        assert_eq!(ChipTag::from_detected(false, 0), ChipTag::Unknown);
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! Three additions over the dummy runner, all here:
 //! 1. a **persistent-flash two-phase run** ([`StoreEmu::run_phase`]);
 //! 2. a mapped **FMC peripheral model** ([`crate::fmc_model`]) at `0x4002_2000`, servicing the exact
-//!    registers `runtime-hal::fmc` drives, backing the flash region with the mapped memory so the
+//!    registers `hal::fmc` drives, backing the flash region with the mapped memory so the
 //!    model and the real driver provably agree;
 //! 3. a host **"load crafted region image"** path ([`StoreEmu::load_region`]) for the planted
 //!    torn-write / `Full` / compaction scenarios;

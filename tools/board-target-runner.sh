@@ -14,6 +14,7 @@ echo "It is built for thumbv7m-none-eabi, the default target in motorcontroller/
 echo "and this machine cannot execute it. From the repository root:" >&2
 echo >&2
 echo "  host tests      ./tools/host-test.sh               (forwards cargo args: -p base, a test name)" >&2
-echo "  shipping image  cd motorcontroller && cargo image" >&2
-echo "  onto a board    tools/flash.sh <image>             (bench lock + image guards + OpenOCD)" >&2
+echo "  shipping image  cd motorcontroller && cargo image-f103   (GD32F103C8)" >&2
+echo "                  cd motorcontroller && cargo image-f130   (GD32F130C8)" >&2
+echo "  onto a board    CHIP=<chip> tools/flash.sh <image> (bench lock + image guards + OpenOCD)" >&2
 exit 2

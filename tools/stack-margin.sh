@@ -8,9 +8,13 @@
 # close the board has come to overwriting CTRL_OBS itself with a stack frame.
 #
 # Usage:
-#   tools/stack-margin.sh [--board master|slave|offroad-master|offroad-slave] [--elf <path>]
-#                         [--watch <seconds>]
+#   tools/stack-margin.sh [--board master|slave|offroad-master|offroad-slave]
+#                         (--chip gd32f103c8|gd32f130c8 | --elf <path>) [--watch <seconds>]
 #   tools/stack-margin.sh --selftest      # decode self-check, no hardware, no lock
+#
+# CTRL_OBS sits at a different address in each chip's image, so the ELF must be the image on the
+# board: --chip (or CHIP=) reads motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware,
+# --elf (or ELF=) another ELF. There is no default chip; with neither the read is refused.
 #
 # READ-ONLY, and deliberately so. It runs `mdw` in an `init`/`shutdown` session and NEVER halts the
 # core, so it does not come under the standing armed-halt rule the way tools/flash.sh does (that rule
@@ -38,16 +42,18 @@ NEED=$(( (STACK_WORD + 1) * 4 ))     # 124 B: the block must be at least this lo
 MARGIN_FLOOR=250
 
 BOARD="${BOARD:-master}"
-ELF="${ELF:-target/thumbv7m-none-eabi/release/firmware}"
+CHIP="${CHIP:-}"
+ELF="${ELF:-}"
 WATCH=0
 SELFTEST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --board) BOARD="${2:?--board needs master|slave|offroad-master|offroad-slave}"; shift 2 ;;
+    --chip)  CHIP="${2:?--chip needs gd32f103c8|gd32f130c8}"; shift 2 ;;
     --elf)   ELF="${2:?--elf needs a path}"; shift 2 ;;
     --watch) WATCH="${2:?--watch needs seconds}"; shift 2 ;;
     --selftest) SELFTEST=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "stack-margin: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -276,9 +282,22 @@ esac
 # move, which is exactly what this instrument exists to track. The SIZE is checked too, because
 # `mdw` reads MEMORY rather than the struct, so an ELF that predates this field returns plausible
 # garbage for word 30 rather than an error (the tools/imu-tilt.py precedent).
+if [ -z "$ELF" ]; then
+  case "$CHIP" in
+    gd32f103c8|gd32f130c8)
+      ELF="$(cd "$(dirname "$0")/.." && pwd)/motorcontroller/target/$CHIP/thumbv7m-none-eabi/release/firmware" ;;
+    "")
+      echo "stack-margin: REFUSED - no image named. Pass --chip gd32f103c8|gd32f130c8 (the chip on the" >&2
+      echo "stack-margin: board) or --elf <path>: CTRL_OBS sits at a different address in each image." >&2
+      exit 2 ;;
+    *)
+      echo "stack-margin: --chip must be gd32f103c8|gd32f130c8 (got '$CHIP')" >&2
+      exit 2 ;;
+  esac
+fi
 if [ ! -r "$ELF" ]; then
   echo "stack-margin: REFUSED - cannot read ELF '$ELF'." >&2
-  echo "stack-margin: build it with \`cargo image\` or pass --elf <path>." >&2
+  echo "stack-margin: build it with \`cargo image-f103\` or \`cargo image-f130\` (in motorcontroller/), or pass --elf <path>." >&2
   exit 2
 fi
 nm_tool=""
@@ -326,7 +345,7 @@ fi
 trap '[ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1 || true' EXIT
 
 echo "stack-margin: board=$BOARD runner=$RUNNER via $PROBE_LABEL on $HOST_LABEL"
-echo "stack-margin: CTRL_OBS=0x$OBS_ADDR size=${OBS_SIZE} B (${READ_WORDS} words) from $(basename "$ELF")"
+echo "stack-margin: CTRL_OBS=0x$OBS_ADDR size=${OBS_SIZE} B (${READ_WORDS} words) from $ELF"
 
 if [ "$WATCH" -gt 0 ]; then
   # Repeat until the margin stops moving, the way the round-9/11b soaks were read: a mark that is

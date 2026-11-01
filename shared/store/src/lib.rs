@@ -10,8 +10,8 @@
 //! dependency), so the record codec, log scan, append, and compaction are fully host-tested against an
 //! in-RAM [`MockFlash`](flash::MockFlash) that models the silicon write rules (erase fills `0xFFFF`;
 //! `program` is halfword-aligned and write-once). The on-target `FmcFlash` adapter (the only
-//! `runtime-hal` dependency) is a thin, target-gated adapter added in Pass 2; this crate is
-//! `base`-only.
+//! `hal` dependency, behind the `hal` feature) is a thin, target-gated adapter; this crate is
+//! otherwise `base`-only.
 //!
 //! `no_std`; the host test suite uses `std`.
 
@@ -34,14 +34,10 @@ pub mod value;
 #[cfg(feature = "test-fields")]
 pub mod scenarios;
 
-// The on-target FmcFlash adapter, target-gated to thumbv7m so the host build (which uses MockFlash)
-// never compiles it or links a HAL: over `hal` with the `hal` feature (the per-chip images), over
-// runtime-hal without it (the universal image). `fmc_flash_universal.rs` is the runtime-hal copy and
-// goes with the universal image (specs/hal.md section 9, step 2).
+// The on-target FmcFlash adapter over `hal`, behind the `hal` feature (the firmware images and
+// store-test enable it with their chip feature) and target-gated to thumbv7m, so the host build
+// (which uses MockFlash) never compiles it or links a HAL.
 #[cfg(all(target_arch = "arm", target_os = "none", feature = "hal"))]
-pub mod fmc_flash;
-#[cfg(all(target_arch = "arm", target_os = "none", not(feature = "hal")))]
-#[path = "fmc_flash_universal.rs"]
 pub mod fmc_flash;
 
 #[cfg(test)]
@@ -77,7 +73,7 @@ pub use key::{Key, Scalar, Type, ERASED_TAG};
 pub use store::{scalar_or_default, DynError, Store, StoreError, Stored};
 pub use value::Value;
 
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[cfg(all(target_arch = "arm", target_os = "none", feature = "hal"))]
 pub use fmc_flash::FmcFlash;
 
 /// Drives every tier's SCALAR scenarios: it takes a `&mut Flash` and the host-packed

@@ -9,12 +9,17 @@
 # imu-tilt.py in the foreground (your args pass straight through).
 #
 # Usage:
-#   tools/tilt-session.sh                         # live strip-chart readout, slave board
-#   tools/tilt-session.sh --checklist             # the guided pitch sign checklist
-#   tools/tilt-session.sh --checklist --record specs/bench-evidence/<date>/imu-tilt.csv
-#   tools/tilt-session.sh --board master          # use the master probe cfg (master-IMU probe work)
-#   tools/tilt-session.sh --keep-rail             # leave the rail ON for a follow-on session
-#   tools/tilt-session.sh --dry-run --checklist   # print every command, touch nothing
+#   tools/tilt-session.sh --chip gd32f130c8                 # live strip-chart readout, slave board
+#   tools/tilt-session.sh --chip <chip> --checklist         # the guided pitch sign checklist
+#   tools/tilt-session.sh --chip <chip> --checklist --record specs/bench-evidence/<date>/imu-tilt.csv
+#   tools/tilt-session.sh --board master --chip gd32f103c8  # the master probe cfg (master-IMU probe work)
+#   tools/tilt-session.sh --chip <chip> --keep-rail         # leave the rail ON for a follow-on session
+#   tools/tilt-session.sh --chip <chip> --dry-run --checklist   # print every command, touch nothing
+#
+# --chip gd32f103c8|gd32f130c8 is required and names the chip on the board: the session builds that
+# chip's image (`cargo image-f103` or `cargo image-f130`) and imu-tilt.py resolves CTRL_OBS from its
+# ELF, motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware. The two images place
+# CTRL_OBS differently, and there is no default chip.
 #
 # Any argument this script does not recognize is forwarded verbatim to tools/imu-tilt.py, so
 # `--checklist`, `--record FILE`, `--no-graph`, `--addr`, etc. all just work.
@@ -32,15 +37,13 @@ IMU_TILT="$SCRIPT_DIR/imu-tilt.py"
 PI="${PI_HOST:-pi@192.168.0.248}"
 PORT="${TILT_PORT:-6666}"
 OWNER="${BENCH_OWNER:-${USER:-hoverboardhavoc}}"
-ELF_REL="motorcontroller/target/thumbv7m-none-eabi/release/firmware"
-ELF="$REPO_DIR/$ELF_REL"
-
 BOARD="slave"
+CHIP=""
 KEEP_RAIL=0
 DRY_RUN=0
 PASS=()   # forwarded to imu-tilt.py
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -48,6 +51,8 @@ while [ $# -gt 0 ]; do
     --dry-run)   DRY_RUN=1; shift ;;
     --board)     BOARD="${2:?--board needs master|slave}"; shift 2 ;;
     --board=*)   BOARD="${1#*=}"; shift ;;
+    --chip)      CHIP="${2:?--chip needs gd32f103c8|gd32f130c8}"; shift 2 ;;
+    --chip=*)    CHIP="${1#*=}"; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           PASS+=("$1"); shift ;;
   esac
@@ -57,6 +62,16 @@ case "$BOARD" in
   master|slave) ;;
   *) echo "tilt-session: --board must be master|slave (got '$BOARD')" >&2; exit 2 ;;
 esac
+
+# The image to build and read: the chip names both the cargo alias and the ELF it produces.
+case "$CHIP" in
+  gd32f103c8) IMAGE_ALIAS="image-f103" ;;
+  gd32f130c8) IMAGE_ALIAS="image-f130" ;;
+  "") echo "tilt-session: --chip gd32f103c8|gd32f130c8 is required (the chip on the board; each has its own image)" >&2; exit 2 ;;
+  *)  echo "tilt-session: --chip must be gd32f103c8|gd32f130c8 (got '$CHIP')" >&2; exit 2 ;;
+esac
+ELF_REL="motorcontroller/target/$CHIP/thumbv7m-none-eabi/release/firmware"
+ELF="$REPO_DIR/$ELF_REL"
 
 # Probe config: single source of truth is tools/flash.sh. Pull the exact OC_CFG line for this board
 # out of it rather than re-declaring the probe wiring here (so a bench-probe change lands in one
@@ -160,14 +175,15 @@ cmd "sleep 3   (rail settle)"
 # --------------------------------------------------------------------------------------------------
 log "ensure local firmware ELF"
 # cargo build is incremental (a no-op when already current), so this also covers the 'stale' case.
-# `cargo image` (the motorcontroller/.cargo/config.toml alias) and NOT a plain
-# `cargo build --release`: the shipping image is the build-std build, and this ELF is what imu-tilt.py resolves symbol ADDRESSES from before
+# `cargo image-f103` / `cargo image-f130` (the motorcontroller/.cargo/config.toml aliases) and NOT a
+# plain `cargo build --release`: the shipping image is the build-std build of one chip, and this ELF
+# is what imu-tilt.py resolves symbol ADDRESSES from before
 # reading them over SWD. A non-build-std ELF links the same source at different addresses, so the
 # readout would silently target the wrong words on a board carrying the real image.
 # Run from motorcontroller/: the alias, the default target and the -Tlink.x flag all live in
 # motorcontroller/.cargo/config.toml, which cargo discovers from the working directory, not from
 # --manifest-path.
-sh_run bash -c "cd \"$REPO_DIR/motorcontroller\" && cargo image"
+sh_run bash -c "cd \"$REPO_DIR/motorcontroller\" && cargo $IMAGE_ALIAS"
 if [ "$DRY_RUN" = 0 ] && [ ! -f "$ELF" ]; then
   echo "tilt-session: build did not produce $ELF" >&2
   exit 1

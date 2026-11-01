@@ -1,5 +1,6 @@
 //! Controlled ISR-load repro for the GD32 I2C master-receive race (the 2026-07-18 `imu_live=0`
-//! root cause; see runtime-hal `src/i2c.rs` module docs).
+//! root cause; see the `hal` crate's `src/i2c.rs`). One image per chip on `hal` (the `gd32f130c8`
+//! or `gd32f103c8` feature, with `hardware`).
 //!
 //! The integrated firmware's 14-byte IMU burst wedged the I2C block on silicon under SysTick +
 //! DMA interrupt load, while the identical burst runs error-free in the interrupt-free
@@ -22,7 +23,7 @@
 //! | off | field | meaning |
 //! |---|---|---|
 //! | 0x00 | `magic` | `0x4C51_5249` ("IRQL") once the loop is running (or with a fatal `err`) |
-//! | 0x04 | `err` | fatal bring-up error (1 detect, 2 clock, 3 gpio, 4 i2c, 5 probe, 7 init), 0 ok |
+//! | 0x04 | `err` | fatal bring-up error (1 `Chip::take`, 2 clock, 3 gpio, 4 i2c, 5 probe, 7 init), 0 ok |
 //! | 0x08 | `samples` | successful 14-byte bursts |
 //! | 0x0C | `errs` | failed bursts (running count) |
 //! | 0x10 | `first_err_stat0` | I2C STAT0 at the first failure |
@@ -43,14 +44,12 @@ mod firmware {
     use cortex_m::peripheral::syst::SystClkSource;
     use cortex_m_rt::{entry, exception};
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
-    // which cortex-m-rt no longer provides once its `device` feature is on.
-    use vectors as _;
 
     use embedded_hal::i2c::I2c as _;
+    use hal::clock::{self, ClockConfig};
+    use hal::descriptor::DESCRIPTOR;
+    use hal::{Chip, I2c, I2cMode, PeriphLabel};
     use imu::{Config, Imu, CLONE_2E};
-    use runtime_hal::clock::{self, ClockConfig};
-    use runtime_hal::{detect_chip, I2c, I2cMode, PeriphLabel};
     use test_shared::obs_store;
 
     /// The production 72 MHz tree (matching the integrated image's clock regime).
@@ -67,9 +66,16 @@ mod firmware {
     /// confirmed a sub-byte-time preemption is harmless (66k bursts, 0 errors, pre-fix driver).
     const IRQ_BURN_CYCLES: u32 = 72 * 120;
 
-    /// The I2C0 base for the first-error register snapshot (the shared family base; reading it
-    /// raw here keeps the snapshot independent of the driver under test).
-    const I2C0_BASE: u32 = 0x4000_5400;
+    /// The IMU bus pins, packed `port << 4 | pin` (`Chip::pin`): PB6 = SCL, PB7 = SDA.
+    const PB6: u8 = 0x16;
+    const PB7: u8 = 0x17;
+
+    /// The I2C0 base for the first-error register snapshot, from the chip descriptor (reading the
+    /// registers raw here keeps the snapshot independent of the driver under test).
+    const I2C0_BASE: u32 = match DESCRIPTOR.addrs.get(PeriphLabel::I2c0) {
+        Some(b) => b,
+        None => panic!("the descriptor has no I2C0 base"),
+    };
 
     #[repr(C)]
     pub struct Obs {
@@ -128,22 +134,18 @@ mod firmware {
     fn main() -> ! {
         let mut cp = cortex_m::Peripherals::take().unwrap();
 
-        let chip = match detect_chip() {
-            Ok(c) => c,
-            Err(_) => fail(1),
-        };
+        let Some(chip) = Chip::take() else { fail(1) };
         if clock::configure_tree(&chip, &CLOCK).is_err() {
             fail(2);
         }
-        let gpiob = match chip.gpiob() {
-            Ok(p) => p.split(),
-            Err(_) => fail(3),
+        let (Ok(scl), Ok(sda)) = (chip.pin(PB6), chip.pin(PB7)) else {
+            fail(3)
         };
         let mut i2c = match I2c::new(
             &chip,
             &CLOCK,
             PeriphLabel::I2c0,
-            (gpiob.pb6, gpiob.pb7),
+            (scl, sda),
             I2cMode::standard(I2C_HZ),
         ) {
             Ok(b) => b,

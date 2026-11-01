@@ -79,13 +79,9 @@ impl ImageKind {
 /// cannot report.
 const ROLES: [&str; 2] = ["mainboard", "sideboard"];
 
-/// The universal image's name, the one board image without a chip in it (section 3.2), until
-/// `hal.md` step 2 retires it.
-pub const UNIVERSAL: &str = "mainboard-gd32";
-
-/// Check `name` against the `<role>-<chip>` form (section 3.2). With
-/// `features` (the image's own table, when it is packed), the chip must be one of them, so the table
-/// stays the one owner of the chip; the universal image is the exception and carries none.
+/// Check `name` against the `<role>-<chip>` form (section 3.2). With `features` (the image's own
+/// table, when it is packed), the chip must be its one chip feature, so the table stays the one
+/// owner of the chip.
 pub fn check_name(name: &str, features: Option<&[String]>) -> Result<(), String> {
     let bad = || {
         format!(
@@ -106,14 +102,10 @@ pub fn check_name(name: &str, features: Option<&[String]>) -> Result<(), String>
     if let Some(features) = features {
         let is_chip = |f: &&String| f.starts_with("gd32") || f.starts_with("mm32");
         let chips: Vec<&String> = features.iter().filter(is_chip).collect();
-        let ok = if name == UNIVERSAL {
-            chips.is_empty()
-        } else {
-            chips.len() == 1 && chips[0] == chip
-        };
-        if !ok {
+        if !(chips.len() == 1 && chips[0] == chip) {
             return Err(format!(
-                "image name {name} names the chip {chip}, but its table builds it with the                  features {features:?}: the chip in the name is the one chip feature there"
+                "image name {name} names the chip {chip}, but its table builds it with the \
+                 features {features:?}: the chip in the name is the one chip feature there"
             ));
         }
     }

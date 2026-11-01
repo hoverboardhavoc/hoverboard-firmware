@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The firmware binary, in two forms (Cargo.toml `[features]`):
-//!
-//! - **the universal image** (no chip feature, `cargo image`): ONE image that detects which GD32 it
-//!   is on at boot and runs everywhere (F103 master, F130 slave, 12-FET), on runtime-hal
-//!   (specs/firmware.md);
-//! - **one image per chip** (`gd32f103c8`, `gd32f130c8`; `cargo image-f103`, `cargo image-f130`), on
-//!   the `hal` crate (specs/hal.md): no detection, the chip's flash vector table, its own flash and
-//!   SRAM. The code differs from the universal image's only where detection was used (hal.md
-//!   section 4.2), each such place behind `cfg(universal_image)`.
+//! The firmware binary: one image per chip, chosen by its chip feature (Cargo.toml `[features]`:
+//! `gd32f103c8`, `gd32f130c8`; `cargo image-f103`, `cargo image-f130`), on the `hal` crate
+//! (specs/hal.md). Each image is built for its chip: no detection, the chip's flash vector table,
+//! its own flash and SRAM.
 //!
 //! It wires the libraries it does not own (`store` + `FmcFlash`, `net`'s L3 `Responder`, `link`'s L2,
-//! the `swd-mailbox`, and `runtime-hal`'s detect / clock / USART) into one cooperative service loop:
-//! boot-safe -> init the SWD mailbox -> detect -> 72 MHz clock -> mount the store -> **bring up
-//! what the layout configures** (the links, the IMU, the inputs, the motor) -> service them forever.
+//! the `swd-mailbox`, and `hal`'s chip context / clock / USART) into one cooperative service loop:
+//! boot-safe -> init the SWD mailbox -> take the chip -> 72 MHz clock -> mount the store -> **bring
+//! up what the layout configures** (the links, the IMU, the inputs, the motor) -> service them
+//! forever.
 //!
 //! **Three ports** (`specs/configured-links.md` section 4). The SWD mailbox is always port 0 (a
 //! debugger, a host or the hoverboard bridge attaches over MEM-AP, no wiring); ports 1 and 2 are the
@@ -48,16 +44,18 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
-// Which image this build is (Cargo.toml `[features]`): no chip feature is the universal image on
-// runtime-hal (cfg `universal_image`, set by build.rs), one chip feature is that chip's image on
-// `hal` (specs/hal.md). Two is refused.
+// Which image this build is (Cargo.toml `[features]`): one chip feature is that chip's image on
+// `hal` (specs/hal.md). None or two is refused on the target; the host build needs none.
 #[cfg(all(feature = "gd32f103c8", feature = "gd32f130c8"))]
-compile_error!("firmware: enable at most one chip feature (gd32f103c8 or gd32f130c8)");
-
-// The universal image names its HAL `hal` too, so the code below names one crate whichever image
-// it builds; the per-chip images get `hal` as the dependency itself.
-#[cfg(all(target_os = "none", universal_image))]
-extern crate runtime_hal as hal;
+compile_error!("firmware: enable one chip feature (gd32f103c8 or gd32f130c8), not two");
+#[cfg(all(
+    target_os = "none",
+    not(any(feature = "gd32f103c8", feature = "gd32f130c8"))
+))]
+compile_error!(
+    "firmware: an image is built for one chip; enable gd32f103c8 or gd32f130c8 \
+     (cargo image-f103, cargo image-f130)"
+);
 
 mod arm;
 mod layout;
@@ -87,12 +85,6 @@ mod firmware {
     use cortex_m_rt::entry;
     use embedded_hal::digital::OutputPin;
     use hal::clock::{self, ClockConfig};
-    #[cfg(universal_image)]
-    use hal::descriptor::ClockPath;
-    #[cfg(universal_image)]
-    use hal::detect_chip;
-    #[cfg(universal_image)]
-    use hal::irq::{install, RamVectorTable, MAX_VECTORS};
     use hal::{
         DescriptorError, DmaTx, Floating, FreeWatchdog, I2c, I2cMode, Input, InputGroup,
         PeriphLabel, Pin as GpioPin, RingBufferedRx, SplitSerial, Usart, WdgTimeout,
@@ -115,11 +107,6 @@ mod firmware {
         IMU_AXIS_SIGN, IMU_GYRO_BIAS,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
-    // Linking-only: the universal image's `__INTERRUPTS` flash vector table (motorcontroller/vectors),
-    // which cortex-m-rt no longer provides once its `device` feature is on. A per-chip image links
-    // its chip's table from `hal`.
-    #[cfg(universal_image)]
-    use vectors as _;
 
     /// This firmware's version, reported in `IDENTITY`.
     const FW_VER: u16 = 0x0001;
@@ -190,16 +177,6 @@ mod firmware {
     /// configured or did not come up is still a REGISTERED port: an emission to it drops, and a
     /// `PROBE_PORTS` reports it `empty`.
     const N_PORTS: u8 = 1 + store::LINKS;
-
-    /// VTOR alignment invariant: the `RAM_VECTORS` static (packed by memory.x's `.ramtables`
-    /// section) carries `RamVectorTable`'s own alignment, and VTOR accepts a table aligned to a
-    /// power of two no smaller than the table itself, so the type is VTOR-valid as long as its
-    /// alignment covers its size (a runtime guard at the call site double-checks the placed
-    /// address). Stated against the type, not a number: the HAL sizes the table (64 slots, 256 B
-    /// since 2026-10-24), and this holds whatever it picks.
-    #[cfg(universal_image)]
-    const _: () =
-        assert!(core::mem::align_of::<RamVectorTable>() >= core::mem::size_of::<RamVectorTable>());
 
     /// The USART a link's pin pair drives on THIS chip, if the HAL can bring that instance up: the
     /// one place the firmware asks the pin model "what is on these pins, and can I use it?".
@@ -314,17 +291,9 @@ mod firmware {
     );
     const _: () = HALL_DEBOUNCE_WINDOW_SURVIVES_THE_PERIOD_RATE;
 
-    /// The RAM vector table (.bss, zero-init; the VTOR alignment rides the type). A plain
-    /// static so its initialization costs no stack (see the bring-up comment at its use).
-    #[cfg(universal_image)]
-    static mut RAM_VECTORS: RamVectorTable = RamVectorTable {
-        slots: [0; MAX_VECTORS],
-    };
-
-    /// Link 0's DMA RX ring. NOT `.bss`: it lives in the 192 B alignment gap between the SWD
-    /// mailbox carve and the 256-aligned RAM vector table (`memory.x`, `.ramgap`; shrink round 7),
-    /// which cortex-m-rt's zero loop never visits, so the link bring-up zeroes it explicitly at the
-    /// one place the `&'static mut` is formed. Nothing reads a ring byte the DMA has not written
+    /// Link 0's DMA RX ring. NOT `.bss`: it lives in cortex-m-rt's `.uninit` (shrink round 7), which
+    /// the zero loop never visits, so the link bring-up zeroes it explicitly at the one place the
+    /// `&'static mut` is formed. Nothing reads a ring byte the DMA has not written
     /// (the reader stays behind the live write index), so the zeroing keeps the SWD-visible bytes
     /// identical to the `.bss` days rather than guarding a read.
     #[link_section = ".uninit.DMA_RING"]
@@ -413,7 +382,7 @@ mod firmware {
     static TX_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
 
     /// Why this board last reset: the RCU `RSTSCK` cause field, read and cleared in `main`
-    /// immediately after `detect_chip` resolves the RCU base, at the register bit positions the
+    /// immediately after the chip context gives the RCU base, at the register bit positions the
     /// manuals give. Published as `CTRL_OBS` word 38, where the field's documentation lives.
     ///
     /// `.bss`, written once on the boot path and read-only thereafter, so the 250 Hz publish
@@ -544,41 +513,26 @@ mod firmware {
     #[no_mangle]
     static INJECT_UART_LINE_ERROR: AtomicU32 = AtomicU32::new(0);
 
-    /// The 250 Hz tick body (R1 verbatim): advance the scheduler one tick, nothing else.
-    /// Registered through the HAL's G7 tick seam (`hal::register_tick_handler`), NOT a
-    /// `#[exception] SysTick`: `irq::install()` flips VTOR to the HAL-owned RAM vector table,
-    /// whose SysTick slot routes to the HAL's `on_systick` -> this registered callback, so a
-    /// flash-table exception symbol would be dead code (the slice-7 P0, silicon-found: the HAL
-    /// tick counter advanced while the firmware's never moved). The HAL table is the single
-    /// owner of the vector; this seam is the supported wiring. Lowest priority (0xF0, set at
-    /// bring-up) so comms IRQs preempt it.
-    extern "C" fn systick_tick_cb() {
+    /// The 250 Hz tick (R1 verbatim), the SysTick vector in the chip's flash vector table: the
+    /// entry count `CTRL_OBS` publishes, then advance the scheduler one tick, nothing else. Lowest
+    /// priority (0xF0, set at bring-up) so comms IRQs preempt it.
+    #[cortex_m_rt::exception]
+    fn SysTick() {
+        hal::irq::SYSTICK_ISR_METRIC.record();
         // SAFETY: shared access to the scheduler static; `tick(&self)` is the crate's ISR-safe
         // entry (atomics inside), sound against the thread-side `dispatch(&self)`.
         unsafe { (*addr_of!(SCHEDULER)).tick() };
         TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A per-chip image's SysTick vector (its flash table; no RAM table to register into): the
-    /// entry count `CTRL_OBS` publishes, then the tick body above, exactly what the universal
-    /// image's HAL `on_systick` does for it.
-    #[cfg(not(universal_image))]
-    #[cortex_m_rt::exception]
-    fn SysTick() {
-        hal::irq::SYSTICK_ISR_METRIC.record();
-        systick_tick_cb();
-    }
-
     /// The descriptor's identity bytes are values the wire allocates: the `NODE_HELLO` mcu byte is
     /// one of `net`'s family tags and the cyclic chip tag names a part (`ChipTag::Unknown` is the
-    /// tag for "cannot name it", which a per-chip image always can).
-    #[cfg(not(universal_image))]
+    /// tag for "cannot name it", which an image built for its chip always can).
     const CHIP_IDENTITY_IS_ALLOCATED: () = {
         let d = &hal::descriptor::DESCRIPTOR;
         assert!(d.node_mcu == MCU_F10X || d.node_mcu == MCU_F1X0);
         assert!(!matches!(ChipTag::from_u8(d.chip_tag), ChipTag::Unknown));
     };
-    #[cfg(not(universal_image))]
     const _: () = CHIP_IDENTITY_IS_ALLOCATED;
 
     /// The plan-driven input pins (integration.md, "The input task"): a resolve-once
@@ -1685,7 +1639,7 @@ mod firmware {
     /// round 7 that frame is `boot`'s and pops; it was `main`'s and permanent).
     ///
     /// The argument list is the Shell's boot inputs one for one (the orchestrator constructor's
-    /// inputs, then the bus, the device, the input pins, the boot ordinal and the detected part);
+    /// inputs, then the bus, the device, the input pins, the boot ordinal and the part);
     /// bundling them into a struct for the lint would be a type with this one caller.
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
@@ -2055,7 +2009,7 @@ mod firmware {
     static mut BOARD_OBS: StatusRecord = StatusRecord::new();
 
     // ---------------------------------------------------------------------------------------------
-    // Serials: the L2 links ride runtime-hal's embedded-io adapters (specs/firmware.md, "The link
+    // Serials: the L2 links ride hal's embedded-io adapters (specs/firmware.md, "The link
     // serials"): SplitSerial<RingBufferedRx> for the inter-board UART, the mailbox's own serial for
     // port 0. There is no firmware-local serial wrapper.
     // ---------------------------------------------------------------------------------------------
@@ -2066,7 +2020,7 @@ mod firmware {
     // across poll_recv + send on the 8 KiB parts) and the carrier can never emit a larger frame.
     type MailboxLink =
         Link<SerialTransport<MailboxSerial, MAILBOX_FRAMER_N>, PACKET, MAILBOX_FRAMER_N>;
-    // The inter-board port is on DMA BOTH ways (`runtime-hal/specs/uart-tx-dma.md`): a ring
+    // The inter-board port is on DMA BOTH ways (`motorcontroller/hal/src/usart_tx.rs`): a ring
     // receiving and a one-shot transmitting, so a frame costs the main loop a copy instead of its
     // wire time (0.43 ms at 460800).
     type UartLink =
@@ -2093,7 +2047,7 @@ mod firmware {
 
         // Paint the free stack, SECOND: as early as anything can run while still leaving the FET
         // backstop above it, and before the first thing in this function with a frame worth
-        // measuring (`Mailbox::from_raw`, `detect_chip`, `clock::configure_tree`).
+        // measuring (`Mailbox::from_raw`, `Chip::take`, `clock::configure_tree`).
         //
         // WHERE IT CANNOT GO. Not before `debug_hold_timer0`, which is the halt backstop and stays
         // unconditionally first. Not in `#[pre_init]`, which runs before cortex-m-rt has
@@ -2115,8 +2069,7 @@ mod firmware {
         // **<= 675 us**, once, on the boot path, spent on EVERY boot.
         //
         // Painting after `configure_tree` would cost 9x less (72 MHz rather than 8 MHz) and is
-        // deliberately not done: it would leave the detect and clock-tree frames unmeasured, and
-        // detect runs the bus-fault probe, to save 0.6 ms of boot.
+        // not done: it would leave the clock-tree frames unmeasured, to save 0.6 ms of boot.
         let painted_words = paint_stack();
         STACK_PAINTED_WORDS.store(painted_words, Ordering::Relaxed);
         // Nothing observed yet: the whole painted region is intact until a sweep says otherwise.
@@ -2163,7 +2116,7 @@ mod firmware {
     /// the watchdog, the mailbox epoch watch and the three boot facts the loop reads. It is a
     /// struct, not a set of locals in `main`, for one reason: a local of `main` is in `main`'s
     /// frame, and `main`'s frame is the one frame in the image that never pops. Everything that
-    /// is NOT in here (the detected `Chip`, the motor plan, the split USART halves, the IMU handles, the input pins, the motor summary) is bring-up
+    /// is NOT in here (the `Chip`, the motor plan, the split USART halves, the IMU handles, the input pins, the motor summary) is bring-up
     /// scaffolding, built and consumed in [`boot`] and gone before the loop's deep chains exist.
     ///
     /// Built IN PLACE: [`boot`] gets `&mut MaybeUninit<LoopState>` and each large field is written
@@ -2215,12 +2168,8 @@ mod firmware {
         let mailbox = unsafe { Mailbox::from_raw(MAILBOX_BASE as *mut u8) };
         mailbox.init_header();
 
-        // Detect the silicon (fail loud: a wrong register layout is worse than a halt).
-        #[cfg(universal_image)]
-        let chip = detect_chip().unwrap();
-        // A per-chip image is built for its chip: the context is the compiled chip's, with no
-        // detection (specs/hal.md section 4.2).
-        #[cfg(not(universal_image))]
+        // The image is built for its chip: the context is the compiled chip's, with no detection
+        // (specs/hal.md section 4.2).
         let chip = match hal::Chip::take() {
             Some(c) => c,
             None => halt(),
@@ -2234,10 +2183,10 @@ mod firmware {
         // set, which is a history and not an answer. Read-then-clear makes each boot's word name
         // that boot's reset and only that one.
         //
-        // The position is the earliest one that can exist: the base comes out of the detect
-        // result's address table (one owner for where RCU is), and nothing between reset and here
-        // touches `RSTSCK` -- the detect probe writes the GPIO clock-enable registers, and the
-        // IRC40K enable that shares this register is part of the watchdog bring-up, much later.
+        // The position is the earliest one that can exist: the base comes out of the chip's
+        // address table (one owner for where RCU is), and nothing between reset and here touches
+        // `RSTSCK`; the IRC40K enable that shares this register is part of the watchdog bring-up,
+        // much later.
         //
         // No `Err` arm: a chip whose descriptor carries no RCU base cannot have its clock tree
         // configured either, and `configure_tree` below halts on exactly that. One instrument does
@@ -2248,26 +2197,12 @@ mod firmware {
         }
         // `mcu` is the intrinsic chip-FAMILY tag the board reports in `IDENTITY` (NOT a role: family
         // != master/slave). Addressing is positional - the walk assigns addresses by where a board
-        // sits, never by reading a hardware id - so this tag is informational only.
-        #[cfg(universal_image)]
-        let mcu = match chip.clock() {
-            ClockPath::F10xRcc => MCU_F10X,
-            ClockPath::F1x0Rcu => MCU_F1X0,
-        };
-        // The PART this board publishes in its cyclic payload (`linkctl::ChipTag`), from the two
-        // facts the detect probe MEASURED: the family discriminator and the per-instance
-        // advanced-timer count. Unlike `mcu` above it is not informational: a controller uses it
-        // to pick the capability table that predicts this board's layout verdict, which is why
-        // the app has had to ask an operator which part it is talking to
-        // (`specs/remote-ui.md` 3.5). Read once, here, where the detect result is.
-        #[cfg(universal_image)]
-        let chip_tag = ChipTag::from_detected(
-            matches!(chip.clock(), ClockPath::F10xRcc),
-            chip.descriptor().adv_timers,
-        );
-        // A per-chip image reads both from its descriptor's constants (specs/hal.md section 4.2);
-        // `CHIP_IDENTITY_IS_ALLOCATED` below pins them to the wire's allocated values.
-        #[cfg(not(universal_image))]
+        // sits, never by reading a hardware id - so this tag is informational only. `chip_tag` is
+        // the PART this board publishes in its cyclic payload (`linkctl::ChipTag`); unlike `mcu` it
+        // is not informational: a controller uses it to pick the capability table that predicts
+        // this board's layout verdict (`specs/remote-ui.md` 3.5). Both are the descriptor's
+        // constants (specs/hal.md section 4.2); `CHIP_IDENTITY_IS_ALLOCATED` pins them to the
+        // wire's allocated values.
         let (mcu, chip_tag) = (
             chip.descriptor().node_mcu,
             ChipTag::from_u8(chip.descriptor().chip_tag),
@@ -2330,40 +2265,16 @@ mod firmware {
         // `GPIOx.OCTL` bit; it matters on battery + the inter-board cable.
         assert_self_hold(&chip, store, status);
 
-        // The application owns the one Peripherals::take() (runtime-hal DECISIONS #13: the HAL uses
-        // raw register views internally and never consumes the one-shot flag, so ordering vs
-        // detect_chip is unconstrained). take() after detect works; fail loud if somehow taken twice.
+        // The application owns the one Peripherals::take() (the HAL uses raw register views
+        // internally and never consumes the one-shot flag); fail loud if somehow taken twice.
         // Its SYST becomes the 250 Hz tick source below.
         let core = match cortex_m::Peripherals::take() {
             Some(p) => p,
             None => halt(),
         };
 
-        // The RAM vector table is a plain zero-initialized static (.bss): the earlier
-        // `cortex_m::singleton!` pattern materialized its init EXPRESSION as a temporary in `main`'s
-        // frame before copying into the static (the slice-7 stack-budget fix). The `&'static mut`
-        // is formed once, here, before any interrupt exists. The VTOR alignment rides the type.
-        // SAFETY: the one formation of a &mut to this static, single-threaded boot.
-        #[cfg(universal_image)]
-        let vectors: &'static mut RamVectorTable = unsafe { &mut *addr_of_mut!(RAM_VECTORS) };
-        // VTOR requires the table aligned to its power-of-two granule, which `RamVectorTable`
-        // carries as its own alignment (256 B for 64 slots) and memory.x's `.ramtables` packing
-        // preserves. Guard it against the type's alignment rather than a number written here, so
-        // the HAL resizing its table cannot leave this check stating the old granule: a misplaced
-        // table is a silent boot brick (VTOR ignores the low bits), so fail loud here instead.
-        #[cfg(universal_image)]
-        if !(vectors.slots.as_ptr() as usize)
-            .is_multiple_of(core::mem::align_of::<RamVectorTable>())
-        {
-            halt();
-        }
-        // Route interrupts through the RAM vector table and enable them BEFORE arming DMA RX.
-        // SAFETY (install): RAM init done, no peripheral IRQ enabled yet, `vectors` is a 'static table.
-        // (A per-chip image runs from its flash vector table and has nothing to install.)
-        #[cfg(universal_image)]
-        unsafe {
-            install(vectors, chip.irq())
-        };
+        // The image runs from its chip's flash vector table; interrupts are enabled BEFORE arming
+        // DMA RX.
         // The motor-era interrupt-priority ordering (HAL R7, `specs/motor-integration.md`'s
         // execution model): the period (ADC injected-EOC) vector above every USART RX vector above
         // the DMA vectors above SysTick at the stock 0xF0. Applied here, BEFORE any of those
@@ -2371,7 +2282,7 @@ mod firmware {
         // bring-up's last step), and it is the single owner of the SysTick priority too. Writing
         // priorities enables nothing.
         hal::irq::apply_motor_era_priorities(chip.irq());
-        // SAFETY (enable): the table is installed; RingBufferedRx::new registers + unmasks its handlers.
+        // SAFETY (enable): the vectors are the flash table's; RingBufferedRx::new unmasks its handlers.
         unsafe { cortex_m::interrupt::enable() };
 
         // === The links (`specs/configured-links.md` section 4): link i is port 1 + i ===
@@ -2479,8 +2390,7 @@ mod firmware {
         //     A board with no motor group configured, or one this image cannot drive, is left
         //     exactly as before: the outcome rides in `CTRL_OBS`'s motor block, and a group that is
         //     staged but refused, or a bring-up step that fails, in the status record.
-        //     Placed after the RAM vector table is installed (the period vector routes through it)
-        //     and before the tick source, so the 250 Hz task never runs against a half-built motor.
+        //     Placed after the interrupt priorities are set and before the tick source, so the 250 Hz task never runs against a half-built motor.
         //     A successful bring-up hands its configured timer to `arm`, which derives the one
         //     arming gate in the image from it. A board that skips the bring-up never installs a
         //     gate and is therefore UNARMABLE, not merely unarmed.
@@ -2611,15 +2521,7 @@ mod firmware {
             if sched.register(input_task_cb, INPUT_RELOAD).is_err() {
                 halt();
             }
-            // The SysTick tick callback, through the HAL's G7 seam (see `systick_tick_cb`:
-            // VTOR points at the HAL RAM table, so this registration IS the SysTick wiring).
-            // Ordered before mark_tick_source_enabled() and the SYST enable below; the
-            // before-enable ordering is positional (not expressible as a compile-time
-            // assertion with the current APIs; the pre-registration window is a safe no-op
-            // in the HAL regardless).
-            // A per-chip image's SysTick is `SysTick` below, in the flash vector table.
-            #[cfg(universal_image)]
-            hal::register_tick_handler(systick_tick_cb);
+            // The tick source is the `SysTick` vector in the flash table, enabled below.
             sched.mark_tick_source_enabled();
         }
         let mut syst = core.SYST;
@@ -2799,7 +2701,7 @@ mod firmware {
     /// **Split out of `main` and PLACED in `.hotcode`** (`specs/motor-integration.md`, "Hot-path
     /// flash placement"). This is the 250 Hz steady-state path, and on the GD32F1x0 an instruction
     /// fetched above `0x0800_8000` costs ~8.8 cycles against 1 below it. Compiled into `main` the
-    /// loop shared one function body with the whole cold bring-up (detect, clock, store mount,
+    /// loop shared one function body with the whole cold bring-up (chip, clock, store mount,
     /// layout validation, BLE/UART/IMU/motor bring-up), 9,330 B against a window with 5,724 B
     /// free, so the loop could not be placed at all and the F1x0 dropped ~0.4% of its control
     /// passes. Split, only the loop half needs window space; the cold half keeps `.text`, where

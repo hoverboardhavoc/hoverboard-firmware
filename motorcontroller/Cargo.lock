@@ -217,12 +217,10 @@ dependencies = [
  "net",
  "orchestrator",
  "panic-halt",
- "runtime-hal",
  "scheduler",
  "state",
  "store",
  "swd-mailbox",
- "vectors",
 ]
 
 [[package]]
@@ -308,11 +306,10 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "embedded-hal 1.0.0",
+ "hal",
  "imu",
  "panic-halt",
- "runtime-hal",
  "test-shared",
- "vectors",
 ]
 
 [[package]]
@@ -329,11 +326,10 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "embedded-io",
+ "hal",
  "link",
  "panic-halt",
- "runtime-hal",
  "test-shared",
- "vectors",
 ]
 
 [[package]]
@@ -473,17 +469,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtime-hal"
-version = "0.1.0"
-source = "git+https://github.com/hoverboardhavoc/runtime-hal?branch=main#71c39e3aa374abd4652402e08b84658208946eff"
-dependencies = [
- "cortex-m",
- "embedded-hal 1.0.0",
- "embedded-io",
- "heapless",
-]
-
-[[package]]
 name = "rustc_version"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -527,7 +512,6 @@ version = "0.1.0"
 dependencies = [
  "base",
  "hal",
- "runtime-hal",
 ]
 
 [[package]]
@@ -586,14 +570,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77439c1b53d2303b20d9459b1ade71a83c716e3f9c34f3228c00e6f185d6c002"
 
 [[package]]
-name = "vectors"
-version = "0.1.0"
-dependencies = [
- "cortex-m-rt",
- "runtime-hal",
-]
-
-[[package]]
 name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -614,11 +590,10 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "hal",
  "panic-halt",
- "runtime-hal",
  "scheduler",
  "test-shared",
- "vectors",
 ]
 
 [[package]]

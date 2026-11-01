@@ -1,6 +1,6 @@
 # Pure inputs crate: software debounce of discrete button/switch lines, two-key combo derivation,
 # the rider-present foot-pad field that steps the balance gain schedule, and the single-pole IIR
-# low-pass of the analog throttle. No dependency on runtime-hal or any hardware. The caller supplies
+# low-pass of the analog throttle. No dependency on a HAL or any hardware. The caller supplies
 # sampled GPIO line levels, pad levels, and the raw ADC throttle word; this crate produces the
 # debounced flags, combo flags, pad field, and filtered throttle. Host-testable.
 #

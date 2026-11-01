@@ -16,7 +16,7 @@ rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--icf=all"]
 # Nothing built for the board runs on the machine that built it, so cargo is told to say that rather
 # than hand an ARM ELF to the host loader. `cargo run -p firmware` used to die on an OS exec error
 # that named neither the target nor the right command; it now refuses and names ./tools/host-test.sh,
-# `cargo image` and tools/flash.sh.
+# `cargo image-<chip>` and tools/flash.sh.
 #
 # What this does NOT cover, because cargo offers no hook before compilation: `cargo test -p <crate>`
 # for a crate that HAS tests fails to compile, with a wall of `can't find crate for test` (libtest is
@@ -25,26 +25,23 @@ rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--icf=all"]
 # behind `required-features`) still exits 0 having run nothing, which is true of it on the host too.
 runner = "../tools/board-target-runner.sh"
 
-# ONE command builds the shipping image, here and in CI: `cargo image`.
+# The shipping images, one per chip (specs/hal.md section 6), here and in CI: `cargo image-f103`
+# and `cargo image-f130`. Each is the release build of `firmware` with one chip feature, in its own
+# target directory, so the two images never share (or overwrite) a build. The ELF is
+# target/<chip>/thumbv7m-none-eabi/release/firmware; the image is named mainboard-<chip> in the
+# firmware crate's `hoverboard-image` tables.
 #
-# It rebuilds core + compiler_builtins from source under this workspace's release profile
+# Each rebuilds core + compiler_builtins from source under this workspace's release profile
 # (rust-toolchain.toml explains why: -2,408 B of flashed span, and the profile pins in Cargo.toml
-# explain why core must not be left at the base "z"). Because that is the ONLY build whose bytes reach
-# flash, the flag belongs to that build alone.
+# explain why core must not be left at the base "z"). Because those are the ONLY builds whose bytes
+# reach flash, the flag belongs to them alone.
 #
-# It is an ALIAS and not a bare `[unstable] build-std = [...]` key on purpose: an unstable key here
-# applies to EVERY cargo invocation in this workspace, so the host tests and the test-image builds the
-# emulator runner makes here would all start rebuilding std, paying minutes per run to change nothing
-# about the image. The alias scopes build-std to the build that ships.
-#
-# `--target` is spelled out even though [build] target already selects it: build-std wants the target
-# explicit, and CI's release step and tools/flash.sh both read the ELF from the path this produces
-# (motorcontroller/target/thumbv7m-none-eabi/release/firmware). CI runs this same alias, so the local
-# image and the CI image come out of the same invocation.
+# They are ALIASES and not a bare `[unstable] build-std = [...]` key: an unstable key here applies to
+# EVERY cargo invocation in this workspace, so the host tests and the test-image builds the emulator
+# runner makes here would all start rebuilding std, paying minutes per run to change nothing about
+# the image. `--target` is spelled out even though [build] target already selects it: build-std
+# wants the target explicit. CI runs these same aliases, so the local image and the CI image come out
+# of the same invocation.
 [alias]
-image = ["build", "--release", "-p", "firmware", "--target", "thumbv7m-none-eabi", "-Z", "build-std=core,compiler_builtins"]
-# The per-chip images (specs/hal.md section 6): the same build-std release build of `firmware` with
-# one chip feature, each in its own target directory so the two images and the universal one never
-# share (or overwrite) a build. The ELF is target/<chip>/thumbv7m-none-eabi/release/firmware.
 image-f103 = ["build", "--release", "-p", "firmware", "--features", "gd32f103c8", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f103c8", "-Z", "build-std=core,compiler_builtins"]
 image-f130 = ["build", "--release", "-p", "firmware", "--features", "gd32f130c8", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f130c8", "-Z", "build-std=core,compiler_builtins"]

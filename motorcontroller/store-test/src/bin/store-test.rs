@@ -28,7 +28,7 @@ mod firmware {
         let cmd = read_cmd();
         let scenario = cmd >> 16;
 
-        // Build the FmcFlash over the compile-time-selected Chip (NEVER runtime detect_chip()).
+        // Build the FmcFlash over the compile-time-selected Chip (there is no runtime detection).
         // The compiled chip's context: the first take always succeeds; a second cannot happen here.
         let Some(chip) = hal::Chip::take() else {
             loop {

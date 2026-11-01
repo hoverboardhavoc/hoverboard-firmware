@@ -75,9 +75,6 @@ import sys
 TOOL = "panic-reach"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_ELF = os.path.join(
-    os.path.dirname(_HERE), "motorcontroller", "target", "thumbv7m-none-eabi", "release", "firmware"
-)
 OBJDUMP_CANDIDATES = ("arm-none-eabi-objdump", "llvm-objdump", "rust-objdump", "objdump")
 
 # ------------------------------------------------------------------------------------------------
@@ -653,7 +650,7 @@ def selftest():
 
 def build_parser():
     ap = argparse.ArgumentParser(prog="panic-reach.py", add_help=True)
-    ap.add_argument("elf", nargs="?", default=None, help=f"the ELF to read (default {DEFAULT_ELF})")
+    ap.add_argument("elf", nargs="?", default=None, help="the ELF to read: an image, motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware")
     ap.add_argument("--dis", default=None, help="read a saved disassembly instead of an ELF")
     ap.add_argument("--objdump", default=None, help="the disassembler to use")
     ap.add_argument("--verbose", action="store_true")
@@ -674,10 +671,17 @@ def main(argv=None):
         sizes = None  # a saved disassembly carries no symbol table: label-to-label extents
         source = args.dis
     else:
-        elf = args.elf or DEFAULT_ELF
+        elf = args.elf
+        if not elf:
+            sys.stderr.write(
+                f"{TOOL}: name the ELF: motorcontroller/target/gd32f103c8/thumbv7m-none-eabi/release/firmware "
+                "or the gd32f130c8 one (the image of each chip).\n"
+            )
+            return 2
         if not os.path.exists(elf):
             sys.stderr.write(
-                f"{TOOL}: no such ELF: {elf}\n{TOOL}: build it first (`cargo image`).\n"
+                f"{TOOL}: no such ELF: {elf}\n{TOOL}: build it first (`cargo image-f103` or "
+                "`cargo image-f130` in motorcontroller/), or pass the ELF.\n"
             )
             return 2
         objdump = find_objdump(args.objdump)

@@ -1,6 +1,6 @@
 //! A host model of the GD32 FMC (flash memory controller) that services the register sequence the
 //! store image's FMC driver drives (`hal::fmc`, motorcontroller/hal/src/fmc.rs; the sequence
-//! `runtime-hal::fmc` drove is the same less the relock), so the model and the real driver agree.
+//! `hal::fmc` drives is the same less the relock), so the model and the real driver agree.
 //!
 //! - **unlock**: read `CTL` (`+0x10`); if `LK` (b7) set, write `KEY` (`+0x04`) = KEY1 (`0x4567_0123`)
 //!   then KEY2 (`0xCDEF_89AB`). The model clears `LK` after the KEY1+KEY2 pair.
@@ -27,7 +27,7 @@ pub const FMC_BASE: u64 = 0x4002_2000;
 /// FMC MMIO window to map (4 KiB, the `mmio_map` alignment unit).
 pub const FMC_WINDOW: u64 = 0x1000;
 
-/// Register offsets from [`FMC_BASE`] (bank0; identical to `runtime-hal/src/fmc.rs`).
+/// Register offsets from [`FMC_BASE`] (bank0; identical to `motorcontroller/hal/src/fmc.rs`).
 pub const KEY: u64 = 0x04;
 pub const STAT: u64 = 0x0C;
 pub const CTL: u64 = 0x10;
@@ -180,7 +180,7 @@ impl FmcModel {
     /// write per the outcome.
     ///
     /// The closed-halfword rule is the silicon behaviour measured on a GD32F130C8 on 2026-10-23
-    /// (`runtime_hal::fmc`, "A high halfword is closed by its successor"): programming the LOW
+    /// (`hal::fmc`, "A high halfword is closed by its successor"): programming the LOW
     /// halfword of a 32-bit word closes the HIGH halfword of the word below it for the rest of that
     /// page's erase cycle, so a later program there is refused while the cell goes on reading
     /// `0xFFFF`. It is modelled here because it is the rule the store's page-header commit used to

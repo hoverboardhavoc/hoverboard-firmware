@@ -1,70 +1,33 @@
-/* The universal-binary layout (specs/firmware.md, "Memory layout"; specs/swd-mailbox.md, "Memory
- * layout", the reserved-region carve).
+/* The image layout (specs/hal.md, sections 5 and 6; specs/swd-mailbox.md, "Memory layout", the
+ * reserved-region carve). A template: build.rs fills the two @..@ lengths from the chip facts the hal
+ * crate's build script publishes for the compiled chip (its `links` metadata: flash size, page size,
+ * SRAM size), so the numbers have one owner, and writes the result to OUT_DIR/memory.x.
  *
- * The SAME linked image runs on every part, so both regions are sized to the SMALLEST part (the
- * F130: 64 KiB flash, 8 KiB RAM). The bigger parts (F103 20 KiB RAM; 12-FET 256 KiB flash / 48 KiB
- * RAM) just have headroom the image does not use.
+ * FLASH is the chip's flash less the store's two pages at the top. The store is NOT linked: the FMC
+ * writes it at absolute addresses the store derives from the same descriptor (`store::geometry`), so
+ * an image that would overlap it fails at LINK rather than having its tail overwritten by the first
+ * store append (specs/decision-flash-budget.md, "memory.x store reserve"; specs/storage-layer.md).
  *
- * FLASH here is only the region cortex-m-rt LINKS the code + vector table into (low flash). The
- * store region is NOT linked: it is the top two DETECTED pages of flash, written by the FMC at
- * absolute addresses the store derives from the runtime-detected Chip (0x0800_F800 on a 64 KiB part,
- * 0x0803_F000 on the 256 KiB 12-FET), beyond this length. FmcFlash uses absolute addresses and is
- * not bounded by this length.
+ * RAM is the chip's SRAM above the SWD mailbox's FIXED reserved region [0x2000_0000, 0x2000_0240) at
+ * the bottom (the bridge reads it cold at a version-stable base). It is reserved by starting the
+ * linked RAM above it: cortex-m-rt's `.data`/`.bss`/`.uninit`/stack all live at or above
+ * 0x2000_0240, and the firmware writes the header through the fixed `swd_mailbox::MAILBOX_BASE`
+ * pointer. A `.mailbox`-section carve was rejected: `INSERT AFTER .bss` drags `__ebss` below
+ * `__sbss`, and cortex-m-rt 0.7.5's equality-terminated `.bss` zero loop then never terminates and
+ * stores off the end of RAM, a bus fault before `main`. 0x240 (576 B) holds the 564 B mailbox (a
+ * const-assert in swd-mailbox fails the BUILD if the region outgrows the carve).
  *
- * The SWD mailbox occupies a FIXED reserved region [0x2000_0000, 0x2000_0240) at the bottom of SRAM
- * (the bridge reads it cold at a version-stable base). It is reserved simply by starting the linked
- * RAM ABOVE it (ORIGIN = 0x2000_0240): cortex-m-rt's `.data`/`.bss`/stack all live at/above
- * 0x2000_0240, so nothing the linker places touches the mailbox, and the firmware writes its header
- * through a fixed `swd_mailbox::MAILBOX_BASE` pointer (the `store-test`/`test-shared` reserved-region
- * idiom: no `.mailbox` section, no INSERT). A `.mailbox`-section carve was rejected: `INSERT AFTER .bss`
- * drags `__ebss` down to the mailbox region end (0x2000_0230), BELOW `__sbss` (0x2000_0400), and
- * cortex-m-rt 0.7.5's equality-terminated `.bss` zero loop (`cmp __ebss,__sbss; beq; stm r0!; b`) then
- * never terminates and stores upward off the end of RAM -> a bus fault before `main`. 0x240 (576 B)
- * holds the 564-B mailbox with headroom (a const-assert in swd-mailbox fails the BUILD if the
- * region ever outgrows the carve, which the linker cannot see).
+ * The image runs from its chip's flash vector table (`hal`, cortex-m-rt's `device` feature) and never
+ * writes VTOR, so there is no RAM vector table; the inter-board DMA ring lives in cortex-m-rt's
+ * `.uninit` with the other uninitialised statics. The vector table is 512 B on every chip (`hal`
+ * pads it), so `.hotcode` starts at 0x0800_0200.
  */
 MEMORY
 {
-  /* 62K, NOT the 64K the part has: the top 2 pages [0x0800_F800, 0x0801_0000) on a 64 KiB part are
-   * the store region (specs/decision-flash-budget.md, "memory.x store reserve"; specs/storage-layer.md).
-   * The store is NOT linked here (FmcFlash writes it at absolute detected-top-of-flash addresses, beyond
-   * this length), so a 63.5 KiB image would link clean and then have its tail OVERWRITTEN by the first
-   * runtime store append. Dropping LENGTH to 64K - 2K makes an over-large image fail at LINK, not at the
-   * first flash write. Byte-identical .bin vs LENGTH=64K (LENGTH only bounds the region; placement is
-   * from ORIGIN upward, unchanged), proven at the slice-C landing. */
-  FLASH (rx!w) : ORIGIN = 0x08000000, LENGTH = 64K - 2K     /* 62K usable; top 2 pages reserved for the store */
-  RAM   (rwx)  : ORIGIN = 0x20000240, LENGTH = 8K - 0x240   /* smallest part, less the reserved mailbox region [0x2000_0000, 0x2000_0240) */
-  /* The attribute flags are for the vector-table OVERLAY below, whose sections cannot name a region
-   * (lld's OVERLAY syntax has no `> region`) and so are matched by flags: a writable section is
-   * RAM and never FLASH (`!w`). Every other section still names its region explicitly. */
+  FLASH (rx!w) : ORIGIN = 0x08000000, LENGTH = @FLASH_LENGTH@
+  RAM   (rwx)  : ORIGIN = 0x20000240, LENGTH = @RAM_LENGTH@
 }
 
-/* The high-alignment RAM tables, packed (the slice-7 RAM-budget fix; round-11 stack slice). The
- * firmware's RAM vector table (align 256, 256 B) and the HAL's detect-probe vector table would
- * otherwise punch pure alignment gaps into .data/.bss (measured at the old 512 B table: 628 + 284 +
- * 776 B of gaps around them at the default placement). Packing them back-to-back at the first 256
- * boundary after the mailbox carve leaves one unavoidable 192 B gap (0x240 -> 0x300) instead.
- *
- * Round 11 shrank the detect-probe table from 1 KiB (256 words, align 1024) to 128 B (16 words,
- * align 128): the probe runs in an IRQ-less window where only the 16 system vectors are reachable,
- * so the never-reachable external-IRQ slots were pure waste (runtime-hal detect::probe). The tables
- * are ordered largest-alignment-first (RAM_VECTORS align 256 THEN PROBE_VECTOR_TABLE align 128) so
- * a shrink lands as reclaimed stack, not an ALIGN gap.
- *
- * 2026-10-24: the RAM vector table went 512 -> 256 B (runtime-hal MAX_IRQS 74 -> 48: 64 slots, the
- * highest vector either family installs is IRQ 40, and a 90-slot table was padded to its 512 B
- * alignment anyway). With the ALIGN below following it, the section is 256 + 128 = 384 B at
- * 0x300 -> 0x480 instead of 640 B at 0x400 -> 0x680, which is 512 B of stack: 256 B of table and
- * 256 B of the gap the 512 boundary used to cost. The occasion was the DMA transmit on the
- * inter-board link, whose 160 B of RAM and stack overflowed the stack on arm
- * (specs/bench-evidence/2026-10-24/dma-tx-drive/).
- *
- * NOLOAD and NOT zero-initialized (outside cortex-m-rt's __sbss..__ebss): safe because both
- * tables are fully written before first use (irq::install assigns the whole slots array before
- * the VTOR flip; the detect probe copies the whole active table into its own before flipping),
- * the same discipline .uninit sections rely on. The ASSERT fails the link loudly if either
- * symbol's section name drifts and the pattern stops matching (the gaps would silently return).
- */
 /* The F1x0 zero-wait flash window (specs/motor-integration.md, "Hot-path flash placement").
  *
  * MEASURED on silicon 2026-07-26: the GD32F1x0's flash is zero-wait only for the FIRST 32 KiB. The
@@ -84,7 +47,7 @@ MEMORY
  *
  * So the hot path is PLACED, not left to link order: everything entered per PWM period (16 kHz) or
  * per control tick (250 Hz) goes in `.hotcode` at the bottom of flash, and `_stext` follows it, so
- * the cold remainder takes whatever is left. The ASSERT at the end of this file is the guard: if
+ * the cold remainder takes whatever is left. The ASSERT after the section is the guard: if
  * `.hotcode` ever grows past 0x0800_8000 the link FAILS rather than silently returning the F1x0 to
  * a 29x ISR.
  *
@@ -117,14 +80,14 @@ SECTIONS
     . = ALIGN(4);
     *(.hotcode .hotcode.*)
     . = ALIGN(4);
-    *(.text.*adc_isr*)
-    *(.text.*systick_handler*)
+    /* The SysTick vector; the period vector's trampolines (`ADC0_1`, `ADC_CMP`) carry
+     * `#[link_section = ".hotcode"]`. */
+    *(.text.*SysTick*)
     *(.text.*control_task_cb*)
     *(.text.*input_task_cb*)
-    *(.text.*fsm_step*) /* matches nothing today (fsm_step fully inlines into run_shell); kept as the loud standalone-emission fallback: if inlining ever regresses, the symbol lands HOT instead of silently cold */
+    *(.text.*fsm_step*) /* matches nothing while fsm_step fully inlines into run_shell; kept as the loud standalone-emission fallback: if inlining ever regresses, the symbol lands HOT instead of silently cold */
     *(.text.*route_emits*)
     *(.text.*route_handback*)
-    *(.text.*systick_tick_cb*)
     *(.text.*_4link*)
     /* base::crc16's shared fold body, on the framer's path above: it used to be inlined into
      * `link` and placed by the anchor on the line above, and an attribute at its definition would
@@ -147,7 +110,7 @@ SECTIONS
      *
      * Anchors and not `#[link_section]`: `shared/store` is linked by the bench and emulator images
      * too (`motorcontroller/store-test`), whose memory.x declares no `.hotcode`, exactly as described for
-     * base::crc16 above. ci.yml and tools/flash.sh carry all four names in the hot-window
+     * base::crc16 above. tools/image-guard-syms.sh carries all four names in the hot-window
      * membership guard, so a rename that silently unanchors them FAILS the build. */
     *(.text.*5store5store*7compact*)
     *(.text.*5store5store13scan_frontier*)
@@ -161,52 +124,9 @@ SECTIONS
 
 _stext = ADDR(.hotcode) + SIZEOF(.hotcode);
 
-SECTIONS
-{
-  /* Shrink round 7 (2026-10-27): the 192 B alignment gap between the mailbox carve (ends 0x240)
-   * and the 256-aligned RAM vector table (0x300) holds the inter-board DMA receive ring (128 B).
-   * It used to be a `.bss` static above the tables; here it is NOLOAD, so cortex-m-rt's zero loop
-   * never sees it and `main` zeroes it explicitly before the ring is armed (`DMA_RING` in
-   * motorcontroller/firmware/src/main.rs). Its contents never matter before that: a DMA ring's reader only
-   * ever reads bytes behind the live DMA write index. The section starts at ORIGIN(RAM), asserted
-   * below, and the SIZEOF assert pins the ring to the gap: a ring that grew past 192 B would push
-   * the vector table to the NEXT 256 boundary and silently cost 256 B.
-   *
-   * The gap's other 64 B are FREE again (2026-10-27): they held the CC2541 port's ring until the
-   * port went (`specs/decision-cc2541-removal.md`). They are there for the next static of 64 B or
-   * less that wants them; until then the vector table still sits at 0x300 and they cost nothing
-   * but are nobody's. */
-  .ramgap (NOLOAD) :
-  {
-    *(.uninit.DMA_RING)
-  } > RAM
-
-  /* The two RAM vector tables OVERLAY each other (shrink round 7). The detect probe's 16-slot
-   * table is live only inside `detect_chip()`, in the IRQ-less boot window before `irq::install`
-   * writes a single slot of `RAM_VECTORS`, and the probe restores `VTOR` to the flash table before
-   * it returns; the two are never live together, so they share the 256 B at 0x300 and the probe
-   * table costs no RAM of its own (it cost 128 B). An OVERLAY rather than a backwards `.`
-   * assignment because lld refuses to move the location counter backward and refuses overlapping
-   * sections unless both are in one overlay; it is the sanctioned form, and both inputs are NOBITS
-   * so nothing is loaded for either. lld's OVERLAY takes no `> region`, which is why the MEMORY
-   * regions above carry attribute flags: a region is picked by flags for these two sections and by
-   * name for every other. The larger table is listed first so the overlay's extent (where `.`
-   * lands after it) is its 256 B. */
-  OVERLAY ALIGN(256) : NOCROSSREFS
-  {
-    .ramvectors { *(.bss.*RAM_VECTORS*) }
-    .probetable { *(.bss.*PROBE_VECTOR_TABLE*) }
-  }
-} INSERT BEFORE .data;
-
-ASSERT(ADDR(.ramgap) == ORIGIN(RAM), "memory.x: .ramgap no longer starts at the mailbox carve; the ring gap-fill is lost");
-ASSERT(SIZEOF(.ramgap) == 128, "memory.x: .ramgap holds the inter-board DMA ring, 128 B, with 64 B of the 192 B gap free (a static that grew past the gap moves the vector table to the next 256 boundary and costs 256 B)");
-ASSERT(ADDR(.ramvectors) == ORIGIN(RAM) + 192, "memory.x: the RAM vector table must follow the ring gap at the first 256 boundary");
-ASSERT(SIZEOF(.ramvectors) == 256, "memory.x: the RAM vector table is 256 B (64 slots)");
-ASSERT(ADDR(.probetable) == ADDR(.ramvectors), "memory.x: the detect-probe vector table must overlay the RAM vector table");
-ASSERT(SIZEOF(.probetable) == 128, "memory.x: the detect-probe vector table is 128 B (16 words at align 128)");
-
-/* The whole point of the section above: hot code that spills past 32 KiB silently costs the F1x0
- * ~29x on the 16 kHz ISR. Fail the LINK instead. */
 ASSERT(ADDR(.hotcode) + SIZEOF(.hotcode) <= 0x08008000,
-  "memory.x: .hotcode overflows the GD32F1x0 zero-wait first 32 KiB of flash (see the header above)");
+  "memory.x: .hotcode overflows the GD32F1x0 zero-wait first 32 KiB of flash");
+
+/* The two budgets CI's per-chip size gate reads (absolute symbols; they occupy nothing). */
+__image_flash_budget = LENGTH(FLASH);
+__image_ram_budget = LENGTH(RAM);

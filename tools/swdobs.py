@@ -23,7 +23,6 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PI = os.environ.get("PI_HOST", "pi@192.168.0.248")
-DEFAULT_ELF = os.path.join(REPO, "motorcontroller/target/thumbv7m-none-eabi/release/firmware")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
@@ -379,8 +378,38 @@ def oc_cfg(board, who="motor-trace"):
     return cfg
 
 
+# --------------------------------------------------------------------------------------------------
+# Which ELF to resolve from. One image per chip (specs/hal.md section 6), each in its own target
+# directory (the image-f103 / image-f130 aliases in motorcontroller/.cargo/config.toml), and the
+# symbol addresses differ between them, so a tool reads the image of the chip on the board it is
+# measuring. There is no default chip: with neither --chip nor --elf the resolver refuses.
+# --------------------------------------------------------------------------------------------------
+CHIPS = ("gd32f103c8", "gd32f130c8")
+
+
+def chip_elf(chip):
+    """The release ELF of `chip`'s image."""
+    return os.path.join(REPO, "motorcontroller", "target", chip, "thumbv7m-none-eabi", "release", "firmware")
+
+
+def add_image_args(ap):
+    """The --chip and --elf options of a tool that resolves symbols from the image on the board."""
+    ap.add_argument("--chip", choices=CHIPS, help="the chip on the board: resolve symbols from its image")
+    ap.add_argument("--elf", help="the ELF to resolve symbols from, instead of --chip's image")
+
+
+def image_elf(args):
+    """The ELF named by `add_image_args`' options: --elf, else --chip's image, else None."""
+    if args.elf:
+        return args.elf
+    return chip_elf(args.chip) if args.chip else None
+
+
 def resolve_symbols_sized(elf, who="motor-trace"):
     """{name: (address, size)} for every motor static plus CTRL_OBS, from the ELF's symbol table."""
+    if not elf:
+        sys.exit(f"{who}: no image named: pass --chip {'|'.join(CHIPS)} (the chip on the board) or "
+                 "--elf PATH. The symbol addresses differ between the two images.")
     try:
         out = subprocess.check_output(
             ["arm-none-eabi-nm", "-S", elf], text=True, stderr=subprocess.DEVNULL

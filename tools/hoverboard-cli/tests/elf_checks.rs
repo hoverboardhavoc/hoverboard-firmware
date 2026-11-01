@@ -83,14 +83,23 @@ fn check(elf: &[u8]) -> Result<(), ElfError> {
 fn the_guards_are_read_from_the_one_copy_by_image_name() {
     let g = release_guards();
     assert_eq!(g.code_floor, 40_000);
-    assert!(g.required_symbols.len() >= 19, "{g:?}");
+    assert!(g.required_symbols.len() >= 13, "{g:?}");
     assert!(g.required_symbols.contains(&"T main$".to_string()));
     assert!(g.required_symbols.contains(&"B CTRL_OBS$".to_string()));
+    assert!(g
+        .required_symbols
+        .contains(&"T DMA_Channel3_4$".to_string()));
     let hot = g.hot_symbols.unwrap();
     assert!(hot.contains(&"4base5fixed3div".to_string()), "{hot:?}");
-    assert!(elf::guards_for(GUARD_FILE, "mainboard-f103")
+    // The other chip's image has its own entry, with its own vector names.
+    let f103 = elf::guards_for(GUARD_FILE, "mainboard-gd32f103c8").unwrap();
+    assert!(f103
+        .required_symbols
+        .contains(&"T DMA0_Channel5$".to_string()));
+    assert!(f103.hot_symbols.unwrap().contains(&"T ADC0_1$".to_string()));
+    assert!(elf::guards_for(GUARD_FILE, "mainboard-gd32")
         .unwrap_err()
-        .contains("no guards for image mainboard-f103"));
+        .contains("no guards for image mainboard-gd32"));
 }
 
 #[test]
@@ -153,9 +162,9 @@ fn a_wfi_in_code_is_refused_in_both_encodings() {
 #[test]
 fn a_missing_required_symbol_is_named() {
     let (mut t, b) = all_required();
-    t.retain(|s| !s.contains("5probe3run"));
+    t.retain(|s| !s.contains("5motor7PERIODS"));
     match check(&fixture(&[0, 0xBF], &[], &refs(&t), &refs(&b))) {
-        Err(ElfError::MissingSymbols(m)) => assert_eq!(m, vec!["5probe3run".to_string()]),
+        Err(ElfError::MissingSymbols(m)) => assert_eq!(m, vec!["5motor7PERIODS".to_string()]),
         other => panic!("{other:?}"),
     }
     // A `B` symbol in .text is not the .bss symbol the guard asks for.

@@ -505,7 +505,7 @@ impl<'f, F: Flash> Store<'f, F> {
         // The hinge is the HIGHEST halfword of the header and not the lowest, because a descending
         // write cannot land on this silicon: programming the low halfword of a word closes the high
         // halfword of the word below it, so the old "seq then magic" order could never finish its
-        // magic once `seq` was down (`runtime_hal::fmc`, and
+        // magic once `seq` was down (`hal::fmc`, and
         // `specs/bench-evidence/2026-10-23/store-compact-commit/`). Programming the records first
         // and the header after is still fine: the records start at `PAGE_HEADER_LEN`, which closes
         // only `hdr[6..8]`, and the store never writes there.
@@ -661,7 +661,7 @@ const MAX_RECORD: usize = 272;
 /// is always even, which keeps every piece and every piece's offset even.
 ///
 /// Pieces are written in ASCENDING address order, like everything else the store programs into a
-/// page (`runtime_hal::fmc`: programming a word's low halfword closes the halfword below it for the
+/// page (`hal::fmc`: programming a word's low halfword closes the halfword below it for the
 /// rest of that page's erase cycle).
 pub(crate) const COMPACT_CHUNK: usize = 32;
 

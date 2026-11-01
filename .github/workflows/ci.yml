@@ -1,14 +1,7 @@
 name: CI
 
-# runtime-hal is a git dependency (`[workspace.dependencies]` in motorcontroller/Cargo.toml and
-# shared/Cargo.toml), pinned by commit in the lockfiles. Cargo fetches it from the public hoverboardhavoc/runtime-hal repository
-# itself, so no job checks it out, and every cargo job builds the commit the lockfile names rather
-# than whatever runtime-hal's main is at run time: a runtime-hal push cannot break this CI, a commit
-# here that bumps the pin can. Cargo resolves a target-gated dependency on every target, so the host
-# jobs (host tests, swd-bridge, the CLI, the bridge) fetch it too without compiling it; the cargo
-# caches keep ~/.cargo/git, so a warm run does not fetch it again. Every job still checks the
-# firmware out into a `hoverboard-firmware/` subdirectory, the layout the sibling checkout once
-# needed, because every path below is written against it.
+# Every job checks the firmware out into a `hoverboard-firmware/` subdirectory, the layout a sibling
+# checkout once needed, because every path below is written against it.
 #
 # The repository holds four Cargo workspaces, one per build chain (specs/repo-layout.md):
 # motorcontroller/ (the GD32 image, pinned nightly, thumbv7m by default), shared/ (the crates more
@@ -135,35 +128,6 @@ jobs:
       - name: panic-reach parser tests (fixtures, no toolchain)
         run: python3 tools/panic-reach.py --selftest
 
-      # The runtime-hal pin agrees across the four tracked lockfiles, one per Cargo workspace.
-      # motorcontroller/'s names the commit the image builds against; shared/ declares the same
-      # workspace dependency (store names it) and pins the same commit; tools/ and bridge/ record
-      # runtime-hal through their path dependencies (store among them) without compiling it, and pin
-      # the same commit so that no lockfile in the tree names a different one. Each must carry the
-      # git source: a local build with the `--config` runtime-hal patch (README.md, "Building
-      # and testing") rewrites the entry to the patched path package, which has no source line, and a
-      # lockfile committed that way leaves cargo here to re-resolve runtime-hal's main at run time.
-      # Pure source, no toolchain.
-      - name: runtime-hal pin agrees across the tracked lockfiles
-        run: |
-          pin() {
-            grep -A2 '^name = "runtime-hal"$' "$1" \
-              | grep -oE '^source = "git\+https://github\.com/hoverboardhavoc/runtime-hal[^"]*"' || true
-          }
-          root=$(pin motorcontroller/Cargo.lock)
-          fail=0
-          for f in motorcontroller/Cargo.lock shared/Cargo.lock tools/Cargo.lock bridge/Cargo.lock; do
-            p=$(pin "$f")
-            echo "$f: ${p:-no runtime-hal git source}"
-            if [ -z "$p" ] || [ "$p" != "$root" ]; then fail=1; fi
-          done
-          if [ "$fail" -ne 0 ]; then
-            echo "FAIL: every tracked lockfile must pin runtime-hal at the same git commit. A lockfile" >&2
-            echo "  written by a --config patched build loses the source line. Restore it with" >&2
-            echo "  git checkout <lockfile>; a plain build re-resolves runtime-hal's main instead." >&2
-            exit 1
-          fi
-
       - name: rustfmt (motorcontroller)
         working-directory: hoverboard-firmware/motorcontroller
         run: cargo fmt --all --check
@@ -194,7 +158,9 @@ jobs:
 
       # The per-chip builds (specs/hal.md): the HAL and the two test images for each of its chips, on
       # both surfaces the HAL has (the board target, and the host where its pure parts are tested),
-      # and the firmware's two per-chip images, whose chip-only code the default build does not see.
+      # and the firmware's two per-chip images, whose chip-only code the default build does not see,
+      # with the bench images on hal (imu-bench, wdg-bench, l2-uart-bench), which carry those two
+      # chip features only (imu-bench with `hardware`, the feature its bins require).
       - name: clippy (motorcontroller, per-chip builds of hal, the test images and firmware)
         working-directory: hoverboard-firmware/motorcontroller
         run: |
@@ -207,6 +173,9 @@ jobs:
           done
           for chip in gd32f103c8 gd32f130c8; do
             cargo clippy -p firmware --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p imu-bench --features "hardware $chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p wdg-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p l2-uart-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
           done
 
       - name: clippy (shared, thumbv7m build surface)
@@ -243,12 +212,12 @@ jobs:
 
   # Embedded build for the real target, in motorcontroller/. A bare `cargo build` there uses the
   # thumbv7m-none-eabi default from motorcontroller/.cargo/config.toml and builds the default members
-  # (the firmware as the universal image, the bench images), which compile the pinned runtime-hal.
-  # The HAL's test images (dummy-test, store-test) build per chip in the emulator job, and the
-  # per-chip firmware images below.
+  # (the crates that need no chip feature). The HAL's test images (dummy-test, store-test) build per
+  # chip in the emulator job, and the two firmware images and the bench images below,
+  # one build per chip.
   #
-  # The upper flashed-span size gate (against the 62 KiB no-bootloader region) is enforced below,
-  # after objcopy (specs/decision-flash-budget.md); the LTO-gutted floor guard is its lower companion.
+  # Every gate below runs on both images: the per-chip size gate, the code floor and required
+  # symbols, the hot window, panic reachability and the flashed-span ceiling.
   build:
     name: Build (thumbv7m-none-eabi)
     runs-on: ubuntu-latest
@@ -261,8 +230,8 @@ jobs:
         with:
           path: hoverboard-firmware
 
-      # rust-src is load-bearing in THIS job: the release image step is `cargo image`, which is
-      # -Z build-std and compiles core from source.
+      # rust-src is needed in THIS job: the image builds (`cargo image-f103`, `cargo image-f130`) are
+      # -Z build-std and compile core from source.
       - name: Install Rust (pinned nightly) + thumbv7m target + rust-src
         uses: dtolnay/rust-toolchain@master
         with:
@@ -282,39 +251,43 @@ jobs:
         working-directory: hoverboard-firmware/motorcontroller
         run: cargo build
 
-      # The universal shipping image: the release `firmware` ELF (specs/firmware.md, "The binary:
-      # downloadable and installable"). One linked image, valid on every part.
-      #
-      # `cargo image` is the workspace's ONE image command (motorcontroller/.cargo/config.toml
-      # `[alias]`): release, -p firmware, --target thumbv7m-none-eabi, -Z
-      # build-std=core,compiler_builtins. CI runs the SAME alias a developer runs, so the artifact uploaded here is the invocation anyone can
-      # reproduce locally, byte for byte. Do not spell the flags out again here: a second copy is a
-      # second thing to drift.
-      - name: Build release firmware image (cargo image = the build-std shipping build)
+      # The shipping images, one per chip (specs/hal.md section 6): `cargo image-f103` and
+      # `cargo image-f130`, the build-std release build of `firmware` with one chip feature, each in
+      # its own target directory (motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware).
+      # The aliases are motorcontroller/.cargo/config.toml's; CI runs the same invocation a developer
+      # runs, so do not spell the flags out again here.
+      - name: Build the firmware images (cargo image-f103, cargo image-f130)
         working-directory: hoverboard-firmware/motorcontroller
-        run: cargo image
+        run: |
+          cargo image-f103
+          cargo image-f130
 
-      # objcopy -O binary gives the flashable .bin. arm-none-eabi-objcopy comes from binutils;
+      # objcopy -O binary gives each flashable .bin. arm-none-eabi-objcopy comes from binutils;
       # the ELF keeps DWARF (profile.release debug = true) for SWD/nm, the .bin is what reaches flash.
       - name: objcopy to .bin
         run: |
           sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
-          arm-none-eabi-objcopy -O binary \
-            motorcontroller/target/thumbv7m-none-eabi/release/firmware \
-            motorcontroller/target/thumbv7m-none-eabi/release/firmware.bin
+          for chip in gd32f103c8 gd32f130c8; do
+            elf=motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
+            arm-none-eabi-objcopy -O binary "$elf" "$elf.bin"
+          done
 
       # LTO-gutted-image guard (round-7a): a capacity/assert mismatch can make LTO delete the whole
-      # main loop while the image still links (.text 55 KB -> 16.8 KB). Fail the build if the release
-      # .text has collapsed below a floor (a healthy image is ~50 KB). arm-none-eabi-size comes from
-      # the binutils installed in the objcopy step above. Mirrors tools/flash.sh's flash-time guard.
+      # main loop while the image still links (.text 55 KB -> 16.8 KB). Fail the build if an image's
+      # release code has collapsed below its floor (a healthy image is ~54 KB). arm-none-eabi-size
+      # comes from the binutils installed in the objcopy step above. Mirrors tools/flash.sh's
+      # flash-time guard.
       #
-      # The floor and both symbol lists are the universal image's (`mainboard-gd32`) in
-      # tools/image-guard-syms.sh, keyed by the image name its Cargo.toml table gives.
+      # Each image's floor and both symbol lists are its entry in tools/image-guard-syms.sh, keyed
+      # by the image name (mainboard-<chip>) its Cargo.toml table gives.
       - name: Assert release code floor + required symbols (LTO-gutted-image guard)
         run: |
-          elf=motorcontroller/target/thumbv7m-none-eabi/release/firmware
           . tools/image-guard-syms.sh
-          image_guards mainboard-gd32 || { echo "FAIL: tools/image-guard-syms.sh has no mainboard-gd32" >&2; exit 1; }
+          for chip in gd32f103c8 gd32f130c8; do
+          (
+          elf=motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
+          image_guards mainboard-$chip || { echo "FAIL: tools/image-guard-syms.sh has no mainboard-$chip" >&2; exit 1; }
+          echo "== mainboard-$chip"
           # Sum every CODE section, not `.text` alone: the F1x0 zero-wait-flash split
           # (specs/motor-integration.md, "Hot-path flash placement") puts the 16 kHz period ISR and the
           # 250 Hz control path in `.hotcode`, inside the first 32 KiB, so a `.text`-only floor reads a
@@ -331,10 +304,8 @@ jobs:
           # reason every entry is on them. They were literals here and in flash.sh until
           # 2026-10-24, and they had drifted: this file carried `4base5crc16` and flash.sh did not.
           #
-          # Required: the control stack plus the six detect fault-path fns, which are
-          # #[inline(never)] and host-untestable, so a codegen or LTO change that dropped or
-          # inlined away the bus-fault-safe probe would strip the fleet's only runtime
-          # chip-identity path while still linking and passing the .text floor.
+          # Required: the control stack, the link vectors and the motor hot path, each reached
+          # only through a vector or a static, so an image that dropped one still links.
           #
           # Hot-window: each must resolve BELOW 0x08008000, the F1x0 zero-wait flash boundary.
           # Missing = FAIL loudly, so a rename or an inline is a conscious list update (the
@@ -349,7 +320,7 @@ jobs:
             echo "FAIL: required symbol(s) absent from the release image (LTO-gutted?):${miss}" >&2
             exit 1
           fi
-          echo "required symbols present (control stack + six detect probe fns + the motor hot path)"
+          echo "required symbols present (control stack, link vectors, the motor hot path)"
           hotmiss=""; hotcold=""
           IFS=',' read -r -a hot <<< "$IMAGE_GUARD_HOT_SYMS"
           for s in "${hot[@]}"; do
@@ -367,6 +338,8 @@ jobs:
             exit 1
           fi
           echo "hot-window membership OK"
+          ) || exit 1
+          done
 
       # Panic reachability (specs/panic-free.md): no panic symbol may be reachable from the 16 kHz
       # period ISR, the 250 Hz control task or the 16 ms input task. `panic-halt` spins where the
@@ -381,7 +354,10 @@ jobs:
       # assert, which a check of the root's own `bl` targets would have passed. Same binutils the
       # steps above use.
       - name: Assert no panic reachable from the motor hot paths
-        run: python3 tools/panic-reach.py motorcontroller/target/thumbv7m-none-eabi/release/firmware
+        run: |
+          for chip in gd32f103c8 gd32f130c8; do
+            python3 tools/panic-reach.py motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
+          done
 
       # UPPER size gate (specs/decision-flash-budget.md, "Mechanical follow-ups", guard 1): fail if the
       # FULL FLASHED SPAN (objcopy .bin size, NOT .text alone -- the .text figure understates the span
@@ -397,7 +373,7 @@ jobs:
       #   hard limit            63,488 B   62 KiB = the 64 KiB part less the 2 KiB store reserve
       #                                    (motorcontroller/firmware/memory.x); an over-span image fails to LINK
       #   lever B (vector trim)   -512 B   128-entry, 512-aligned flash table (motorcontroller/vectors)
-      #   lever A (build-std)   -2,408 B   nightly + `cargo image` + the core/compiler_builtins pins
+      #   lever A (build-std)   -2,408 B   nightly + the build-std image build + the core/compiler_builtins pins
       #   image at the raise    60,584 B   measured here, both levers in, slice 5's arming plumbing in
       #   IMAGE (2026-08-02)      53,904 B   after the wide-division outlining (-8,616 B, bit-exact)
       #   ceiling                56,000 B  =>  2,096 B of growth before it fires
@@ -510,7 +486,7 @@ jobs:
       # the ~2,100 B BLE descope) is now spent as a possibility: BLE is the robot's control link.
       #
       # RATCHET FROM THIS JOB'S NUMBER, NOT A LOCAL ONE. The span is reproducible for a given build
-      # LOCATION and only for that: the same commit, same toolchain, same runtime-hal, built
+      # LOCATION and only for that: the same commit, same toolchain, same HAL, built
       # at two different filesystem paths, measured 56,712 B and 56,728 B (2026-08-13), and identical
       # content at a THIRD path returned 56,712 B again. Each path repeats its own number, so the span
       # is deterministic per build location and varies across them. The 16 B is accounted for to the
@@ -529,10 +505,16 @@ jobs:
       # The rule the observation supports stands on its own: a ceiling is set from the measurement
       # every commit is judged against, which is this job's. 16 B against a ~1,800 B margin changes
       # no verdict, so what this governs is only which number a ratchet may be taken from.
+      #
+      # 2026-11-01: the universal image retired (specs/hal.md section 9, step 2). The ceiling applies
+      # to each per-chip image (55,000 B F103, 55,172 B F130 measured locally at the retirement,
+      # against the universal image's 59,584 B); the number stays 62,000 until a ratchet is taken
+      # from this job's figures.
       - name: Assert release flashed-span ceiling (upper size gate)
         run: |
-          span=$(wc -c < motorcontroller/target/thumbv7m-none-eabi/release/firmware.bin)
-          echo "release flashed span = ${span} B (.bin)"
+          for chip in gd32f103c8 gd32f130c8; do
+          span=$(wc -c < motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware.bin)
+          echo "mainboard-$chip release flashed span = ${span} B (.bin)"
           ceiling=62000
           hard=63488
           # Derived, never written down twice: the previous message hardcoded a headroom figure that
@@ -547,16 +529,19 @@ jobs:
             exit 1
           fi
           echo "flashed span within the ${ceiling} B ceiling"
+          done
 
-      # The per-chip images (specs/hal.md section 6): `cargo image-f103` and `cargo image-f130`, the
-      # same build-std release build of `firmware` with one chip feature, each in its own target
-      # directory (motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware). Built beside
-      # the universal image, which they replace after the bench parity gate (hal.md section 9).
-      - name: Build the per-chip images (cargo image-f103, cargo image-f130)
+      # The bench images on hal, one per chip, as the bench builds them (release; imu-bench's bins
+      # need `hardware`). They need a chip feature, so the default `cargo build` above skips them;
+      # this is their link check.
+      - name: Build the bench images per chip (imu-bench, wdg-bench, l2-uart-bench)
         working-directory: hoverboard-firmware/motorcontroller
         run: |
-          cargo image-f103
-          cargo image-f130
+          for chip in gd32f103c8 gd32f130c8; do
+            cargo build --release -p imu-bench --features "hardware $chip"
+            cargo build --release -p wdg-bench --features "$chip"
+            cargo build --release -p l2-uart-bench --features "$chip"
+          done
 
       # The per-chip size gate (specs/hal.md section 6): each image's flashed span against its
       # chip's flash less the store's two pages, and its static RAM (.data + .bss + .uninit) against
@@ -569,7 +554,6 @@ jobs:
           fail=0
           for chip in gd32f103c8 gd32f130c8; do
             elf=motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
-            arm-none-eabi-objcopy -O binary "$elf" "$elf.bin"
             span=$(wc -c < "$elf.bin")
             syms=$(arm-none-eabi-nm "$elf")
             flash=$((16#$(printf '%s\n' "$syms" | awk '$3=="__image_flash_budget"{print $1}')))
@@ -586,14 +570,6 @@ jobs:
             fi
           done
           exit "$fail"
-
-      # Panic reachability on the per-chip images: the same gate as the universal image's above,
-      # for the period ISR, the control task and the input task of each chip's build.
-      - name: Assert no panic reachable from the motor hot paths (per-chip images)
-        run: |
-          for chip in gd32f103c8 gd32f130c8; do
-            python3 tools/panic-reach.py motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
-          done
 
       # The firmware bundle (specs/firmware-bundle.md section 5): every image this job built, in one
       # .hbfw (a zip of the stripped ELFs and a manifest), which `hoverboard-cli board update` takes
@@ -614,11 +590,14 @@ jobs:
           mkdir -p "$out/elfs"
           bundle="$out/firmware-$(git rev-parse --short=7 HEAD).hbfw"
           "$cli" firmware pack "$bundle" \
-            motorcontroller/firmware:mainboard-gd32=motorcontroller/target/thumbv7m-none-eabi/release/firmware
+            motorcontroller/firmware:mainboard-gd32f103c8=motorcontroller/target/gd32f103c8/thumbv7m-none-eabi/release/firmware \
+            motorcontroller/firmware:mainboard-gd32f130c8=motorcontroller/target/gd32f130c8/thumbv7m-none-eabi/release/firmware
           "$cli" firmware info "$bundle"
           # The unstripped ELFs, by image name, for the tools that read symbols and DWARF from them
           # (tools/swdobs.py and the others).
-          cp motorcontroller/target/thumbv7m-none-eabi/release/firmware "$out/elfs/mainboard-gd32.elf"
+          for chip in gd32f103c8 gd32f130c8; do
+            cp motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware "$out/elfs/mainboard-$chip.elf"
+          done
 
       # Every CI build uploads the bundle and the unstripped ELFs as workflow artifacts, so any
       # commit's images can be downloaded from its Actions run without a local toolchain. The bundle
@@ -647,9 +626,7 @@ jobs:
 
   # Host tests: the motorcontroller suite, then the shared suite. Run with an explicit host target so
   # they neither inherit the thumbv7m default nor the link.x flag scoped to it in
-  # motorcontroller/.cargo/config.toml. The HAL is not linked on the host target; cargo
-  # still resolves (and fetches) the pinned runtime-hal, since it resolves target-gated dependencies
-  # on every target.
+  # motorcontroller/.cargo/config.toml. The HAL is not linked on the host target.
   host-tests:
     name: Host tests
     runs-on: ubuntu-latest
@@ -1024,10 +1001,7 @@ jobs:
   # (all targets) first, then the firmware's release build with no Wi-Fi variables set (the network
   # is a store field, specs/bridge-onboarding.md section 2), then the two images with a pinned
   # espflash binary release: the merged install image for install-esp (bootloader/bootloader.bin,
-  # partitions.csv, the app in ota_0, padded to 4 MB) and the app image for update-esp. The core's
-  # path dependencies (store among them) declare a target-gated runtime-hal dependency that cargo
-  # still resolves and fetches, at the commit bridge/Cargo.lock pins, without
-  # compiling it.
+  # partitions.csv, the app in ota_0, padded to 4 MB) and the app image for update-esp.
   bridge:
     name: Hoverboard bridge (core tests + clippy, release images)
     runs-on: ubuntu-latest

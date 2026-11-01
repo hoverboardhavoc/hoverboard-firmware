@@ -139,7 +139,7 @@ impl<const N: usize> ModeMachine<N> {
     }
 
     /// The MOE-allowed decision for motor `i`: `true` = MOE may be active, `false` = MOE must be
-    /// clear. The firmware applies this to runtime-hal's `ComplementaryPwm` MOE. Out-of-range `i`
+    /// clear. The firmware applies this to hal's arming gate (MOE). Out-of-range `i`
     /// returns `false` (defensive: never report a non-existent motor as armed).
     pub fn moe_allowed(&self, i: usize) -> bool {
         self.moe.get(i).map(|g| g.allowed()).unwrap_or(false)

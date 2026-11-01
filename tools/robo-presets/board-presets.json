@@ -173,7 +173,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -181,7 +181,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -189,7 +189,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -197,7 +197,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -453,7 +453,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -461,7 +461,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -469,7 +469,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -477,7 +477,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -725,7 +725,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -733,7 +733,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -851,12 +851,12 @@
         },
         {
           "from": "USART1_RX",
-          "reason": "link 0 would be his PA2 TX / PA15 RX, a pair runtime-hal's USART table does not route on the F1x0, so staging it would put a permanent entry in the boot report",
+          "reason": "link 0 would be his PA2 TX / PA15 RX, a pair the hal's USART table does not route on the F1x0, so staging it would put a permanent entry in the boot report",
           "value": "PA15"
         },
         {
           "from": "USART1_TX",
-          "reason": "link 0 would be his PA2 TX / PA15 RX, a pair runtime-hal's USART table does not route on the F1x0, so staging it would put a permanent entry in the boot report",
+          "reason": "link 0 would be his PA2 TX / PA15 RX, a pair the hal's USART table does not route on the F1x0, so staging it would put a permanent entry in the boot report",
           "value": "PA2"
         }
       ]
@@ -970,7 +970,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -978,7 +978,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -1254,7 +1254,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -1262,7 +1262,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -1270,7 +1270,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -1278,7 +1278,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -1510,7 +1510,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -1518,7 +1518,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -1764,7 +1764,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -1772,7 +1772,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -1780,7 +1780,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -1788,7 +1788,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -2032,7 +2032,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -2040,7 +2040,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -2048,7 +2048,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -2056,7 +2056,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -2297,7 +2297,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -2305,7 +2305,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -2313,7 +2313,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -2321,7 +2321,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -2603,7 +2603,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -2611,7 +2611,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -2834,7 +2834,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -2842,7 +2842,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -2850,7 +2850,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -2858,7 +2858,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -3080,7 +3080,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -3088,7 +3088,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -3096,7 +3096,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -3104,7 +3104,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -3380,7 +3380,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -3388,7 +3388,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -3396,7 +3396,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -3404,7 +3404,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -3647,7 +3647,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -3655,7 +3655,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -3663,7 +3663,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -3671,7 +3671,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -3934,7 +3934,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -3942,7 +3942,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -3950,7 +3950,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -3958,7 +3958,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -4205,7 +4205,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -4213,7 +4213,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -4441,7 +4441,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -4449,7 +4449,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -4457,7 +4457,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -4465,7 +4465,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -4713,7 +4713,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -4721,7 +4721,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -4729,7 +4729,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -4737,7 +4737,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -4952,7 +4952,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -4960,7 +4960,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -4968,7 +4968,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -4976,7 +4976,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -5238,7 +5238,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -5246,7 +5246,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -5254,7 +5254,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -5262,7 +5262,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -5507,7 +5507,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -5515,7 +5515,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -5523,7 +5523,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -5531,7 +5531,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -5736,7 +5736,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -5744,7 +5744,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART2 on this chip",
+          "note": "the hal routes his pair as USART2 on this chip",
           "value": "PB10"
         },
         {
@@ -5752,7 +5752,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -5760,7 +5760,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART2 on this chip",
+          "note": "the hal routes his pair as USART2 on this chip",
           "value": "PB11"
         },
         {
@@ -6108,7 +6108,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -6116,7 +6116,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART2 on this chip",
+          "note": "the hal routes his pair as USART2 on this chip",
           "value": "PB10"
         },
         {
@@ -6124,7 +6124,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -6132,7 +6132,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART2 on this chip",
+          "note": "the hal routes his pair as USART2 on this chip",
           "value": "PB11"
         },
         {
@@ -6394,7 +6394,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -6402,7 +6402,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -6410,7 +6410,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -6418,7 +6418,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {
@@ -6632,7 +6632,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -6640,7 +6640,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART2 on this chip",
+          "note": "the hal routes his pair as USART2 on this chip",
           "value": "PB10"
         },
         {
@@ -6648,7 +6648,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -6656,7 +6656,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART2 on this chip",
+          "note": "the hal routes his pair as USART2 on this chip",
           "value": "PB11"
         },
         {
@@ -6892,7 +6892,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -6900,7 +6900,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART2 on this chip",
+          "note": "the hal routes his pair as USART2 on this chip",
           "value": "PB10"
         },
         {
@@ -6908,7 +6908,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -6916,7 +6916,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART2 on this chip",
+          "note": "the hal routes his pair as USART2 on this chip",
           "value": "PB11"
         },
         {
@@ -7144,7 +7144,7 @@
           "id": "0x0F",
           "index": 0,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA2"
         },
         {
@@ -7152,7 +7152,7 @@
           "id": "0x0F",
           "index": 1,
           "key": "tx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB6"
         },
         {
@@ -7160,7 +7160,7 @@
           "id": "0x10",
           "index": 0,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART1 on this chip",
+          "note": "the hal routes his pair as USART1 on this chip",
           "value": "PA3"
         },
         {
@@ -7168,7 +7168,7 @@
           "id": "0x10",
           "index": 1,
           "key": "rx",
-          "note": "runtime-hal routes his pair as USART0 on this chip",
+          "note": "the hal routes his pair as USART0 on this chip",
           "value": "PB7"
         },
         {

@@ -5,13 +5,14 @@
 > fault/arming state machine can turn both FETs of a phase leg on at once, shorting the battery across the
 > bridge. Bench it on a current-limited supply with the motor disconnected.
 
-**The ambition: one configurable firmware for building vehicles, self-balancing or not, from a single
-binary that runs across the whole spread of hoverboard mainboards, 12-FET and 6-FET, single and
-twin/split.** Build a hoverboard you ride on its foot pads, or a non-balancing machine (a kart, a scooter, a robot
-base) driven by a remote or a throttle: the same image, reconfigured rather than recompiled.
+**The ambition: one configurable firmware for building vehicles, self-balancing or not, that runs
+across the whole spread of hoverboard mainboards, 12-FET and 6-FET, single and twin/split, with one
+image per MCU.** Build a hoverboard you ride on its foot pads, or a non-balancing machine (a kart, a
+scooter, a robot base) driven by a remote or a throttle: the same image, reconfigured rather than
+recompiled.
 
-Everything board-specific comes from configuration, not the build: the firmware detects the MCU at boot,
-then reads the board layout, IMU model, drive mode, and tuning from settings stored on the board, which you
+Everything board-specific except the MCU comes from configuration, not the build: the firmware reads
+the board layout, IMU model, drive mode, and tuning from settings stored on the board, which you
 can change at any time without recompiling or reflashing. The [Status](#status) below says how much of
 this is built.
 
@@ -19,17 +20,17 @@ Every other open hoverboard firmware picks the board at **compile time** (board 
 header, an online build generator). Change the board, swap the IMU, or even move which pin a wire is on, and
 you build a different binary. This one is configured at runtime instead.
 
-## One binary, two architectures
+## One firmware, two architectures
 
-Two things differ between boards, and they are **independent axes**: the MCU and the board layout. Each is
-resolved at runtime, not baked into the build.
+Two things differ between boards, and they are **independent axes**: the MCU and the board layout.
 
-- **The MCU is detected at boot.** The fleet spans two genuinely different peripheral architectures, not
-  minor variants of one: an **STM32F103 / GD32F103** class (APB-bus GPIO, the legacy `CRL`/`CRH` config
-  registers) and a **GD32F130** class (AHB-bus GPIO with an explicit alternate-function mux, an ST-style
-  peripheral set). Same Cortex-M3 core, different register model. One image detects which it is on and
-  drives the right model either way, on the [runtime-hal](https://github.com/hoverboardhavoc/runtime-hal)
-  foundation.
+- **The MCU is chosen by the image.** The fleet spans two genuinely different peripheral architectures,
+  not minor variants of one: an **STM32F103 / GD32F103** class (APB-bus GPIO, the legacy `CRL`/`CRH`
+  config registers) and a **GD32F130** class (AHB-bus GPIO with an explicit alternate-function mux, an
+  ST-style peripheral set). Same Cortex-M3 core, different register model. The firmware is one source
+  built once per chip, on the in-repo HAL (`motorcontroller/hal`): `mainboard-gd32f103c8` and
+  `mainboard-gd32f130c8`. The CLI reads the chip on the board and installs the image built for it
+  (`hoverboard-cli board update`), so a board never runs the other chip's register model.
 - **The board layout cannot be detected:** which pins drive the phases, where the halls, IMU, buttons, and
   LEDs sit, which IMU model is fitted, and whether it is a single mainboard driving both wheels or a split
   board with one controller per wheel. Every hoverboard firmware needs this; here it is **configuration stored on the board**, written
@@ -37,8 +38,8 @@ resolved at runtime, not baked into the build.
   over the Bluetooth of the hoverboard bridge on the board's SWD header), from a configurator.
 
 The two axes are orthogonal: the same chip turns up in different layouts, and a split board can be
-either MCU. The combinations multiply, and one configurable image covers them all instead of a build per
-board.
+either MCU. The combinations multiply, and one configurable image per chip covers them all instead of a
+build per board.
 
 **Mainboards, not sideboards.** The small auxiliary sideboards (LEDs, IMU, inputs, no motor) are the
 same F130 family, but a smaller part: the reference design for them is a GD32F130C6T with **32 KiB of
@@ -48,7 +49,7 @@ sideboard's flash. A sideboard can still be a node on the board's link, running 
 and this project's link stack is designed for exactly that tree. What it cannot be is another host for
 this image.
 
-Six-step commutation drives a wheel on both an F103 and an F130 from a single image, under an arming gate
+Six-step commutation drives a wheel on both an F103 and an F130, under an arming gate
 and a current limit, and a phone drives both wheels of a split pair through the hoverboard bridge on the
 master's SWD header. The
 runtime-config path is wired end to end: settings written from the phone take effect at the next arm. The
@@ -64,11 +65,11 @@ Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned &nbs
 | Component | | What it is |
 |---|:--:|---|
 | Foundations (`shared/base`) | ✅ | CRC-16/MODBUS, fixed-point conventions, the shared error vocabulary |
-| HAL ([runtime-hal]) | ✅ | chip detection (GD32F103 / F130), GPIO / USART / timer / ADC / I2C / SPI, on-chip flash erase/program; commutation spins a wheel on real boards |
+| HAL (`motorcontroller/hal`) | ✅ | one build per chip (GD32F103 / F130): GPIO / USART + DMA / timer / ADC / I2C / SPI, on-chip flash erase/program, each register sequence checked against GigaDevice's peripheral library; commutation spins a wheel on real boards |
 | Config storage (`shared/store`) | ✅ | log-structured key/value config store in flash; host-tested and running on a board |
-| Universal firmware binary (`motorcontroller/firmware`) | ✅ | one image: detect the GD32 at boot, read and validate the board layout, mount the store, run the 250 Hz control pipeline and the 16 kHz motor ISR; valid fleet-wide |
+| Firmware images (`motorcontroller/firmware`) | ✅ | one image per GD32 part: read and validate the board layout, mount the store, run the 250 Hz control pipeline and the 16 kHz motor ISR |
 | Onboard Bluetooth (the CC2541 module) | ❌ | the AT bring-up and the board's BLE port were proven on real phones and then removed (2026-10-27): the phone's way in is the hoverboard bridge's Bluetooth, and the module is no longer driven |
-| DMA UART ([runtime-hal]) | ✅ | interrupt- and DMA-driven buffered USART receive behind embedded-io adapters; proven on both chip families |
+| DMA UART (`motorcontroller/hal`) | ✅ | interrupt- and DMA-driven buffered USART receive behind embedded-io adapters; proven on both chip families |
 | Config over Bluetooth | ✅ | a phone (the in-repo Android app) writes a setting into a board's on-board storage over the hoverboard bridge's Bluetooth and the board's SWD mailbox, and reads it back: the runtime-config path end to end (a browser configurator is planned) |
 | IMU + attitude | ✅ | a configurable I2C IMU driver (multiple models, per-board axis map and gyro bias) and the fused pitch/roll filter; both bench boards read their IMU and publish attitude every control tick |
 | Link stack (`shared/link` + `shared/net`) | ✅ | frame format, addressing, discovery, multi-hop forwarding, and the config register protocol wired to the store; framing proven over the inter-board UART and Bluetooth, discovery + config proven over Bluetooth (forwarding is host-tested) |
@@ -83,7 +84,6 @@ Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned &nbs
 | Full configurator + flash/backup bridge | 📋 | the complete browser configurator (board layout and tuning) over the board's link, plus an ESP32 bridge for flashing and backup. The Android app already covers setup and tuning; the board-layout editor is designed but not built |
 | ~~Firmware update / bootloader~~ | ❌ | **Abandoned: it does not fit in the flash these boards have.** A bootloader and the config store would leave 47,104 B for the app, and the image is 57,904 B. See [Why there is no bootloader](#why-there-is-no-bootloader) |
 
-[runtime-hal]: https://github.com/hoverboardhavoc/runtime-hal
 
 
 ### Why there is no bootloader
@@ -137,8 +137,8 @@ bench-validated on its own rather than carried along.
 
 Configuration lives on the board, not in the build:
 
-- **One binary, fleet-wide.** The image detects the MCU at boot and drives either architecture; the board
-  layout and tuning are config, not a rebuild. (A few features may still be compile-time flags where flash
+- **One image per MCU, fleet-wide.** The image is built for its chip; the board layout and tuning are
+  config, not a rebuild. (A few features may still be compile-time flags where flash
   space is tight.)
 - **Config in flash** as a log-structured key/value store: each setting is an appended record with
   its own header and CRC, the newest record for a key wins, and a key with no record reads the
@@ -154,8 +154,8 @@ CI builds the motor-controller images on every push to `main` and packs them int
 bundle (`firmware-<commit>.hbfw`, `specs/firmware-bundle.md`), so you can flash without a local
 toolchain. `hoverboard-cli board update <board> <bundle>` reads the chip on the board and flashes
 the image built for it; `hoverboard-cli board flash <board> <elf>` flashes a development ELF as it
-is; `hoverboard-cli firmware info <bundle>` lists what the bundle holds. Only the universal
-image exists so far, so the bundle holds one image, for both GD32 families at 64 KiB.
+is; `hoverboard-cli firmware info <bundle>` lists what the bundle holds. The bundle holds
+`mainboard-gd32f103c8` and `mainboard-gd32f130c8`.
 
 - **Latest `main` build** (no login): [download `firmware-bundle.zip`](https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware-bundle.zip)
   (the bundle from the most recent green `main` build, served by [nightly.link](https://nightly.link)).
@@ -167,7 +167,7 @@ Each build chain is its own folder; run cargo or Gradle from inside it:
 
 | Folder | Builds |
 |---|---|
-| `motorcontroller/` | the GD32 firmware image (`cargo image`) and its test and bench images |
+| `motorcontroller/` | the GD32 firmware images (`cargo image-f103`, `cargo image-f130`), the HAL, and the test and bench images |
 | `shared/` | the crates the firmware, the bridge and the host tools all link; `shared/protocol-kotlin/` is their Kotlin mirror |
 | `bridge/` | the ESP32-C3 bridge image |
 | `tools/` | the host programs (the CLI, the SWD mailbox bridge, the emulator and hardware runners) beside the scripts |
@@ -186,20 +186,17 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
   `thumbv7m-none-eabi`, so it compiles the test binaries for the board and silently runs none of
   them. The script resolves the host triple and passes CI's flags, and CI's host-test job runs the
   same script.
-- **Shipping image: `cargo image` in `motorcontroller/`.** This is the build-std release build whose
-  bytes reach flash (`motorcontroller/.cargo/config.toml` explains why it is an alias and not a
-  config key). The ELF is `motorcontroller/target/thumbv7m-none-eabi/release/firmware`.
-- **Per-chip images: `cargo image-f103` and `cargo image-f130` in `motorcontroller/`** (`specs/hal.md`).
-  The same build-std release build of `firmware` for one chip, on the `hal` crate
-  (`motorcontroller/hal`) instead of runtime-hal: no boot detection, the chip's own flash vector
-  table, its own flash and SRAM sizes. The ELFs are
+- **Shipping images: `cargo image-f103` and `cargo image-f130` in `motorcontroller/`**
+  (`specs/hal.md` section 6). Each is the build-std release build of `firmware` for one chip, on the
+  `hal` crate (`motorcontroller/hal`), whose bytes reach flash (`motorcontroller/.cargo/config.toml`
+  explains why they are aliases and not a config key). The ELFs are
   `motorcontroller/target/gd32f103c8/thumbv7m-none-eabi/release/firmware` and
   `motorcontroller/target/gd32f130c8/thumbv7m-none-eabi/release/firmware`. An F103 board needs the
-  F103 image and an F130 board the F130 image; nothing on the board checks which it got. They build
-  beside the universal image until the bench parity gate retires it (`specs/hal.md` section 9).
-- **The HAL builds for exactly one chip** (`gd32f103c8`, `gd32f130c8` or `gd32f103rc`), so it and
-  `store-test` are left out of the workspace's default members and are always built with
-  `-p <crate> --features <chip>`. `./tools/host-test.sh` runs the HAL's host tests once per chip.
+  F103 image and an F130 board the F130 image: `hoverboard-cli board update` picks it from a bundle by
+  the chip the board reports, while `board flash` writes an ELF as given and checks no chip.
+- **The HAL builds for exactly one chip** (`gd32f103c8`, `gd32f130c8` or `gd32f103rc`), so it,
+  `firmware`, `store-test` and the bench images are left out of the workspace's default members and
+  are always built with `-p <crate> --features <chip>` (or the image aliases). `./tools/host-test.sh` runs the HAL's host tests once per chip.
 - **Golden register traces: `cargo run -p golden-trace -- check` in `tools/`.** It compares the
   HAL's register accesses for every vector in `tools/golden-trace/vectors/` against the checked-in
   trace of the same operation through GigaDevice's standard peripheral library, under Unicorn
@@ -207,30 +204,6 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
   `third_party/gd32-spl/` and fails unless they reproduce byte for byte; it, `-- regen` (write them)
   and `-- trace VECTOR --vendor` need `arm-none-eabi-gcc` from the Arm GNU Toolchain 15.2.Rel1, and
   every command needs cmake for Unicorn's build. `-- trace VECTOR --chip CHIP` prints one HAL trace.
-- **runtime-hal is a git dependency pinned by the lockfiles** (`[workspace.dependencies]` in
-  `motorcontroller/Cargo.toml` and, identically, `shared/Cargo.toml`). A plain build uses the
-  pinned commit, locally and in CI. To build against a local runtime-hal checkout beside this one
-  (`../runtime-hal`, for a HAL change not yet pushed), patch that one command, from
-  `motorcontroller/`. `./tools/host-test.sh` passes the same `--config` through, and runs each
-  suite from a folder at the same depth:
-
-  ```
-  cargo --config 'patch."https://github.com/hoverboardhavoc/runtime-hal".runtime-hal.path="../../runtime-hal"' image
-  ```
-
-  For `clippy`, put the `--config` after the subcommand (`cargo clippy --config '...'`): placed
-  before it, clippy builds against the git pin and says nothing.
-
-  A patched build rewrites the runtime-hal entry in each lockfile it touches to the local path,
-  with no `source` line. Afterwards run `git checkout motorcontroller/Cargo.lock` (and
-  `shared/Cargo.lock`, `tools/Cargo.lock` or `bridge/Cargo.lock` if the build touched them). A
-  plain build does not restore the pin: it re-resolves the branch and moves the pin to
-  runtime-hal's current `main`. CI's lint job fails a lockfile without the git source.
-- **Bumping runtime-hal:** run `cargo update -p runtime-hal` in `motorcontroller/`, `shared/`,
-  `tools/` and `bridge/` (the four tracked lockfiles must pin the same commit), and commit it as a
-  lockfile change naming the new runtime-hal commit and why the firmware needs it. A firmware
-  change that needs a runtime-hal change reaches CI only after runtime-hal is pushed and the pin is
-  bumped.
 
 ## Flashing
 

@@ -30,35 +30,34 @@
 # reads this file as text: an image's arm is its `<name>)` line up to its `;;` line, and inside it
 # each `IMAGE_GUARD_<KEY>=<value>` line, the value single-quoted or a bare number. Keep that shape.
 #
-# The flash.sh profiles for bench validators (imu-bench, probe, motor-verify, commutation-example)
-# are not images: they guard validators built from other repos, have one consumer each and no
-# hot-window half, and stay where their profile is.
+# flash.sh's imu-bench profile is not an image: it guards a bench validator, has one consumer and no
+# hot-window half, and stays where its profile is.
 
 image_guards() {
   IMAGE_GUARD_FLOOR=''
   IMAGE_GUARD_REQ_SYMS=''
   IMAGE_GUARD_HOT_SYMS=''
   case "$1" in
-    mainboard-gd32)
-      # The universal mainboard image, both GD32 families. ~54 KB of code when healthy.
+    mainboard-gd32f103c8)
+      # The mainboard image for the GD32F103C8 (specs/hal.md section 6). 54,132 B of code (.text +
+      # .hotcode) when healthy, measured at the retirement of the universal image.
       IMAGE_GUARD_FLOOR=40000
 
       # ----------------------------------------------------------------------------------------------
       # REQUIRED SYMBOLS: must RESOLVE in the image, anywhere.
       #
-      # The control stack the live firmware must contain, PLUS the six detect fault-path functions. Those
-      # six are matched by the length-prefixed path `..5probe<len><name>`, which is valid under BOTH legacy
-      # and v0 mangling (rustc 1.97 flipped the default to v0 and the old `17h` hash anchor broke CI
-      # closed, 2026-07-22). They are `#[inline(never)]` and host-untestable, so an LTO or codegen change
-      # that dropped or inlined away the bus-fault-safe probe would strip the fleet's ONLY runtime
-      # chip-identity path, in an image that still links and still flashes (the class the round-7a gutted
-      # image showed can pass both).
+      # The control stack the live firmware must contain, and the two link vectors: the USART1 handler and
+      # the DMA channel vector of its receive ring (the hal descriptor's `dma_rx`, DMA0 channel 5 here).
+      # Both are reached only through the flash vector table, so an image that dropped either still links.
+      # Paths are matched by their length-prefixed segments (`..5motor2hw..`), which are valid under both
+      # legacy and v0 mangling (rustc 1.97 flipped the default to v0 and the old `17h` hash anchor broke
+      # CI closed, 2026-07-22).
       #
       # The motor symbols (motor-integration slice 3) are here on the same reasoning: the 16 kHz period ISR
       # is reached only through a registered function pointer and its state through a `static mut` the ISR
       # alone touches, so dropping either leaves a configured, counting timer with nothing stepping the
       # commutator. An image that links, flashes, and has no motor.
-      IMAGE_GUARD_REQ_SYMS='T main$,T SysTick$,usart1_rx_isr,dma_rx_isr,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5probe3run,5probe12probe_family,5probe15probe_candidate,5probe13probe_present,5probe14measure_counts,5probe15scratch_present,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
+      IMAGE_GUARD_REQ_SYMS='T main$,T SysTick$,T USART1$,T DMA0_Channel5$,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
 
       # ----------------------------------------------------------------------------------------------
       # HOT-WINDOW MEMBERSHIP (audit D7): each must RESOLVE, and the FIRST nm line matching the pattern
@@ -70,7 +69,8 @@ image_guards() {
       #
       # A symbol that VANISHES (inlined or renamed) fails loudly, so the change is conscious: a silent drop
       # out of the window is an 8.8x fetch regression with CI green, which is the fsm_step near-miss.
-      # fsm_step itself is absent from this list because it fully inlines into run_shell.
+      # fsm_step itself is absent from this list because it fully inlines into run_shell. The ADC and
+      # SysTick handlers are named by their vector symbols: their bodies inline into them.
       #
       # `4base5fixed3div` is here for BOTH halves, and the missing half matters more:
       #   - above the boundary: the image's only `Fix` division body, entered 9 times per 250 Hz control
@@ -103,7 +103,15 @@ image_guards() {
       # 199 ms linked cold against 60 ms linked in the window, its 1 KiB page scan 108 ms against 0.4 ms
       # (specs/bench-evidence/2026-10-23/store-compact-window/). All four are placed by NAME anchors in
       # memory.x; `parse_header` and `is_committed` are on the 250 Hz arm-time row read as well.
-      IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,7adc_isr,15systick_handler,systick_tick_cb,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed'
+      IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,T ADC0_1$,T SysTick$,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed'
+      ;;
+    mainboard-gd32f130c8)
+      # The mainboard image for the GD32F130C8: mainboard-gd32f103c8's lists, every reason there, with
+      # this chip's vector names (the USART1 receive ring on DMA channels 3-4, the ADC on ADC_CMP).
+      # 54,232 B of code when healthy.
+      IMAGE_GUARD_FLOOR=40000
+      IMAGE_GUARD_REQ_SYMS='T main$,T SysTick$,T USART1$,T DMA_Channel3_4$,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
+      IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,T ADC_CMP$,T SysTick$,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed'
       ;;
     *) return 1 ;;
   esac

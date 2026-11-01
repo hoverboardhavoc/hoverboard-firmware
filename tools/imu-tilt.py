@@ -29,9 +29,12 @@ WHAT IT READS
   (round17 example: word0=4c525443, word6=fffff7c2 = -2110 mdeg = -2.11 deg, word12=00030000 ->
    flags 0x03 = CONFIGURED + LIVE.)
 
-  The CTRL_OBS ADDRESS is resolved from the ELF symbol table every run (--elf), never hardcoded:
-  the block's address has moved almost every round as .bss/.uninit shifted (round17: it moved +8 B
-  again). --addr 0x... overrides the ELF lookup. The block's SIZE is read from the same symbol and
+  The CTRL_OBS ADDRESS is resolved from the ELF symbol table every run, never hardcoded: the
+  block's address has moved almost every round as .bss/.uninit shifted (round17: it moved +8 B
+  again), and it differs between the two chips' images. --chip gd32f103c8|gd32f130c8 names the chip
+  on the board and reads that image's ELF (motorcontroller/target/<chip>/thumbv7m-none-eabi/
+  release/firmware); --elf PATH reads another ELF. There is no default chip: with neither (and no
+  --addr) the tool refuses. --addr 0x... overrides the ELF lookup. The block's SIZE is read from the same symbol and
   checked against the layout decoded here: a shorter block means a stale ELF/image, and the words
   past its end would be whatever .bss/stack follows (`mdw` reads memory, not the struct, so it
   returns plausible garbage rather than an error). --addr skips that check along with the lookup.
@@ -63,18 +66,18 @@ CONNECTION (OpenOCD TCL RPC)
 
 USAGE
   # live streaming readout (default):
-  tools/imu-tilt.py --elf motorcontroller/target/thumbv7m-none-eabi/release/firmware
+  tools/imu-tilt.py --chip gd32f130c8
   # append a self-describing evidence CSV (schema v3: unix_time,pitch_mdeg,roll_mdeg,flags,label):
-  tools/imu-tilt.py --record specs/bench-evidence/<date>/imu-tilt.csv
+  tools/imu-tilt.py --chip <chip> --record specs/bench-evidence/<date>/imu-tilt.csv
   #   while recording live, type a word + Enter to drop a `# marker <text>` row in the CSV.
   # guided sign checklist (prompts orientations, samples, prints PASS/CHECK):
-  tools/imu-tilt.py --checklist --record specs/bench-evidence/<date>/imu-tilt.csv
+  tools/imu-tilt.py --chip <chip> --checklist --record specs/bench-evidence/<date>/imu-tilt.csv
   #   labels every sample row with the pose id and writes # step/# summary comment lines so the
   #   CSV alone reconstructs the session (windows, means, spec-expected sign, verdicts, provenance).
   # the balance-era accel-sign gate (board LEVEL, RIGHT WAY UP, at rest, disarmed):
-  tools/imu-tilt.py --accel-sign --record specs/bench-evidence/<date>/accel-sign.csv
+  tools/imu-tilt.py --chip <chip> --accel-sign --record specs/bench-evidence/<date>/accel-sign.csv
   # the O1 attribution instrument, one shot:
-  tools/imu-tilt.py --events
+  tools/imu-tilt.py --chip <chip> --events
   # parser self-test, no hardware:
   tools/imu-tilt.py --selftest
 
@@ -1286,7 +1289,7 @@ def selftest():
     dw.step_end("lean_forward", -10110, "negative", "PASS", 2)
     dw.summary(
         [("level", -2109, "baseline~0", "INFO"), ("lean_forward", -10110, "negative", "PASS")],
-        [("elf", "motorcontroller/target/thumbv7m-none-eabi/release/firmware"), ("ctrl_obs", "0x20000c40"),
+        [("elf", "motorcontroller/target/gd32f130c8/thumbv7m-none-eabi/release/firmware"), ("ctrl_obs", "0x20000c40"),
          ("tool", TOOL_VERSION), ("commit", "abc1234")],
     )
     for line in demo.getvalue().splitlines():
@@ -1299,7 +1302,15 @@ def selftest():
 # --------------------------------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------------------------------
-DEFAULT_ELF = "motorcontroller/target/thumbv7m-none-eabi/release/firmware"
+# One image per chip, each in its own target directory (motorcontroller/.cargo/config.toml, the
+# image-f103 / image-f130 aliases). No default: the chip on the board must be named.
+CHIPS = ("gd32f103c8", "gd32f130c8")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def chip_elf(chip):
+    """The release ELF of `chip`'s image."""
+    return os.path.join(REPO, "motorcontroller", "target", chip, "thumbv7m-none-eabi", "release", "firmware")
 
 
 def build_parser():
@@ -1311,7 +1322,8 @@ def build_parser():
         "6666:localhost:6666 pi@192.168.0.248",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--elf", default=DEFAULT_ELF, help=f"ELF to resolve CTRL_OBS from (default {DEFAULT_ELF})")
+    p.add_argument("--chip", choices=CHIPS, help="the chip on the board: resolve CTRL_OBS from that chip's image")
+    p.add_argument("--elf", help="ELF to resolve CTRL_OBS from, instead of --chip's image")
     p.add_argument("--addr", help="CTRL_OBS address override, e.g. 0x20000c40 (skips ELF lookup)")
     p.add_argument("--host", default="localhost", help="OpenOCD TCL RPC host (default localhost)")
     p.add_argument("--port", type=int, default=6666, help="OpenOCD TCL RPC port (default 6666)")
@@ -1342,9 +1354,19 @@ def build_parser():
 def resolve_addr(args):
     if args.addr:
         return int(args.addr, 0)
+    if args.elf is None and args.chip is None:
+        print(
+            "error: name the image on the board: --chip gd32f103c8|gd32f130c8, or --elf PATH "
+            "(or --addr). CTRL_OBS sits at a different address in each chip's image.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.elf is None:
+        args.elf = chip_elf(args.chip)
     if not os.path.exists(args.elf):
         print(
-            f"error: ELF {args.elf!r} not found. Build the firmware or pass --elf / --addr.",
+            f"error: ELF {args.elf!r} not found. Build it (cargo image-f103 / image-f130 in "
+            "motorcontroller/) or pass --elf / --addr.",
             file=sys.stderr,
         )
         sys.exit(2)

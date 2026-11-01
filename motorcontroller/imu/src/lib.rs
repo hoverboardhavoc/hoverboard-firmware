@@ -12,7 +12,7 @@
 //! spec's source 1); which IMU model is fitted is a [`Model`] descriptor (the spec's model table).
 //!
 //! Transport: the driver is generic over the `embedded-hal` 1.0 `i2c::I2c` trait per call, so it
-//! works with either runtime-hal's hardware-I2C peripheral (the silicon-proven default path) or a
+//! works with either hal's hardware-I2C peripheral (the silicon-proven default path) or a
 //! future bit-banged software-I2C master exposing the same trait (a board-model variant, not
 //! built). The concrete pins/bus instance are firmware wiring, not this crate's.
 //!

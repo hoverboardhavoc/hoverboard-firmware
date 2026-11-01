@@ -74,7 +74,7 @@ impl<T: Scalar> Field<T> {
 /// It is a SEPARATE type rather than an option on [`Field`] for a measured reason: `Field` is
 /// passed by value to every typed `get`, and widening it by a defaults pointer cost **736 B** of
 /// image across the 22 non-test call sites that link (74 counting tests; measured 2026-08-13,
-/// `cargo image` span, and independently reconstructed at +752 B). Resolving
+/// image span, and independently reconstructed at +752 B). Resolving
 /// [`Self::at`] to a plain `Field` keeps that handle four bytes and confines the extra width to the
 /// two consts that need it.
 #[derive(Clone, Copy)]

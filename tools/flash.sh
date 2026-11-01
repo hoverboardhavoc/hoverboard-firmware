@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Cargo runner: flash a locally-built ELF onto a bench board through its probe.
-# Usage (via cargo): cargo run --release   -> cargo invokes "flash.sh <elf>"
+# Flash a locally-built ELF onto a bench board through its probe.
+# Usage: CHIP=gd32f103c8|gd32f130c8 BOARD=<board> tools/flash.sh <elf>   (a release image)
+#        IMAGE_PROFILE=imu-bench BOARD=<board> tools/flash.sh <elf>        (the IMU bench validator)
 #
 # There are two RUNNERS, i.e. two hosts a probe-touching command can execute on, and which one a board
 # uses is a physical fact about that board (see the runner block below the BOARD table):
@@ -161,7 +162,7 @@ target_sh() {
 # `set -e` is live in here, so BOTH cleanups end in `|| true` and the status is captured first and
 # returned last. Without that, either one failing takes the handler down with it: a failed release
 # would skip the removal and leave the staged image on the Pi, and a failed removal after a
-# SUCCESSFUL flash would report failure to cargo for a board that was in fact programmed, which
+# SUCCESSFUL flash would report failure to the caller for a board that was in fact programmed, which
 # invites exactly the re-flash of a live board this tool exists to prevent. The cleanups are
 # best-effort; the run's own verdict is not theirs to change.
 TOOK_LOCK=0
@@ -280,18 +281,37 @@ refuse_unrunnable() {
   exit 1
 }
 
-# Which image is being flashed, so the gutted-image guard (below) applies the right .text floor and
-# required-symbol set. A release image's guards come from tools/image-guard-syms.sh, keyed by the
-# image name its Cargo.toml table gives (`mainboard-gd32`, the universal image, is the default); the
-# bench validators below are not release images and keep their own profiles. The integrated firmware
-# is ~54 KB .text with the control-stack symbols; the imu-bench validator is a legitimately small
-# ~18 KB .text image with only IMU_BENCH_OBS. A single integrated-tuned guard rejects the legit
-# imu-bench image (round 9), so the profile selects the set.
-# FAIL-CLOSED, in two different ways: an ABSENT or empty value defaults to `mainboard-gd32` (the
-# shipping image), so a stray flash is never waved through a laxer floor, and an UNKNOWN value is
-# refused outright by the `*)` arm below rather than defaulted. Neither can select a weaker guard set.
+# Which image is being flashed, so the gutted-image guard (below) applies the right code floor and
+# required-symbol set. A release image is built per chip (specs/hal.md section 6): CHIP names the
+# chip, the image is `mainboard-$CHIP`, and its guards come from tools/image-guard-syms.sh, keyed by
+# the image name its Cargo.toml table gives. The imu-bench validator is not a release image and keeps
+# its own profile below, selected with IMAGE_PROFILE=imu-bench. The integrated firmware is ~54 KB of
+# code with the control-stack symbols; the imu-bench validator is a legitimately small ~18 KB .text
+# image with only IMU_BENCH_OBS. A single integrated-tuned guard rejects the legit imu-bench image
+# (round 9), so the profile selects the set.
+# FAIL-CLOSED, in three ways, none of which can select a weaker guard set:
+#   - neither CHIP nor IMAGE_PROFILE given is refused. There is no default chip: an F103 board and an
+#     F130 board run different images, and the wrong one drives the wrong register model.
+#   - an UNKNOWN chip or profile is refused outright by the `*)` arm below rather than defaulted.
+#   - CHIP and IMAGE_PROFILE that name different images are refused rather than one winning.
+# The CHIP given and the chip the ELF was built for are not compared by name, but each image's
+# required symbols carry its chip's vector names (image-guard-syms.sh), so the other chip's ELF fails
+# the required-symbol guard. Which chip the BOARD carries is not checked here (specs/hal.md section 7).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-IMAGE_PROFILE="${IMAGE_PROFILE:-mainboard-gd32}"
+CHIP="${CHIP:-}"
+IMAGE_PROFILE="${IMAGE_PROFILE:-}"
+if [ -n "$CHIP" ]; then
+  if [ -n "$IMAGE_PROFILE" ] && [ "$IMAGE_PROFILE" != "mainboard-$CHIP" ]; then
+    echo "flash: REFUSED - CHIP=$CHIP names the image mainboard-$CHIP, but IMAGE_PROFILE=$IMAGE_PROFILE. Give one of them." >&2
+    exit 2
+  fi
+  IMAGE_PROFILE="mainboard-$CHIP"
+elif [ -z "$IMAGE_PROFILE" ]; then
+  echo "flash: REFUSED - no image named. Set CHIP=gd32f103c8|gd32f130c8 for a release image" >&2
+  echo "flash: (mainboard-<chip>), or IMAGE_PROFILE=imu-bench for the IMU bench validator." >&2
+  echo "flash: there is no default chip: each chip has its own image and its own guards." >&2
+  exit 2
+fi
 . "$SCRIPT_DIR/image-guard-syms.sh"
 case "$IMAGE_PROFILE" in
   imu-bench)
@@ -299,55 +319,13 @@ case "$IMAGE_PROFILE" in
     # Floor well below 18 KB but far above a gutted few-KB image.
     PROFILE_TEXT_FLOOR=8000
     PROFILE_REQ_SYMS='B IMU_BENCH_OBS$' ;;
-  probe)
-    # The runtime-hal detect bench validators (bench-fw-detect / bench-fw-probe / bench-fw-faultpin):
-    # legitimately tiny opt-s images (~1.5-4 KB .text) that exercise the fault-safe probe on silicon.
-    # They publish their result to a FIXED RAM address (RESULT_ADDR), not a named symbol, so the guard
-    # keys on the probe machinery every one of them links: the single-access probe read and the naked
-    # BusFault entry's Rust bridge. The `.text` SECTION alone of the smallest validator (faultpin) is
-    # ~536 B (the rest is .rodata); floor below that but well above a gutted stub. The required-symbol
-    # check is the load-bearing guard for these tiny images (a gutted image loses the probe machinery).
-    PROFILE_TEXT_FLOOR=256
-    PROFILE_REQ_SYMS='probe_read32,bus_fault_trampoline' ;;
-  motor-verify)
-    # runtime-hal's bench-fw/motor-verify: the CONFIG-ONLY hot-path validator (advanced-timer
-    # complementary-PWM bring-up + the motor-era NVIC priority ordering, then read both back; MOE is
-    # never armed). ~3.1 KB .text at opt-s + full LTO, so it needs its own floor: the `integrated`
-    # 40 KB floor rejects it and the `probe` 256 B floor is far too lax to notice a gutted one.
-    # Symbols: its own crate-qualified cortex-m-rt main body (the whole configure/verify sequence
-    # inlines INTO it, so if that body is gutted there is nothing left to run), plus the detect
-    # fault-safe probe machinery it family-detects through -- family detection is what resolves the
-    # per-family IRQ numbers the priority write targets, so an image that lost it would program the
-    # WRONG vectors' priorities and still blink a verdict. Mangling-agnostic patterns (length-prefixed
-    # paths + a crate-name anchor), valid under both legacy and v0.
-    PROFILE_TEXT_FLOOR=2000
-    PROFILE_REQ_SYMS='T main$,bench_fw_motor_verify.*cortex_m_rt_main,5probe3run,5probe12probe_family,5probe15bus_fault_entry' ;;
-  commutation-example)
-    # runtime-hal's proven spin choreography (examples/src/bin/commutation_splitboard.rs and
-    # commutation_12fet.rs): the adopted reference this spec's bring-up order came from, re-run from
-    # current mains at the user-present session (specs/arm-session.md). ~5.5 KB and ~6.0 KB of
-    # FLASHED SPAN at opt-s + LTO, of which the code this floor measures is 4,352 B and 4,776 B
-    # (measured 2026-07-31, both mains; the rest of the span is the 1 KB vector table plus
-    # .rodata). Neither the 40 KB integrated floor nor the 256 B probe floor fits.
-    #
-    # THESE IMAGES ARM THE BRIDGE THEMSELVES: they call the arming gate directly, with no mode
-    # machine in front of it, which is exactly why they are user-present-only. The profile exists so
-    # they go through the SAME bench lock, wfi scan and armed-bridge guard as everything else rather
-    # than being flashed by a raw openocd line.
-    #
-    # Symbols: the bin's own cortex-m-rt main body (the whole bring-up + spin loop inlines into it,
-    # so a gutted image has nothing left) and the detect fault-safe probe machinery both bins
-    # family-detect through. Mangling-agnostic patterns; the bin NAME is deliberately not anchored so
-    # one profile covers both examples.
-    PROFILE_TEXT_FLOOR=3000
-    PROFILE_REQ_SYMS='cortex_m_rt_main,5probe3run,5probe15bus_fault_entry,5probe20bus_fault_trampoline' ;;
   *)
     # A release image: its floor and both symbol lists live in tools/image-guard-syms.sh, which is
     # the ONE copy CI's build-time guard, the bundle packer and the flash-guard harness read as well,
     # and which carries the reason every entry is on them. They were literals here and in ci.yml
     # until 2026-10-24 and had already drifted apart.
     if ! image_guards "$IMAGE_PROFILE"; then
-      echo "flash: IMAGE_PROFILE must be an image named in tools/image-guard-syms.sh or one of imu-bench|probe|motor-verify|commutation-example (got '$IMAGE_PROFILE')" >&2; exit 2
+      echo "flash: REFUSED - '$IMAGE_PROFILE' is not an image named in tools/image-guard-syms.sh (CHIP=gd32f103c8|gd32f130c8) and not imu-bench." >&2; exit 2
     fi
     PROFILE_TEXT_FLOOR="$IMAGE_GUARD_FLOOR"
     PROFILE_REQ_SYMS="$IMAGE_GUARD_REQ_SYMS"

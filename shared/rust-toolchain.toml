@@ -1,7 +1,7 @@
 # The crates here are compiled into the GD32 image (../motorcontroller) by its pinned nightly, so
 # this workspace's tests and lints run on that same nightly, as they did on main before the split,
 # and Cargo.lock pins the dependency versions motorcontroller/Cargo.lock ships. The host tests link
-# the prebuilt core of this toolchain: build-std is only the motorcontroller's `cargo image`, so
+# the prebuilt core of this toolchain: build-std is only the motorcontroller's image builds, so
 # rust-src is not needed here. The ESP32-C3 bridge (../bridge) also links some of these crates on
 # 1.92 stable, from its own lockfile; the bridge CI job is the check that they build there.
 [toolchain]

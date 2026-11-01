@@ -13,7 +13,7 @@ up with is skipped, never made up.
 
 Usage:
     tools/foc-trace.py --tcp HOST:PORT --board BOARD [--cal COUNTS] [--hz 10]
-                       [--csv FILE] [--elf PATH] [--frame DIRECTION ALIGN_OFFSET]
+                       [--csv FILE] (--chip CHIP | --elf PATH) [--frame DIRECTION ALIGN_OFFSET]
                        [--cli PATH]
     (--serial DEVICE or --device NAME in place of --tcp, as hoverboard-cli takes them; BOARD is a
     hoverboard-cli target: an address, a device.name or a uid prefix)
@@ -63,7 +63,7 @@ import subprocess
 import sys
 
 from swdobs import (
-    CTRL_MAGIC, CTRL_OBS_WORDS, DEFAULT_ELF, REPO, W_DUTY2_ANGLE, W_FOC_DQ_MEAN, W_FOC_HOLD,
+    CTRL_MAGIC, CTRL_OBS_WORDS, REPO, add_image_args, image_elf, W_DUTY2_ANGLE, W_FOC_DQ_MEAN, W_FOC_HOLD,
     W_FOC_PHASE_MEAN, W_FOC_REF_VQ, W_MOTOR_CURRENT, W_MOTOR_FAULT, W_MOTOR_RATE_Q, W_MOTOR_SPEED, W_MOTOR_STATE,
     W_TORQUE_MODE, CURRENT_CAL_FIELD, clamp_current_cal, i16_pair, resolve_symbols_sized, s16, s32,
 )
@@ -357,7 +357,7 @@ def main(argv=None):
                     "scales the amps unless --cal is given")
     ap.add_argument("--hz", type=float, default=10.0, help="the rate the stream is asked for, at most 10")
     ap.add_argument("--csv", default=None)
-    ap.add_argument("--elf", default=DEFAULT_ELF)
+    add_image_args(ap)
     ap.add_argument("--cli", default=None, help="the hoverboard-cli binary")
     ap.add_argument("--cal", type=int, help="counts per amp, given rather than read off the board")
     ap.add_argument("--frame", nargs=2, type=int, metavar=("DIRECTION", "ALIGN_OFFSET"),
@@ -366,6 +366,7 @@ def main(argv=None):
     if not 0 < args.hz <= 10:
         sys.exit(f"{TOOL}: --hz {args.hz}: the bridge read is streamed at up to 10 Hz")
 
+    args.elf = image_elf(args)
     ctrl, gains = resolve(args.elf)
     link_args = (["--tcp", args.tcp] if args.tcp else
                  ["--serial", args.serial] if args.serial else ["--device", args.device])

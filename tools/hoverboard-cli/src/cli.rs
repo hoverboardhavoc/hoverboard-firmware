@@ -1087,12 +1087,12 @@ mod tests {
         assert_eq!(cmd(line), update(None, false));
         assert_eq!(cmd(&format!("{line} --yes")), update(None, true));
         assert_eq!(
-            cmd(&format!("{line} --image mainboard-gd32 --yes")),
-            update(Some("mainboard-gd32"), true)
+            cmd(&format!("{line} --image mainboard-gd32f103c8 --yes")),
+            update(Some("mainboard-gd32f103c8"), true)
         );
         assert_eq!(
-            cmd(&format!("{line} --image=mainboard-gd32")),
-            update(Some("mainboard-gd32"), false)
+            cmd(&format!("{line} --image=mainboard-gd32f103c8")),
+            update(Some("mainboard-gd32f103c8"), false)
         );
         assert_eq!(
             cmd("board flash offroad-master fw.elf"),
@@ -1104,7 +1104,7 @@ mod tests {
         // board flash takes no bundle options.
         for line in [
             "board flash offroad-master fw.elf --yes",
-            "board flash offroad-master fw.elf --image mainboard-gd32",
+            "board flash offroad-master fw.elf --image mainboard-gd32f103c8",
         ] {
             assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
         }
@@ -1115,10 +1115,10 @@ mod tests {
             })
         );
         assert_eq!(
-            cmd("firmware pack o.hbfw motorcontroller/firmware:mainboard-gd32=fw --dirty"),
+            cmd("firmware pack o.hbfw motorcontroller/firmware:mainboard-gd32f103c8=fw --dirty"),
             Ok(Command::FirmwarePack {
                 out: s("o.hbfw"),
-                entries: vec![s("motorcontroller/firmware:mainboard-gd32=fw")],
+                entries: vec![s("motorcontroller/firmware:mainboard-gd32f103c8=fw")],
                 dirty: true,
             })
         );

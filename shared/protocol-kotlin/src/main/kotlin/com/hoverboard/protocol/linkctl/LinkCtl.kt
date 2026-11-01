@@ -122,12 +122,12 @@ private fun rdI32(b: ByteArray, at: Int): Int = rdU32(b, at).toInt()
 // --- CYCLIC_STATE (34 B: 16 B committed + a 12 B appended block + the i32 wheelRate + the u16 machine digest)
 
 /**
- * The part a board reports in [CyclicObs.chip]: what `detect_chip` identified at boot.
+ * The part a board reports in [CyclicObs.chip]: the chip its image is built for.
  * Mirror of `shared/linkctl/src/lib.rs`, `ChipTag`.
  *
  * The tags are the firmware's own allocation, not a silicon id: the GD32 parts carry no readable
- * part number, so the board derives the tag from what its detect probe MEASURED
- * (`shared/linkctl/src/lib.rs`, `ChipTag::from_detected`).
+ * part number, so each image reports the tag its chip's descriptor carries
+ * (`motorcontroller/hal/src/descriptor.rs`, `chip_tag`).
  *
  * [Unknown] is the fail-safe for a byte this build does not allocate, as [DriveKind.Neutral] is
  * for an unknown kind byte: a client that cannot name the part must say so rather than assume one.
@@ -167,7 +167,7 @@ enum class ChipTag(val value: Int) {
  * off 17..19  i16 LE  phaseMean   the SAME window's mean magnitude, same counts
  * off 19..21  u16 LE  dutyOn      the last applied on-duty, 0..ARR
  * off 21      u8      bootTag     boot_count's low byte
- * off 22      u8      chip        the part detect_chip identified (ChipTag)
+ * off 22      u8      chip        the part the board's image is built for (ChipTag)
  * off 23..27  u32 LE  odometer    this wheel's lifetime travel in absolute hall edges
  * ```
  *

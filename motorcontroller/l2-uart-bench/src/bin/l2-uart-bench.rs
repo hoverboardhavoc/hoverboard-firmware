@@ -1,16 +1,19 @@
 //! L2 Tier-2 on-silicon validator (`specs/l2.md`, "Tier 2 - master <-> slave on silicon").
 //!
-//! One universal image for the wired GD32 pair. It detects the family and takes a role:
-//!   - **F10x (master / driver):** runs the test sequence and records the outcome.
-//!   - **F1x0 (slave / responder):** echoes every reassembled packet straight back, forever.
+//! One image per chip on the `hal` crate for the wired GD32 pair; the compiled chip's family sets
+//! the role:
+//!   - **F10x (the `gd32f103c8` build, master / driver):** runs the test sequence and records the
+//!     outcome.
+//!   - **F1x0 (the `gd32f130c8` build, slave / responder):** echoes every reassembled packet
+//!     straight back, forever.
 //!
 //! Both run **L2 over the inter-board UART** (USART1, PA2 TX / PA3 RX, `link::INTER_BOARD_BAUD`
 //! 8N1 - the proven inter-board link, M1 milestone). The L2 logic is the HAL-free `link` crate: TX
 //! fragments a packet and frames each fragment (`SOF | len | frag-hdr | chunk | CRC-16`); the wire
-//! I/O both ways is `runtime-hal`'s `SplitSerial<RingBufferedRx>` embedded-io adapter (polled TX
-//! half + circular-DMA RX; the adapter owns the IDLE-latch and overrun semantics below its API,
-//! `runtime-hal specs/serial-adapters.md`), and the received bytes feed `link`'s `StreamFramer` +
-//! `Reassembler` - the SOF/len/CRC framer is the framing authority, exactly as the spec requires.
+//! I/O both ways is `hal`'s `SplitSerial` embedded-io adapter (one-shot DMA TX per frame +
+//! circular-DMA RX; the adapter owns the IDLE-latch and overrun semantics below its API, and bounds
+//! every write wait), and the received bytes feed `link`'s `StreamFramer` + `Reassembler` - the
+//! SOF/len/CRC framer is the framing authority, exactly as the spec requires.
 //!
 //! The master validates the spec's Tier-2 checks and writes them to `LINK_OBS`:
 //!   1. a single-fragment packet round-trips (frames cross intact both directions);
@@ -37,16 +40,12 @@ mod firmware {
     use cortex_m::asm::nop;
     use cortex_m_rt::entry;
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
-    // which cortex-m-rt no longer provides once its `device` feature is on.
-    use vectors as _;
 
     use embedded_io::{Read, Write};
+    use hal::clock::{self, ClockConfig};
+    use hal::descriptor::DESCRIPTOR;
+    use hal::{Chip, DmaTx, PeriphLabel, RingBufferedRx, SplitSerial, Usart};
     use link::{encode_stream_frame, fragment, Reassembler, StreamFramer};
-    use runtime_hal::clock::{self, ClockConfig};
-    use runtime_hal::descriptor::ClockPath;
-    use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
-    use runtime_hal::{detect_chip, PeriphLabel, RingBufferedRx, SplitSerial, Usart};
     use test_shared::obs_store;
 
     // --- clock / link parameters ----------------------------------------------------------------
@@ -74,6 +73,9 @@ mod firmware {
     /// DMA ring capacity. >= the max wire frame with comfortable margin for back-to-back fragments
     /// ("a buffer sized to the max L2 frame", with headroom so a 2-fragment burst never laps).
     const DMA_CAP: usize = 256;
+    /// The inter-board USART1 pins, packed `port << 4 | pin` (`Chip::pin`): PA2 = TX, PA3 = RX.
+    const PA2: u8 = 0x02;
+    const PA3: u8 = 0x03;
 
     // --- test packets (master) ------------------------------------------------------------------
 
@@ -115,7 +117,7 @@ mod firmware {
         magic: u32,
         /// 1 = master (F10x), 2 = slave (F1x0).
         role: u8,
-        /// Non-zero if `detect_chip` failed.
+        /// Non-zero if `Chip::take` failed (the field keeps its name and offset).
         detect_err: u8,
 
         // --- master fields ---
@@ -167,29 +169,25 @@ mod firmware {
         alive: 0,
     };
 
-    // --- static buffers (the DMA ring + the RAM vector table must be 'static) --------------------
+    /// The role, from the compiled chip: the GD32F10x (descriptor `node_mcu` 1, the `gd32f103c8`
+    /// build) is the master, the GD32F1x0 the slave.
+    const IS_MASTER: bool = DESCRIPTOR.node_mcu == 1;
+
+    // --- static buffers (the DMA RX ring and the DMA TX buffer must be 'static) -------------------
 
     static mut DMA_BUF: [u8; DMA_CAP] = [0; DMA_CAP];
-    static mut VECTORS: RamVectorTable = RamVectorTable {
-        slots: [0; MAX_VECTORS],
-    };
+    /// The DMA TX buffer: one wire frame per transfer (each `write_all` is one frame).
+    static mut TX_BUF: [u8; MAX_WIRE_FRAME] = [0; MAX_WIRE_FRAME];
 
     // --- entry ----------------------------------------------------------------------------------
 
     #[entry]
     fn main() -> ! {
-        let chip = match detect_chip() {
-            Ok(c) => c,
-            Err(_) => {
-                obs_store!(LINK_OBS, detect_err, 1);
-                halt();
-            }
+        let Some(chip) = Chip::take() else {
+            obs_store!(LINK_OBS, detect_err, 1);
+            halt();
         };
-        let is_master = match chip.clock() {
-            ClockPath::F10xRcc => true,
-            ClockPath::F1x0Rcu => false,
-        };
-        obs_store!(LINK_OBS, role, if is_master { 1 } else { 2 });
+        obs_store!(LINK_OBS, role, if IS_MASTER { 1 } else { 2 });
 
         // Bring up the production 72 MHz tree (IRC8M -> PLL) so the link runs in the shipping clock
         // regime. Both boards do this independently before any UART traffic.
@@ -197,42 +195,41 @@ mod firmware {
             halt();
         }
 
-        // GPIOA carries the inter-board USART1 pins PA2 (TX) / PA3 (RX). Split once to configure them.
-        let gpioa = match chip.gpioa() {
-            Ok(p) => p.split(),
-            Err(_) => halt(),
+        // The inter-board USART1 pins PA2 (TX) / PA3 (RX), as floating inputs with the port clock on.
+        let (Ok(pa2), Ok(pa3)) = (chip.pin(PA2), chip.pin(PA3)) else {
+            halt()
         };
 
         // USART1 on PA2/PA3, link::INTER_BOARD_BAUD 8N1: configures the GPIO AF + base, RX/TX
         // enabled. The BRR is computed from the 72 MHz tree's APB1 = 36 MHz input clock.
-        let usart = match Usart::new(
-            &chip,
-            &CLOCK,
-            PeriphLabel::Usart1,
-            (gpioa.pa2, gpioa.pa3),
-            BAUD,
-        ) {
+        let usart = match Usart::new(&chip, &CLOCK, PeriphLabel::Usart1, (pa2, pa3), BAUD) {
             Ok(u) => u,
             Err(_) => halt(),
         };
 
-        // Split into owned halves (specs/usart-split.md): the RX half is consumed by
-        // RingBufferedRx, then both halves ride the SplitSerial embedded-io adapter.
-        let (tx, usart_rx) = usart.split();
+        // Split into owned halves: the RX half is consumed by RingBufferedRx, the TX half by
+        // DmaTx, then both ride the SplitSerial embedded-io adapter.
+        let (usart_tx, usart_rx) = usart.split();
 
-        // Route interrupts through the RAM vector table and enable them BEFORE arming the DMA RX (the
-        // RingBufferedRx::new contract: VTOR flipped before it unmasks the USART/DMA IRQs).
-        // SAFETY: RAM init done, no peripheral IRQ enabled yet, VECTORS is a 'static aligned table.
-        unsafe { install(&mut *addr_of_mut!(VECTORS), chip.irq()) };
-        // SAFETY: enabling interrupts after the table is installed; handlers are registered by `new`.
+        // The serial vectors are the HAL's own, in the flash vector table. Their priorities are
+        // set before the bring-ups below unmask them (the RingBufferedRx::new contract), then
+        // interrupts are enabled once.
+        hal::irq::apply_motor_era_priorities(chip.irq());
+        // SAFETY: the vectors these bring-ups unmask are the HAL's own; nothing else is unmasked.
         unsafe { cortex_m::interrupt::enable() };
 
-        // Arm DMA-driven RX (circular DMA + USART IDLE) over the 'static ring. Consumes `usart_rx`.
-        // SAFETY: DMA_BUF is a 'static, the sole DMA ring for this single receiver.
-        let dma_buf =
-            unsafe { core::slice::from_raw_parts_mut(addr_of_mut!(DMA_BUF) as *mut u8, DMA_CAP) };
+        // Arm DMA-driven RX (circular DMA + USART IDLE) over the 'static ring, and the one-shot DMA
+        // TX over its 'static buffer (which also starts the DWT cycle counter its deadline uses).
+        // SAFETY: the one formation of each &'static mut; DMA_BUF is the sole ring of this single
+        // receiver, TX_BUF the sole buffer of this single transmitter.
+        let (dma_buf, tx_buf) =
+            unsafe { (&mut *addr_of_mut!(DMA_BUF), &mut *addr_of_mut!(TX_BUF)) };
         let ring = match RingBufferedRx::new(&chip, usart_rx, PeriphLabel::Usart1, dma_buf) {
             Ok(r) => r,
+            Err(_) => halt(),
+        };
+        let tx = match DmaTx::new(&chip, usart_tx, tx_buf, CLOCK.sysclk_hz, BAUD) {
+            Ok(t) => t,
             Err(_) => halt(),
         };
         // The one wire seam: every TX and RX byte crosses the HAL adapter's embedded-io traits.
@@ -244,7 +241,7 @@ mod firmware {
         let mut out = [0u8; PKT_MAX];
         let mut pid: u8 = 0;
 
-        if is_master {
+        if IS_MASTER {
             run_master(
                 &mut serial,
                 &mut framer,

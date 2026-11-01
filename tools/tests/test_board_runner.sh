@@ -10,11 +10,12 @@ chk() {  # chk <label> <condition-description> <actual> <expected>
   else printf 'FAIL  %-52s %s (want %s)\n' "$1" "$3" "$4"; F=$((F+1)); fi
 }
 
-out=$("$R" motorcontroller/target/thumbv7m-none-eabi/release/firmware 2>&1); rc=$?
+out=$("$R" motorcontroller/target/gd32f103c8/thumbv7m-none-eabi/release/firmware 2>&1); rc=$?
 chk "refuses a board binary"            rc "$rc" 2
 chk "names the binary"                  grep "$(printf '%s' "$out" | grep -c 'firmware')" 1
 chk "names the host-test route"         grep "$(printf '%s' "$out" | grep -c 'tools/host-test.sh')" 1
-chk "names the image build"             grep "$(printf '%s' "$out" | grep -c 'cargo image')" 1
+chk "names the F103 image build"        grep "$(printf '%s' "$out" | grep -c 'cargo image-f103')" 1
+chk "names the F130 image build"        grep "$(printf '%s' "$out" | grep -c 'cargo image-f130')" 1
 chk "names the flash route"             grep "$(printf '%s' "$out" | grep -c 'tools/flash.sh')" 1
 
 # A refusal that said nothing about the target would leave the caller where the OS exec error did.

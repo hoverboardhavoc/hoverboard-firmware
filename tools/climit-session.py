@@ -12,7 +12,7 @@ The operator owns the PSU and the kill. The tool never asks them to type a comma
 
 Usage:
     tools/climit-session.py [--board master] [--limit-ma 2500] [--cal-demand 3000]
-                            [--trip-demand 32767] [--record DIR] [--elf PATH]
+                            [--trip-demand 32767] [--record DIR] (--chip CHIP | --elf PATH)
                             [--skip-gate N ...] [--dry-run] [--selftest]
 
     --dry-run   print every command and prompt in order against a simulated board; nothing is
@@ -2592,7 +2592,7 @@ def build_parser():
     ap.add_argument("--cal-demand", type=int, default=3000)
     ap.add_argument("--trip-demand", type=int, default=32767)
     ap.add_argument("--record", default=None, help="default specs/bench-evidence/<today>/current-limit/")
-    ap.add_argument("--elf", default=swdobs.DEFAULT_ELF)
+    swdobs.add_image_args(ap)
     ap.add_argument("--brake-fallback", action="store_true",
                     help="gates 3 and 4 brake a spinning wheel by hand instead of locking the rotor "
                          "(only when nothing can hold the rotor)")
@@ -2614,6 +2614,7 @@ def main(argv=None, shell=None):
     if argv[:1] == ["--child-watchdog"]:
         return child_watchdog(argv[2:] if argv[1:2] == ["--"] else argv[1:])
     args = build_parser().parse_args(argv)
+    args.elf = swdobs.image_elf(args)
     if args.selftest:
         return selftest()
     err = check_limit_arg(args.limit_ma)

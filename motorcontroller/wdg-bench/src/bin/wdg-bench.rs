@@ -1,8 +1,8 @@
 //! Watchdog reload-contract on-silicon validator (`specs/silicon-queue.md` section 5, "Watchdog
 //! reload contract"; the R2 placement of `specs/sensing-and-safety.md`).
 //!
-//! One universal image (either bench family). It arms `runtime-hal`'s `FreeWatchdog` and runs the
-//! R2-shaped main loop:
+//! One image per chip (the `gd32f103c8` or `gd32f130c8` feature, on the `hal` crate); both builds
+//! run the same sequence. It arms `hal`'s `FreeWatchdog` and runs the R2-shaped main loop:
 //!
 //! - **(a) link-servicing stand-in**: a calibrated busy block (~300 us at 72 MHz), standing in for
 //!   `service_links()`;
@@ -27,8 +27,8 @@
 //! 3. Poke `stall_dispatch_only = 1`: also resets (while `link_count` was still growing), proving
 //!    the feed sits after dispatch, not inside link servicing.
 //!
-//! The reset cause is read at boot via `runtime-hal`'s `clock::was_fwdgt_reset` and then cleared
-//! (`clock::clear_reset_flags`), so each boot's `was_fwdgt_reset` field reflects only the reset
+//! The reset cause is read at boot (`hal::reset_cause_flags`, tested for
+//! `hal::clock::RESET_CAUSE_FWDGT`) and then cleared (`hal::clear_reset_cause`), so each boot's `was_fwdgt_reset` field reflects only the reset
 //! that produced it. `FreeWatchdog::freeze_on_debug_halt()` is set at bring-up so a debugger that
 //! halts the core mid-session is not reset out from under the probe (no effect when not attached).
 //!
@@ -49,12 +49,9 @@ mod firmware {
     use cortex_m::peripheral::syst::SystClkSource;
     use cortex_m_rt::{entry, exception};
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
-    // which cortex-m-rt no longer provides once its `device` feature is on.
-    use vectors as _;
 
-    use runtime_hal::clock::{self, ClockConfig};
-    use runtime_hal::{detect_chip, FreeWatchdog, WdgTimeout};
+    use hal::clock::{self, ClockConfig, RESET_CAUSE_FWDGT};
+    use hal::{clear_reset_cause, reset_cause_flags, Chip, FreeWatchdog, WdgTimeout};
     use scheduler::{systick_load, Scheduler};
     use test_shared::obs_store;
 
@@ -105,7 +102,7 @@ mod firmware {
         /// `0x5744_4742` ("WDGB").
         magic: u32,
         /// Fatal bring-up error, busy-spinning (watchdog NOT armed on any of these, so no reset
-        /// loop): 0 ok, 1 detect_chip failed, 2 no RCU base, 3 clock tree failed, 4 scheduler
+        /// loop): 0 ok, 1 `Chip::take` failed, 2 no RCU base, 3 clock tree failed, 4 scheduler
         /// register failed, 5 SysTick LOAD does not fit 24 bits, 6 watchdog start failed.
         err: u8,
         /// This boot was a free-watchdog reset.
@@ -206,10 +203,7 @@ mod firmware {
     fn main() -> ! {
         let mut cp = cortex_m::Peripherals::take().unwrap();
 
-        let chip = match detect_chip() {
-            Ok(c) => c,
-            Err(_) => fail(1),
-        };
+        let Some(chip) = Chip::take() else { fail(1) };
 
         // Reset cause FIRST (read before clearing), so the protocol's after-reboot check works:
         // a watchdog reset lands here with FWDGTRSTF set.
@@ -217,8 +211,8 @@ mod firmware {
             Ok(b) => b,
             Err(_) => fail(2),
         };
-        let wdg_reset = clock::was_fwdgt_reset(rcu);
-        clock::clear_reset_flags(rcu);
+        let wdg_reset = reset_cause_flags(rcu) & RESET_CAUSE_FWDGT != 0;
+        clear_reset_cause(rcu);
         obs_store!(WDG_BENCH_OBS, was_fwdgt_reset, wdg_reset as u8);
 
         // The production 72 MHz tree (the SysTick LOAD below derives from it).

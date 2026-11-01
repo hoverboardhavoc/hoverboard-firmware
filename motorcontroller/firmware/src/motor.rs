@@ -1,7 +1,7 @@
 //! The plan-gated motor bring-up and the 16 kHz period ISR (`specs/motor-integration.md`, slice 3:
 //! "Firmware bring-up, disarmed").
 //!
-//! This is the motor half of the one universal image. It is **disarmed by construction**: the
+//! This is the motor half of the firmware image. It is **disarmed by construction**: the
 //! arming gate (the sole MOE writer, `hal::timer::arming`) is never named anywhere in this
 //! MODULE, so no code path here can energize a bridge. The timer is configured, the counter runs
 //! and the compare units toggle, the injected ADC converts and its end-of-conversion ISR steps the
@@ -1394,8 +1394,6 @@ pub enum BringUpStep {
     CalibratePhaseOffsets,
     /// Read `MOTOR_METHOD`, build the commutator records, install the runtime the ISR reads.
     SelectMethodAndInstall,
-    /// Register the period handler on the HAL's control-handler seam.
-    RegisterPeriodHandler,
     /// Unmask the period vector in the NVIC. **LAST**, a deliberate deviation from the spec's
     /// step-7-then-8 order: the ISR clears the injected end-of-conversion flag through the handle
     /// that `SelectMethodAndInstall` publishes, and EOIC is a level source, so a vector unmasked
@@ -1406,7 +1404,7 @@ pub enum BringUpStep {
 /// The bring-up sequence, in order. One list: a motor without phase-current sense is not brought up
 /// at all in this slice (the no-current-sense period vector is the TIMER0 update interrupt, and the
 /// HAL wires no registered handler to it), so there is no second ordering to express.
-pub const BRING_UP_STEPS: [BringUpStep; 13] = [
+pub const BRING_UP_STEPS: [BringUpStep; 12] = [
     BringUpStep::EnableTimerClock,
     BringUpStep::ConfigureTimer,
     BringUpStep::ConfigureTriggerChannel,
@@ -1418,7 +1416,6 @@ pub const BRING_UP_STEPS: [BringUpStep; 13] = [
     BringUpStep::ConfirmTriggerStart,
     BringUpStep::CalibratePhaseOffsets,
     BringUpStep::SelectMethodAndInstall,
-    BringUpStep::RegisterPeriodHandler,
     BringUpStep::EnablePeriodVector,
 ];
 
@@ -1631,7 +1628,7 @@ pub fn six_step_records(decode: commutation::sixstep::SixStep) -> commutation::M
 /// The match is on the REQUEST, not on a verdict, so every arm is reachable and adding a method to
 /// the crate is a compile error here.
 ///
-/// `#[inline(never)]`, MEASURED (2026-10-10, `cargo image`): its two call sites are the bring-up and
+/// `#[inline(never)]`, MEASURED (2026-10-10, the image build): its two call sites are the bring-up and
 /// the arm-time re-derivation, and inlined it emitted the FOC record's seed (the 9-word stock PI
 /// record, the ramp and the duty order) twice, for **212 B** of the enabling cost. Both call sites
 /// are cold, one per boot and one per arm, so a call is the right trade; and keeping the build out
@@ -1807,7 +1804,6 @@ pub mod hw {
         AdcClockDiv, BreakConfig, ClockDiv, InjectedAdcConfig, InjectedChannel, OcMode, PwmAlign,
         PwmChannelConfig, PwmConfig, TimerTriggerLink, TrgoSource,
     };
-    #[cfg(not(universal_image))]
     use hal::interrupt;
     use hal::{
         clock, irq, Chip, InjectedAdcController, InjectedHandle, InputGroup, PeriphLabel,
@@ -2006,7 +2002,7 @@ pub mod hw {
     /// running since the bring-up started it.
     ///
     /// **MEASURED on the built image rather than estimated** (re-measured 2026-10-23 when the
-    /// align offset joined the angle path's installed offset, `cargo image`; this function inlines
+    /// align offset joined the angle path's installed offset, the image build; this function inlines
     /// into `firmware::re_read_arm_values`, its `cpsid` at 0x0800_adf6, as the SECOND of that
     /// function's two masked regions; the first is [`boot_fixed`]'s read): the masked region is
     /// **75 instructions in 200 bytes between the `cpsid` and the interrupt-restore test, with no
@@ -2348,13 +2344,6 @@ pub mod hw {
                         Ordering::Relaxed,
                     );
                 }
-                // The universal image registers the period ISR into its RAM vector table; a
-                // per-chip image's period vector is `ADC0_1` / `ADC_CMP` below, in its flash table,
-                // so the step has nothing to do there and is kept so both images walk one sequence.
-                BringUpStep::RegisterPeriodHandler => {
-                    #[cfg(universal_image)]
-                    irq::register_control_handler(period_isr);
-                }
                 BringUpStep::EnablePeriodVector => {
                     let period_irq = irq::period_irq(chip.irq());
                     irq::unmask_irq(period_irq);
@@ -2572,8 +2561,8 @@ pub mod hw {
         }
     }
 
-    /// The period ISR (16 kHz, the highest-priority code in the image). Registered on the HAL's
-    /// control-handler seam, which the RAM vector table's ADC injected-EOC slot routes to.
+    /// The period ISR (16 kHz, the highest-priority code in the image), called from the chip's ADC
+    /// vector (below), which carries the injected end of conversion.
     ///
     /// The body is the spec's hot path verbatim, and the write order is load-bearing: range-check
     /// and write the compares FIRST, then gate the outputs, so a rejected duty cannot change which
@@ -2583,12 +2572,10 @@ pub mod hw {
     /// **596 below it** (F103, same binary: 600). `motorcontroller/firmware/memory.x` owns the placement and
     /// asserts the window at link time.
     #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
-    // A per-chip image calls this from its period vector rather than through a registered pointer,
-    // so without the attribute LTO folds it into the vector's trampoline: the symbol the
-    // panic-reach root, the hot-window guard and the bench tools name would be gone. One `bl` of
-    // cost; the universal image reached it through two (its RAM table's HAL ISR, then the
-    // registered handler).
-    #[cfg_attr(not(universal_image), inline(never))]
+    // The period vector calls this directly, so without the attribute LTO folds it into the
+    // vector's trampoline: the symbol the panic-reach root, the hot-window guard and the bench
+    // tools name would be gone. One `bl` of cost.
+    #[inline(never)]
     extern "C" fn period_isr() {
         // SAFETY: the `MOTOR` invariant (see the static), which is NOT "the ISR is the only
         // accessor after the unmask" any more: this ISR is the only accessor WHENEVER THE PERIOD
@@ -2755,9 +2742,7 @@ pub mod hw {
 
     /// A per-chip image's period vector: the ADC vector of its flash table (`ADC0_1` on the
     /// GD32F103, `ADC_CMP` on the GD32F130, the vendor names), which carries the injected end of
-    /// conversion. The universal image routes the same ISR through its RAM vector table instead
-    /// (`RegisterPeriodHandler`). Both run `period_isr`; the trampoline is placed with it in the
-    /// zero-wait window.
+    /// conversion. Both run `period_isr`; the trampoline is placed with it in the zero-wait window.
     #[cfg(feature = "gd32f103c8")]
     #[interrupt]
     #[link_section = ".hotcode"]
@@ -2965,10 +2950,9 @@ mod tests {
         // ...and the confirm before the vector is unmasked, so a board whose trigger never starts
         // is recorded as a failed step instead of arriving at an ISR that will never be entered.
         assert!(idx(BringUpStep::ConfirmTriggerStart) < idx(BringUpStep::EnablePeriodVector));
-        // The runtime installed before the handler is registered, and the vector unmasked LAST:
-        // the ISR clears a LEVEL flag through the installed handle, so an earlier unmask would
-        // re-enter forever.
-        assert!(idx(BringUpStep::SelectMethodAndInstall) < idx(BringUpStep::RegisterPeriodHandler));
+        // The runtime installed before the vector is unmasked, and the unmask LAST: the ISR clears
+        // a LEVEL flag through the installed handle, so an earlier unmask would re-enter forever.
+        assert!(idx(BringUpStep::SelectMethodAndInstall) < idx(BringUpStep::EnablePeriodVector));
         assert_eq!(
             *BRING_UP_STEPS.last().unwrap(),
             BringUpStep::EnablePeriodVector
@@ -3019,7 +3003,6 @@ mod tests {
                         | BringUpStep::ConfirmTriggerStart
                         | BringUpStep::CalibratePhaseOffsets
                         | BringUpStep::SelectMethodAndInstall
-                        | BringUpStep::RegisterPeriodHandler
                         | BringUpStep::EnablePeriodVector
                 ),
                 "an unexpected bring-up step exists: {s:?}"

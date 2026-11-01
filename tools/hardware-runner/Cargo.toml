@@ -10,7 +10,7 @@ description = "Flashes a dummy firmware image to a real GD32 over SWD with probe
 [dependencies]
 test-shared = { path = "../../motorcontroller/test-shared" }
 
-# The store crate (host build, base-only: its runtime-hal/FmcFlash dep is target-gated, so this pulls
+# The store crate (host build, base-only: its hal/FmcFlash dep is target-gated, so this pulls
 # in no HAL). `test-fields` exposes the scenario ids, reserved test fields, value consts, and the
 # SHARED crafted-region builders (`store::scenarios`) the silicon driver plants, byte-identically to the
 # emulator runner. The store host build is alloc-free, so the shared builders write into the driver's

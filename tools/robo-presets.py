@@ -57,7 +57,7 @@ never silently dropped.
 THE LINKS. His USART pin pairs become the inter-board link fields `links.<i>.tx` / `links.<i>.rx`
 (0x0F / 0x10, index = the link), as `specs/configured-links.md` section 6 sets out: link 0 is his USART1
 pair where the layout has one, else the first pair he lists, and link 1 is the other. A pair is
-staged only where runtime-hal's USART table routes it on the preset's family (`USART_PINS` below);
+staged only where the hal's USART table routes it on the preset's family (`USART_PINS` below);
 one it does not route stays in `unmapped` with that reason, so a preset never stages a link the
 board would record as a permanent entry in its boot report. There is no verdict stage: the board
 judges its own fields at boot and reports what did not come up in its boot report (`STATUS_READ`).
@@ -108,8 +108,8 @@ INC_DIR = "HoverBoardGigaDevice/Inc"
 # --------------------------------------------------------------------------------------------------
 
 #: His TARGET numbering (`HoverBoardGigaDevice/Inc/config.h`), the chip each one is, and the
-#: runtime-hal family it belongs to (`F1x0` = GD32F130, `F10x` = GD32F103), which is what the link
-#: routing below is asked against. A target with no family is out of scope: our image cannot run on
+#: hal family it belongs to (`F1x0` = GD32F130, `F10x` = GD32F103), which is what the link
+#: routing below is asked against. A target with no family is out of scope: no image of ours runs on
 #: it, so a preset for one would be an invitation to brick a board.
 TARGETS = {
     1: {"chip": "GD32F130", "family": "F1x0", "docs_dir": "target_1=GD32F130"},
@@ -443,18 +443,18 @@ def asked_keys():
 
 
 # --------------------------------------------------------------------------------------------------
-# The links: his USART pairs, and the pairs runtime-hal can route
+# The links: his USART pairs, and the pairs the hal can route
 # --------------------------------------------------------------------------------------------------
 
 #: The number of inter-board links the firmware brings up, each one element of `links` in a file
 #: (`shared/store/src/field.rs`, `LINKS`).
 LINKS = 2
 
-#: runtime-hal's USART pin table, one row per pin: the pin, the USART it carries, the half, and the
-#: families that route it. Mirrored from runtime-hal `src/pincap.rs`, `USART_PINS` (commit ce6ea27,
-#: `runtime-hal/specs/usart-pin-remap.md` section 1), whose rows carry the datasheet citations:
-#: PA2/PA3 are USART1 on both families, PB6/PB7 are USART0 on both (the F10x through the AFIO
-#: remap), and PB10/PB11 are USART2 on the F10x only (the F1x0 has no USART2). The firmware's link
+#: The hal's USART pin table, one row per pin: the pin, the USART it carries, the half, and the
+#: families that route it. Mirrored from `motorcontroller/hal/src/pincap.rs`, `USART_PINS`, with the
+#: family column taken from each chip's descriptor (the HAL routes a row only on a chip that carries
+#: the instance): PA2/PA3 are USART1 on both families, PB6/PB7 are USART0 on both (the F10x through
+#: the AFIO remap), and PB10/PB11 are USART2 on the F10x only (the F1x0 has no USART2). The firmware's link
 #: bring-up asks that table which USART a stored pair drives, so a pair it does not answer is a link
 #: the board records in its boot report at every boot.
 USART_PINS = [
@@ -470,7 +470,7 @@ USART_PINS = [
 def usart_route(family, tx, rx):
     """The USART a (TX, RX) pair drives on `family`, or None.
 
-    runtime-hal's pair rule (`usart_pins`): the TX row for `tx` and the RX row for `rx` both exist on
+    The hal's pair rule (`usart_pins`): the TX row for `tx` and the RX row for `rx` both exist on
     the family and name the same USART. A reversed pair or a pair across two USARTs is None. The
     F10x remap clause adds nothing here, because each USART's rows share one remap value.
     """
@@ -499,7 +499,7 @@ def link_assignment(values, family):
     """Which of his USART pairs become which link, and why the others do not.
 
     Returns `(links, empty, reasons)`. `links` holds one entry per link index: None, or a dict with
-    his two macros, the two pin tokens and the USART runtime-hal routes them as. `empty` holds, per
+    his two macros, the two pin tokens and the USART the hal routes them as. `empty` holds, per
     link index, why it carries no pair (None where it does). `reasons` maps each USART macro of a
     declared pair to its unmapped reason, or to None where the pair became a link.
 
@@ -530,7 +530,7 @@ def link_assignment(values, family):
                 reasons[tx_m] = reasons[rx_m] = None
                 continue
             why = (
-                "link %d would be his %s TX / %s RX, a pair runtime-hal's USART table does not "
+                "link %d would be his %s TX / %s RX, a pair the hal's USART table does not "
                 "route on the %s, so staging it would put a permanent entry in the boot report"
                 % (link, tx, rx, family)
             )
@@ -777,7 +777,7 @@ def field_entries(values, notes, layout_defines, links):
                         at,
                         value=pair[f["half"]],
                         **{"from": pair[f["half"] + "_from"]},
-                        note="runtime-hal routes his pair as %s on this chip" % pair["usart"],
+                        note="the hal routes his pair as %s on this chip" % pair["usart"],
                     )
                 )
             continue

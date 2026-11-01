@@ -279,6 +279,9 @@ const RSTSCK_RSTFC: u32 = 1 << 24;
 /// The reset-cause flags, bits 31:25 (low-power, window watchdog, free watchdog, software,
 /// power-on, external pin) and bit 23 on the parts that carry it.
 const RSTSCK_CAUSE_MASK: u32 = 0xFE80_0000;
+/// `RSTSCK.FWDGTRSTF` (bit 29 on both models): the free watchdog caused the last reset. One of the
+/// [`reset_cause_flags`].
+pub const RESET_CAUSE_FWDGT: u32 = 1 << 29;
 const LSI_STAB_SPINS: u32 = 100_000;
 
 /// Start the IRC40K oscillator (the free watchdog's clock) and wait for it to report stable.

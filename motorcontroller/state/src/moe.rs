@@ -3,7 +3,7 @@
 //! (`archive/accumulated-build`, commit `74b7773`).
 //!
 //! This crate is the sole software writer of MOE in normal operation. It DECIDES whether the bridge
-//! hardware gate is allowed to be active; the firmware ENACTS the decision against runtime-hal's
+//! hardware gate is allowed to be active; the firmware ENACTS the decision against hal's
 //! `ComplementaryPwm` MOE. The decision is safety-owned arming, never opened by the control loop.
 //!
 //! The MOE-ordering invariant (FIXED): MOE is set exactly once, on the INIT pass, and cleared on

@@ -375,7 +375,7 @@ class EndToEnd(unittest.TestCase):
                 mock.patch.object(ft.signal, "signal"), \
                 contextlib.redirect_stdout(out):
             with self.assertRaises(SystemExit) as e:
-                ft.main(["--tcp", "bridge.local:5333", "--board", "0x01", "--cli", "hb",
+                ft.main(["--tcp", "bridge.local:5333", "--board", "0x01", "--cli", "hb", "--chip", "gd32f130c8",
                          "--frame", "0", "1"])
         self.assertIn("the board read stream ended: error: interrupted", str(e.exception.code))
         text = out.getvalue()

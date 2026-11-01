@@ -20,9 +20,3 @@ members = [
 
 [workspace.package]
 license = "GPL-3.0-or-later"
-
-# The same declaration as ../motorcontroller/Cargo.toml's, character for character, so both
-# workspaces resolve one runtime-hal package (`store` names it, target-gated to the board). Cargo.lock
-# here pins the same commit as every other tracked lockfile; CI's lint job checks that they agree.
-[workspace.dependencies]
-runtime-hal = { git = "https://github.com/hoverboardhavoc/runtime-hal", branch = "main" }

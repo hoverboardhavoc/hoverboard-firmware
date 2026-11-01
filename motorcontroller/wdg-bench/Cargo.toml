@@ -1,18 +1,27 @@
 # Watchdog reload-contract bench firmware (specs/silicon-queue.md section 5, "Watchdog reload
-# contract"; specs/sensing-and-safety.md R2). The image arms runtime-hal's FreeWatchdog, runs the
+# contract"; specs/sensing-and-safety.md R2). The image arms the hal crate's FreeWatchdog, runs the
 # R2-shaped main loop (link-servicing stand-in -> scheduler dispatch -> feed AFTER dispatch) with
 # the scheduler crate's 250 Hz SysTick tick, and exposes two SWD-pokable stall knobs in the
 # WDG_BENCH_OBS block: stall_full (hang everything) and stall_dispatch_only (keep servicing the
 # link stand-in, skip dispatch + feed). Both must produce a watchdog reset, the second proving the
-# feed sits after dispatch, not inside link servicing. Bench-only, not a production path. On a host
-# target it degrades to an empty main (like firmware / ble-loopback / l2-uart-bench), so a bare host
-# `cargo build` / `cargo test` over the workspace stays green and never links the HAL.
+# feed sits after dispatch, not inside link servicing. Bench-only, not a production path.
+#
+# One image per chip (specs/hal.md section 3.2): `cargo build --release -p wdg-bench --features
+# gd32f103c8` (or gd32f130c8). A chip feature is required, so the workspace sweep skips this crate
+# (`default-members` in motorcontroller/Cargo.toml). On a host target it degrades to an empty main
+# and never links the HAL.
 [package]
 name = "wdg-bench"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "Bench-only watchdog reload-contract validator (thumbv7m): FreeWatchdog + 250 Hz scheduler with the R2 feed-after-dispatch placement, SWD-pokable stall knobs and reset-cause readback in the WDG_BENCH_OBS block."
+description = "Bench-only watchdog reload-contract validator (thumbv7m, one image per chip on the hal crate): FreeWatchdog + 250 Hz scheduler with the R2 feed-after-dispatch placement, SWD-pokable stall knobs and reset-cause readback in the WDG_BENCH_OBS block."
+
+# One per chip (specs/hal.md section 3.2); none is the default, so the workspace sweep skips this
+# crate (`default-members`).
+[features]
+gd32f103c8 = ["hal/gd32f103c8"]
+gd32f130c8 = ["hal/gd32f130c8"]
 
 [dependencies]
 # The 250 Hz cooperative scheduler under test: SysTick ISR calls tick(), the main loop dispatch().
@@ -23,13 +32,8 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
 
-# The HAL: detect_chip(), the clock tree, FreeWatchdog, and the reset-cause flag read/clear.
-# Target-gated exactly like firmware / ble-loopback / l2-uart-bench; the host build degrades to an
-# empty main and never links the HAL. runtime-hal is the workspace git dependency (motorcontroller/Cargo.toml).
+# The HAL for the compiled chip: the chip context, the clock tree, FreeWatchdog, the reset-cause
+# flag read/clear and the flash vector table (linked through cortex-m-rt's `device` feature).
+# Target-gated like the firmware's; the host build degrades to an empty main and never links the HAL.
 [target.'cfg(target_arch = "arm")'.dependencies]
-runtime-hal = { workspace = true }
-# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
-# `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
-# one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
-# `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.
-vectors = { path = "../vectors" }
+hal = { path = "../hal" }

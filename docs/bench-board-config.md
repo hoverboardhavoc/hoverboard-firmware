@@ -1,7 +1,7 @@
 # Reading a board's stored configuration over SWD
 
-Everything a board here knows about itself is in its own flash, not in the build: one universal
-image runs on every part, and the pin map, the IMU wiring, the gains and the limits are store
+Everything a board here knows about itself apart from its chip is in its own flash, not in the
+build: one image per chip runs on every board of that chip, and the pin map, the IMU wiring, the gains and the limits are store
 records read at boot and at every arm. This page is how to read and write them, and how to decode
 what comes back.
 
@@ -93,8 +93,8 @@ attached node from what the walk reports, never from a convention, and `--dst` t
   but no board here has pad hardware fitted, and a defaulted pin would sample a floating line the
   active-high debouncer reads as a foot (`specs/board-model.md`).
 - **The IDCODE does not tell you the chip family.** Every part here reads `0x13030410` with
-  `set CPUTAPID 0`, which these GD32s require. The firmware detects the family itself at boot and
-  publishes it; `tools/flash.sh`'s probe table records each board's family and UID.
+  `set CPUTAPID 0`, which these GD32s require. `hoverboard-cli board target-id` reads the family
+  and flash size, and the firmware publishes the part its image is built for; `tools/flash.sh`'s probe table records each board's family and UID.
 
 ## Taking a snapshot
 

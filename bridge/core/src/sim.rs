@@ -533,7 +533,7 @@ pub struct Gd32 {
     pub flash: Vec<u16>,
     /// Halfwords the F1x0 rule has closed until the next erase: programming the low halfword of a
     /// word closes the high halfword of the word below, within a page and never across one
-    /// (measured on a GD32F130C8, `runtime_hal::fmc`, "A high halfword is closed by its successor").
+    /// (measured on a GD32F130C8, `hal::fmc`, "A high halfword is closed by its successor").
     closed: Vec<bool>,
     /// RAM, word-aligned so the firmware's `Mailbox` can sit on it.
     ram: Vec<u32>,

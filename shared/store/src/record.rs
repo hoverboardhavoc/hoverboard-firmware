@@ -32,7 +32,7 @@ pub const PAGE_HEADER_LEN: usize = 8;
 ///
 /// It is not a spare field, it is unreachable. The first record is programmed at
 /// [`PAGE_HEADER_LEN`], and on the GD32F1x0 programming the low halfword of a word CLOSES the high
-/// halfword of the word below it (see `runtime_hal::fmc`, "A high halfword is closed by its
+/// halfword of the word below it (see `hal::fmc`, "A high halfword is closed by its
 /// successor"), so the moment the first record lands, `hdr[6..8]` can never be programmed again.
 pub const PAGE_HEADER_PROGRAMMED: usize = 6;
 
