@@ -1,309 +1,322 @@
-//! The handheld remote (`specs/handheld-remote.md`). Build step 1 (section 6.5): the BLE central
-//! alone. It connects to the pinned bridge with the parameters of section 3.4, subscribes to `tx`,
-//! attaches with `NODE_HELLO`, and prints the `CYCLIC_STATE` sources and rates it receives.
+//! The handheld remote (`specs/handheld-remote.md`): a Ride screen on the ESP32-2432S028R "Cheap
+//! Yellow Display", a BLE central to one hoverboard bridge.
+//!
+//! Tasks (section 6.2): the touch sampler on an interrupt executor above the main one, so a
+//! display transfer never delays a sample; the BLE host and the link (framing, walk, ride facts,
+//! inbox) and the view on the main executor. They share one [`Model`] behind a lock.
 #![no_std]
 #![no_main]
 
+mod link;
+mod panel;
+mod xpt2046;
+
+use core::cell::RefCell;
+
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
-use embassy_futures::select::{select, Either};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_time::{Duration, Instant, Ticker, Timer};
+use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
+use esp_hal::delay::Delay;
+use esp_hal::dma::{DmaRxBuf, DmaTxBuf};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::interrupt::software::SoftwareInterruptControl;
+use esp_hal::interrupt::Priority;
+use esp_hal::ledc::channel::{self, ChannelIFace};
+use esp_hal::ledc::timer::{self, TimerIFace};
+use esp_hal::ledc::{LSGlobalClkSource, Ledc, LowSpeed};
+use esp_hal::spi::master::{Config as SpiConfig, Spi};
+use esp_hal::spi::Mode;
+use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
-use heapless::Vec;
-use trouble_host::prelude::*;
+use esp_rtos::embassy::InterruptExecutor;
+use mipidsi::interface::SpiInterface;
+use mipidsi::models::ILI9341Rgb565;
+use mipidsi::options::{ColorOrder, Orientation};
+use static_cell::StaticCell;
+use trouble_host::prelude::ExternalController;
 
-use handheld_core::wire::Wire;
-use net::pdu::Pdu;
-use net::walk::Controller as Walk;
+use handheld_core::model::{Model, TouchDebug};
+use handheld_core::touch::{median_spread, Lift, Touch, PERIOD_MS};
 
 include!(concat!(env!("OUT_DIR"), "/bridge.rs"));
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-const CONNECTIONS_MAX: usize = 1;
-const L2CAP_CHANNELS_MAX: usize = 3;
+/// The one model every task reads and steps.
+pub static MODEL: Mutex<CriticalSectionRawMutex, RefCell<Option<Model>>> =
+    Mutex::new(RefCell::new(None));
 
-/// How long a `NODE_HELLO` waits for its reply before it is sent again (the app's `L3Session`).
-const REPLY_WAIT: Duration = Duration::from_secs(1);
-/// How often the sources and rates are printed.
-const REPORT: Duration = Duration::from_secs(10);
-/// The wait between a failed or lost connection and the next attempt (section 3.4).
-const RETRY: Duration = Duration::from_millis(500);
+/// Run `f` on the model.
+pub fn with<R>(f: impl FnOnce(&mut Model) -> R) -> R {
+    MODEL.lock(|m| f(m.borrow_mut().as_mut().expect("the model is set at boot")))
+}
+
+/// The time in ms, as the model counts it.
+pub fn now_ms() -> u32 {
+    Instant::now().as_millis() as u32
+}
+
+/// The backlight's PWM duty, percent (section 2.2: below full, to keep the 5 V net up with the
+/// radio running; measured on the bench, section 7.2 check 2).
+const BACKLIGHT_PCT: u8 = 60;
+
+type Panel = mipidsi::Display<
+    SpiInterface<
+        'static,
+        ExclusiveDevice<
+            esp_hal::spi::master::SpiDmaBus<'static, esp_hal::Blocking>,
+            Output<'static>,
+            Delay,
+        >,
+        Output<'static>,
+    >,
+    ILI9341Rgb565,
+    mipidsi::NoResetPin,
+>;
+
+static PANEL_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
+static SAMPLER: StaticCell<InterruptExecutor<1>> = StaticCell::new();
 
 #[esp_rtos::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
-    println!("handheld: booting");
-    // The second-stage bootloader's RAM is free once the app runs (the fork's ESP32 coexistence
-    // example's split).
+    println!(
+        "handheld: booting, reset {:?}",
+        esp_hal::system::reset_reason()
+    );
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 96 * 1024);
     esp_alloc::heap_allocator!(size: 24 * 1024);
 
     let timg0 = TimerGroup::new(p.TIMG0);
-    let sw_int = esp_hal::interrupt::software::SoftwareInterruptControl::new(p.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+    let sw = SoftwareInterruptControl::new(p.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw.software_interrupt0);
 
-    let Some(bridge) = BRIDGE else {
-        println!("handheld: No bridge set.");
-        loop {
-            Timer::after(Duration::from_secs(3600)).await;
-        }
-    };
-    println!(
-        "handheld: bridge {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        bridge[0], bridge[1], bridge[2], bridge[3], bridge[4], bridge[5]
-    );
+    MODEL.lock(|m| m.replace(Some(Model::new(BRIDGE))));
 
-    let connector = match BleConnector::new(p.BT, Default::default()) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("handheld: BLE controller failed: {:?}", e);
-            loop {
-                Timer::after(Duration::from_secs(3600)).await;
+    // The RGB LED is active low: off.
+    let _red = Output::new(p.GPIO4, Level::High, OutputConfig::default());
+    let _green = Output::new(p.GPIO16, Level::High, OutputConfig::default());
+    let _blue = Output::new(p.GPIO17, Level::High, OutputConfig::default());
+
+    // The radio before the backlight (section 2.2).
+    let connector = if BRIDGE.is_some() {
+        match BleConnector::new(p.BT, Default::default()) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                println!("handheld: BLE controller failed: {:?}", e);
+                None
             }
         }
+    } else {
+        None
     };
-    println!(
-        "handheld: BLE controller up, heap {} B free",
-        esp_alloc::HEAP.free()
-    );
-    let controller: ExternalController<_, 20> = ExternalController::new(connector);
+    let heap = esp_alloc::HEAP.free() as u32;
+    println!("handheld: radio up, heap {} B free", heap);
+    with(|m| m.heap_free = heap);
 
-    // Our own static random address, from the MAC as the bridge makes its own.
-    let mut own = esp_hal::efuse::Efuse::read_base_mac_address();
-    own.reverse();
-    own[5] |= 0xC0;
-    let mut target = bridge;
-    target.reverse();
-
-    run(controller, Address::random(own), Address::random(target)).await;
-}
-
-async fn run<C: Controller>(controller: C, own: Address, target: Address) {
-    let mut resources: HostResources<_, DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
-        HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources)
-        .set_random_address(own)
-        .build();
-    let mut runner = stack.runner();
-    let mut central = stack.central();
-
-    let accept = [target];
-    let config = ConnectConfig {
-        connect_params: RequestedConnParams {
-            min_connection_interval: Duration::from_micros(7_500),
-            max_connection_interval: Duration::from_millis(15),
-            max_latency: 0,
-            min_event_length: Duration::from_secs(0),
-            max_event_length: Duration::from_secs(0),
-            supervision_timeout: Duration::from_millis(400),
-        },
-        scan_config: ScanConfig {
-            filter_accept_list: &accept,
-            ..Default::default()
-        },
-    };
-
-    let _ = join(
-        async {
-            loop {
-                if let Err(e) = runner.run().await {
-                    println!("handheld: BLE host runner failed: {:?}", e);
-                    Timer::after(Duration::from_millis(200)).await;
-                }
-            }
-        },
-        async {
-            loop {
-                let started = Instant::now();
-                println!("handheld: connecting");
-                match central.connect(&config).await {
-                    Ok(conn) => {
-                        println!(
-                            "handheld: connected after {} ms",
-                            started.elapsed().as_millis()
-                        );
-                        session(&stack, &conn).await;
-                        println!("handheld: disconnected");
-                    }
-                    Err(e) => println!("handheld: connect failed: {:?}", e),
-                }
-                Timer::after(RETRY).await;
-            }
-        },
+    // The display: SPI2 with DMA at 40 MHz, CS on IO15, DC on IO2, no reset pin.
+    let (rx, rx_d, tx, tx_d) = esp_hal::dma_buffers!(32, 4096);
+    let spi = Spi::new(
+        p.SPI2,
+        SpiConfig::default()
+            .with_frequency(Rate::from_mhz(40))
+            .with_mode(Mode::_0),
     )
-    .await;
+    .unwrap()
+    .with_sck(p.GPIO14)
+    .with_mosi(p.GPIO13)
+    .with_miso(p.GPIO12)
+    .with_dma(p.DMA_SPI2)
+    .with_buffers(
+        DmaRxBuf::new(rx_d, rx).unwrap(),
+        DmaTxBuf::new(tx_d, tx).unwrap(),
+    );
+    let cs = Output::new(p.GPIO15, Level::High, OutputConfig::default());
+    let dc = Output::new(p.GPIO2, Level::Low, OutputConfig::default());
+    let dev = ExclusiveDevice::new(spi, cs, Delay::new()).unwrap();
+    let di = SpiInterface::new(dev, dc, PANEL_BUF.init([0; 4096]));
+    let mut delay = Delay::new();
+    let mut panel: Panel = mipidsi::Builder::new(ILI9341Rgb565, di)
+        .color_order(ColorOrder::Bgr)
+        .orientation(Orientation::new().flip_horizontal())
+        .init(&mut delay)
+        .unwrap();
+    #[cfg(feature = "test-pattern")]
+    panel::test_pattern(&mut panel);
+    #[cfg(not(feature = "test-pattern"))]
+    {
+        use embedded_graphics::prelude::*;
+        let _ = panel.clear(panel::color::BG);
+    }
+
+    // The backlight by PWM on IO21.
+    let mut ledc = Ledc::new(p.LEDC);
+    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+    let mut bl_timer = ledc.timer::<LowSpeed>(timer::Number::Timer0);
+    bl_timer
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty8Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(20),
+        })
+        .unwrap();
+    let mut bl = ledc.channel(channel::Number::Channel0, p.GPIO21);
+    bl.configure(channel::config::Config {
+        timer: &bl_timer,
+        duty_pct: BACKLIGHT_PCT,
+        drive_mode: esp_hal::gpio::DriveMode::PushPull,
+    })
+    .unwrap();
+    println!("handheld: display up, backlight {} %", BACKLIGHT_PCT);
+
+    // The touch controller: SPI3 through the GPIO matrix, mode 0, 1 MHz; PENIRQ on IO36.
+    let tspi = Spi::new(
+        p.SPI3,
+        SpiConfig::default()
+            .with_frequency(Rate::from_mhz(1))
+            .with_mode(Mode::_0),
+    )
+    .unwrap()
+    .with_sck(p.GPIO25)
+    .with_mosi(p.GPIO32)
+    .with_miso(p.GPIO39);
+    let tcs = Output::new(p.GPIO33, Level::High, OutputConfig::default());
+    let irq = Input::new(p.GPIO36, InputConfig::default().with_pull(Pull::None));
+    let touch = xpt2046::Xpt2046::new(tspi, tcs, irq);
+
+    let sampler = SAMPLER.init(InterruptExecutor::new(sw.software_interrupt1));
+    sampler.start(Priority::Priority1).must_spawn(sample(touch));
+
+    spawner.must_spawn(view(panel));
+    if let Some(c) = connector {
+        let controller: ExternalController<_, 20> = ExternalController::new(c);
+        link::run(controller, BRIDGE.unwrap_or([0; 6])).await;
+    }
+    loop {
+        Timer::after(Duration::from_secs(3600)).await;
+        let _ = &bl;
+    }
 }
 
-/// One connection: discover, subscribe, attach, count. Returns when the link is lost or a step
-/// fails.
-async fn session<C: Controller>(
-    stack: &Stack<'_, C, DefaultPacketPool>,
-    conn: &Connection<'_, DefaultPacketPool>,
-) {
-    let client = match GattClient::<C, DefaultPacketPool, 4>::new(stack, conn).await {
-        Ok(c) => c,
-        Err(e) => {
-            println!("handheld: GATT client failed: {:?}", e);
-            return;
+type TouchDev = xpt2046::Xpt2046<
+    esp_hal::spi::master::Spi<'static, esp_hal::Blocking>,
+    Output<'static>,
+    Input<'static>,
+>;
+
+/// The touch sampler: every 2 ms on a timer, PENIRQ then the conversions, classified and
+/// stepped through the lift machine; what it means goes to the model.
+#[embassy_executor::task]
+async fn sample(mut dev: TouchDev) {
+    let mut touch = Touch::default();
+    let mut ticker = Ticker::every(Duration::from_millis(PERIOD_MS as u64));
+    let mut count = 0u16;
+    let mut since = now_ms();
+    let mut rate = 0u16;
+    loop {
+        ticker.next().await;
+        let r = dev.read();
+        let now = now_ms();
+        touch.sample(&r, now);
+        count += 1;
+        if now.wrapping_sub(since) >= 1000 {
+            rate = count;
+            count = 0;
+            since = now;
         }
-    };
-    let params = conn.params();
-    println!(
-        "handheld: interval {} us, latency {}, supervision {} ms, ATT MTU {}",
-        params.conn_interval.as_micros(),
-        params.peripheral_latency,
-        params.supervision_timeout.as_millis(),
-        conn.att_mtu()
-    );
-    let _ = select(client.task(), async {
-        let services = match client
-            .services_by_uuid(&Uuid::from(espsvc::LINK_SERVICE_UUID))
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                println!("handheld: service discovery failed: {:?}", e);
-                return;
-            }
+        let (mx, sx) = median_spread(r.raw.x);
+        let (my, sy) = median_spread(r.raw.y);
+        let debug = TouchDebug {
+            state: match touch.lift {
+                Lift::Idle => b'I',
+                Lift::Pressing { .. } => b'P',
+                Lift::Down { .. } => b'D',
+                Lift::Lifting { .. } => b'L',
+            },
+            z: if r.pen_down { r.raw.z() } else { 0 },
+            x: (mx, sx),
+            y: (my, sy),
+            rate,
         };
-        let Some(service) = services.first().cloned() else {
-            println!("handheld: no link service");
-            return;
-        };
-        let rx: Characteristic<[u8]> = match client
-            .characteristic_by_uuid(&service, &Uuid::from(espsvc::LINK_RX_UUID))
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                println!("handheld: rx not found: {:?}", e);
-                return;
-            }
-        };
-        let tx: Characteristic<[u8]> = match client
-            .characteristic_by_uuid(&service, &Uuid::from(espsvc::LINK_TX_UUID))
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                println!("handheld: tx not found: {:?}", e);
-                return;
-            }
-        };
-        let mut listener = match client.subscribe(&tx, false).await {
-            Ok(l) => l,
-            Err(e) => {
-                println!("handheld: subscribe failed: {:?}", e);
-                return;
-            }
-        };
-        println!("handheld: subscribed");
-        let chunk_max = (conn.att_mtu() as usize).saturating_sub(3).clamp(20, 244);
+        let v = touch.view(now);
+        with(|m| {
+            m.touch = v;
+            m.touch_debug = debug;
+        });
+    }
+}
 
-        let mut wire = Wire::new();
-        let mut walk = Walk::new();
-        let mut hello_at: Option<Instant> = None;
-        let mut sources: Vec<(u8, u32), 8> = Vec::new();
-        let mut since = Instant::now();
-        let mut buf = [0u8; 256];
-        let mut chunk = [0u8; 244];
-        let mut tick = Instant::now();
-        let (mut notes, mut bytes, mut pdus) = (0u32, 0u32, 0u32);
-        loop {
-            match select(listener.next(), Timer::at(tick + Duration::from_millis(10))).await {
-                Either::First(n) => {
-                    notes += 1;
-                    bytes += n.as_ref().len() as u32;
-                    wire.feed(n.as_ref())
-                }
-                Either::Second(_) => tick = Instant::now(),
-            }
-
-            while let Some(pdu) = wire.recv(&mut buf) {
-                pdus += 1;
-                if let Some(r) = walk.reply_to_probe(pdu) {
-                    wire.send(&r);
-                    continue;
-                }
-                if walk.granted().is_none() && walk.on_reply(pdu) {
-                    println!("handheld: attached as {:#04x}", walk.guest_addr());
-                    hello_at = None;
-                    continue;
-                }
-                if let Ok(p) = Pdu::decode(pdu) {
-                    if p.opcode == linkctl::OP_CYCLIC_STATE {
-                        let ok = linkctl::CyclicState::decode(p.payload).is_ok();
-                        if ok {
-                            match sources.iter_mut().find(|(s, _)| *s == p.src) {
-                                Some((_, n)) => *n += 1,
-                                None => {
-                                    let _ = sources.push((p.src, 1));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if walk.granted().is_none() {
-                let due = hello_at.is_none_or(|t| t.elapsed() > REPLY_WAIT);
-                if due {
-                    // A resend of the first contact is a fresh `NODE_HELLO` from the same guest.
-                    let mut w = Walk::new();
-                    if let Some(req) = w.next_request() {
-                        walk = w;
-                        wire.send(&req);
-                        hello_at = Some(Instant::now());
-                    }
-                }
-            }
-
-            while wire.pending() > 0 {
-                let n = wire.take(&mut chunk[..chunk_max]);
-                if let Err(e) = client
-                    .write_characteristic_without_response(&rx, &chunk[..n])
-                    .await
-                {
-                    println!("handheld: write failed: {:?}", e);
-                    return;
-                }
-            }
-
-            if since.elapsed() >= REPORT {
-                let secs = since.elapsed().as_millis() as f32 / 1000.0;
-                for (src, n) in sources.iter() {
+/// One short log line of the view.
+fn log_view(v: &handheld_core::model::View, debug: &(heapless::String<40>, heapless::String<40>)) {
+    use handheld_core::model::{Body, Lower};
+    match &v.body {
+        Body::Card(c) => println!("view: card {:?}", c),
+        Body::Ride(r) => {
+            let phase = match &r.lower {
+                Lower::Bars { phase, band } => {
+                    let t = |p: &Option<handheld_core::model::PhaseBar>| {
+                        p.as_ref()
+                            .map(|b| (b.label.clone(), b.text.clone(), b.fill))
+                    };
                     println!(
-                        "handheld: CYCLIC_STATE from {:#04x}: {} in {} s = {} Hz",
-                        src,
-                        n,
-                        secs,
-                        *n as f32 / secs
+                        "view: phase {:?} {:?} band {:?}",
+                        t(&phase[0]),
+                        t(&phase[1]),
+                        band
                     );
+                    ""
                 }
-                println!(
-                    "handheld: {} notifications, {} B, {} PDUs in {} s",
-                    notes, bytes, pdus, secs
-                );
-                (notes, bytes, pdus) = (0, 0, 0);
-                if sources.is_empty() {
-                    println!("handheld: no CYCLIC_STATE in {} s", secs);
+                Lower::Grid(cells) => {
+                    println!("view: lamp grid, {} lamps", cells.len());
+                    ""
                 }
-                let params = conn.params();
-                println!(
-                    "handheld: interval {} us, MTU {}, heap {} B free",
-                    params.conn_interval.as_micros(),
-                    conn.att_mtu(),
-                    esp_alloc::HEAP.free()
-                );
-                sources.clear();
-                since = Instant::now();
+            };
+            println!(
+                "view: ring {} lit{} speed {:?} pack {:?}{}",
+                r.dial.lit,
+                if r.dial.caution { " caution" } else { "" },
+                r.dial.speed,
+                r.pack.text,
+                phase
+            );
+            for c in r.corners.iter().flatten() {
+                let (a, b) = c.attitude.lines();
+                println!("view: corner {} {} {}", c.label, a, b);
             }
         }
-    })
-    .await;
+    }
+    println!(
+        "view: top {:?} line {:?} debug {} | {}",
+        v.top,
+        v.line.as_ref().map(|s| s.text.as_str()),
+        debug.0,
+        debug.1
+    );
+}
+
+/// The view: at most 25 redraws a second, each drawing only what changed.
+#[embassy_executor::task]
+async fn view(mut panel: Panel) {
+    let mut cache = panel::Cache::default();
+    let mut ticker = Ticker::every(Duration::from_millis(40));
+    let mut logged = 0u32;
+    loop {
+        ticker.next().await;
+        let now = now_ms();
+        let (v, debug) = with(|m| (m.view(now), m.debug_lines()));
+        // A line of what the screen shows every 5 s, for the serial log (section 6.4).
+        if now.wrapping_sub(logged) >= 5000 {
+            logged = now;
+            log_view(&v, &debug);
+        }
+        let dbg = cfg!(debug_assertions) || cfg!(feature = "debug-line");
+        let d = dbg.then_some((debug.0.as_str(), debug.1.as_str()));
+        panel::draw(&mut panel, &v, d, &mut cache);
+    }
 }

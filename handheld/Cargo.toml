@@ -18,6 +18,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+# The debug line (section 5.6) in a release image, for tuning the touch on the bench.
+debug-line = []
+# Boot to section 7.2 check 2's test pattern instead of the Ride view.
+test-pattern = []
+
 [dependencies]
 handheld-core = { path = "core" }
 net = { path = "../shared/net" }
@@ -37,6 +43,13 @@ embassy-sync = "0.7"
 embassy-futures = "0.1"
 trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "94e15ffe139bc992c1a8b4c34c1fd6a6359356ef", features = ["default-packet-pool-mtu-255", "scan", "gatt-client-notification-queue-size-16"] }
 static_cell = "2.1"
+mipidsi = "0.10"
+embedded-graphics = "0.8"
+u8g2-fonts = { version = "0.7", features = ["embedded_graphics_textstyle"] }
+embedded-hal = "1.0"
+embedded-hal-bus = "0.3"
+embedded-io = "0.6"
+libm = "0.2"
 heapless = "0.8"
 
 [profile.dev]
