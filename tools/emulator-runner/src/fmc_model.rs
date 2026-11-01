@@ -1,11 +1,12 @@
-//! A host model of the GD32 FMC (flash memory controller) that services the EXACT register sequence
-//! `runtime-hal::fmc` drives, so the model and the real driver provably agree.
-//!
-//! Cross-checked against `runtime-hal/src/fmc.rs` (the `target` RAM-resident sequence the Unicorn
-//! image actually runs, the `cfg(target_arch = "arm")` path):
+//! A host model of the GD32 FMC (flash memory controller) that services the register sequence the
+//! store image's FMC driver drives (`hal::fmc`, motorcontroller/hal/src/fmc.rs; the sequence
+//! `runtime-hal::fmc` drove is the same less the relock), so the model and the real driver agree.
 //!
 //! - **unlock**: read `CTL` (`+0x10`); if `LK` (b7) set, write `KEY` (`+0x04`) = KEY1 (`0x4567_0123`)
 //!   then KEY2 (`0xCDEF_89AB`). The model clears `LK` after the KEY1+KEY2 pair.
+//! - **relock**: a `CTL` write with `LK` set locks the controller again (as on silicon, where `LK`
+//!   is set by software and cleared only by the key pair); `hal::fmc` relocks after every operation,
+//!   so each operation's unlock runs the key pair.
 //! - **erase**: `CTL = PER` (b1), `ADDR` (`+0x14`) = absolute page address, `CTL = PER|START` (b6),
 //!   poll `STAT` (`+0x0C`) until `BUSY` (b0) clears, write `STAT` to clear flags, `CTL = 0`. The model
 //!   performs the page erase (fill `0xFFFF`) when `START` is written with `PER` set, and reports
@@ -155,6 +156,11 @@ impl FmcModel {
             }
             CTL => {
                 self.ctl = val;
+                if val & CTL_LK != 0 {
+                    // Software sets LK to relock; only the key pair clears it.
+                    self.locked = true;
+                    self.key1_seen = false;
+                }
                 if val & CTL_PER != 0 && val & CTL_START != 0 {
                     // Page erase kicked: the page containing ADDR (ADDR is page-aligned by the driver).
                     let page_base = self.addr & !(self.page_size - 1);
@@ -215,6 +221,13 @@ mod tests {
         assert_eq!(m.read_reg(CTL) & CTL_LK, CTL_LK); // still locked after KEY1 alone
         m.write_reg(KEY, KEY2);
         assert_eq!(m.read_reg(CTL) & CTL_LK, 0); // unlocked after the pair
+        m.write_reg(CTL, CTL_LK);
+        assert_eq!(m.read_reg(CTL) & CTL_LK, CTL_LK); // relocked by software
+        m.write_reg(CTL, 0);
+        assert_eq!(m.read_reg(CTL) & CTL_LK, CTL_LK); // a CTL write of 0 does not unlock
+        m.write_reg(KEY, KEY1);
+        m.write_reg(KEY, KEY2);
+        assert_eq!(m.read_reg(CTL) & CTL_LK, 0); // and the pair unlocks it again
     }
 
     #[test]

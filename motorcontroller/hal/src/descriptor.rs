@@ -121,6 +121,7 @@ const COMMON: AddrTable = AddrTable::new()
     .with(PeriphLabel::Spi0, 0x4001_3000);
 
 /// The GD32F10x bases: GPIO on APB2 (0x400 stride, port E not carried), USART2, the second I2C, and the factory unique ID at `0x1FFF_F7E8` (GD32F10x User Manual 1.5.2).
+#[cfg(any(feature = "gd32f103c8", feature = "gd32f103rc"))]
 const F10X: AddrTable = COMMON
     .with(PeriphLabel::Usart2, 0x4000_4800)
     .with(PeriphLabel::Gpioa, 0x4001_0800)

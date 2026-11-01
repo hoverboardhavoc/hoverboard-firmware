@@ -177,26 +177,28 @@ jobs:
         working-directory: hoverboard-firmware/motorcontroller
         run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
 
-      # `--exclude hal --exclude store-test`: both build for exactly one chip (specs/hal.md section
-      # 3.2) and are linted per chip in the next step; `--workspace` would build them with none.
+      # `--exclude hal --exclude dummy-test --exclude store-test`: they build for exactly one chip
+      # (specs/hal.md section 3.2) and are linted per chip in the next step; `--workspace` would
+      # build them with none.
       - name: clippy (motorcontroller, host-test surface, all targets)
         working-directory: hoverboard-firmware/motorcontroller
         run: >
           cargo clippy
-          --workspace --exclude hal --exclude store-test --all-targets
+          --workspace --exclude hal --exclude dummy-test --exclude store-test --all-targets
           --target ${{ env.HOST_TARGET }}
           -F store/test-fields
           -- -D warnings
 
-      # The per-chip builds (specs/hal.md): the HAL and the store image for each of its chips, on
+      # The per-chip builds (specs/hal.md): the HAL and the two test images for each of its chips, on
       # both surfaces the HAL has (the board target, and the host where its pure parts are tested),
       # and the firmware's two per-chip images, whose chip-only code the default build does not see.
-      - name: clippy (motorcontroller, per-chip builds of hal, store-test and firmware)
+      - name: clippy (motorcontroller, per-chip builds of hal, the test images and firmware)
         working-directory: hoverboard-firmware/motorcontroller
         run: |
           for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
             cargo clippy -p hal --features "$chip" --target thumbv7m-none-eabi -- -D warnings
             cargo clippy -p hal --features "$chip" --all-targets --target ${{ env.HOST_TARGET }} -- -D warnings
+            cargo clippy -p dummy-test --features "$chip" --target thumbv7m-none-eabi -- -D warnings
             cargo clippy -p store-test --features "$chip" --target thumbv7m-none-eabi -- -D warnings
           done
           for chip in gd32f103c8 gd32f130c8; do
@@ -236,9 +238,10 @@ jobs:
           -- -D warnings
 
   # Embedded build for the real target, in motorcontroller/. A bare `cargo build` there uses the
-  # thumbv7m-none-eabi default from motorcontroller/.cargo/config.toml and builds the workspace images
-  # (dummy-test, store-test), which compile the pinned runtime-hal (store/store-test's target-gated
-  # FmcFlash dep).
+  # thumbv7m-none-eabi default from motorcontroller/.cargo/config.toml and builds the default members
+  # (the firmware as the universal image, the bench images), which compile the pinned runtime-hal.
+  # The HAL's test images (dummy-test, store-test) build per chip in the emulator job, and the
+  # per-chip firmware images below.
   #
   # The upper flashed-span size gate (against the 62 KiB no-bootloader region) is enforced below,
   # after objcopy (specs/decision-flash-budget.md); the LTO-gutted floor guard is its lower companion.
@@ -1079,8 +1082,9 @@ jobs:
   # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
   # flashes). emulator-runner is a tools/ workspace member (it links Unicorn's cmake-built native lib,
   # which cannot cross-compile to thumbv7m), built/tested there on the host target, behind the
-  # `unicorn` feature. The tests build the dummy-test AND store-test images first, in
-  # motorcontroller/, so that workspace's target directory is cached here too.
+  # `unicorn` feature. The tests build the dummy-test AND store-test images first, once per chip on
+  # the hal crate (specs/hal.md section 8.3), in motorcontroller/, so that workspace's target
+  # directory is cached here too.
   emulator-tests:
     name: Emulator tests (Unicorn, tier 2)
     runs-on: ubuntu-latest
