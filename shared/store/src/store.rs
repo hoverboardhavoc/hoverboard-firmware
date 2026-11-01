@@ -12,7 +12,9 @@
 
 use base::error::FlashError;
 
-use crate::field::{lookup_key, BlobField, Field, StrField};
+use base::crc16::Crc16;
+
+use crate::field::{lookup_key, BlobField, Effect, Field, Scope, StrField, BOARD_OWNED, REGISTRY};
 use crate::flash::Flash;
 use crate::key::{Key, Scalar, Type, ERASED_TAG};
 use crate::record::{self, Header, HeaderScan, MAGIC, PAGE_HEADER_LEN};
@@ -52,9 +54,6 @@ pub enum DynError {
     UnknownKey,
     /// The value's [`Type`] does not match the field's registered type.
     TypeMismatch,
-    /// The field is read-only ([`crate::FieldDef::read_only`]): the firmware's own fact, never
-    /// stored.
-    ReadOnly,
     /// The underlying append failed (`Full` / `ValueTooLarge` / a flash error).
     Store(StoreError),
 }
@@ -287,13 +286,10 @@ impl<'f, F: Flash> Store<'f, F> {
 
     /// Un-store `key` (`specs/storage-layer.md`, "Read / write model"): append a tombstone, so the
     /// next read returns the default and reports [`Stored::No`]. Registry-checked like
-    /// [`Store::set_value`] (`UnknownKey`, `ReadOnly`). A key with no record, or whose newest record
+    /// [`Store::set_value`] (`UnknownKey`). A key with no record, or whose newest record
     /// is already a tombstone, is left alone and nothing is written.
     pub fn erase_value(&mut self, key: Key) -> Result<(), DynError> {
-        let def = lookup_key(key).ok_or(DynError::UnknownKey)?;
-        if def.read_only {
-            return Err(DynError::ReadOnly);
-        }
+        lookup_key(key).ok_or(DynError::UnknownKey)?;
         match self.find_latest(key) {
             Some((_, h)) if h.type_tag != ERASED_TAG => Ok(self.append(key, ERASED_TAG, &[])?),
             _ => Ok(()),
@@ -302,12 +298,8 @@ impl<'f, F: Flash> Store<'f, F> {
 
     /// Dynamic write by raw [`Key`] (the L3 `CONFIG_WRITE` path). Validates the value's [`Type`]
     /// against the registry (`UnknownKey` / `TypeMismatch`) and appends the record now (write-through).
-    /// A read-only field is refused (`ReadOnly`) whatever the value, and nothing is appended.
     pub fn set_value(&mut self, key: Key, value: Value) -> Result<(), DynError> {
         let def = lookup_key(key).ok_or(DynError::UnknownKey)?;
-        if def.read_only {
-            return Err(DynError::ReadOnly);
-        }
         if value.kind() != def.kind {
             return Err(DynError::TypeMismatch);
         }
@@ -322,6 +314,87 @@ impl<'f, F: Flash> Store<'f, F> {
         };
         self.append(key, def.kind.tag(), bytes)?;
         Ok(())
+    }
+
+    /// The **machine digest** (`specs/machine-settings.md` section 4.1): [`Store::digest`] over
+    /// every registered row whose id is in the machine block (`0x20..=0x3F`, [`Scope::Machine`]).
+    /// Two motor controllers of one machine must report the same one.
+    pub fn machine_digest(&self) -> u16 {
+        self.digest(None)
+    }
+
+    /// [`Store::digest`] over the rows whose [`Effect`] is `effect`, board-owned fields excepted:
+    /// the stored side of the running-against-stored comparison behind `FLAG_REARM` and
+    /// `FLAG_REBOOT` (`specs/machine-settings.md` section 5). The board-owned fields
+    /// ([`BOARD_OWNED`]) are written by the board and the walk, not the operator, and the board runs
+    /// what it writes (the walk's `ASSIGN` adopts its address at once, the odometer is the board's
+    /// own count), so a write of one is never a value waiting for a reboot.
+    pub fn effect_digest(&self, effect: Effect) -> u16 {
+        self.digest(Some(effect))
+    }
+
+    /// A CRC-16 (the record CRC) over the [`REGISTRY`] rows `effect` selects (`None`: the machine
+    /// block; `Some`: that effect's rows less the board-owned ones), in registry order, of each
+    /// row's key, its type tag and its EFFECTIVE value: the newest committed record's bytes when
+    /// they hold a value of the row's type and width, else the row's default, which is what
+    /// [`Store::get_value`] answers.
+    ///
+    /// Defaults are in it, so two images whose defaults differ disagree, and so does a row one image
+    /// registers and the other does not.
+    ///
+    /// Each row is resolved by a walk of the log up to the frontier that hops headers WITHOUT
+    /// re-checking their CRC (the chain before the frontier was validated at mount or written by
+    /// [`Store::append`] itself) and CRC-checks only the records of the row's key, which keeps the
+    /// three digests a board takes on a config write to about a millisecond on a full page.
+    ///
+    /// One body for every selection, chosen by value rather than by a generic predicate, so the
+    /// image carries one copy.
+    #[inline(never)]
+    fn digest(&self, effect: Option<Effect>) -> u16 {
+        let region = self.flash.as_bytes();
+        let mut crc = Crc16::new();
+        for row in REGISTRY.iter() {
+            let selected = match effect {
+                None => Scope::of(row.field_id) == Some(Scope::Machine),
+                Some(e) => row.effect == e && !BOARD_OWNED.contains(&row.field_id),
+            };
+            if !selected {
+                continue;
+            }
+            let key = row.key();
+            let tag = row.kind.tag();
+            crc.update(&[key.field_id, key.index, tag]);
+            let stored = self.latest_unchecked(key).and_then(|(off, h)| {
+                let bytes = record::value_bytes(region, off, &h);
+                let fits = row.kind.fixed_len().is_none_or(|w| w == bytes.len());
+                (h.type_tag == tag && fits).then_some(bytes)
+            });
+            let mut scratch = [0u8; 4];
+            crc.update(stored.unwrap_or_else(|| row.default_bytes(&mut scratch)));
+        }
+        crc.finish()
+    }
+
+    /// The newest committed record of `key` that holds a value (not a tombstone), found by a walk
+    /// to the frontier that hops headers without re-checking their CRC ([`Store::digest`]).
+    fn latest_unchecked(&self, key: Key) -> Option<(usize, Header)> {
+        let region = self.flash.as_bytes();
+        let mut cursor = self.active_page_off + PAGE_HEADER_LEN;
+        let mut found = None;
+        while cursor < self.frontier {
+            let Some(h) = record::header_unchecked(region, cursor) else {
+                break;
+            };
+            let here = cursor;
+            cursor = here + record::record_size(h.len as usize);
+            if h.field_id == key.field_id
+                && h.index == key.index
+                && record::is_committed(region, here, &h)
+            {
+                found = Some((here, h));
+            }
+        }
+        found.filter(|(_, h)| h.type_tag != ERASED_TAG)
     }
 
     /// Pack the latest record per key into the spare page (header-last), then erase the old page. The

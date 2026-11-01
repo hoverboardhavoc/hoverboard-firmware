@@ -7,7 +7,8 @@ it, installing it the first time, and updating it afterwards.
 
 One image for every network: the image holds no Wi-Fi credentials. The bridge reads the network
 from its store, `wifi.ssid` and `wifi.pass` (`specs/bridge-onboarding.md` section 2), once at boot,
-and with none stored it does not start its Wi-Fi station (`info` shows `wifi not configured`).
+and with none stored it does not start its Wi-Fi station (`hoverboard-cli bridge info <bridge>`
+shows `wifi not configured`).
 
 ```
 cd bridge
@@ -52,7 +53,7 @@ driven by the bridge's own driver: `cargo test -p emulator-runner --features uni
 
 ## First install
 
-Over the C3's own USB port with `hoverboard-cli install-esp` (`specs/bridge-onboarding.md` section
+Over the C3's own USB port with `hoverboard-cli bridge install` (`specs/bridge-onboarding.md` section
 3), from one merged image holding the bootloader, the partition table and the app in `ota_0`, with
 `otadata` blank (the bootloader then runs `ota_0`). CI builds it as `hoverboard-bridge-install.bin`;
 locally:
@@ -62,7 +63,7 @@ espflash save-image --chip esp32c3 --merge --flash-size 4mb \
   --bootloader bootloader/bootloader.bin --partition-table partitions.csv \
   --target-app-partition ota_0 \
   target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/hoverboard-bridge-install.bin
-hoverboard-cli install-esp target/img/hoverboard-bridge-install.bin bridge.json
+hoverboard-cli bridge install target/img/hoverboard-bridge-install.bin bridge.json
 ```
 
 `bridge.json` names the new bridge and its network, in the file format of `cli-config.md`:
@@ -71,10 +72,10 @@ hoverboard-cli install-esp target/img/hoverboard-bridge-install.bin bridge.json
 { "device": { "name": "offroad-slave" }, "wifi": { "ssid": "<network>", "pass": "<password>" } }
 ```
 
-`install-esp` finds the port by the C3's USB ids (`303a:1001`), or takes `--serial PORT`. If a
+`bridge install` finds the port by the C3's USB ids (`303a:1001`), or takes `--serial PORT`. If a
 bridge answers there it names it and asks before erasing it (`--yes` skips the question). It writes
 the image, waits for the first boot, applies the file, resets the bridge and waits for it to join.
-The password is never printed and never read back (`config` shows `(set)`).
+The password is never printed and never read back (`bridge get` shows `(set)`).
 
 The merged image is padded to the whole 4 MB, so it also erases `keys` and `otadata`: the bridge
 boots unassigned with its default name and no Wi-Fi, and the next walk addresses it again.
@@ -98,12 +99,13 @@ The app image alone, as the slot holds it:
 ```
 espflash save-image --chip esp32c3 \
   target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/hoverboard-bridge.bin
-hoverboard-cli --tcp <name>.local:5333 update-esp target/img/hoverboard-bridge.bin
+hoverboard-cli --tcp <name>.local:5333 bridge update <bridge> target/img/hoverboard-bridge.bin
 ```
 
-`update-esp` writes the slot not running, the bridge resets into it, and the tool reconnects and sends
-`ESP_UPDATE_CONFIRM`. With `--no-confirm` it stops after the reconnect; the next reset then returns
-to the previous slot.
+`<bridge>` is the bridge's address (as `hoverboard-cli machine nodes` lists it), its `device.name`
+or a prefix of its `uid`; an address needs no walk. `bridge update` writes the slot not running, the
+bridge resets into it, and the tool reconnects and sends `ESP_UPDATE_CONFIRM`. With `--no-confirm`
+it stops after the reconnect; the next reset then returns to the previous slot.
 
 `cargo run --release` flashes the same layout as the first install from the ELF, leaving `keys`
 alone and erasing `otadata` so the bootloader runs `ota_0`.

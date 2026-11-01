@@ -1,13 +1,15 @@
 //! The walk and the configuration requests (`specs/hoverboard-bridge.md`, "The terminal tool"): the
-//! whole walk with `net`'s [`Controller`], then `node.class` and `device.name` read from every
-//! address; `CONFIG_READ`, `CONFIG_WRITE` (a value or an un-store) and `CONFIG_COMPACT`; and `--node`
-//! resolved to an address by number or by name.
+//! whole walk with `net`'s [`Controller`], then `IDENTIFY` and `device.name` asked of every
+//! address; `CONFIG_READ`, `CONFIG_WRITE` (a value or an un-store), `CONFIG_COMPACT` and
+//! `STATUS_READ`; and where the walk placed every node.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use net::pdu::{Opcode, Pdu, NO_ADDRESS};
 use net::walk::{Controller, CLASS_BRIDGE};
-use store::{Key, Type, Value, DEVICE_NAME, NODE_CLASS};
+pub use net::walk::{Identity, CLASS_MOTOR};
+use store::{Key, Type, Value, DEVICE_NAME};
 
 use crate::wire::Wire;
 
@@ -20,21 +22,119 @@ const TRIES: u32 = 3;
 /// The longest one wait for a packet inside the walk, so a resend is not late by much.
 const POLL: Duration = Duration::from_millis(50);
 
-/// The motor controller's `node.class`, the registry default.
-pub const CLASS_MOTOR: u8 = NODE_CLASS.default();
-
 /// A node the walk found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     /// Its address.
     pub addr: u8,
-    /// Its `node.class`, if it answered.
-    pub class: Option<u8>,
+    /// Its `IDENTITY`, if it answered (`specs/machine-settings.md` section 6.1).
+    pub identity: Option<Identity>,
     /// Its `device.name`, if it answered.
     pub name: Option<String>,
 }
 
-/// The name of a `node.class` value.
+impl Found {
+    /// Its class, if it answered `IDENTIFY`.
+    pub fn class(&self) -> Option<u8> {
+        self.identity.map(|i| i.class)
+    }
+}
+
+/// Where the walk placed every node: the node the link is attached to, each node's walked
+/// neighbours (`Controller::neighbours`), and each node's mailbox port, its `PORT_SWD` port
+/// (`Controller::port_of_kind`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Topology {
+    /// The node on the far end of the tool's own link (`Controller::gateway_addr`).
+    pub gateway: Option<u8>,
+    /// Each node's walked neighbours.
+    pub neighbours: BTreeMap<u8, Vec<u8>>,
+    /// Each node's mailbox port, where it has one.
+    pub mailbox: BTreeMap<u8, u8>,
+}
+
+impl Topology {
+    /// The placement `walked` recorded for each of its nodes.
+    pub fn of(walked: &Controller) -> Self {
+        let addrs = walked.assigned_addrs();
+        Topology {
+            gateway: walked.gateway_addr(),
+            neighbours: addrs
+                .iter()
+                .map(|&a| (a, walked.neighbours(a).to_vec()))
+                .collect(),
+            mailbox: addrs
+                .iter()
+                .filter_map(|&a| Some((a, walked.port_of_kind(a, net::walk::PORT_SWD)?)))
+                .collect(),
+        }
+    }
+
+    /// The walked neighbours of `addr`.
+    pub fn neighbours(&self, addr: u8) -> &[u8] {
+        self.neighbours.get(&addr).map_or(&[], Vec::as_slice)
+    }
+
+    /// The mailbox port of `addr`.
+    pub fn mailbox(&self, addr: u8) -> Option<u8> {
+        self.mailbox.get(&addr).copied()
+    }
+}
+
+/// A whole walk: the tool's guest address, every node with its `IDENTITY` and name, and where the
+/// walk placed them.
+#[derive(Debug, Clone)]
+pub struct Walked {
+    /// The tool's guest address.
+    pub src: u8,
+    /// Every node, in address order.
+    pub found: Vec<Found>,
+    /// Where they sit.
+    pub topology: Topology,
+}
+
+/// The walk's first two exchanges and no more: first contact ([`hello`]), then the attached node's
+/// own `PROBE_PORTS` ([`ports`]). What the reply placed is enough to tell the board on the attached
+/// bridge's mailbox (`target::wired_here`); [`finish`] walks on from here.
+pub fn start<W: Wire>(wire: &mut W) -> Result<Controller, String> {
+    let c = hello(wire)?;
+    ports(wire, c)
+}
+
+/// The walk's first contact alone: the attached node's `NODE_HELLO` reply, which grants the guest
+/// address. A route by `uid` asks the attached node its `IDENTIFY` and `TARGET_ID` from here
+/// (`specs/board-route.md` section 1); [`ports`] goes on.
+pub fn hello<W: Wire>(wire: &mut W) -> Result<Controller, String> {
+    walk_until(wire, Controller::new(), REPLY_WAIT, |_, replies| {
+        replies >= 1
+    })
+}
+
+/// The walk's next exchange after [`hello`]: the attached node's own `PROBE_PORTS`. An attached
+/// node with no address sends nothing, since the walk's next request would assign it.
+pub fn ports<W: Wire>(wire: &mut W, c: Controller) -> Result<Controller, String> {
+    walk_until(wire, c, REPLY_WAIT, |c, replies| {
+        replies >= 1 || c.gateway_addr().is_none()
+    })
+}
+
+/// The rest of the walk [`start`] began, then ask every node its `IDENTITY` and read its name
+/// ([`survey`]).
+pub fn finish<W: Wire>(wire: &mut W, c: Controller) -> Result<Walked, String> {
+    let c = walk_until(wire, c, REPLY_WAIT, |_, _| false)?;
+    Ok(Walked {
+        src: c.guest_addr(),
+        found: survey(wire, &c),
+        topology: Topology::of(&c),
+    })
+}
+
+/// A factory unique ID as 24 lowercase hex digits (`specs/machine-settings.md` section 6.2).
+pub fn uid_hex(uid: &[u8; net::walk::UID_LEN]) -> String {
+    uid.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The name of an `IDENTITY` class.
 pub fn class_name(class: Option<u8>) -> &'static str {
     match class {
         Some(CLASS_MOTOR) => "motor controller",
@@ -54,7 +154,6 @@ pub fn status_name(status: u8) -> String {
         CFG_TYPE_MISMATCH => "type mismatch".into(),
         CFG_STORE_ERR => "store error".into(),
         CFG_ARMED => "armed".into(),
-        CFG_READ_ONLY => "read-only".into(),
         CFG_NO_SPACE => "no space".into(),
         CFG_COMMIT_FAILED => "commit failed".into(),
         CFG_DEFAULT => "default".into(),
@@ -91,9 +190,20 @@ pub fn walk<W: Wire>(wire: &mut W) -> Result<Controller, String> {
 /// the outstanding request's reply (telemetry, a duplicate or late reply) is dropped here; the
 /// walk runs before `watch` and `drive` start counting.
 fn walk_within<W: Wire>(wire: &mut W, reply_wait: Duration) -> Result<Controller, String> {
-    let mut c = Controller::new();
+    walk_until(wire, Controller::new(), reply_wait, |_, _| false)
+}
+
+/// Walk on from `c` until it is complete or `stop` says so, given the controller and how many
+/// replies this call has taken.
+fn walk_until<W: Wire>(
+    wire: &mut W,
+    mut c: Controller,
+    reply_wait: Duration,
+    stop: impl Fn(&Controller, u32) -> bool,
+) -> Result<Controller, String> {
     let mut last: Option<(Vec<u8>, Instant, u32)> = None;
-    while !c.is_complete() {
+    let mut replies = 0;
+    while !c.is_complete() && !stop(&c, replies) {
         if let Some(req) = c.next_request() {
             wire.send(&req);
             last = Some((req.to_vec(), Instant::now(), 1));
@@ -103,6 +213,7 @@ fn walk_within<W: Wire>(wire: &mut W, reply_wait: Duration) -> Result<Controller
                 wire.send(&r);
             } else if c.on_reply(&pkt) {
                 last = None;
+                replies += 1;
             }
         }
         if let Some((req, at, tries)) = last.as_mut() {
@@ -146,17 +257,18 @@ impl ConfigResp {
     }
 }
 
-/// Send a `CONFIG_*` request `op` with `payload` from `src` to `dst` and wait for the `CONFIG_RESP`
-/// whose first two bytes are `echo` (the key, or `[0, 0]` for the acks that name none). A request
-/// to `0x00` is answered by the node on the tool's own link, whatever its address.
-fn exchange<W: Wire>(
+/// Send request `op` with `payload` from `src` to `dst` and wait for the reply `answer` takes: a
+/// frame of opcode `reply`, addressed to `src`, from `dst`. A request to `0x00` is answered by the
+/// node on the tool's own link, whatever its address. Sent [`TRIES`] times, each waiting
+/// [`REPLY_WAIT`].
+fn ask<W: Wire, T>(
     wire: &mut W,
-    op: Opcode,
+    (op, reply): (Opcode, Opcode),
     src: u8,
     dst: u8,
     payload: &[u8],
-    echo: [u8; 2],
-) -> Result<ConfigResp, String> {
+    answer: impl Fn(&[u8]) -> Option<T>,
+) -> Result<T, String> {
     let pdu = Pdu::from_op(op, src, dst, payload);
     let mut buf = [0u8; net::walk::MAX_PDU];
     let n = pdu
@@ -168,21 +280,59 @@ fn exchange<W: Wire>(
         while let Some(pkt) = wire.recv(deadline.saturating_duration_since(Instant::now())) {
             let Ok(p) = Pdu::decode(&pkt) else { continue };
             let from = dst == NO_ADDRESS || p.src == dst;
-            if p.known() == Some(Opcode::ConfigResp)
-                && p.dst == src
-                && from
-                && p.payload.len() >= 4
-                && p.payload[..2] == echo
-            {
-                return Ok(ConfigResp {
-                    status: p.payload[2],
-                    tag: p.payload[3],
-                    bytes: p.payload[4..].to_vec(),
-                });
+            if p.known() == Some(reply) && p.dst == src && from {
+                if let Some(t) = answer(p.payload) {
+                    return Ok(t);
+                }
             }
         }
     }
-    Err(format!("no CONFIG_RESP from {dst:#04x}"))
+    Err(format!("no {reply:?} from {dst:#04x}"))
+}
+
+/// Send a `CONFIG_*` request `op` with `payload` from `src` to `dst` and wait for the `CONFIG_RESP`
+/// whose first two bytes are `echo` (the key, or `[0, 0]` for the acks that name none).
+fn exchange<W: Wire>(
+    wire: &mut W,
+    op: Opcode,
+    src: u8,
+    dst: u8,
+    payload: &[u8],
+    echo: [u8; 2],
+) -> Result<ConfigResp, String> {
+    ask(wire, (op, Opcode::ConfigResp), src, dst, payload, |p| {
+        (p.len() >= 4 && p[..2] == echo).then(|| ConfigResp {
+            status: p[2],
+            tag: p[3],
+            bytes: p[4..].to_vec(),
+        })
+    })
+    .map_err(|_| format!("no CONFIG_RESP from {dst:#04x}"))
+}
+
+/// `IDENTIFY` to `dst`: its `IDENTITY` (`specs/machine-settings.md` section 6.1).
+pub fn identify<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<Identity, String> {
+    ask(
+        wire,
+        (Opcode::Identify, Opcode::Identity),
+        src,
+        dst,
+        &[],
+        Identity::decode,
+    )
+}
+
+/// `STATUS_READ` to `dst`: the boot status record's entries, four bytes each
+/// (`specs/configured-links.md` section 5).
+pub fn status_read<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<Vec<u8>, String> {
+    ask(
+        wire,
+        (Opcode::StatusRead, Opcode::Status),
+        src,
+        dst,
+        &[],
+        |p| Some(p.to_vec()),
+    )
 }
 
 /// Send a `CONFIG_*` request for `key` and wait for its `CONFIG_RESP`.
@@ -262,7 +412,8 @@ pub fn assign<W: Wire>(
     Err(format!("no ASSIGN_ACK from {new_addr:#04x}"))
 }
 
-/// Read `node.class` and `device.name` from every address the walk found, in address order.
+/// Ask every address the walk found for its `IDENTITY` and read its `device.name`, in address
+/// order (`specs/machine-settings.md` section 6.1).
 pub fn survey<W: Wire>(wire: &mut W, walked: &Controller) -> Vec<Found> {
     let src = walked.guest_addr();
     let mut addrs = walked.assigned_addrs().to_vec();
@@ -270,13 +421,7 @@ pub fn survey<W: Wire>(wire: &mut W, walked: &Controller) -> Vec<Found> {
     addrs
         .into_iter()
         .map(|addr| {
-            let class =
-                read(wire, src, addr, NODE_CLASS.key())
-                    .ok()
-                    .and_then(|r| match r.value() {
-                        Some(Value::U8(c)) => Some(c),
-                        _ => None,
-                    });
+            let identity = identify(wire, src, addr).ok();
             let name =
                 read(wire, src, addr, DEVICE_NAME.key())
                     .ok()
@@ -284,7 +429,11 @@ pub fn survey<W: Wire>(wire: &mut W, walked: &Controller) -> Vec<Found> {
                         Some(Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
                         _ => None,
                     });
-            Found { addr, class, name }
+            Found {
+                addr,
+                identity,
+                name,
+            }
         })
         .collect()
 }
@@ -305,30 +454,6 @@ pub fn parse_int(s: &str) -> Option<i128> {
     Some(if neg { -v } else { v })
 }
 
-/// The node `spec` names among `found`: an address, or a `device.name`.
-pub fn resolve(spec: &str, found: &[Found]) -> Result<u8, String> {
-    if let Some(a) = parse_int(spec) {
-        return u8::try_from(a)
-            .ok()
-            .filter(|&a| net::pdu::is_board(a))
-            .ok_or_else(|| format!("not a node address (0x01..0x7f): {spec}"));
-    }
-    let named: Vec<u8> = found
-        .iter()
-        .filter(|f| f.name.as_deref() == Some(spec))
-        .map(|f| f.addr)
-        .collect();
-    let names = || {
-        let n: Vec<&str> = found.iter().filter_map(|f| f.name.as_deref()).collect();
-        n.join(", ")
-    };
-    match named[..] {
-        [a] => Ok(a),
-        [] => Err(format!("no node named {spec} (nodes: {})", names())),
-        _ => Err(format!("more than one node is named {spec}")),
-    }
-}
-
 /// A field argument: `<id>` or `<id>.<index>`, each a number.
 pub fn parse_key(s: &str) -> Result<Key, String> {
     let (id, index) = s.split_once('.').unwrap_or((s, "0"));
@@ -346,7 +471,7 @@ pub fn parse_key(s: &str) -> Result<Key, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use net::walk::{NB_ASSIGNED, PORT_UART, PROTO_VER};
+    use net::walk::{NB_ASSIGNED, NB_EMPTY, PORT_BLE, PORT_SWD, PORT_UART, PROTO_VER};
     use std::collections::VecDeque;
 
     /// One board at `0x01` behind a link that streams telemetry without pause and loses the
@@ -373,7 +498,7 @@ mod tests {
                     Opcode::NodeHello.to_u8(),
                     0x01,
                     p.src,
-                    &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
+                    &[0x01, PROTO_VER, 0x88],
                 )),
                 Some(Opcode::ProbePorts) => {
                     self.probes += 1;
@@ -409,5 +534,119 @@ mod tests {
         assert_eq!(wire.probes, 2, "the probe was resent once");
         assert_eq!(c.assigned_addrs().to_vec(), [0x01]);
         assert_eq!(c.guest_addr(), 0x88);
+    }
+
+    /// A bridge on the tool's link holding `addr` (`NO_ADDRESS` for none): `NODE_HELLO` granting
+    /// guest `0x88`, its own `PROBE_PORTS` answered with `ports`, and any other node's with no
+    /// ports. Counts the requests by opcode.
+    struct Bridge {
+        addr: u8,
+        ports: Vec<u8>,
+        replies: VecDeque<Vec<u8>>,
+        sent: Vec<Opcode>,
+    }
+
+    impl Bridge {
+        /// A bridge at `0x03`: BLE empty, the mailbox (port 1) neighbour `swd`, the tool on its
+        /// console.
+        fn at_0x03(swd: (u8, u8)) -> Self {
+            Bridge {
+                addr: 0x03,
+                ports: vec![
+                    3,
+                    0,
+                    PORT_BLE,
+                    NB_EMPTY,
+                    0,
+                    1,
+                    PORT_SWD,
+                    swd.0,
+                    swd.1,
+                    2,
+                    PORT_UART,
+                    NB_ASSIGNED,
+                    0x88,
+                ],
+                replies: VecDeque::new(),
+                sent: Vec::new(),
+            }
+        }
+    }
+
+    impl Wire for Bridge {
+        fn send(&mut self, pdu: &[u8]) {
+            let p = Pdu::decode(pdu).unwrap();
+            let op = p.known().unwrap();
+            self.sent.push(op);
+            let reply = match op {
+                Opcode::NodeHello => encode(
+                    Opcode::NodeHello.to_u8(),
+                    self.addr,
+                    p.src,
+                    &[self.addr, PROTO_VER, 0x88],
+                ),
+                Opcode::ProbePorts if p.dst == self.addr => {
+                    encode(Opcode::Ports.to_u8(), self.addr, p.src, &self.ports)
+                }
+                Opcode::ProbePorts => encode(Opcode::Ports.to_u8(), p.dst, p.src, &[0]),
+                _ => return,
+            };
+            self.replies.push_back(reply);
+        }
+        fn recv(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+            self.replies.pop_front()
+        }
+        fn window(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn start_stops_at_the_attached_bridges_ports_and_names_the_board_on_its_mailbox() {
+        let mut wire = Bridge::at_0x03((NB_ASSIGNED, 0x01));
+        let c = start(&mut wire).unwrap();
+        assert_eq!(wire.sent, [Opcode::NodeHello, Opcode::ProbePorts]);
+        assert_eq!(crate::target::wired_here(&c, 0x01), Some((0x03, 1)));
+        // Another address, the bridge's own and the tool's are not on its mailbox.
+        for other in [0x02, 0x03, 0x88] {
+            assert_eq!(crate::target::wired_here(&c, other), None, "{other:#04x}");
+        }
+    }
+
+    #[test]
+    fn a_mailbox_with_no_neighbour_names_no_board_and_the_walk_goes_on_from_the_start() {
+        for swd in [(NB_EMPTY, 0), (net::walk::NB_UNASSIGNED, 0)] {
+            let mut wire = Bridge::at_0x03(swd);
+            let c = start(&mut wire).unwrap();
+            assert_eq!(crate::target::wired_here(&c, 0x01), None, "{swd:?}");
+        }
+        // Another board on the mailbox: no route to 0x01, and finishing probes that board without
+        // a second first contact.
+        let mut wire = Bridge::at_0x03((NB_ASSIGNED, 0x02));
+        let c = start(&mut wire).unwrap();
+        assert_eq!(crate::target::wired_here(&c, 0x01), None);
+        let w = finish(&mut wire, c).unwrap();
+        let addrs: Vec<u8> = w.found.iter().map(|f| f.addr).collect();
+        assert_eq!(addrs, [0x02, 0x03]);
+        assert_eq!(
+            wire.sent[..3],
+            [Opcode::NodeHello, Opcode::ProbePorts, Opcode::ProbePorts]
+        );
+        assert_eq!(
+            wire.sent
+                .iter()
+                .filter(|&&o| o == Opcode::NodeHello)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn start_sends_nothing_after_first_contact_with_a_node_holding_no_address() {
+        let mut wire = Bridge::at_0x03((NB_ASSIGNED, 0x01));
+        wire.addr = NO_ADDRESS;
+        let c = start(&mut wire).unwrap();
+        assert_eq!(wire.sent, [Opcode::NodeHello]);
+        assert_eq!(crate::target::wired_here(&c, 0x01), None);
     }
 }

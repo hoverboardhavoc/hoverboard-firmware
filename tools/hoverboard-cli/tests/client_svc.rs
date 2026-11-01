@@ -22,12 +22,15 @@ use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
 use hoverboard_bridge_core::sim::{board, Family, Gd32, Inject, RamFlash, SimPins, SimPlatform};
 use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
 use hoverboard_bridge_core::update::Update;
-use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
+use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::transport::Tcp;
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 use link::StreamFramer;
 use net::pdu::Pdu;
 use sha2::{Digest, Sha256};
+
+/// The address the simulated bridge holds from a past walk.
+const BRIDGE_ADDR: u8 = 0x03;
 
 /// The bridge, as the firmware's service loop runs it.
 struct Esp {
@@ -47,12 +50,17 @@ impl Esp {
         let mut router = Router::new();
         router.connect(Port::Ble);
         let flash: &'static mut RamFlash = Box::leak(Box::new(RamFlash::erased(4096)));
+        let mut keys = store::Store::mount(flash).unwrap();
+        // The address a past walk gave the bridge, which `bridge update` names it by.
+        keys.set_value(store::NODE_ADDRESS.key(), store::Value::U8(BRIDGE_ADDR))
+            .unwrap();
         Esp {
             router,
             node: Node::new(
-                store::Store::mount(flash).unwrap(),
+                keys,
                 true,
                 0x0001,
+                hoverboard_bridge_core::sim::SIM_MAC,
                 &hoverboard_bridge_core::sim::SIM_NAME,
             ),
             port: MailboxPort::new(board(family, Inject::default(), 5)),
@@ -278,6 +286,96 @@ fn info_id_memory_and_target_control_round_trip() {
     assert_eq!(c.ctrl(Ctrl::Halt), Err(ClientError::Status(Status::Armed)));
 }
 
+/// A bridge that answers each `MEM_READ` with a counter's bytes, `delay` after it was asked.
+struct SlowReads {
+    delay: Duration,
+    pending: VecDeque<Vec<u8>>,
+    reads: u32,
+}
+
+impl Wire for SlowReads {
+    fn send(&mut self, pdu: &[u8]) {
+        let p = Pdu::decode(pdu).unwrap();
+        if let Ok(Msg::MemRead { addr, len }) = Msg::decode(&p) {
+            self.reads += 1;
+            let data = vec![self.reads as u8; len as usize];
+            let mut buf = [0u8; espsvc::MAX_PDU];
+            let n = Msg::MemData { addr, data: &data }
+                .encode(p.dst, p.src, &mut buf)
+                .unwrap();
+            self.pending.push_back(buf[..n].to_vec());
+        }
+    }
+    fn recv(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+        let r = self.pending.pop_front()?;
+        std::thread::sleep(self.delay);
+        Some(r)
+    }
+    fn window(&self) -> usize {
+        1
+    }
+}
+
+/// `specs/board-route.md` section 6, test 5: `board read --hz` on one client reads every slot
+/// while the bridge keeps up, and a slow bridge yields fewer samples, each a real read, never one
+/// made up for a slot it missed. The line is the time, to the millisecond, and the bytes.
+#[test]
+fn a_streaming_read_takes_the_slots_the_bridge_keeps_up_with() {
+    let run = |delay: Duration, len: usize| {
+        let mut c = Client::new(SlowReads {
+            delay,
+            pending: VecDeque::new(),
+            reads: 0,
+        });
+        let t0 = Instant::now();
+        let mut got: Vec<(Duration, Vec<u8>)> = Vec::new();
+        c.read_every(
+            0x2000_0920,
+            len,
+            Duration::from_millis(50),
+            || t0.elapsed() >= Duration::from_millis(500),
+            |at, data| got.push((at, data.to_vec())),
+        )
+        .unwrap();
+        (got, c.wire().reads)
+    };
+    // Fast: at most one sample per 50 ms slot, each one read. How many slots a run gets depends
+    // on how far the host's sleeps overshoot (a CI runner gave 5 in 500 ms), so the count is
+    // bounded above only; what is exact is that no slot holds two samples.
+    let (fast, reads) = run(Duration::ZERO, 4);
+    assert!((1..=11).contains(&fast.len()), "{} samples", fast.len());
+    assert_eq!(reads as usize, fast.len());
+    for (i, (at, data)) in fast.iter().enumerate() {
+        assert!(*at >= Duration::from_millis(50) * i as u32, "{i}: {at:?}");
+        assert_eq!(data, &vec![i as u8 + 1; 4]);
+    }
+    for w in fast.windows(2) {
+        assert!(
+            w[1].0.as_millis() / 50 > w[0].0.as_millis() / 50,
+            "{fast:?}"
+        );
+    }
+    // Slow: each read takes 120 ms, so it misses two slots in three; the samples are the reads,
+    // each in the first slot after the last one ended.
+    let (slow, reads) = run(Duration::from_millis(120), 4);
+    assert!((1..=5).contains(&slow.len()), "{} samples", slow.len());
+    assert_eq!(reads as usize, slow.len());
+    for w in slow.windows(2) {
+        assert!(w[1].0 >= w[0].0 + Duration::from_millis(120), "{slow:?}");
+        assert_eq!(w[1].1[0], w[0].1[0] + 1, "no sample is made up");
+    }
+    // A range over MEM_MAX is the MEM_READs it needs, in one sample.
+    let (wide, reads) = run(Duration::ZERO, espsvc::MEM_MAX + 4);
+    assert_eq!(reads as usize, 2 * wide.len());
+    assert_eq!(wide[0].1.len(), espsvc::MEM_MAX + 4);
+
+    assert_eq!(
+        sample_line(Duration::from_millis(1234), &[0x4d, 0x42, 0x00, 0xff]),
+        "1.234 4d4200ff"
+    );
+    assert_eq!(sample_line(Duration::ZERO, &[]), "0.000 ");
+}
+
 #[test]
 fn a_protected_board_is_refused_at_begin_and_cleared_by_clear_protection() {
     let mut esp = Esp::new(Family::F1x0);
@@ -497,17 +595,114 @@ fn cli(args: &[&str], limit: Duration) -> (bool, String, String) {
     )
 }
 
+/// The master's GD32 once a [`serve_machine_over_tcp`] run is over: its flash as halfwords and as
+/// bytes, and whether its mailbox header is written (it booted).
+struct Master {
+    flash: Vec<u16>,
+    bytes: Vec<u8>,
+    booted: bool,
+}
+
+/// The whole simulated machine (`hoverboard_bridge_core::sim::Machine`: the bridge, the master on
+/// its mailbox, the slave on the master's UART) on the bridge's TCP console, for `connections`
+/// clients one after the other, with the master's store pages holding `store` first. A board's SWD
+/// commands go through the bridge wired to it, which the walk finds.
+fn serve_machine_over_tcp(listener: TcpListener, store: Vec<u16>, connections: usize) -> Master {
+    serve_machine_with(listener, store, connections, |_| {})
+}
+
+/// What [`serve_machine_with`] does to the master's GD32 before serving.
+type Prep = fn(&mut Gd32);
+
+/// [`serve_machine_over_tcp`], with `prep` applied to the master's GD32 first (its family, its
+/// flash size).
+fn serve_machine_with(
+    listener: TcpListener,
+    store: Vec<u16>,
+    connections: usize,
+    prep: Prep,
+) -> Master {
+    use hoverboard_bridge_core::sim::Machine;
+    let flash: &'static mut RamFlash = Box::leak(Box::new(RamFlash::erased(4096)));
+    let svc = Service::new(
+        Build {
+            version: [0, 1, 0],
+            commit: 0,
+            swd_khz: 1000,
+        },
+        Box::leak(Box::new(ImageBuffer::new())),
+        Box::leak(Box::new(Update::new())),
+        SimPlatform::new(),
+    );
+    let mut m = Machine::new(flash, svc);
+    m.port.swd().pins().bus.flash[31 * 1024..].copy_from_slice(&store);
+    prep(&mut m.port.swd().pins().bus);
+    for _ in 0..connections {
+        let (mut sock, _) = listener.accept().unwrap();
+        m.router.connect(Port::Tcp);
+        sock.set_read_timeout(Some(Duration::from_millis(1)))
+            .unwrap();
+        let mut buf = [0u8; 256];
+        let mut out = [0u8; 64];
+        loop {
+            if m.router.room(Port::Tcp) >= buf.len() {
+                match sock.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => m.router.on_bytes(Port::Tcp, &buf[..n]),
+                    Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                    Err(_) => break,
+                }
+            }
+            // While a job runs the board is halted and its firmware does not run: the bridge's
+            // service loop alone, as on the bench.
+            let moved = if m.svc.busy() {
+                m.node.pump(&mut m.router, &mut m.port, &mut m.svc);
+                true
+            } else {
+                m.step()
+            };
+            loop {
+                let k = m.router.next_out(Port::Tcp, &mut out);
+                if k == 0 {
+                    break;
+                }
+                let _ = sock.write_all(&out[..k]);
+            }
+            if !moved {
+                m.tick();
+            }
+        }
+        m.router.disconnect(Port::Tcp);
+    }
+    let g = &mut m.port.swd().pins().bus;
+    Master {
+        flash: g.flash.clone(),
+        bytes: g.flash_bytes(),
+        booted: g.mailbox().magic() == swd_mailbox::MAGIC,
+    }
+}
+
 #[test]
-fn the_binary_runs_a_multi_chunk_read_and_a_flash_over_tcp() {
+fn the_binary_runs_a_multi_chunk_read_and_a_flash_through_the_boards_bridge() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let mut esp = Esp::new(Family::F1x0);
     let store: Vec<u16> = (0..1024u16).map(|i| i.wrapping_mul(0x9E37)).collect();
-    esp.model().flash[31 * 1024..].copy_from_slice(&store);
-    let server = std::thread::spawn(move || serve_console_over_tcp(listener, esp, 2));
+    let pages = store.clone();
+    let server = std::thread::spawn(move || serve_machine_over_tcp(listener, pages, 2));
     let limit = Duration::from_secs(60);
 
-    let (ok, out, err) = cli(&["--tcp", &addr, "read", "0x0800F800", "2048"], limit);
+    let (ok, out, err) = cli(
+        &[
+            "--tcp",
+            &addr,
+            "board",
+            "read",
+            "0x01",
+            "0x0800F800",
+            "2048",
+        ],
+        limit,
+    );
     assert!(ok, "{err}");
     assert!(err.contains(&format!("connected to {addr}")), "{err}");
     let read: Vec<u8> = out
@@ -522,7 +717,10 @@ fn the_binary_runs_a_multi_chunk_read_and_a_flash_over_tcp() {
     let elf = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("flash-over-tcp.elf");
     std::fs::write(&elf, common::flashable_elf(&img)).unwrap();
     let tcp = format!("--tcp={addr}");
-    let (ok, out, err) = cli(&[&tcp, "flash", elf.to_str().unwrap()], limit);
+    let (ok, out, err) = cli(
+        &[&tcp, "board", "flash", "0x01", elf.to_str().unwrap()],
+        limit,
+    );
     assert!(ok, "{err}");
     assert!(out.starts_with("booted"), "{out}");
     let stages = out.lines().find(|l| l.starts_with("stages: ")).expect(&out);
@@ -530,14 +728,12 @@ fn the_binary_runs_a_multi_chunk_read_and_a_flash_over_tcp() {
         assert!(stages.contains(&format!("{name} ")), "{stages}");
     }
 
-    let mut esp = server.join().unwrap();
-    let g = esp.model();
-    let flashed = g.flash_bytes();
+    let g = server.join().unwrap();
     let n = (common::release_guards().code_floor as usize).max(img.len());
-    assert_eq!(&flashed[..img.len()], &img[..]);
-    assert!(flashed[img.len()..n].iter().all(|&b| b == 0));
+    assert_eq!(&g.bytes[..img.len()], &img[..]);
+    assert!(g.bytes[img.len()..n].iter().all(|&b| b == 0));
     assert_eq!(&g.flash[31 * 1024..], &store[..]);
-    assert_eq!(g.mailbox().magic(), swd_mailbox::MAGIC, "booted");
+    assert!(g.booted, "booted");
 }
 
 /// A bundle packed from `elf` as the universal image, with `targets` in place of its table's when
@@ -577,16 +773,18 @@ fn the_binary_flashes_the_image_a_bundle_holds_for_the_chip() {
     let img = image(5 * 1024 + 11);
     // Named .elf: the content says it is a bundle.
     let path = bundle_file("bundle-named-elf.elf", &common::flashable_elf(&img), None);
-    for (family, name) in [(Family::F10x, "gd32f10x"), (Family::F1x0, "gd32f1x0")] {
+    let f10x: Prep = |g| g.family = Family::F10x;
+    let f1x0: Prep = |g| g.family = Family::F1x0;
+    for (prep, name) in [(f10x, "gd32f10x"), (f1x0, "gd32f1x0")] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server =
-            std::thread::spawn(move || serve_console_over_tcp(listener, Esp::new(family), 2));
+            std::thread::spawn(move || serve_machine_with(listener, vec![0xFFFF; 1024], 2, prep));
         let tcp = format!("--tcp={addr}");
         let limit = Duration::from_secs(60);
 
         // No terminal and no --yes: chosen and checked, then refused before anything is streamed.
-        let (ok, out, err) = cli(&[&tcp, "flash", &path], limit);
+        let (ok, out, err) = cli(&[&tcp, "board", "flash", "0x01", &path], limit);
         assert!(!ok, "{out}");
         assert!(err.contains("give --yes"), "{err}");
         let line = format!(
@@ -595,16 +793,15 @@ fn the_binary_flashes_the_image_a_bundle_holds_for_the_chip() {
         );
         assert!(out.contains(&line), "{out}");
 
-        let (ok, out, err) = cli(&[&tcp, "flash", &path, "--yes"], limit);
+        let (ok, out, err) = cli(&[&tcp, "board", "flash", "0x01", &path, "--yes"], limit);
         assert!(ok, "{err}");
         assert!(err.contains("SHA-256 checked"), "{err}");
         assert!(out.starts_with(&line), "{out}");
         assert!(out.contains("\nbooted"), "{out}");
 
-        let mut esp = server.join().unwrap();
-        let g = esp.model();
-        assert_eq!(&g.flash_bytes()[..img.len()], &img[..]);
-        assert_eq!(g.mailbox().magic(), swd_mailbox::MAGIC, "booted");
+        let g = server.join().unwrap();
+        assert_eq!(&g.bytes[..img.len()], &img[..]);
+        assert!(g.booted, "booted");
     }
 }
 
@@ -622,25 +819,29 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let mut esp = Esp::new(Family::F1x0);
-    esp.model().flash_kib = 32;
-    let before = esp.model().flash_bytes();
-    let server = std::thread::spawn(move || serve_console_over_tcp(listener, esp, 2));
+    let prep: Prep = |g| {
+        g.family = Family::F1x0;
+        g.flash_kib = 32;
+    };
+    let server =
+        std::thread::spawn(move || serve_machine_with(listener, vec![0xFFFF; 1024], 2, prep));
     let tcp = format!("--tcp={addr}");
     let limit = Duration::from_secs(30);
-    let (ok, _, err) = cli(&[&tcp, "flash", &path, "--yes"], limit);
+    let (ok, _, err) = cli(&[&tcp, "board", "flash", "0x01", &path, "--yes"], limit);
     assert!(!ok);
     assert!(err.contains("would refuse a gd32f1x0 32 KiB part"), "{err}");
     // The chip is not the image's: refused naming both.
     let other = bundle_file("bundle-64k.hbfw", &common::flashable_elf(&img), None);
-    let (ok, _, err) = cli(&[&tcp, "flash", &other, "--yes"], limit);
+    let (ok, _, err) = cli(&[&tcp, "board", "flash", "0x01", &other, "--yes"], limit);
     assert!(!ok);
     assert!(
         err.contains("no image in the bundle is for the chip (gd32f1x0 32 KiB)"),
         "{err}"
     );
-    let mut esp = server.join().unwrap();
-    assert_eq!(esp.model().flash_bytes(), before);
+    let g = server.join().unwrap();
+    // Nothing streamed: the master still runs the image the simulated machine boots.
+    assert!(g.booted);
+    assert_ne!(&g.bytes[..img.len()], &img[..]);
 }
 
 #[test]
@@ -665,7 +866,9 @@ fn firmware_info_prints_the_manifest_and_reads_no_board() {
     let (ok, _, err) = cli(
         &[
             "--tcp=127.0.0.1:1",
+            "board",
             "flash",
+            "0x01",
             elf_path.to_str().unwrap(),
             "--image",
             "x",
@@ -680,13 +883,21 @@ fn a_link_option_never_falls_back_to_ble() {
     let limit = Duration::from_secs(20);
     // Nothing listens on port 1: the TCP link fails at once, with no BLE scan behind it.
     let (ok, _, err) = cli(
-        &["--tcp", "127.0.0.1:1", "read", "0x0800F800", "2048"],
+        &[
+            "--tcp",
+            "127.0.0.1:1",
+            "board",
+            "read",
+            "0x01",
+            "0x0800F800",
+            "2048",
+        ],
         limit,
     );
     assert!(!ok && err.contains("127.0.0.1:1"), "{err}");
-    let (ok, _, err) = cli(&["--tcp=127.0.0.1:1", "info"], limit);
+    let (ok, _, err) = cli(&["--tcp=127.0.0.1:1", "bridge", "info", "0x03"], limit);
     assert!(!ok && err.contains("127.0.0.1:1"), "{err}");
-    let (ok, _, err) = cli(&["--tpc", "127.0.0.1:1", "info"], limit);
+    let (ok, _, err) = cli(&["--tpc", "127.0.0.1:1", "bridge", "info", "0x03"], limit);
     assert!(!ok && err.contains("unknown option --tpc"), "{err}");
 }
 
@@ -790,7 +1001,14 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
     let esp = Esp::with_platform(Family::F1x0, SimPlatform::with_slots(16 * 1024));
     let server = std::thread::spawn(move || serve_console_resetting(listener, esp, 2));
     let (ok, out, err) = cli(
-        &["--tcp", &addr, "update-esp", bin.to_str().unwrap()],
+        &[
+            "--tcp",
+            &addr,
+            "bridge",
+            "update",
+            "0x03",
+            bin.to_str().unwrap(),
+        ],
         limit,
     );
     assert!(ok, "{err}");
@@ -813,7 +1031,14 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
     let server = std::thread::spawn(move || serve_console_resetting(listener, esp, 2));
     let tcp = format!("--tcp={addr}");
     let (ok, out, err) = cli(
-        &[&tcp, "update-esp", bin.to_str().unwrap(), "--no-confirm"],
+        &[
+            &tcp,
+            "bridge",
+            "update",
+            "0x03",
+            bin.to_str().unwrap(),
+            "--no-confirm",
+        ],
         limit,
     );
     assert!(ok, "{err}");
@@ -839,7 +1064,14 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
         let server =
             std::thread::spawn(move || serve_console_resetting_info(listener, esp, 2, delta));
         let (ok, out, err) = cli(
-            &["--tcp", &addr, "update-esp", bin.to_str().unwrap()],
+            &[
+                "--tcp",
+                &addr,
+                "bridge",
+                "update",
+                "0x03",
+                bin.to_str().unwrap(),
+            ],
             limit,
         );
         assert!(ok, "{delta}: {err}");
@@ -859,6 +1091,16 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
     }
 
     // A file that is not a bridge image costs no connection.
-    let (ok, _, err) = cli(&["--tcp", "127.0.0.1:1", "update-esp", "Cargo.toml"], limit);
+    let (ok, _, err) = cli(
+        &[
+            "--tcp",
+            "127.0.0.1:1",
+            "bridge",
+            "update",
+            "0x03",
+            "Cargo.toml",
+        ],
+        limit,
+    );
     assert!(!ok && err.contains("not an ESP32-C3 app image"), "{err}");
 }

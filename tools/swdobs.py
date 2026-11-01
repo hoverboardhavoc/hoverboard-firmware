@@ -4,8 +4,8 @@ One owner for the things every tool that reads the running target needs: the ben
 (sourced from tools/flash.sh, never re-typed), the remote OpenOCD start/stop on the Pi, the
 OpenOCD TCL client, the ELF symbol resolver (mangled-suffix match for the motor statics, the
 CTRL_OBS address and size, and FOC_GAINS where present), the CTRL_OBS word map, and the two
-per-motor reads the current limit is built from (the board's own counts per amp, 0x67, and its own
-phase-current noise floor, 0x6B, neither of which any tool carries a copy of). Imported by
+per-motor reads the current limit is built from (the board's own counts per amp, 0x4C, and its own
+phase-current noise floor, 0x4D, neither of which any tool carries a copy of). Imported by
 tools/motor-trace.py, tools/climit-session.py and tools/foc-trace.py (which reads over a bridge,
 not OpenOCD, and takes the word map, the resolver and the cal clamp from here). tools/imu-tilt.py
 still carries its own copy (noted in its header).
@@ -27,11 +27,11 @@ DEFAULT_ELF = os.path.join(REPO, "motorcontroller/target/thumbv7m-none-eabi/rele
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in motorcontroller/firmware/src/main.rs (#[repr(C)], 50 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in motorcontroller/firmware/src/main.rs (#[repr(C)], 52 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 51
+CTRL_OBS_WORDS = 52
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -113,7 +113,7 @@ W_SF_REF = 46           # v_ref_q i16 (1/4096 count) | e_x i16 << 16 (edges, x_r
 #                         outside RUN.
 # Words 47-49: the FOC observation (specs/foc-torque.md section 7), each two i16 halves of one
 # 64-period window, published by one store in the period ISR (decode with i16_pair). Current counts;
-# amps are counts over the board's own 0x67 (read_current_cal below).
+# amps are counts over the board's own 0x4C (read_current_cal below).
 W_FOC_PHASE_MEAN = 47   # mean ia i16 | mean ib i16 << 16: the two conditioned phase currents, live
 #                         in EVERY method (the current limit's window). The host frame of gate O2
 #                         is Clarke and Park over this pair (tools/foc-trace.py --frame).
@@ -128,6 +128,10 @@ W_FOC_HOLD = 50         # the hold word (specs/foc-torque.md section 7, round 3)
 #                         disarmed, 25 the demand-freshness guard, 26 the chop, 27 both phases held
 #                         in one period, 28-29 the offset calibration's block-pair count this boot,
 #                         30 that calibration refused for disagreement). Live in every method.
+W_IMU_RETRIES = 51      # low byte: the boot's IMU probe-and-init attempts (specs/imu-probe-retry.md),
+#                         0 the first answered, 1 the second answered after a bus clear, 2 the IMU
+#                         did not come up. Also 0 on a board that never probed: read it beside the
+#                         flags byte's b0 and b6 (word 12). Bytes 1-3 are zero.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
@@ -141,8 +145,9 @@ MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
 # The cause byte mirrors motorcontroller/firmware/src/main.rs `imu_frame_cause_byte`: bit 7 = a cause is
 # present (the accel refusal encodes field and index both as 0, so the flag is what tells it from
 # "no frame refusal"), bit 2 = the refusal names IMU_AXIS_ROLE rather than IMU_AXIS_SIGN, bits 0..1 =
-# the refused triple's first IMU_AXIS_SIGN index, 0 = accel and 3 = gyro, exactly as the boot status
-# record's IMU-frame entry carries it in its detail byte (`board.status`, BOARD_OBS).
+# the refused triple's first IMU_AXIS_SIGN index, always 0 (the accelerometer and the gyro share the
+# three signs), exactly as the boot status record's IMU-frame entry carries it in its detail byte
+# (the STATUS reply, BOARD_OBS).
 # --------------------------------------------------------------------------------------------------
 CAUSE_PRESENT = 0x80
 CAUSE_NAMES_ROLE = 0x04
@@ -154,11 +159,9 @@ def decode_arm_refusals(word):
     if not cause & CAUSE_PRESENT:
         text = "no frame refusal"
     elif cause & CAUSE_NAMES_ROLE:
-        text = "imu.axis_role (0x68): the roles are not two distinct chip axes in 1..3"
+        text = "imu.axis_role (0x16): the roles are not two distinct chip axes in 1..3"
     else:
-        first = cause & 0x03
-        triple = "gyro" if first else "accel"
-        text = f"imu.axis_sign (0x65) index {first}: the {triple} triple is a reflection"
+        text = "imu.axis_sign (0x15): the sign triple is a reflection"
     return word & 0xFF, (word >> 8) & 0xFF, text
 
 
@@ -198,15 +201,15 @@ def decode_reset_cause(word):
 # --------------------------------------------------------------------------------------------------
 # The current-sense calibration: what a `peak` count means in amps.
 #
-# This is BOARD data, not a tool constant: shared/store/src/field.rs MOTOR_CURRENT_CAL (0x67, u16
+# This is BOARD data, not a tool constant: shared/store/src/field.rs MOTOR_CURRENT_CAL (0x4C, u16
 # stock current counts per amp, per-motor via the key's index, default 455 from the 2026-10-09
 # energised gate). It replaced the compiled COUNTS_PER_AMP = 800 this module used to carry, for the
 # reason this module exists at all: one owner per fact, and the owner of a per-board fact is the
 # board (specs/motor-integration.md, "The current-sense calibration"). So a tool that reports amps
-# reads 0x67 off the attached board at stand-up through `read_current_cal` below.
+# reads 0x4C off the attached board at stand-up through `read_current_cal` below.
 # --------------------------------------------------------------------------------------------------
-CURRENT_CAL_FIELD = 0x67
-# What an unstaged 0x67 reads: the registry default, the value the firmware itself would use. Only
+CURRENT_CAL_FIELD = 0x4C
+# What an unstaged 0x4C reads: the registry default, the value the firmware itself would use. Only
 # for a report that says it could not read the board, never as a silent substitute for the read.
 CURRENT_CAL_DEFAULT = 455
 # The firmware's boot seam clamps the stored word before converting anything against it
@@ -218,15 +221,15 @@ CURRENT_CAL_MIN, CURRENT_CAL_MAX = 100, 819
 # The phase-current NOISE FLOOR: the smallest soft limit this board's sense chain can be held to.
 #
 # BOARD data for the same reason and in the same units as the scale above: shared/store/src/field.rs
-# MOTOR_NOISE_FLOOR (0x6B, u16 stock current counts, per-motor via the key's index, default 2,100).
+# MOTOR_NOISE_FLOOR (0x4D, u16 stock current counts, per-motor via the key's index, default 2,100).
 # It replaced a compiled firmware constant measured on ONE board in ONE session, whose five
 # rest-floor reads that day spanned 1,444 to 2,097 counts; one number for every chain chops on noise
 # at the noisy end and silently raises the minimum enforceable current at the quiet end
 # (specs/store-field-audit.md, the 2026-10-09 sweep, Tier 1 item 1). So a tool that reports what a
-# board will enforce reads 0x6B off it through `read_noise_floor` below.
+# board will enforce reads 0x4D off it through `read_noise_floor` below.
 # --------------------------------------------------------------------------------------------------
-NOISE_FLOOR_FIELD = 0x6B
-# What an unstaged 0x6B reads: the registry default, which IS the constant the field replaced. Only
+NOISE_FLOOR_FIELD = 0x4D
+# What an unstaged 0x4D reads: the registry default, which IS the constant the field replaced. Only
 # for a report that says it could not read the board, never as a silent substitute for the read.
 NOISE_FLOOR_DEFAULT = 2_100
 # The firmware's boot seam clamps the stored word into this plausibility band before the limit is
@@ -234,7 +237,7 @@ NOISE_FLOOR_DEFAULT = 2_100
 # MAX_LIMIT_COUNTS), so a tool reporting what the board will DO applies the same clamp.
 NOISE_FLOOR_MIN, NOISE_FLOOR_MAX = 1_000, 16_383
 
-# One CONFIG_READ line of swd-mailbox-config's output: `CONFIG_READ 0x67:0 -> CFG_OK value U16(455)`,
+# One CONFIG_READ line of swd-mailbox-config's output: `CONFIG_READ 0x4C:0 -> CFG_OK value U16(455)`,
 # with the trailing text (a write's `(write -> read matches)`) kept as its own group.
 CFG_READ_RE = re.compile(
     r"CONFIG_READ\s+0x([0-9a-fA-F]+):(\d+) -> (\S+)(?: value \w+\((-?\d+)\))?(.*)$"
@@ -306,13 +309,13 @@ def _read_motor_field(run, endpoint, field, name, clamp, motor, dst, config_bin)
 
 
 def read_current_cal(run, endpoint, motor=0, dst="attached", config_bin=None):
-    """Read `motor.current_cal` (0x67) for `motor`: `(raw, effective)`. See `_read_motor_field`."""
+    """Read `motor.current_cal` (0x4C) for `motor`: `(raw, effective)`. See `_read_motor_field`."""
     return _read_motor_field(run, endpoint, CURRENT_CAL_FIELD, "motor.current_cal",
                              clamp_current_cal, motor, dst, config_bin)
 
 
 def read_noise_floor(run, endpoint, motor=0, dst="attached", config_bin=None):
-    """Read `motor.noise_floor` (0x6B) for `motor`: `(raw, effective)`. See `_read_motor_field`."""
+    """Read `motor.noise_floor` (0x4D) for `motor`: `(raw, effective)`. See `_read_motor_field`."""
     return _read_motor_field(run, endpoint, NOISE_FLOOR_FIELD, "motor.noise_floor",
                              clamp_noise_floor, motor, dst, config_bin)
 

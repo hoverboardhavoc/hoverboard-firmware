@@ -53,20 +53,20 @@ object Walk {
     /** The L3 protocol version a `NODE_HELLO` reply reports. */
     const val PROTO_VER = 1
 
-    /** `NODE_HELLO` reply `mcu`: a GD32F10x board. The chip family, never the node's class. */
+    /** `IDENTITY` `mcu`: a GD32F10x board. The chip family, never the node's class. */
     const val MCU_F10X = 1
 
-    /** `NODE_HELLO` reply `mcu`: a GD32F1x0 board. */
+    /** `IDENTITY` `mcu`: a GD32F1x0 board. */
     const val MCU_F1X0 = 2
 
-    /** `NODE_HELLO` reply `mcu`: the hoverboard bridge. */
+    /** `IDENTITY` `mcu`: the hoverboard bridge. */
     const val MCU_ESP32C3 = 3
 
-    /**
-     * `node.class` of a bridge (the hoverboard bridge). The same value [Fields.NodeClass.BRIDGE]
-     * carries, which is pinned to the registry's doc; the Rust declares it beside the responder.
-     */
-    const val CLASS_BRIDGE = com.hoverboard.protocol.store.Fields.NodeClass.BRIDGE
+    /** `IDENTITY` `class` of a motor controller, a mainboard running this firmware (`specs/l3.md`, "Node class"). */
+    const val CLASS_MOTOR = 0x01
+
+    /** `IDENTITY` `class` of a bridge, the hoverboard bridge (`specs/l3.md`, "Node class"). */
+    const val CLASS_BRIDGE = 0x02
 
     /** `CONFIG_RESP` status: success. */
     const val CFG_OK = 0
@@ -88,12 +88,6 @@ object Walk {
      * allowed; `specs/integration.md`, R4). Reads are unaffected; retry after disarm.
      */
     const val CFG_ARMED = 5
-
-    /**
-     * `CONFIG_RESP` status: the field is read-only (`node.class`, [com.hoverboard.protocol.store.Fields.NODE_CLASS]).
-     * The board refuses the write and stores nothing.
-     */
-    const val CFG_READ_ONLY = 6
 
     /**
      * `CONFIG_RESP` status: the region is genuinely out of space. The board compacted and the
@@ -144,6 +138,54 @@ object Walk {
     /** `TUNE_READ`: read one live value back out of RAM, replying `CONFIG_RESP`. Payload is
      * `CONFIG_READ`'s `[field_id, index]`. See [OP_TUNE_WRITE]. */
     const val OP_TUNE_READ = 0x35
+}
+
+/**
+ * The `NODE_HELLO` reply's length, `[node_id, proto_ver, your_addr]` (`shared/net/src/walk.rs`,
+ * `HELLO_REPLY_LEN`). A request is one byte, `[kind]`, so the length tells the two apart.
+ */
+const val HELLO_REPLY_LEN = 3
+
+/**
+ * What a node says about itself in `IDENTITY` (`specs/machine-settings.md` section 6.1), the
+ * mirror of `shared/net/src/walk.rs`, `Identity`: its class ([Walk.CLASS_MOTOR], [Walk.CLASS_BRIDGE]),
+ * its chip family ([Walk.MCU_F10X] and its siblings), its firmware version and its factory unique ID
+ * ([UID_LEN] bytes: a GD32's 96-bit ID, or a bridge's MAC followed by six zero bytes). Addressing
+ * never reads it (`specs/l3.md`, "No baked-in id").
+ */
+data class Identity(val nodeClass: Int, val mcu: Int, val fwVer: Int, val uid: ByteArray) {
+    init {
+        require(uid.size == UID_LEN) { "a uid is $UID_LEN bytes, got ${uid.size}" }
+    }
+
+    /** The payload, `class, mcu, fw_ver (u16 LE), uid` (`Identity::encode`). */
+    fun encode(): ByteArray =
+        byteArrayOf(nodeClass.toByte(), mcu.toByte(), (fwVer and 0xFF).toByte(), ((fwVer ushr 8) and 0xFF).toByte()) + uid
+
+    override fun equals(other: Any?): Boolean =
+        other is Identity && nodeClass == other.nodeClass && mcu == other.mcu && fwVer == other.fwVer &&
+            uid.contentEquals(other.uid)
+
+    override fun hashCode(): Int = ((nodeClass * 31 + mcu) * 31 + fwVer) * 31 + uid.contentHashCode()
+
+    companion object {
+        /** The factory unique ID's length (`walk.rs`, `UID_LEN`). */
+        const val UID_LEN = 12
+
+        /** The payload's length (`Identity::LEN`). */
+        const val LEN = 4 + UID_LEN
+
+        /** Decode a payload of exactly [LEN] bytes, or null for any other length (`Identity::decode`). */
+        fun decode(p: ByteArray): Identity? {
+            if (p.size != LEN) return null
+            return Identity(
+                nodeClass = p[0].toInt() and 0xFF,
+                mcu = p[1].toInt() and 0xFF,
+                fwVer = (p[2].toInt() and 0xFF) or ((p[3].toInt() and 0xFF) shl 8),
+                uid = p.copyOfRange(4, LEN),
+            )
+        }
+    }
 }
 
 /** The `CONFIG_RESP` bytes before the value: `field_id`, `index`, `status`, `type_tag`. */
@@ -295,9 +337,7 @@ class Controller {
     fun replyToProbe(frame: ByteArray): ByteArray? {
         val pdu = Pdu.decodeOrNull(frame) ?: return null
         if (pdu.known() == Opcode.NodeHello && pdu.payload.size == 1) {
-            val reply = byteArrayOf(
-                guestAddr.toByte(), Walk.PROTO_VER.toByte(), 0, 0, 0, NO_ADDRESS.toByte(),
-            )
+            val reply = byteArrayOf(guestAddr.toByte(), Walk.PROTO_VER.toByte(), NO_ADDRESS.toByte())
             return Pdu.of(Opcode.NodeHello, guestAddr, pdu.src, reply).encode()
         }
         return null
@@ -323,7 +363,7 @@ class Controller {
         when (task) {
             is Task.Hello -> {
                 val nodeId = p[0].toInt() and 0xFF
-                val yourAddr = p[5].toInt() and 0xFF
+                val yourAddr = p[2].toInt() and 0xFF
                 guestAddr = yourAddr // adopt the granted guest address
                 if (nodeId == NO_ADDRESS) {
                     enqueue(Task.AssignGateway(alloc()))
@@ -372,7 +412,7 @@ class Controller {
         val p = pdu.payload
         val op = pdu.known()
         return when (task) {
-            is Task.Hello -> op == Opcode.NodeHello && p.size >= 6
+            is Task.Hello -> op == Opcode.NodeHello && p.size == HELLO_REPLY_LEN
             is Task.Probe -> op == Opcode.Ports && pdu.src == task.addr
             is Task.AssignGateway -> op == Opcode.AssignAck && acks(pdu, task.newAddr)
             is Task.AssignNeighbor -> op == Opcode.AssignAck && acks(pdu, task.newAddr)
@@ -528,6 +568,12 @@ class Controller {
         System.arraycopy(vb, 0, payload, 3, vb.size)
         return Pdu.of(Opcode.ConfigWrite, guestAddr, dst, payload).encode()
     }
+
+    /** Build an `IDENTIFY(dst)` PDU, empty; the node answers `IDENTITY` ([Identity]). */
+    fun buildIdentify(dst: Int): ByteArray = Pdu.of(Opcode.Identify, guestAddr, dst, ByteArray(0)).encode()
+
+    /** Build a `STATUS_READ(dst)` PDU, empty; the node answers `STATUS`, its boot status record's entries ([com.hoverboard.protocol.board.BoardStatus.decode]). */
+    fun buildStatusRead(dst: Int): ByteArray = Pdu.of(Opcode.StatusRead, guestAddr, dst, ByteArray(0)).encode()
 
     /** Build a `CONFIG_READ(dst, key)` PDU: `[field_id, index]`. */
     fun buildConfigRead(dst: Int, key: Key): ByteArray =

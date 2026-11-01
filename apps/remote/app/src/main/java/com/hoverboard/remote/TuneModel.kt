@@ -566,7 +566,8 @@ class TuneModel(
 
     /**
      * One drive bound, written to flash and re-read nowhere: `CONFIG_WRITE` verifies its own echo,
-     * so a verified write IS the board's statement of what it now stores.
+     * so a verified write IS the board's statement of what it now stores. A drive bound is a machine
+     * field, so it goes to every motor controller, the tuned one first ([machineBoards]).
      *
      * Refused while armed before anything is sent, which is the same rule SAVE follows and the same
      * one the board enforces (R4 refuses every config write while armed).
@@ -587,17 +588,26 @@ class TuneModel(
         write(s) { node, board -> storeBound(node, board, key, value) }
     }
 
-    /** One verified `CONFIG_WRITE` of a drive bound; the notice says what else it came to. */
+    /**
+     * One verified `CONFIG_WRITE` of a drive bound to every motor controller, the tuned one first;
+     * the notice says what else it came to, and the first board that does not take it stops the
+     * rest.
+     */
     private suspend fun storeBound(node: Int, board: Int, key: Key, v: Int) {
+        for (b in machineBoards(board)) if (!storeBoundOn(node, b, key, v, tuned = b == board)) return
+    }
+
+    /** [storeBound] on one board; false when the write did not verify. */
+    private suspend fun storeBoundOn(node: Int, board: Int, key: Key, v: Int, tuned: Boolean): Boolean {
         if (isArmed()) {
             _state.update { it.copy(notice = TuneNotice.BoundWhileArmed) }
-            return
+            return false
         }
         val notice = when (val r = awaitSlot { transport.writeConfig(key, Value.I16(v), board) }) {
             null -> TuneNotice.NotAttached
             is WriteVerified -> {
-                update(node) { it.copy(bounds = it.bounds + (key to v)) }
-                return
+                if (tuned) update(node) { it.copy(bounds = it.bounds + (key to v)) }
+                return true
             }
             is WriteMismatch -> TuneNotice.Mismatch(key, v, (r.stored as? Value.I16)?.v)
             is Refused -> TuneNotice.BoardRefused(key, r.refusal)
@@ -606,7 +616,17 @@ class TuneModel(
             is Malformed -> TuneNotice.Garbled(key)
         }
         _state.update { it.copy(notice = notice) }
+        return false
     }
+
+    /**
+     * The motor controllers a machine field's `CONFIG_WRITE` goes to (`specs/machine-settings.md`
+     * section 7): the gains, the reference row, the maxima and the drive bounds are one value for
+     * the machine, and a copy written to one board alone sets every board's `EV_MACHINE`, which
+     * refuses the arm. The tuned [board] first, then the others in address order.
+     */
+    private fun machineBoards(board: Int): List<Int> =
+        listOf(board) + _state.value.motors.map { it.address }.filter { it != board }
 
     override fun slide(key: Key, value: Int) = dragTo(key, value, released = false)
 
@@ -745,8 +765,15 @@ class TuneModel(
         }
     }
 
-    /** One `CONFIG_WRITE`, unless the board was armed since SAVE began; false when the save must stop here. */
-    private suspend fun persist(key: Key, v: Int, board: Int): Boolean {
+    /**
+     * One `CONFIG_WRITE` to every motor controller ([machineBoards]), unless a board was armed since
+     * SAVE began; false when the save must stop here.
+     */
+    private suspend fun persist(key: Key, v: Int, board: Int): Boolean =
+        machineBoards(board).all { persistOn(key, v, it) }
+
+    /** [persist] on one board. */
+    private suspend fun persistOn(key: Key, v: Int, board: Int): Boolean {
         if (isArmed()) {
             _state.update { it.copy(notice = TuneNotice.SaveWhileArmed) }
             return false

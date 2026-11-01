@@ -1430,9 +1430,12 @@ impl SimBoard {
         let mut resp = net::walk::Responder::new(
             2,
             [net::walk::PORT_SWD, net::walk::PORT_UART, 0, 0],
-            net::walk::MCU_F1X0,
-            store::NODE_CLASS.default(),
-            0x0001,
+            net::walk::Identity {
+                class: net::walk::CLASS_MOTOR,
+                mcu: net::walk::MCU_F1X0,
+                fw_ver: 0x0001,
+                uid: [addr; net::walk::UID_LEN],
+            },
         );
         if let Ok(mut s) = store::Store::mount(&mut flash) {
             let _ = s.set_value(store::NODE_ADDRESS.key(), store::Value::U8(addr));
@@ -1475,7 +1478,9 @@ pub fn running_board() -> (crate::mailbox::MailboxPort<SimPins<Gd32>>, Firmware)
 }
 
 /// The simulated bridge's MAC-based default name.
-pub static SIM_NAME: [u8; 14] = crate::node::default_name([0, 0, 0, 0, 0xAB, 0x12]);
+pub static SIM_NAME: [u8; 14] = crate::node::default_name(SIM_MAC);
+/// The simulated bridge's eFuse MAC, behind [`SIM_NAME`] and its `IDENTITY` uid.
+pub const SIM_MAC: [u8; 6] = [0, 0, 0, 0, 0xAB, 0x12];
 
 /// A bridge in front of a master and its slave: the bridge's service loop on the simulated F1x0's
 /// mailbox, the master's firmware on the other end, and the slave on the master's UART. The bridge's
@@ -1511,7 +1516,7 @@ impl<'f> Machine<'f> {
         };
         Machine {
             router: crate::router::Router::new(),
-            node: crate::node::Node::new(store, true, 0x0001, &SIM_NAME),
+            node: crate::node::Node::new(store, true, 0x0001, SIM_MAC, &SIM_NAME),
             port,
             svc,
             fw,

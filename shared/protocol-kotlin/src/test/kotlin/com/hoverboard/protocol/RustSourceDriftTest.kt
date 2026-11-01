@@ -747,8 +747,8 @@ class RustSourceDriftTest {
             com.hoverboard.protocol.config.CfgRefusal.SECRET,
             com.hoverboard.protocol.config.CfgRefusal.fromCode(secret),
         )
-        assertEquals(0x12, Fields.WIFI_PASS.id)
-        assertEquals(0x11, Fields.WIFI_SSID.id)
+        assertEquals(0x04, Fields.WIFI_PASS.id)
+        assertEquals(0x03, Fields.WIFI_SSID.id)
     }
 
     /**
@@ -803,8 +803,16 @@ class RustSourceDriftTest {
             ).groupValues[1],
         )
         assertEquals(encoded, CyclicState.ENCODED_LEN, "CyclicState::ENCODED_LEN drifted")
-        assertEquals(CyclicState.LEN + CyclicObs.LEN + 4, CyclicState.ENCODED_LEN)
+        assertEquals(CyclicState.LEN + CyclicObs.LEN + 4 + 2, CyclicState.ENCODED_LEN)
         assertEquals(CyclicState.LEN + CyclicObs.LEN, CyclicState.WHEEL_RATE_OFF)
+        // `MACHINE_OFF` is written as an expression over `WHEEL_RATE_OFF`; it is read as that
+        // expression, so a reorder of the trailing words fails here.
+        findOne(
+            implBlock(linkctl, "CyclicState"),
+            """pub const MACHINE_OFF: usize = Self::WHEEL_RATE_OFF \+ 4;""",
+            "CyclicState::MACHINE_OFF",
+        )
+        assertEquals(CyclicState.WHEEL_RATE_OFF + 4, CyclicState.MACHINE_OFF)
     }
 
     /**
@@ -853,7 +861,7 @@ class RustSourceDriftTest {
             "CyclicState" to listOf(
                 "pitch" to "i16", "roll" to "i16", "wheelSpeed" to "i16", "battery" to "u16",
                 "mode" to "u8", "fault" to "u16", "flags" to "u8", "peerDemand" to "i16",
-                "wheelPos" to "i16", "obs" to "CyclicObs", "wheelRate" to "i32",
+                "wheelPos" to "i16", "obs" to "CyclicObs", "wheelRate" to "i32", "machine" to "u16",
             ),
             "CyclicObs" to listOf(
                 "phasePeak" to "i16", "phaseMean" to "i16", "dutyOn" to "u16",
@@ -915,7 +923,7 @@ class RustSourceDriftTest {
         }
         check(bits.isNotEmpty()) {
             "No `u8` constant in any of ${PAYLOADS.joinToString(", ")}'s impl blocks in " +
-                "shared/linkctl/src/lib.rs: the payloads carry eight bits between them, so reading " +
+                "shared/linkctl/src/lib.rs: the payloads carry nine bits between them, so reading " +
                 "none means the selector no longer finds the impls, not that the firmware dropped " +
                 "every flag."
         }
@@ -940,6 +948,9 @@ class RustSourceDriftTest {
             "CyclicState::FLAG_RIDER" to CyclicState.FLAG_RIDER,
             "CyclicState::FLAG_LEADER" to CyclicState.FLAG_LEADER,
             "CyclicState::FLAG_FOLLOWER" to CyclicState.FLAG_FOLLOWER,
+            "CyclicState::FLAG_REARM" to CyclicState.FLAG_REARM,
+            "CyclicState::FLAG_REBOOT" to CyclicState.FLAG_REBOOT,
+            "CyclicState::FLAG_PEER_SILENT" to CyclicState.FLAG_PEER_SILENT,
             "CyclicState::FLAG_LOCKDOWN" to CyclicState.FLAG_LOCKDOWN,
             "Inputs::BUTTON_POWER" to Inputs.BUTTON_POWER,
             "Inputs::RIDER_PRESENT" to Inputs.RIDER_PRESENT,
@@ -951,8 +962,10 @@ class RustSourceDriftTest {
      * The `u16` level-mask constants (`motorcontroller/orchestrator/src/events.rs`, `EV_LATCH_B` and the bits
      * beside it), evaluated: each is
 
-     * `1 << N` or an OR of constants declared before it (`EV_MOTOR_BITS`, `FAULT_A_BITS`). A
-     * constant written in any other form fails by name in [bitValue] rather than dropping out.
+     * `1 << N`, an OR of constants declared before it (`EV_MOTOR_BITS`, `FAULT_A_BITS`), or a
+     * `linkctl::CyclicState` constant, read where the wire owns it (`EV_MACHINE` is
+     * `shared/linkctl/src/lib.rs`, `CyclicState::FAULT_MACHINE`, which the CLI reads too). A constant written in
+     * any other form fails by name in [bitValue] rather than dropping out.
      */
     private fun rustLevelMasks(): Map<String, Int> {
         val events = rust("motorcontroller/orchestrator/src/events.rs")
@@ -960,7 +973,14 @@ class RustSourceDriftTest {
         for (m in findAll(events, """^pub\s+const\s+(\w+)\s*:\s*u16\s*=\s*([^;]+);""", "events.rs u16 masks")) {
             val name = m.groupValues[1]
             val expr = m.groupValues[2].trim()
-            values[name] = if (expr.contains('|')) {
+            val wire = Regex("""^linkctl::CyclicState::(\w+)$""").find(expr)
+            values[name] = if (wire != null) {
+                val bit = wire.groupValues[1]
+                val decl = checkNotNull(
+                    Regex("""pub\s+const\s+$bit\s*:\s*u16\s*=\s*([^;]+);""").find(linkctl),
+                ) { "$name names CyclicState::$bit, which shared/linkctl/src/lib.rs does not declare as a u16" }
+                bitValue("CyclicState::$bit", decl.groupValues[1])
+            } else if (expr.contains('|')) {
                 expr.split('|').map { it.trim() }.fold(0) { acc, term ->
                     acc or checkNotNull(values[term]) { "$name names $term, which events.rs has not declared above it" }
                 }
@@ -1132,8 +1152,8 @@ class RustSourceDriftTest {
      * The live tune lane's two keys, against the `IndexedField` handles in
      * `shared/store/src/field.rs` (`CONTROL_SF_GAINS`, `CONTROL_REFERENCE`) and the seam in
      * `motorcontroller/control/src/config.rs` (`GainShadow`) (`specs/state-feedback.md` section 6): the ids,
-     * the per-index defaults and the ranges of `CONTROL_SF_GAINS` (0x79) and `CONTROL_REFERENCE`
-     * (0x7B), and the `CONTROL_GAIN_MAX` (0x7A) defaults the gains are bounded by.
+     * the per-index defaults and the ranges of `CONTROL_SF_GAINS` (0x27) and `CONTROL_REFERENCE`
+     * (0x29), and the `CONTROL_GAIN_MAX` (0x28) defaults the gains are bounded by.
      *
      * Three separate drift risks, all silent on the wire and all pinned here: an id that moves
      * leaves a tune UI writing some OTHER field; a default that moves makes the app show a fresh
@@ -1146,7 +1166,7 @@ class RustSourceDriftTest {
         val field = rust("shared/store/src/field.rs")
         val config = rust("motorcontroller/control/src/config.rs")
 
-        // `pub const NAME: IndexedField<i16, 4> =\n    IndexedField::new(0x7A, [20000, ...]);`
+        // `pub const NAME: IndexedField<i16, 4> =\n    IndexedField::new(0x28, [20000, ...]);`
         fun family(name: String): Pair<Int, List<Int>> {
             val m = findOne(
                 field,
@@ -1195,7 +1215,7 @@ class RustSourceDriftTest {
         assertEquals(literal("GAIN_MIN", min, "gain minimum"), Gains.MIN, "the tune seam's minimum drifted")
         assertEquals(row("DEFAULT_GAIN_MAX"), Gains.DEFAULT_MAX, "the tune seam's default maxima drifted")
         val (idMax, defMax) = family("CONTROL_GAIN_MAX")
-        assertEquals(0x7A, idMax)
+        assertEquals(0x28, idMax)
         assertEquals(defMax, Gains.DEFAULT_MAX, "CONTROL_GAIN_MAX defaults drifted from the seam's")
         assertEquals(Gains.DEFAULT_MAX.map { Value.I16(it) }, Fields.CONTROL_GAIN_MAX.defaults)
 
@@ -1270,11 +1290,9 @@ class RustSourceDriftTest {
      * defect again in a smaller box:
      *
      * - a handle declared as a `BlobField` is exempt. `Value` has no blob case a settings client
-     *   can edit, so what the exemption follows is the Rust's choice of handle type. In the
-     *   production registry it covers exactly one row, `SOME_BLOB` at 0x30, which is a real
-     *   registered field that no client exercises and whose own Rust doc says so; the store-test
-     *   `T_BLOB` is in the `test-fields` block, which this gate reads separately and does not
-     *   require a mirror for.
+     *   can edit, so what the exemption follows is the Rust's choice of handle type. The production
+     *   registry has no such row; the store-test `T_BLOB` is in the `test-fields` block, which this
+     *   gate reads separately and does not require a mirror for.
      *
      * A second kind of field, one deliberately not for clients, has no marker in the Rust and so is
      * not exempt: it fails here, and the answer is to mirror it or to teach this gate why its
@@ -1364,75 +1382,109 @@ class RustSourceDriftTest {
     }
 
     /**
-     * [Fields.ARM_TIME] against `ARM_ROW` in motorcontroller/firmware/src/arm.rs: which fields the firmware
-     * re-reads when a board arms, and therefore which ones a client must NOT tell its operator to
-     * restart a board for.
+     * Every mirrored field's [com.hoverboard.protocol.store.Effect] against the `REGISTRY` rows of
+     * `shared/store/src/field.rs` (`specs/machine-settings.md` section 5), and the arm-effect set
+     * against `ARM_ROW` in `motorcontroller/firmware/src/arm.rs`, the row the firmware re-reads when
+     * a board arms.
      *
-     * This pin exists because the class has gone stale twice, both times in the remote app and both
-     * times for days. The class is a firmware fact that never reaches the wire, so no client can
-     * read it off a board; it is copied, and a copy with no gate is a copy that drifts. When
-     * `motor.direction` and `motor.align_offset` moved into this row (2026-10-20), the Setup screen
-     * went on saying the board reads them only at boot and went on showing a power-cycle
-     * instruction, and the owner power-cycled for two days for nothing
-     * (`specs/integration.md`, "When a stored value takes effect").
+     * The effect is what a client tells its operator about a write: at the next arm, at the next
+     * boot, live, or nothing on the board reads it. It went stale twice in the remote app while it
+     * was a copy with no gate, both times for days: `motor.direction` and `motor.align_offset` moved
+     * into the arm row (2026-10-20) while the Setup screen went on showing a power-cycle
+     * instruction (`specs/integration.md`, "When a stored value takes effect").
      *
-     * The gate is a set comparison in both directions, so a field that moves EITHER way fails: into
-     * the row without reaching the mirror, or out of the row while the mirror still claims it. The
-     * row is enumerated per line through [findAllClaiming], and the length the Rust declares
-     * (`[store::Key; N]`) is checked against the number of entries read, which is this file's rule
-     * for a region a line census can only half see.
-     *
-     * Ids and not keys: the row names an indexed field one index at a time, and the comparison
-     * folds those to the field, so adding `IMU_AXIS_SIGN` index 6 would not fail here. What it
-     * cannot miss is a FIELD entering or leaving the row, which is the fact a client states.
+     * Every row of the registry is read (censused per line), each names its handle and its effect,
+     * and every index of a field has to state the same effect, which is what the mirror carries per
+     * field. The rows are compared both ways: a mirrored field the registry gives another effect
+     * fails, and so does a registry row naming a handle nothing mirrors. `ARM_ROW` is then compared
+     * to the arm-effect fields as a set of field ids (the Rust holds the two equal by its own test;
+     * this is the mirror's independent reading).
      */
     @Test
-    fun theArmTimeValueRowAgreesWithTheRustSource() {
+    fun theFieldEffectsAgreeWithTheRustRegistry() {
+        val field = rust("shared/store/src/field.rs")
+        val registry = field.substringAfter("pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [")
+            .substringBefore("\n];")
+        // `NODE_ADDRESS.entry(Boot),`, `LINK_TX.at(0).entry(Boot),`, `DEVICE_NAME.entry(BYTES_DEVICE_NAME, Boot),`
+        val rows = findAllClaiming(
+            registry,
+            """^\s*([A-Z0-9_]+)\s*(?:\.at\(\s*\d+\s*\))?\s*\.entry\(\s*(?:\w+\s*,\s*)?(Live|Arm|Boot|Client)\s*\)\s*,""",
+            """\.entry\(""",
+            "the REGISTRY rows",
+        ).map { it.groupValues[1] to it.groupValues[2] }
+        val byHandle = rows.groupBy({ it.first }, { it.second })
+        val mirrored = Fields.ALL.mapValues { it.value.effect } + Fields.INDEXED.mapValues { it.value.effect }
+        for ((name, effects) in byHandle) {
+            if (name.startsWith("T_")) continue
+            check(effects.toSet().size == 1) { "`$name`'s REGISTRY rows state different effects: $effects" }
+            val effect = checkNotNull(mirrored[name]) { "`$name` is in REGISTRY and nothing here mirrors its effect" }
+            assertEquals(effects.first().uppercase(), effect.name, "`$name`'s effect drifted from the Rust registry")
+        }
+        assertEquals(
+            byHandle.keys.filterNot { it.startsWith("T_") }.toSet(),
+            mirrored.keys,
+            "the mirror carries a field the Rust REGISTRY has no row for",
+        )
+        assertEquals(
+            listOf("Live", "Arm", "Boot", "Client"),
+            rustVariants(field, "Effect"),
+            "store::Effect grew or lost a variant: review com.hoverboard.protocol.store.Effect",
+        )
+
         val arm = rust("motorcontroller/firmware/src/arm.rs")
         val decl = findOne(
             arm,
-            """^const\s+ARM_ROW\s*:\s*\[\s*store::Key\s*;\s*(\d+)\s*\]\s*=\s*\[""",
+            """^(?:pub\s+)?const\s+ARM_ROW\s*:\s*\[\s*store::Key\s*;\s*(\d+)\s*\]\s*=\s*\[""",
             "the ARM_ROW declaration",
         )
         val open = decl.range.last
         val end = arm.indexOf("\n];", open)
         check(end > open) { "Unterminated `ARM_ROW` array in motorcontroller/firmware/src/arm.rs" }
-        val body = arm.substring(open + 1, end)
-
-        // `store::MOTOR_METHOD.key(),` or `store::IMU_AXIS_SIGN.at(0).key(),`, one per line. The
-        // census is every line of the array that is not blank and not a comment, which inside an
-        // array literal is as loose as an item gets: an entry written in any other shape (a named
-        // constant, two entries on one line) fails by name rather than dropping out of the
-        // comparison in silence.
-        val rows = findAllClaiming(
-            body,
+        val armRows = findAllClaiming(
+            arm.substring(open + 1, end),
             """store::([A-Z0-9_]+)\s*(?:\.at\(\s*\d+\s*\))?\s*\.key\(\)\s*,""",
             """\S""",
             "the ARM_ROW entries",
         )
         assertEquals(
             literal("ARM_ROW", decl.groupValues[1], "the declared row length"),
-            rows.size,
-            "ARM_ROW declares a length its entries do not add up to, so either an entry is written " +
-                "in a shape this gate cannot read or the declared length is wrong",
+            armRows.size,
+            "ARM_ROW declares a length its entries do not add up to",
         )
-
-        val mirrored = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
-        val fromRust = rows.map { it.groupValues[1] }.map { name ->
-            val id = mirrored[name]
-            checkNotNull(id) {
-                "`$name` is in the firmware's arm-time row and nothing in Fields mirrors that name, " +
-                    "so this gate cannot say whether the mirror carries it. Mirror the field first."
-            }
-        }.toSet()
-
         assertEquals(
-            fromRust,
-            Fields.ARM_TIME,
-            "Fields.ARM_TIME and the firmware's ARM_ROW name different fields. A field moving " +
-                "between the boot read and the arm-time row changes what every client has to tell " +
-                "its operator about when the value takes effect, so the mirror moves with it.",
+            armRows.map { it.groupValues[1] }.toSet(),
+            mirrored.filterValues { it == com.hoverboard.protocol.store.Effect.ARM }.keys,
+            "the firmware's ARM_ROW and the mirror's arm-effect fields name different fields",
         )
+    }
+
+    /**
+     * The scope blocks (`specs/machine-settings.md` sections 2 and 3): the three arms of
+     * `Scope::of` (`shared/store/src/field.rs` (`Scope`)) as ranges, against [com.hoverboard.protocol.store.Scope.of]
+     * at every id; and every mirrored field in the block of its scope with no free id inside a
+     * block below its last registered one (section 9, test 7).
+     */
+    @Test
+    fun theScopeBlocksAgreeWithTheRustSource() {
+        val field = rust("shared/store/src/field.rs")
+        val body = rustBody(field, "pub const fn of(field_id: u8) -> Option<Scope>", "\n    }")
+        val arms = findAllClaiming(
+            body,
+            """(0x[0-9A-Fa-f]+)\s*\.\.=\s*(0x[0-9A-Fa-f]+)\s*=>\s*Some\(\s*Scope::(\w+)\s*\)""",
+            ARM_LINE,
+            "Scope::of's arms",
+        ).associate { it.groupValues[3].uppercase() to (num(it.groupValues[1])..num(it.groupValues[2])) }
+        assertEquals(3, arms.size, "Scope::of names ${arms.size} blocks")
+        for (id in 0x00..0xFF) {
+            val rust = arms.entries.singleOrNull { id in it.value }?.key
+            assertEquals(rust, com.hoverboard.protocol.store.Scope.of(id)?.name, "Scope.of(0x%02X) drifted".format(id))
+        }
+        val ids = (Fields.ALL.values.map { it.id } + Fields.INDEXED.values.map { it.id }).toSet()
+        for (scope in com.hoverboard.protocol.store.Scope.entries) {
+            val block = checkNotNull(arms[scope.name])
+            val inBlock = ids.filter { it in block }.sorted()
+            assertEquals((block.first..inBlock.last()).toList(), inBlock, "the $scope block has a free id below its last")
+        }
     }
 
     /**
@@ -1492,7 +1544,7 @@ class RustSourceDriftTest {
             assertEquals(default, def.default, "$name default drifted")
         }
 
-        // `pub const NAME: IndexedField<i16, 2> = IndexedField::new(0x69, [25200, -5]);`
+        // `pub const NAME: IndexedField<i16, 2> = IndexedField::new(0x18, [25200, -5]);`
         for ((name, def) in Fields.INDEXED) {
             val m = findOne(
                 field,
@@ -1501,6 +1553,7 @@ class RustSourceDriftTest {
             )
             val type = when (m.groupValues[1]) {
                 "i16" -> Type.I16
+                "i32" -> Type.I32
                 "u8" -> Type.U8
                 else -> error("$name has Rust type ${m.groupValues[1]}, which this gate does not map yet")
             }
@@ -1509,7 +1562,11 @@ class RustSourceDriftTest {
             val defaults = m.groupValues[4].split(",").map { raw ->
                 val t = constOrLiteral(field, name, raw)
                 val n = if (t.startsWith("-")) -literal(name, t.drop(1), "default") else literal(name, t, "default")
-                if (type == Type.U8) Value.U8(n) else Value.I16(n)
+                when (type) {
+                    Type.U8 -> Value.U8(n)
+                    Type.I32 -> Value.I32(n)
+                    else -> Value.I16(n)
+                }
             }
             assertEquals(m.groupValues[2].toInt(), defaults.size, "$name declares a count its defaults do not match")
             assertEquals(defaults, def.defaults, "$name defaults drifted")
@@ -1517,26 +1574,34 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The read-only fields: every row of `REGISTRY` in `shared/store/src/field.rs` marked
-     * `.read_only()` (`node.class`; `specs/l3.md`, "Node class"), against the [FieldDef.readOnly]
-     * flags of [Fields.ALL]. Exact in both directions: a field the firmware starts refusing must
-     * be marked here, so a client does not offer an edit the board answers with
-     * [Walk.CFG_READ_ONLY], and a Kotlin flag the Rust dropped fails too.
-     *
-     * The `.read_only()` calls are censused separately from the row pattern, so a row shape the
-     * pattern does not read (an indexed `.at(i)` row, say) fails here rather than going unpinned.
+     * The node's identity and boot report are opcodes of their own (`specs/machine-settings.md`
+     * section 6.1), against `shared/net/src/walk.rs`: the `NODE_HELLO` reply's length, the
+     * `IDENTITY` payload's layout and the most a `STATUS` carries, which is the boot record's own
+     * capacity. The opcodes themselves are in [l3OpcodesAgreeWithTheRustSource] and the class and
+     * chip bytes in [walkWireConstantsAgreeWithTheRustSource].
      */
     @Test
-    fun theReadOnlyFieldsAgreeWithTheRustRegistry() {
-        val field = rust("shared/store/src/field.rs")
-        val registry = field.substringAfter("pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [")
-            .substringBefore("];")
-        val rows = findAll(registry, """^\s*(\w+)\.entry\(\w*\)\.read_only\(\),""", "a read-only registry row")
-        val calls = Regex("""\.read_only\(\)""").findAll(registry).count()
-        assertEquals(calls, rows.size, "a `.read_only()` registry row this gate cannot read")
-        val fromRust = rows.map { it.groupValues[1] }.toSet()
-        val fromKotlin = Fields.ALL.filterValues { it.readOnly }.keys
-        assertEquals(fromRust, fromKotlin, "the read-only fields drifted from the Rust registry")
+    fun theIdentityAndStatusRepliesAgreeWithTheRustSource() {
+        val walk = rust("shared/net/src/walk.rs")
+        fun usize(name: String): Int = literal(
+            name,
+            findOne(walk, """^pub\s+const\s+$name\s*:\s*usize\s*=\s*([^;]+);""", "walk.rs $name").groupValues[1],
+            "walk.rs length",
+        )
+        assertEquals(usize("HELLO_REPLY_LEN"), com.hoverboard.protocol.l3.HELLO_REPLY_LEN, "HELLO_REPLY_LEN drifted")
+        assertEquals(usize("UID_LEN"), com.hoverboard.protocol.l3.Identity.UID_LEN, "UID_LEN drifted")
+        findOne(walk, """pub const LEN: usize = 4 \+ UID_LEN;""", "Identity::LEN")
+        assertEquals(4 + com.hoverboard.protocol.l3.Identity.UID_LEN, com.hoverboard.protocol.l3.Identity.LEN)
+        assertEquals(
+            listOf("class" to "u8", "mcu" to "u8", "fw_ver" to "u16", "uid" to "[u8; UID_LEN]"),
+            fields(walk, "Identity"),
+            "walk::Identity's layout drifted",
+        )
+        assertEquals(usize("STATUS_MAX"), BoardStatus.MAX_ENTRIES * BoardStatus.ENTRY_LEN, "STATUS_MAX drifted")
+        assertTrue(
+            !rust("shared/store/src/field.rs").contains(".read_only()"),
+            "a read-only registry row is back: the registry holds stored settings only",
+        )
     }
 
     /**
@@ -1559,9 +1624,8 @@ class RustSourceDriftTest {
 
     /**
      * The vocabularies the firmware writes down only in a field's doc comment, because no code
-     * on a board decodes them: [Fields.MachineDriveMode] (`MACHINE_DRIVE_MODE`, which the firmware
-     * stores and never reads), [Fields.BatteryChemistry] (`BOARD_BATTERY_CHEMISTRY`, likewise) and
-     * [Fields.NodeClass] (`NODE_CLASS`, a registry default). The doc is
+     * on a board decodes them: [Fields.BatteryChemistry] (`BOARD_BATTERY_CHEMISTRY`, which the
+     * firmware stores and never reads). The doc is
      * the Rust's one statement of what each byte means, so it is what the mirror is pinned to, as an
      * exact set: a mode or class the Rust adds or renumbers fails here before the app writes or
      * reads the wrong byte.
@@ -1576,27 +1640,6 @@ class RustSourceDriftTest {
                 .takeWhile { it.trimStart().startsWith("///") }
                 .reversed().joinToString(" ") { it.trimStart().removePrefix("///").trim() }
         }
-        val modes = Regex("""`(\d+)`\s*=\s*([A-Z]+)""").findAll(docOf("MACHINE_DRIVE_MODE"))
-            .associate { it.groupValues[2] to it.groupValues[1].toInt() }
-        assertEquals(
-            mapOf(
-                "SINGLE" to Fields.MachineDriveMode.SINGLE,
-                "BOUND" to Fields.MachineDriveMode.BOUND,
-                "DIFFERENTIAL" to Fields.MachineDriveMode.DIFFERENTIAL,
-                "RIGID" to Fields.MachineDriveMode.RIGID,
-            ),
-            modes,
-            "MACHINE_DRIVE_MODE vocabulary drifted",
-        )
-        assertEquals(
-            Value.U8(Fields.MachineDriveMode.SINGLE),
-            Fields.MACHINE_DRIVE_MODE.default,
-            "an unwritten machine must drive in SINGLE",
-        )
-        assertTrue(
-            Fields.MACHINE_DRIVE_MODE.id !in Fields.ARM_TIME,
-            "the firmware never reads MACHINE_DRIVE_MODE, so it cannot be in the arm-time row",
-        )
         val chemistries = Regex("""`(\d+)`\s*=\s*([a-z0-9_]+)""").findAll(docOf("BOARD_BATTERY_CHEMISTRY"))
             .associate { it.groupValues[2] to it.groupValues[1].toInt() }
         assertEquals(
@@ -1609,18 +1652,11 @@ class RustSourceDriftTest {
             "BOARD_BATTERY_CHEMISTRY vocabulary drifted",
         )
         assertEquals(Value.U8(Fields.BatteryChemistry.LI_ION), Fields.BOARD_BATTERY_CHEMISTRY.default)
-        assertTrue(
-            Fields.BOARD_BATTERY_CHEMISTRY.id !in Fields.ARM_TIME,
-            "the firmware never reads BOARD_BATTERY_CHEMISTRY, so it cannot be in the arm-time row",
-        )
-        val classes = Regex("""`0x(\p{XDigit}+)`\s*=\s*(motor controller|bridge)""").findAll(docOf("NODE_CLASS"))
-            .associate { it.groupValues[2] to it.groupValues[1].toInt(16) }
         assertEquals(
-            mapOf("motor controller" to Fields.NodeClass.MOTOR_CONTROLLER, "bridge" to Fields.NodeClass.BRIDGE),
-            classes,
-            "NODE_CLASS vocabulary drifted",
+            com.hoverboard.protocol.store.Effect.CLIENT,
+            Fields.BOARD_BATTERY_CHEMISTRY.effect,
+            "the firmware never reads BOARD_BATTERY_CHEMISTRY",
         )
-        assertEquals(Value.U8(Fields.NodeClass.MOTOR_CONTROLLER), Fields.NODE_CLASS.default, "a board reads motor controller")
     }
 
     /**
@@ -1666,7 +1702,7 @@ class RustSourceDriftTest {
 
         // The staged limit's clamp is NOT mirrored, and this is where that is recorded. The
         // firmware bounds the limit in COUNTS at both ends, because the counts-per-amp scale is
-        // per-board data (`MOTOR_CURRENT_CAL`, 0x67; `specs/motor-integration.md`, "The current
+        // per-board data (`MOTOR_CURRENT_CAL`, 0x4C; `specs/motor-integration.md`, "The current
         // limit"), so there is no milliamp constant left to drift from: a milliamp bound would be a
         // bound at one assumed scale, which is the defect the count window replaced.
         // `Fields.CURRENT_LIMIT_MA` is therefore the client's own editor range, and what is pinned
@@ -1687,7 +1723,7 @@ class RustSourceDriftTest {
         assertEquals("i16::MAX / 2", bound("MAX_LIMIT_COUNTS"), "MAX_LIMIT_COUNTS stopped being half the comparison's full scale")
         val maxLimit = Short.MAX_VALUE / 2
         assertTrue(2 * maxLimit <= Short.MAX_VALUE.toInt(), "the hard trip's 2x no longer fits the comparison")
-        // The window's FLOOR is per-board now (`store::MOTOR_NOISE_FLOOR`, 0x6B), so what is left in
+        // The window's FLOOR is per-board now (`store::MOTOR_NOISE_FLOOR`, 0x4D), so what is left in
         // the Rust is the plausibility band the boot seam clamps a staged floor into, and that band
         // is what `Fields.NOISE_FLOOR` mirrors. Both ends are pinned: its bottom against
         // `NOISE_FLOOR_MIN` and its top against `MAX_LIMIT_COUNTS`, which is the SAME ceiling the 2x
@@ -1703,7 +1739,7 @@ class RustSourceDriftTest {
         )
         assertTrue(
             !motor.contains("MIN_LIMIT_COUNTS"),
-            "a compiled limit floor is back in the firmware: the floor is per-board (store::MOTOR_NOISE_FLOOR, 0x6B)",
+            "a compiled limit floor is back in the firmware: the floor is per-board (store::MOTOR_NOISE_FLOOR, 0x4D)",
         )
         // The registered default is inside the band, so an unstaged board needs no clamping, and it
         // IS the constant the field replaced (the id/type/default are pinned by the Setup-field gate).
@@ -1816,7 +1852,7 @@ class RustSourceDriftTest {
     /**
      * The orientation rule the Setup screen enforces before staging `IMU_AXIS_SIGN`
      * (`specs/remote-ui.md` section 3.4, D7), against `imu::Config` in motorcontroller/imu/src/lib.rs, which
-     * since `IMU_AXIS_ROLE` (0x68) judges a frame by the signs AND the axis roles
+     * since `IMU_AXIS_ROLE` judges a frame by the signs AND the axis roles
      * (`specs/imu.md`, the role model).
      *
      * The facts pinned. The reference map an unset sign falls back to, and [Orientation.DEFAULT_ROLES]
@@ -1842,7 +1878,7 @@ class RustSourceDriftTest {
             if (v.startsWith("-")) -literal(what, v.drop(1), what) else literal(what, v, what)
         val reference = findOne(defBody, """sign\s*:\s*\[([^\]]+)\]""", "reference sign map").groupValues[1]
             .split(",").map { signed("Config::default().sign", it.trim()) }
-        assertEquals(reference, Orientation.REFERENCE, "the reference sign map drifted")
+        assertEquals(reference, Orientation.REFERENCE + Orientation.REFERENCE, "the reference sign map drifted")
         assertTrue(
             Regex("""^\s*roles\s*:\s*DEFAULT_ROLES\s*,""", RegexOption.MULTILINE).containsMatchIn(defBody),
             "Config::default().roles is no longer DEFAULT_ROLES: review Orientation.effectiveRoles",
@@ -1884,17 +1920,19 @@ class RustSourceDriftTest {
             "imu::body_order changed: review Orientation.bodyOrder",
         )
 
-        val staged = fnBody("pub fn staged(sign: [i32; 6], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError>")
+        val staged = fnBody("pub fn staged(sign: [i32; 3], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError>")
         assertTrue(
             staged.contains("..Config::default()") &&
-                staged.contains("for (dst, staged) in cfg.sign.iter_mut().zip(sign.iter()) { if *staged != 0 { *dst = *staged; } }") &&
+                staged.contains(
+                    "for (axis, staged) in sign.iter().enumerate() { if *staged != 0 { " +
+                        "cfg.sign[axis] = *staged; cfg.sign[axis + 3] = *staged; } }",
+                ) &&
                 staged.contains("for (dst, staged) in cfg.roles.iter_mut().zip(roles.iter()) { if *staged != 0 { *dst = *staged; } }"),
             "imu::Config::staged's unset rule changed: review Orientation.effective / effectiveRoles. Got: $staged",
         )
         val order = listOf(
             "if body_order(cfg.roles).is_none() { Err(FrameError::Roles) }",
             "else if !Self::frame_is_rotation(cfg.roles, [s[0], s[1], s[2]]) { Err(FrameError::Accel) }",
-            "else if !Self::frame_is_rotation(cfg.roles, [s[3], s[4], s[5]]) { Err(FrameError::Gyro) }",
             "else { Ok(cfg) }",
         ).map { staged.indexOf(it) }
         assertTrue(
@@ -2161,6 +2199,7 @@ class RustSourceDriftTest {
                 "single" -> BoardStatus.IndexKind.SINGLE
                 "motor" -> BoardStatus.IndexKind.MOTOR
                 "family", "array" -> BoardStatus.IndexKind.ARRAY
+                "link" -> BoardStatus.IndexKind.LINK
                 else -> error("$handle's NAMES row is a `${row.groupValues[1]}` row, which no status entry names")
             }
             assertEquals(BoardStatus.Name(row.groupValues[2], kind), name, "the NAMES row of $handle drifted")
@@ -2189,9 +2228,18 @@ class RustSourceDriftTest {
             "EV_MOTOR_PERIOD" to CyclicState.EV_MOTOR_PERIOD,
             "EV_MOTOR_ARM" to CyclicState.EV_MOTOR_ARM,
             "EV_CONFIG" to CyclicState.EV_CONFIG,
+            "EV_MACHINE" to CyclicState.EV_MACHINE,
         )
         assertEquals(rust, kotlin, "the fault word's bits drifted from events.rs")
         assertEquals(0, CyclicState.EV_CONFIG and CyclicState.ARM_BLOCKING_BITS, "EV_CONFIG blocks nothing")
+        // EV_MACHINE refuses an arm through the mode machine's off-inhibit and disengages nothing,
+        // so it is outside both aggregates (`orchestrator::lib`, `off_inhibit: ... || levels.machine`).
+        assertEquals(0, CyclicState.EV_MACHINE and CyclicState.ARM_BLOCKING_BITS, "EV_MACHINE never disengages")
+        findOne(
+            rust("motorcontroller/orchestrator/src/lib.rs"),
+            """off_inhibit:\s*state\.motor_moving\s*\|\|\s*levels\.machine""",
+            "EV_MACHINE as the off-inhibit",
+        )
     }
 
     private companion object {

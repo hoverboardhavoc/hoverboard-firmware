@@ -2,13 +2,15 @@ package com.hoverboard.remote
 
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Scope
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.asLong
 
 /**
- * What `control.frame` (0x25) reads across the machine's motor controllers (`specs/remote-ui.md`
+ * What `machine.frame` reads across the machine's motor controllers (`specs/remote-ui.md`
  * 3.7a, `specs/rover-one-imu.md` section 7, "Configuring the pair from the phone").
  *
  * The frame is MACHINE policy: it wants the same value on every motor controller, and a machine
@@ -31,8 +33,8 @@ sealed interface FramePair {
 }
 
 /**
- * What `control.side` (0x26) reads across the motor controllers (`specs/remote-ui.md` 3.7a). This one
- * is a BOARD fact and wants to DIFFER: the only correct machine is one right wheel and one left.
+ * What motor 0's `side` reads across the motor controllers (`specs/remote-ui.md` 3.7a). A wheel fact,
+ * and it wants to DIFFER: the only correct machine is one right wheel and one left.
  *
  * As for [FramePair], the comparison is of effective values: the firmware reads 1 as the right
  * wheel and every other byte as the left.
@@ -49,22 +51,6 @@ sealed interface SidePair {
 
     /** More than one board is the right wheel, which the picker cannot express and a raw edit can. */
     data object BothRight : SidePair
-}
-
-/**
- * What `machine.drive_mode` (0x78) reads across the motor controllers (`specs/remote-ui.md` 3.2):
- * the stored setting the app drives by. Unlike [FramePair] it is judged on a machine with ONE motor
- * controller too, because SINGLE is a mode a one-board machine stores and drives in.
- */
-sealed interface ModePair {
-    /** A motor controller's copy has not been read this session, or none was found. */
-    data object Unknown : ModePair
-
-    /** Every motor controller stores [byte]. */
-    data class Agree(val byte: Int) : ModePair
-
-    /** The copies differ: [bytes] is each motor controller's, by address. */
-    data class Differ(val bytes: Map<Int, Int>) : ModePair
 }
 
 /**
@@ -105,7 +91,6 @@ sealed interface MachineArm {
 data class Machine(
     val frame: FramePair,
     val side: SidePair,
-    val mode: ModePair,
     val peerFound: Boolean = false,
 ) {
 
@@ -124,22 +109,20 @@ data class Machine(
         }
 
     /**
-     * Whether the machine is in a state the badge of 3.7 calls out: the boards hold frames or drive
-     * modes that differ, more than one claims the right wheel, or the machine runs rigid with none
-     * on the right.
+     * Whether the machine is in a state the badge of 3.7 calls out: the boards hold frames that
+     * differ, more than one claims the right wheel, or the machine runs rigid with none on the right.
      *
      * A fresh pivoting machine with every board on the left is NOT badged: that is the default, it
      * is inert while no turn bound is staged, and badging it would mark every unconfigured board.
      */
     val disagrees: Boolean
         get() = frame is FramePair.Differ ||
-            mode is ModePair.Differ ||
             side is SidePair.BothRight ||
             (frame is FramePair.Agree && frame.rigid && side is SidePair.NoneRight)
 
     companion object {
         /** Nothing read: what a session with no board attached knows. */
-        val UNKNOWN = Machine(FramePair.Unknown, SidePair.Unknown, ModePair.Unknown, peerFound = false)
+        val UNKNOWN = Machine(FramePair.Unknown, SidePair.Unknown, peerFound = false)
     }
 }
 
@@ -152,7 +135,7 @@ val SetupState.machine: Machine
     get() {
         if (attached == null) return Machine.UNKNOWN
         val mcs = motorControllers
-        return Machine(framePair(mcs), sidePair(mcs), modePair(mcs), peerFound = mcs.size >= 2)
+        return Machine(framePair(mcs), sidePair(mcs), peerFound = mcs.size >= 2)
     }
 
 private fun SetupState.framePair(mcs: List<Int>): FramePair {
@@ -173,12 +156,6 @@ private fun SetupState.sidePair(mcs: List<Int>): SidePair {
         1 -> SidePair.OneRight(right.single())
         else -> SidePair.BothRight
     }
-}
-
-private fun SetupState.modePair(mcs: List<Int>): ModePair {
-    if (mcs.isEmpty()) return ModePair.Unknown
-    val bytes = mcs.associateWith { storedByte(it, SetupFields.DRIVE_MODE.key) ?: return ModePair.Unknown }
-    return if (bytes.values.toSet().size == 1) ModePair.Agree(bytes.values.first()) else ModePair.Differ(bytes)
 }
 
 /** The stored byte for [key] on the board at [address], or null while it is unread. */
@@ -202,20 +179,49 @@ private fun SetupState.sendingByte(address: Int, key: Key): Int? =
     setupOf(address).writes[key]?.takeIf { it.sending }?.want?.asLong()?.toInt()
 
 /**
- * The drive mode in force on the machine this session sees (`specs/remote-ui.md` section 2 and 3.2),
- * from the stored copies of `machine.drive_mode` and `control.side` on every motor controller, the
- * rigid-frame leader flags in each board's own [telemetry], and the selected motor controller.
+ * The drive mode in force on the machine this session sees (`specs/remote-ui.md` section 2 and 3.2;
+ * `specs/machine-settings.md` section 7), derived from the stored `machine.mode` and `machine.frame`
+ * on the motor controllers, the number of them, the Ride screen's turn-axis setting [turnAxis], each
+ * board's motor 0 `side`, and the rigid-frame leader flags in each board's own [telemetry].
  * [DriveInForce.NONE] while no node is attached.
  */
-fun SetupState.driveInForce(telemetry: Map<Int, TelemetryUi>): DriveInForce =
+fun SetupState.driveInForce(telemetry: Map<Int, TelemetryUi>, turnAxis: Boolean): DriveInForce =
     if (attached == null) {
         DriveInForce.NONE
     } else {
         DriveInForce.of(
             nodes = nodes,
-            storedMode = { storedByte(it, SetupFields.DRIVE_MODE.key) },
+            mode = { storedByte(it, SetupFields.CONTROL_MODE.key) },
+            frame = { storedByte(it, SetupFields.CONTROL_FRAME.key) },
             side = { storedByte(it, SetupFields.CONTROL_SIDE.key) },
             leaders = telemetry.filterValues { it.leadsRigidFrame }.keys,
-            selected = selectedMotor,
+            turnAxis = turnAxis,
         )
+    }
+
+/**
+ * Every key of every machine field (`specs/machine-settings.md` section 3.2), each index: what the
+ * machine digest covers, and what Setup reads from each motor controller once a board reports that
+ * the boards disagree (`EV_MACHINE`), to list the fields that differ.
+ */
+val MACHINE_KEYS: List<Key> =
+    (
+        Fields.ALL.values.filter { it.scope == Scope.MACHINE }.map { it.key() } +
+            Fields.INDEXED.values.filter { it.scope == Scope.MACHINE }
+                .flatMap { f -> (0 until f.size).map { f.at(it).key(it) } }
+        ).sortedWith(compareBy({ it.fieldId }, { it.index }))
+
+/**
+ * The machine fields whose copies differ across the motor controllers, as `machine diff` lists them
+ * (`specs/machine-settings.md` sections 6.3 and 7): each key with every board's value by address,
+ * for the keys read on every motor controller. Empty while the copies agree or are not read apart.
+ */
+val SetupState.machineDifferences: Map<Key, Map<Int, Value>>
+    get() {
+        val mcs = motorControllers
+        if (mcs.size < 2) return emptyMap()
+        return MACHINE_KEYS.mapNotNull { key ->
+            val each = mcs.associateWith { setupOf(it).values[key] ?: return@mapNotNull null }
+            if (each.values.toSet().size > 1) key to each else null
+        }.toMap()
     }

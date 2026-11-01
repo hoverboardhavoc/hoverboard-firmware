@@ -13,6 +13,7 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.github.takahirom.roborazzi.captureScreenRoboImage
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.linkctl.ChipTag
@@ -302,7 +303,7 @@ class ScreenshotTest {
 
     private fun boardsOff(): UiState = UiState(
         connectionState = ConnectionState.CONNECTED,
-        nodes = listOf(NodeInfo(0x01, Fields.NodeClass.BRIDGE, "offroad-master")),
+        nodes = listOf(NodeInfo(0x01, Walk.CLASS_BRIDGE, "offroad-master")),
         attachedNode = 0x01,
         deviceName = "offroad-master",
         boardsOff = true,
@@ -326,7 +327,7 @@ class ScreenshotTest {
         val bounds = SetupFields.DRIVE_BOUNDS.associate { it.key to (it.def.default as Value.I16).v }
         val state = TuneState(
             target = 0x01,
-            motors = listOf(0x01, 0x02).map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME) },
+            motors = listOf(0x01, 0x02).map { NodeInfo(it, Walk.CLASS_MOTOR, BOARD_NAME) },
             boards = mapOf(
                 0x01 to BoardGains(
                     staged = keys.zip(Gains.DEFAULT).toMap(),
@@ -346,13 +347,12 @@ class ScreenshotTest {
     /** Setup for a motor controller, with the machine status section: one board's fault line, one bit-6 MODE line. */
     @Test
     fun setup_motorController() {
-        val values = SetupFields.ALL.associate { it.key to it.def.default } +
-            (SetupFields.NODE_CLASS.key to Value.U8(Fields.NodeClass.MOTOR_CONTROLLER))
+        val values = SetupFields.ALL.associate { it.key to it.def.default }
         val setup = SetupState(
             addresses = listOf(0x01, 0x02),
             attached = 0x01,
             target = 0x01,
-            boards = mapOf(0x01 to BoardSetup(values = values)),
+            boards = mapOf(0x01 to BoardSetup(values = values, identity = identityOf(Walk.CLASS_MOTOR))),
         )
         val status = sided(armed = false)
             .reporting(0x01, board(fault = CyclicState.EV_MOTOR_HALL))
@@ -453,6 +453,7 @@ class ScreenshotTest {
             peerDemand = 0,
             wheelPos = 0,
             wheelRate = 0,
+            machine = 0,
             obs = obs,
         ),
     )
@@ -473,15 +474,14 @@ class ScreenshotTest {
         return UiState(
             connectionState = ConnectionState.CONNECTED,
             armed = armed,
-            nodes = boards.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, BOARD_NAME) },
+            nodes = boards.map { NodeInfo(it, Walk.CLASS_MOTOR, BOARD_NAME) },
             attachedNode = 0x01,
             selected = 0x01,
-            drive = DriveInForce(targets, stored = DriveMode.BOUND, refusal = null),
+            drive = DriveInForce(targets, derived = DriveMode.BOUND, refusal = null),
             driving = targets,
             machine = Machine(
                 FramePair.Agree(rigid = false),
                 SidePair.OneRight(0x02),
-                ModePair.Agree(DriveMode.BOUND.byte),
             ),
             telemetryByBoard = boards.associateWith { board() },
             countsPerAmp = boards.associateWith { DRIVING_CAL },

@@ -9,7 +9,7 @@
 //! | [`loader`] | the RAM loader: its code, its SRAM layout, the bridge's side of its ring protocol |
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
 //! | [`router`] | the L2 stream decoders on the BLE, USB and TCP bytes |
-//! | [`node`] | the bridge as an L3 node: the walk responder, the forwarding table, `node.class`, its store, dispatch of the frames addressed to it |
+//! | [`node`] | the bridge as an L3 node: the walk responder, the forwarding table, `IDENTITY`, its store, dispatch of the frames addressed to it |
 //! | [`svc`] | the ESP commands and the bulk transfer window |
 //! | [`update`] | the bridge's own slot update: the transfer into the inactive slot, its checks, activation |
 //!

@@ -220,10 +220,7 @@ class RideSessionTest : RiderVmTest() {
     @Test
     fun `every board given a demand is judged`() = vmTest {
         collecting()
-        for (b in listOf(0x01, 0x02)) {
-            transport.store[b to Fields.MACHINE_DRIVE_MODE.key()] =
-                com.hoverboard.protocol.store.Value.U8(com.hoverboard.remote.model.DriveMode.BOUND.byte)
-        }
+        // Two motor controllers, pivoting, turn axis off: the derived mode is BOUND.
         transport.setConnectionState(ConnectionState.CONNECTED)
         transport.setAttachedBoard(0x01, 0x02)
         reporting(0x01, 0x02)

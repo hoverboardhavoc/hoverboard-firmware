@@ -100,7 +100,6 @@ object Layout {
             motorSlot(Fields.MOTOR_DEAD_TIME, false, { it.deadTime }, { mf, v -> mf.copy(deadTime = v) })
             motorSlot(Fields.MOTOR_DIRECTION, false, { it.direction }, { mf, v -> mf.copy(direction = v) })
             motorSlot(Fields.MOTOR_ALIGN_OFFSET, false, { it.alignOffset }, { mf, v -> mf.copy(alignOffset = v) })
-            motorSlot(Fields.MOTOR_CURRENT_SENSE, false, { it.currentSense }, { mf, v -> mf.copy(currentSense = v) })
             motorSlot(Fields.MOTOR_CURRENT_CAL, false, { it.currentCal }, { mf, v -> mf.copy(currentCal = v) })
             motorSlot(Fields.MOTOR_PHASE_A, true, { it.phaseA }, { mf, v -> mf.copy(phaseA = v) })
             motorSlot(Fields.MOTOR_PHASE_B, true, { it.phaseB }, { mf, v -> mf.copy(phaseB = v) })

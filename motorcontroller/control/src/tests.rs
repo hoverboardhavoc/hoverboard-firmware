@@ -1293,9 +1293,9 @@ fn an_unstaged_shadow_is_inert() {
 
 #[test]
 fn the_tune_seam_owns_the_allowlist_and_the_ranges() {
-    // The lane's allowlist is exactly 0x79 indices 0..3 and 0x7B indices 0..1; the gain row is
+    // The lane's allowlist is exactly 0x27 indices 0..3 and 0x29 indices 0..1; the gain row is
     // bounded by the stored maxima and the reference row by the compiled ones.
-    assert_eq!((SF_GAINS_FIELD, REFERENCE_FIELD), (0x79, 0x7B));
+    assert_eq!((SF_GAINS_FIELD, REFERENCE_FIELD), (0x27, 0x29));
     let mut s = GainShadow::default();
     for i in 0..4u8 {
         let max = DEFAULT_GAIN_MAX[i as usize];
@@ -1338,8 +1338,8 @@ fn the_tune_seam_owns_the_allowlist_and_the_ranges() {
         (REFERENCE_FIELD, 2),
         (0x71, 0),
         (0x76, 0),
-        (0x7A, 0),
-        (0x7C, 0),
+        (0x28, 0),
+        (0x2A, 0),
     ] {
         assert_eq!(s.set(id, i, 1), Err(TuneError::UnknownKey), "{id:#x}/{i}");
         assert_eq!(s.get(id, i), None);

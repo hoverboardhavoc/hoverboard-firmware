@@ -148,8 +148,8 @@ pub fn read_adc_input<F: Flash>(
 }
 
 /// Read motor `m`'s layout: the hall group, the gate group held to the dead-time floor and routed
-/// to an advanced timer (`gate_timer`), and the phase-current pair, present exactly when
-/// `motor.current_sense` is nonzero and routed to ADC channels (`adc_channel`).
+/// to an advanced timer (`gate_timer`), and the phase-current pair, fitted exactly when both its
+/// pins are set and routed to ADC channels (`adc_channel`).
 ///
 /// A group that is absent or refused is `None` in the plan, and the motor bring-up then leaves the
 /// motor absent. A gate group below [`DEAD_TIME_MIN_DTG`] is refused: below the floor both FETs of a
@@ -218,9 +218,10 @@ pub fn read_motor<F: Flash>(
     }
 }
 
-/// The phase-current pair of motor `m`. The pair is present exactly when `motor.current_sense` is
-/// nonzero: a declaration with no pins is incomplete at `current.phase_a`, pins with no declaration
-/// are incomplete at `current.sense`, and each pin needs an ADC channel.
+/// The phase-current pair of motor `m`, a group like the others (`specs/machine-settings.md`
+/// section 3.3): phase sense is fitted exactly when both pins are set, neither is no sense and
+/// nothing is recorded, one of the two is recorded as incomplete, and each pin needs an ADC
+/// channel.
 fn read_phase_current<F: Flash>(
     s: &Store<F>,
     m: u8,
@@ -229,20 +230,7 @@ fn read_phase_current<F: Flash>(
 ) -> Option<PhaseCurrentSet> {
     let fields = [store::MOTOR_PHASE_A.at(m), store::MOTOR_PHASE_B.at(m)];
     let id = store::MOTOR_PHASE_A.id();
-    if s.get(store::MOTOR_CURRENT_SENSE.at(m)) == 0 {
-        if fields.iter().any(|f| s.get(*f) != board::ABSENT) {
-            status.record(id, m, Reason::Incomplete, store::MOTOR_CURRENT_SENSE.id());
-        }
-        return None;
-    }
-    let Some(pins) = group(s, fields, status) else {
-        // `group` recorded a partial pair or a bad byte; an empty pair is what the declaration
-        // left unset.
-        if fields.iter().all(|f| s.get(*f) == board::ABSENT) {
-            status.record(id, m, Reason::Incomplete, id);
-        }
-        return None;
-    };
+    let pins = group(s, fields, status)?;
     let mut channels = [0u8; 2];
     for (c, p) in channels.iter_mut().zip(pins) {
         match adc_channel(p.packed()) {
@@ -279,7 +267,7 @@ pub fn read_imu<F: Flash>(s: &Store<F>, status: &mut StatusRecord) -> Option<Imu
     Some(ImuPins { scl, sda, model })
 }
 
-/// Read link `i`'s pin pair (`link.tx`, `link.rx`): both set is a configured link, neither is no
+/// Read link `i`'s pin pair (`links[i].tx`, `links[i].rx`): both set is a configured link, neither is no
 /// link (its pins are not touched), one of the two is recorded as incomplete.
 pub fn read_link<F: Flash>(s: &Store<F>, i: u8, status: &mut StatusRecord) -> Option<[Pin; 2]> {
     group(s, [store::LINK_TX.at(i), store::LINK_RX.at(i)], status)
@@ -330,7 +318,6 @@ mod tests {
             (store::MOTOR_GATE_LO_B, 0x1E),
             (store::MOTOR_GATE_LO_C, 0x1F),
             (store::MOTOR_DEAD_TIME, 25),
-            (store::MOTOR_CURRENT_SENSE, 1),
             (store::MOTOR_PHASE_A, 0x10),
             (store::MOTOR_PHASE_B, 0x00),
         ] {
@@ -461,41 +448,11 @@ mod tests {
     }
 
     #[test]
-    fn the_phase_pair_follows_the_current_sense_declaration() {
-        // Declared with no pins: incomplete at the pair's first field.
+    fn the_phase_pair_is_a_group_of_two_pins() {
+        // Neither pin: no current sense, nothing to say.
         let (plan, entries) = with(
             |s| {
                 stage_motor(s);
-                s.set(store::MOTOR_PHASE_A.at(0), board::ABSENT).unwrap();
-                s.set(store::MOTOR_PHASE_B.at(0), board::ABSENT).unwrap();
-            },
-            |s, st| read_motor(s, 0, gate_timer, adc, st),
-        );
-        assert_eq!(plan.phase_current, None);
-        let a = store::MOTOR_PHASE_A.id();
-        assert_eq!(entries, [entry(a, 0, Reason::Incomplete, a)]);
-        // Pins with no declaration: incomplete at the declaration.
-        let (_, entries) = with(
-            |s| {
-                stage_motor(s);
-                s.set(store::MOTOR_CURRENT_SENSE.at(0), 0).unwrap();
-            },
-            |s, st| read_motor(s, 0, gate_timer, adc, st),
-        );
-        assert_eq!(
-            entries,
-            [entry(
-                a,
-                0,
-                Reason::Incomplete,
-                store::MOTOR_CURRENT_SENSE.id()
-            )]
-        );
-        // Neither: no current sense, nothing to say.
-        let (plan, entries) = with(
-            |s| {
-                stage_motor(s);
-                s.set(store::MOTOR_CURRENT_SENSE.at(0), 0).unwrap();
                 s.set(store::MOTOR_PHASE_A.at(0), board::ABSENT).unwrap();
                 s.set(store::MOTOR_PHASE_B.at(0), board::ABSENT).unwrap();
             },
@@ -503,6 +460,20 @@ mod tests {
         );
         assert_eq!(plan.phase_current, None);
         assert_eq!(entries, []);
+        // One of the two: incomplete at the unset one.
+        let a = store::MOTOR_PHASE_A.id();
+        let (plan, entries) = with(
+            |s| {
+                stage_motor(s);
+                s.set(store::MOTOR_PHASE_B.at(0), board::ABSENT).unwrap();
+            },
+            |s, st| read_motor(s, 0, gate_timer, adc, st),
+        );
+        assert_eq!(plan.phase_current, None);
+        assert_eq!(
+            entries,
+            [entry(a, 0, Reason::Incomplete, store::MOTOR_PHASE_B.id())]
+        );
         // A phase pin with no ADC channel.
         let (_, entries) = with(
             |s| {

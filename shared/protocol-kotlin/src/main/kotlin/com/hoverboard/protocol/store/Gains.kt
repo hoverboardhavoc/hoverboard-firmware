@@ -17,10 +17,10 @@ package com.hoverboard.protocol.store
  */
 object Gains {
     /** The gains' `field_id` (`store::CONTROL_SF_GAINS`, `control::SF_GAINS_FIELD`). */
-    const val CONTROL_SF_GAINS = 0x79
+    const val CONTROL_SF_GAINS = 0x27
 
     /** The reference row's `field_id` (`store::CONTROL_REFERENCE`, `control::REFERENCE_FIELD`). */
-    const val CONTROL_REFERENCE = 0x7B
+    const val CONTROL_REFERENCE = 0x29
 
     /** Gain index 0: `gp`, numerator counts per degree of pitch. */
     const val GP = 0

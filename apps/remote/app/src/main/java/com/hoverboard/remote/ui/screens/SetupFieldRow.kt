@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
+import com.hoverboard.protocol.store.Effect
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.FieldWrite
@@ -42,7 +43,6 @@ import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.FloorOutside
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.model.TakesEffect
 import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.display
 import com.hoverboard.remote.model.fitsOneWrite
@@ -145,13 +145,13 @@ private fun WriteResult(field: SetupField, write: FieldWrite, editable: Boolean,
  * What this row's write said, and the tone to say it in, for a row that renders it inline and for
  * the Machine section's two boards.
  *
- * A [TakesEffect.RESTART] field still marked written has not been taken up: the model drops that
+ * A boot-effect field ([Effect.BOOT]) still marked written has not been taken up: the model drops that
  * record when the boot tag on the wire shows the board restarted, so its presence IS the statement
  * that no restart has happened. Nothing asks the operator to assert one.
  */
 @Composable
 internal fun writeStatus(field: SetupField, write: FieldWrite): Pair<String, Tone> {
-    val restartDue = field.takesEffect == TakesEffect.RESTART
+    val restartDue = field.takesEffect == Effect.BOOT
     val (text, colour) = when (write.state) {
         // The same word the screen-level indicator uses: one string for one fact.
         WriteState.Sending -> R.string.setup_writing to Tone.MUTED
@@ -169,9 +169,9 @@ internal fun writeStatus(field: SetupField, write: FieldWrite): Pair<String, Ton
 /**
  * When this row's value reaches the board, in one line.
  *
- * Both sentences come off [SetupField.takesEffect], which reads the firmware's own arm-time row
- * through the drift-pinned mirror (`specs/integration.md`, "When a stored value takes effect: the
- * arm-time re-read"), so a row cannot state one class while the board runs the other. It is shown
+ * The sentence comes off [SetupField.takesEffect], the registry's own effect attribute through the
+ * drift-pinned mirror (`specs/machine-settings.md` section 5), so a row cannot state one class while
+ * the board runs the other. It is shown
  * before the edit as well as after it: the operator deciding whether to change a value is the one
  * who needs to know what it will cost. A read-only row says nothing, having no edit to place in
  * time.
@@ -179,9 +179,10 @@ internal fun writeStatus(field: SetupField, write: FieldWrite): Pair<String, Ton
 @Composable
 internal fun TakeEffect(field: SetupField) {
     val line = when (field.takesEffect) {
-        TakesEffect.NEXT_ARM -> R.string.setup_effect_arm
-        TakesEffect.RESTART -> R.string.setup_effect_boot
-        TakesEffect.APP_ONLY -> R.string.setup_effect_app
+        Effect.ARM -> R.string.setup_effect_arm
+        Effect.BOOT -> R.string.setup_effect_boot
+        Effect.CLIENT -> R.string.setup_effect_app
+        Effect.LIVE -> R.string.setup_effect_live
         null -> return
     }
     Caption(line)

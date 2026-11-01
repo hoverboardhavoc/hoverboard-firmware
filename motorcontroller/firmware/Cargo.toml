@@ -24,7 +24,7 @@ targets = [
 store = { path = "../../shared/store" }
 # The packed pin type, the dead-time floor and the boot status record (specs/configured-links.md):
 # each bring-up reads its own fields and records what did not come up in BOARD_OBS, which is
-# served as `board.status`. HAL-free, no_std.
+# served by `STATUS_READ`. HAL-free, no_std.
 board = { path = "../board" }
 # The SWD mailbox: the firmware carves its fixed RAM region (memory.x) and inits the header at boot,
 # and services it from the loop (specs/swd-mailbox.md). HAL-free, no_std.

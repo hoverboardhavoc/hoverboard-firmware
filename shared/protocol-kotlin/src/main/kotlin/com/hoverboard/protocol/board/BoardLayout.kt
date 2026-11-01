@@ -7,7 +7,7 @@ package com.hoverboard.protocol.board
  *
  * There is no verdict here. The firmware does not validate a layout as a whole: each subsystem
  * reads its own fields at boot and brings up what it can, and what did not come up is listed in
- * the board's own status record, read over the link as `board.status` ([BoardStatus],
+ * the board's own status record, read over the link with `STATUS_READ` ([BoardStatus],
  * `specs/configured-links.md` sections 3 and 5). A client names and picks pins with this file and
  * learns what the board made of them from that record after the next boot.
  *
@@ -121,10 +121,9 @@ data class MotorFields(
     val direction: Int = 0,
     /** The six-step align offset. */
     val alignOffset: Int = 0,
-    /** The phase-current DECLARATION: 0 = none; nonzero brings up [phaseA] / [phaseB]. */
-    val currentSense: Int = 0,
     /** Counts per amp. */
     val currentCal: Int = 0,
+    /** The phase-current sense pins: phase sense is fitted exactly when both are set. */
     val phaseA: Int = PIN_ABSENT,
     val phaseB: Int = PIN_ABSENT,
 ) {

@@ -194,11 +194,10 @@ pub const DEFAULT_ROLES: [u8; 2] = [3, 2];
 pub enum FrameError {
     /// A role is outside `1..=3`, or the two roles name the same chip axis.
     Roles,
-    /// The accel triple read through the roles is a reflection (determinant -1), or a sign is not
-    /// `+-1`.
+    /// The sign triple read through the roles is a reflection (determinant -1), or a sign is not
+    /// `+-1`. The accelerometer and the gyro share the triple (`specs/machine-settings.md`
+    /// section 3.1), so one check covers both.
     Accel,
-    /// The gyro triple read through the roles is a reflection, or a sign is not `+-1`.
-    Gyro,
 }
 
 impl Default for Config {
@@ -219,28 +218,34 @@ impl Config {
     /// Build a config from per-board STAGED values (the store's `IMU_AXIS_SIGN`, `IMU_GYRO_BIAS`
     /// and `IMU_AXIS_ROLE`), applying the unset rule, and REFUSE a frame that is not a rotation.
     ///
+    /// `sign` is the three-axis triple `[x, y, z]`, applied to the accelerometer AND the gyro: on
+    /// the MPU-6050 class both share one rotation (`specs/imu.md`, the reference map;
+    /// `specs/machine-settings.md` section 3.1), so the six-wide map this builds repeats the triple
+    /// and the gyro frame cannot differ from the accelerometer's.
+    ///
     /// A staged sign of **0 means "not configured"** and falls back to that index of the reference
     /// map in [`Config::default`], so a board with nothing staged behaves exactly as it did before
     /// the field existed, and a board with a real mount overrides it per axis. 0 is not a valid
-    /// sign, which is what lets one all-indices default express six different per-axis defaults.
+    /// sign, which is what lets one all-indices default express three different per-axis defaults.
     /// A staged role of 0 likewise falls back to that index of [`DEFAULT_ROLES`].
     ///
     /// The rule lives here rather than in the firmware's bring-up because it is this type's own
     /// contract: `sign` and `roles` are the config's fields, so what an absent value means for them
     /// is the config's to say, and saying it here is what makes it host-testable.
     ///
-    /// The resolved frame must pass [`Config::frame_is_rotation`] for BOTH triples, or this returns
-    /// the [`FrameError`] and the caller does not bring the IMU up: a wrong role is worse than a
-    /// wrong sign (the machine balances about the wrong axis and nothing in the loop can tell), so
-    /// it is a boot refusal, not only a host-test property.
-    pub fn staged(sign: [i32; 6], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError> {
+    /// The resolved frame must pass [`Config::frame_is_rotation`], or this returns the
+    /// [`FrameError`] and the caller does not bring the IMU up: a wrong role is worse than a wrong
+    /// sign (the machine balances about the wrong axis and nothing in the loop can tell), so it is
+    /// a boot refusal, not only a host-test property.
+    pub fn staged(sign: [i32; 3], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError> {
         let mut cfg = Config {
             gyro_bias,
             ..Config::default()
         };
-        for (dst, staged) in cfg.sign.iter_mut().zip(sign.iter()) {
+        for (axis, staged) in sign.iter().enumerate() {
             if *staged != 0 {
-                *dst = *staged;
+                cfg.sign[axis] = *staged;
+                cfg.sign[axis + 3] = *staged;
             }
         }
         for (dst, staged) in cfg.roles.iter_mut().zip(roles.iter()) {
@@ -253,8 +258,6 @@ impl Config {
             Err(FrameError::Roles)
         } else if !Self::frame_is_rotation(cfg.roles, [s[0], s[1], s[2]]) {
             Err(FrameError::Accel)
-        } else if !Self::frame_is_rotation(cfg.roles, [s[3], s[4], s[5]]) {
-            Err(FrameError::Gyro)
         } else {
             Ok(cfg)
         }

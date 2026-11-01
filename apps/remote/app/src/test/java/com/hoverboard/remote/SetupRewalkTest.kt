@@ -47,7 +47,7 @@ class SetupRewalkTest {
     @Test
     fun `a node whose class is not read is not taken for a bridge`() = runTest {
         val rig = SetupRig(this)
-        rig.transport.unreadable += SetupFields.NODE_CLASS.key
+        rig.transport.unidentifiable += 0x01
         rig.transport.setAttachedBoard(0x01)
         tick(interval * 3)
         assertTrue(rig.transport.rewalks.isEmpty())

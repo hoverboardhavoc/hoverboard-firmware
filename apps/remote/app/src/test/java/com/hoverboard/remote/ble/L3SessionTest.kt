@@ -113,7 +113,7 @@ class L3SessionTest {
             }
         }
         val client = ConfigClient(ConfigExchange(h.engine, h.lock))
-        val trim = Fields.ATTITUDE_LEVEL_TRIM.key(0)
+        val trim = Fields.ATTITUDE_LEVEL_TRIM.at(0).key(0)
 
         assertEquals(WriteVerified(Value.I16(-266)), client.write(trim, Value.I16(-266), 0x01))
         assertEquals(ReadValue(Value.I16(-266)), client.read(trim, 0x01))
@@ -268,12 +268,12 @@ class L3SessionTest {
             drainToApp()
         }
 
-        /** `[node_id, proto_ver, fw_lo, fw_hi, mcu, your_addr]` (specs/l3.md, the merged reply). */
+        /** `[node_id, proto_ver, your_addr]` (`specs/machine-settings.md` section 6.1). */
         private fun helloReply(askedBy: Int): ByteArray = Pdu.of(
             Opcode.NodeHello,
             nodeId,
             askedBy,
-            byteArrayOf(nodeId.toByte(), Walk.PROTO_VER.toByte(), 0, 0, MCU_TAG, GUEST.toByte()),
+            byteArrayOf(nodeId.toByte(), Walk.PROTO_VER.toByte(), GUEST.toByte()),
         ).encode()
 
         private fun onProbe(pdu: Pdu) {
@@ -337,7 +337,6 @@ class L3SessionTest {
     private companion object {
         /** The guest address the fake board grants (`0x80..0xFE`, one past the provisional 0x80). */
         const val GUEST = 0x81
-        const val MCU_TAG: Byte = 0x10
 
         /** The firmware's decimated BLE telemetry cadence: 5 Hz. */
         const val CYCLIC_PERIOD_MS = 200L

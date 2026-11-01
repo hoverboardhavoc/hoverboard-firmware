@@ -184,7 +184,7 @@ internal fun LampSheet(state: UiState, lamp: FaultLamp, onDismiss: () -> Unit, m
                     WarningGlyph(20.dp)
                     Spacer(Modifier.width(12.dp))
                 }
-                Text(stringResource(lamp.title), style = ride(22.sp, FontWeight.Bold), color = Fg)
+                Text(stringResource(state.lampTitle(lamp)), style = ride(22.sp, FontWeight.Bold), color = Fg)
             }
             Text(
                 stringResource(R.string.lamp_where, litWhere(state, lamp), lamp.code),

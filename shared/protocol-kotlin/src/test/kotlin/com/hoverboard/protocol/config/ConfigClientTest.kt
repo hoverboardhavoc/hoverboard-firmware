@@ -35,7 +35,7 @@ import java.lang.reflect.Modifier
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConfigClientTest {
 
-    private val limit = Key(0x20, 0) // MOTOR_CURRENT_LIMIT, u32
+    private val limit = com.hoverboard.protocol.store.Fields.MOTOR_CURRENT_LIMIT.key() // u32
     private val master = 0x01
     private val slave = 0x02
 
@@ -235,6 +235,15 @@ internal class FakeConfigBoards(scope: TestScope) {
     /** The tune lane's client, on the SAME exchange as [client] (one request in flight between them). */
     val tune = TuneClient(exchange)
 
+    /** `IDENTIFY` and `STATUS_READ`'s client, on the same exchange again. */
+    val node = NodeClient(exchange)
+
+    /** Board address -> the `IDENTITY` payload it answers (a board absent here answers 3 stray bytes). */
+    val identities = HashMap<Int, ByteArray>()
+
+    /** Board address -> the `STATUS` payload it answers; empty for a board absent here. */
+    val statuses = HashMap<Int, ByteArray>()
+
     /** (board address, key) -> the RAM shadow the tune lane reads and writes; never [store]. */
     val shadow = HashMap<Pair<Int, Key>, Int>()
 
@@ -289,7 +298,7 @@ internal class FakeConfigBoards(scope: TestScope) {
     private fun attach() {
         engine.pump()
         engine.takeOutgoing()
-        val hello = byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())
+        val hello = byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0x80.toByte())
         link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, hello).encode())
         engine.onReceive(wire.drainOutgoing()!!)
         engine.pump()
@@ -303,7 +312,8 @@ internal class FakeConfigBoards(scope: TestScope) {
             val pdu = link.pollRecv()?.let { Pdu.decodeOrNull(it) } ?: break
             val op = pdu.known()
             val tune = pdu.opcode == Walk.OP_TUNE_READ || pdu.opcode == Walk.OP_TUNE_WRITE
-            if (op != Opcode.ConfigRead && op != Opcode.ConfigWrite && !tune) continue
+            val node = op == Opcode.Identify || op == Opcode.StatusRead
+            if (op != Opcode.ConfigRead && op != Opcode.ConfigWrite && !tune && !node) continue
             requests.add(pdu)
             if (silent) continue
             if (dropNext > 0) {
@@ -324,6 +334,11 @@ internal class FakeConfigBoards(scope: TestScope) {
     }
 
     private fun answer(req: Pdu): Pdu {
+        when (req.known()) {
+            Opcode.Identify -> return Pdu.of(Opcode.Identity, req.dst, req.src, identities[req.dst] ?: ByteArray(3))
+            Opcode.StatusRead -> return Pdu.of(Opcode.Status, req.dst, req.src, statuses[req.dst] ?: ByteArray(0))
+            else -> Unit
+        }
         val p = req.payload
         val key = Key(p[0].toInt() and 0xFF, p[1].toInt() and 0xFF)
         val head = byteArrayOf(p[0], p[1], status.toByte())

@@ -23,8 +23,19 @@ use store::{
 
 const PS: usize = 1024;
 const CAP: usize = 255;
-/// A board's class, the registry default of `node.class`.
-const MOTOR: u8 = store::NODE_CLASS.default();
+/// A board's class.
+const MOTOR: u8 = CLASS_MOTOR;
+
+/// The identity a test node of `class` answers `IDENTIFY` with: its class, a test chip family and
+/// version, and a uid naming the class.
+fn identity(class: u8) -> Identity {
+    Identity {
+        class,
+        mcu: 0x10,
+        fw_ver: 0x0001,
+        uid: [class; UID_LEN],
+    }
+}
 
 /// A minimal in-RAM [`Flash`] for the walk tests: a two-page region, erased to `0xFFFF`, with
 /// halfword-aligned write-once `program` (the silicon rules the store relies on). Independent of
@@ -167,7 +178,7 @@ impl Mesh {
             ports.push(None);
         }
         self.boards.push(Board {
-            resp: Responder::new(n_ports, kinds, /*mcu*/ 0x10, class, /*fw*/ 0x0001),
+            resp: Responder::new(n_ports, kinds, identity(class)),
             flash: TestFlash::erased(PS),
             ports,
         });
@@ -260,7 +271,10 @@ impl Mesh {
                 moved = true;
                 if let Some(reply) = self.ctrl.ctrl.reply_to_probe(&frame) {
                     self.ctrl.link.as_mut().unwrap().send(&reply).unwrap();
-                } else if Pdu::decode(&frame).map(|p| p.known()) == Ok(Some(Opcode::ConfigResp)) {
+                } else if matches!(
+                    Pdu::decode(&frame).map(|p| p.known()),
+                    Ok(Some(Opcode::ConfigResp | Opcode::Identity | Opcode::Status))
+                ) {
                     self.ctrl.inbox.push(frame);
                 } else {
                     let outstanding = self.ctrl.ctrl.outstanding;
@@ -347,6 +361,22 @@ impl Mesh {
     }
 
     /// `CONFIG_READ(dst, key)` -> the CONFIG_RESP.
+    /// `IDENTIFY` to `dst`, decoded.
+    fn identify(&mut self, dst: u8) -> Option<Identity> {
+        let r = self.controller_send(Opcode::Identify.to_u8(), dst, &[])?;
+        let p = Pdu::decode(&r).ok()?;
+        (p.known() == Some(Opcode::Identity))
+            .then(|| Identity::decode(p.payload))
+            .flatten()
+    }
+
+    /// `STATUS_READ` to `dst`: the entries.
+    fn status_read(&mut self, dst: u8) -> Option<StdVec<u8>> {
+        let r = self.controller_send(Opcode::StatusRead.to_u8(), dst, &[])?;
+        let p = Pdu::decode(&r).ok()?;
+        (p.known() == Some(Opcode::Status)).then(|| p.payload.to_vec())
+    }
+
     fn config_read(&mut self, dst: u8, key: store::Key) -> StdVec<u8> {
         self.controller_send(Opcode::ConfigRead.to_u8(), dst, &[key.field_id, key.index])
             .expect("a CONFIG_RESP")
@@ -638,16 +668,17 @@ fn a_fresh_bridge_in_front_of_an_addressed_pair_ends_at_0x03_and_the_boards_keep
     assert_eq!(m.ctrl.ctrl.port_of_kind(0x01, PORT_SWD), Some(0));
     assert_eq!(m.ctrl.ctrl.port_of_kind(0x02, PORT_BLE), Some(2));
     assert_eq!(m.ctrl.ctrl.port_of_kind(0x7E, PORT_SWD), None);
+    // The neighbour each port holds: the master on the bridge's mailbox, the slave on the
+    // master's link; nothing for the console (a controller) or for the master's link back.
+    assert_eq!(m.ctrl.ctrl.neighbour_on(0x03, 1), Some(0x01));
+    assert_eq!(m.ctrl.ctrl.neighbour_on(0x01, 1), Some(0x02));
+    assert_eq!(m.ctrl.ctrl.neighbour_on(0x03, 2), None);
+    assert_eq!(m.ctrl.ctrl.neighbour_on(0x01, 0), None);
 
     // Each node reports its class: 2 for the bridge, 1 for the boards.
     for (addr, class) in [(0x03, CLASS_BRIDGE), (0x01, MOTOR), (0x02, MOTOR)] {
-        let r = m.config_read(addr, store::NODE_CLASS.key());
-        assert_eq!(resp_status(&r), CFG_OK, "{addr:#04x}");
-        assert_eq!(resp_value(&r), Some(Value::U8(class)), "{addr:#04x}");
+        assert_eq!(m.identify(addr), Some(identity(class)), "{addr:#04x}");
     }
-    // A class write is refused by the bridge too.
-    let w = m.config_write(0x03, store::NODE_CLASS.key(), Value::U8(0x01));
-    assert_eq!(resp_status(&w), CFG_READ_ONLY);
 
     // A second walk changes nothing.
     m.ctrl.ctrl = Controller::new();
@@ -719,7 +750,7 @@ fn a_bridge_refuses_a_name_it_cannot_advertise_and_keeps_the_old_one() {
 #[test]
 fn re_assigning_the_same_address_re_persists_and_re_acks_idempotently() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
 
     // First ASSIGN(egress=SELF, 0x05) arrives directly (dst=0x00, the one peer). It persists + ACKs;
     // imagine the ACK is dropped on the wire.
@@ -759,7 +790,7 @@ fn an_assign_that_fills_the_page_compacts_and_still_persists() {
     // would refuse re-addressing over the wire, permanently. Fill the page through the wire
     // path, then ASSIGN, and require the persist to succeed via compaction.
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
 
     // Fill the active page TO THE BRINK by direct store writes (deliberately not the wire: the
     // wire's config path now compacts for itself, which would leave room and make this test
@@ -1045,7 +1076,7 @@ fn ingest_one(
 #[test]
 fn a_delivered_control_block_pdu_is_handed_back() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
 
     // A dst=0x00 point-to-point PDU in the reserved control block is delivered locally (the
     // forwarder's point-to-point rule) and handed back uninterpreted: opcode, src, payload.
@@ -1086,7 +1117,7 @@ fn a_delivered_control_block_pdu_is_handed_back() {
 #[test]
 fn a_handled_walk_opcode_returns_no_hand_back() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
 
     // A handled opcode (ASSIGN to self) is consumed by the walk layer: emissions, no hand-back.
     let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x05]);
@@ -1101,7 +1132,7 @@ fn a_handled_walk_opcode_returns_no_hand_back() {
 #[test]
 fn hand_back_is_bounded_by_max_pdu() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
 
     // The largest deliverable frame: header + (MAX_PDU - 3) payload bytes == MAX_PDU. The whole
     // payload comes back intact (a full bounded copy, no truncation).
@@ -1204,7 +1235,7 @@ fn an_armed_board_rejects_write_multi_and_gates_before_decode() {
 #[test]
 fn an_armed_board_refuses_assign_no_persist_no_adopt() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
     resp.set_armed(true);
 
     // ASSIGN(egress=SELF, 0x05) delivered to an armed board is refused whole: the ACK carries
@@ -1792,46 +1823,57 @@ fn the_config_value_limits_fill_one_pdu() {
     assert_eq!(fits(Opcode::ConfigResp, 4, CONFIG_RESP_VALUE_MAX + 1), None);
 }
 
+/// `IDENTIFY` (`specs/machine-settings.md` section 6.1): every node answers with its identity,
+/// routed back like a `CONFIG_RESP`, and writes nothing.
 #[test]
-fn node_class_answers_ok_and_refuses_an_unstore_read_only() {
-    let mut m = walked_pair();
-    let before = m.boards[0].flash.bytes.clone();
-    assert_eq!(
-        resp_status(&unstore(&mut m, 0x01, store::NODE_CLASS.key())),
-        CFG_READ_ONLY
-    );
-    assert!(m.boards[0].flash.bytes == before);
-    let r = m.config_read(0x01, store::NODE_CLASS.key());
-    assert_eq!(
-        (resp_status(&r), resp_value(&r)),
-        (CFG_OK, Some(Value::U8(MOTOR)))
-    );
+fn identify_answers_the_nodes_identity_on_a_board_and_a_bridge() {
+    let mut m = Mesh::new();
+    let bridge = m.add_node(3, [PORT_BLE, PORT_SWD, PORT_UART, PORT_UART], CLASS_BRIDGE);
+    let board = m.add_board(2);
+    m.wire(bridge, 1, board, 0);
+    m.attach_controller(bridge, 0);
+    m.run_walk();
+    let before = m.boards[board].flash.bytes.clone();
+    assert_eq!(m.identify(0x01), Some(identity(CLASS_BRIDGE)));
+    assert_eq!(m.identify(0x02), Some(identity(MOTOR)));
+    assert!(m.boards[board].flash.bytes == before);
+    // The payload: class, mcu, fw_ver LE, the twelve uid bytes.
+    let r = m
+        .controller_send(Opcode::Identify.to_u8(), 0x02, &[])
+        .expect("an IDENTITY");
+    let p = Pdu::decode(&r).unwrap();
+    assert_eq!(p.known(), Some(Opcode::Identity));
+    assert_eq!(p.payload.len(), Identity::LEN);
+    assert_eq!(&p.payload[..4], &[MOTOR, 0x10, 0x01, 0x00]);
+    assert_eq!(&p.payload[4..], &[MOTOR; UID_LEN]);
+    assert_eq!(Identity::decode(&p.payload[..15]), None);
 }
 
-/// `board.status` (`specs/configured-links.md` section 5): read-only, answered `CFG_OK` from the
-/// record the node handed over at boot, empty on a node that handed none (a bridge), and a write
-/// is refused without touching flash.
+/// `STATUS_READ` (`specs/machine-settings.md` section 6.1): answered from the record the node
+/// handed over at boot, empty on a node that handed none (a bridge).
 #[test]
-fn board_status_is_answered_from_the_record_and_refuses_a_write() {
-    static ENTRIES: [u8; 8] = [0x56, 1, 3, 0x16, 0x4D, 0, 5, 10];
+fn status_read_answers_the_boot_record() {
+    static ENTRIES: [u8; 8] = [0x0F, 1, 3, 0x16, 0x43, 0, 5, 10];
     let mut m = walked_pair();
-    let r = m.config_read(0x02, store::BOARD_STATUS.key());
-    assert_eq!(
-        (resp_status(&r), resp_value(&r)),
-        (CFG_OK, Some(Value::Bytes(&[])))
-    );
+    assert_eq!(m.status_read(0x02), Some(StdVec::new()));
     m.boards[0].resp.set_status(&ENTRIES);
-    let r = m.config_read(0x01, store::BOARD_STATUS.key());
+    assert_eq!(m.status_read(0x01), Some(ENTRIES.to_vec()));
+    // 14 entries, the record's cap, fit one PDU.
+    const { assert!(STATUS_MAX + crate::pdu::HEADER_LEN <= MAX_PDU) };
+}
+
+/// The removed read-only rows are gone: `0x03` and `0x05` are ordinary stored fields now
+/// (`wifi.ssid`, `wifi.tx_power`).
+#[test]
+fn the_former_read_only_ids_are_ordinary_fields() {
+    let mut m = walked_pair();
+    let w = m.config_write(0x01, store::WIFI_SSID.key(), Value::Str(b"home"));
+    assert_eq!(resp_status(&w), CFG_OK);
+    let r = m.config_read(0x01, store::WIFI_TX_POWER.key());
     assert_eq!(
         (resp_status(&r), resp_value(&r)),
-        (CFG_OK, Some(Value::Bytes(&ENTRIES)))
+        (CFG_DEFAULT, Some(Value::U8(34)))
     );
-    let before = m.boards[0].flash.bytes.clone();
-    let w = m.config_write(0x01, store::BOARD_STATUS.key(), Value::Bytes(&[1, 2, 3, 4]));
-    assert_eq!(resp_status(&w), CFG_READ_ONLY);
-    assert!(m.boards[0].flash.bytes == before);
-    // 14 entries, the record's cap, fit one CONFIG_RESP.
-    const { assert!(56 <= CONFIG_RESP_VALUE_MAX) };
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1851,14 +1893,14 @@ fn grant_guest(resp: &mut Responder, flash: &mut TestFlash) -> u8 {
     let n = hello.encode(&mut buf).unwrap();
     let (_, emits) = ingest_one(resp, flash, &buf[..n]);
     let e = emits.first().expect("a hello request is answered");
-    let reply = Pdu::decode(&e.bytes).expect("the identity reply decodes");
-    assert_eq!(reply.payload.len(), 6, "identity reply shape");
-    reply.payload[5]
+    let reply = Pdu::decode(&e.bytes).expect("the hello reply decodes");
+    assert_eq!(reply.payload.len(), HELLO_REPLY_LEN, "hello reply shape");
+    reply.payload[2]
 }
 
 /// A lone responder booted at a persisted `addr` (the boot-time restore), for the slice tests.
 fn responder_at(addr: u8, flash: &mut TestFlash) -> Responder {
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
     let mut s = Store::mount(flash).unwrap();
     s.set_value(NODE_ADDRESS.key(), Value::U8(addr)).unwrap();
     resp.restore_addr(&s);
@@ -1874,7 +1916,7 @@ fn grants(resp: &mut Responder, flash: &mut TestFlash, n: usize) -> StdVec<u8> {
 #[test]
 fn an_unassigned_node_grants_from_slice_0_and_wraps_there() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
     let g = grants(&mut resp, &mut flash, 10);
     assert_eq!(
         g,
@@ -1912,7 +1954,7 @@ fn the_top_slice_is_seven_addresses_and_never_reaches_broadcast() {
 #[test]
 fn an_assign_moves_the_allocator_to_the_new_slice() {
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
     assert_eq!(grant_guest(&mut resp, &mut flash), 0x80);
 
     let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x02]);
@@ -1936,7 +1978,7 @@ fn every_grant_from_every_node_address_stays_inside_the_guest_range() {
     for addr in 0x00..GUEST_FIRST {
         let mut flash = TestFlash::erased(PS);
         let mut resp = if addr == NO_ADDRESS {
-            Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001)
+            Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR))
         } else {
             responder_at(addr, &mut flash)
         };
@@ -2019,7 +2061,7 @@ fn two_controllers_attached_at_two_nodes_hold_different_guest_addresses() {
     ));
     let grant = |frames: StdVec<StdVec<u8>>| {
         let f = frames.first().expect("the hello is answered").clone();
-        Pdu::decode(&f).unwrap().payload[5]
+        Pdu::decode(&f).unwrap().payload[2]
     };
     let ga = grant(raw_exchange(&mut m, &mut a, &hello));
     let gb = grant(raw_exchange(&mut m, &mut b, &hello));
@@ -2031,8 +2073,7 @@ fn two_controllers_attached_at_two_nodes_hold_different_guest_addresses() {
     // exactly its own reply. (B's link also carries S's neighbour probe, a NODE_HELLO; that is not
     // a reply and is left out.)
     let probe = frame_of(&Pdu::from_op(Opcode::ProbePorts, ga, 0x03, &[]));
-    let class = [store::NODE_CLASS.id(), 0];
-    let read = frame_of(&Pdu::from_op(Opcode::ConfigRead, gb, 0x03, &class));
+    let read = frame_of(&Pdu::from_op(Opcode::Identify, gb, 0x03, &[]));
     a.send(&probe).unwrap();
     b.send(&read).unwrap();
     m.settle();
@@ -2048,46 +2089,7 @@ fn two_controllers_attached_at_two_nodes_hold_different_guest_addresses() {
         got
     };
     assert_eq!(replies(&mut a), [(Opcode::Ports.to_u8(), 0x03, ga)]);
-    assert_eq!(replies(&mut b), [(Opcode::ConfigResp.to_u8(), 0x03, gb)]);
-}
-
-// ---------------------------------------------------------------------------------------------------
-// `node.class` (`specs/l3.md`, "Node class"): read-only, never stored.
-// ---------------------------------------------------------------------------------------------------
-
-#[test]
-fn node_class_reads_motor_controller() {
-    let mut m = walked_pair();
-    for addr in [0x01, 0x02] {
-        let r = m.config_read(addr, store::NODE_CLASS.key());
-        assert_eq!(resp_status(&r), CFG_OK);
-        assert_eq!(resp_value(&r), Some(Value::U8(0x01)));
-    }
-}
-
-#[test]
-fn a_node_class_write_is_refused_read_only_and_touches_no_flash() {
-    let mut m = walked_pair();
-    let before = m.boards[0].flash.bytes.clone();
-
-    let w = m.config_write(0x01, store::NODE_CLASS.key(), Value::U8(0x02));
-    assert_eq!(resp_status(&w), CFG_READ_ONLY);
-    assert_eq!(CFG_READ_ONLY, 6);
-
-    // CONFIG_WRITE_MULTI routes through the same refusal.
-    let multi = [1, store::NODE_CLASS.id(), 0, Type::U8.tag(), 1, 0x02];
-    let r = m
-        .controller_send(Opcode::ConfigWriteMulti.to_u8(), 0x01, &multi)
-        .expect("a CONFIG_RESP");
-    assert_eq!(resp_status(&r), CFG_READ_ONLY);
-
-    assert!(
-        m.boards[0].flash.bytes == before,
-        "a refused write appended nothing"
-    );
-    assert!(!m.boards[0].resp.take_config_persisted());
-    let r = m.config_read(0x01, store::NODE_CLASS.key());
-    assert_eq!(resp_value(&r), Some(Value::U8(0x01)));
+    assert_eq!(replies(&mut b), [(Opcode::Identity.to_u8(), 0x03, gb)]);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -2108,11 +2110,7 @@ fn the_controller_reads_the_neighbour_state_from_bits_0_and_1_only() {
     };
     // Attach to an unassigned gateway, assign it 0x01, and probe it.
     c.next_request().unwrap();
-    c.on_reply(&reply(
-        Opcode::NodeHello,
-        0x00,
-        &[0x00, PROTO_VER, 0, 0, 0x10, 0x80],
-    ));
+    c.on_reply(&reply(Opcode::NodeHello, 0x00, &[0x00, PROTO_VER, 0x80]));
     c.next_request().unwrap();
     c.on_reply(&reply(Opcode::AssignAck, 0x01, &[0x01, STATUS_OK]));
     let probe = c.next_request().unwrap();
@@ -2159,7 +2157,7 @@ fn a_board_never_sets_the_link_group_bit() {
     // A lone 3-port board at 0x01 probed by 0x80: port 0 finds an assigned neighbour, port 1 an
     // unassigned one, port 2 nothing.
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(3, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(3, [PORT_UART; MAX_PORTS], identity(MOTOR));
     let mut s = Store::mount(&mut flash).unwrap();
     s.set_value(NODE_ADDRESS.key(), Value::U8(0x01)).unwrap();
     resp.restore_addr(&s);
@@ -2173,7 +2171,7 @@ fn a_board_never_sets_the_link_group_bit() {
         frame_of(&Pdu::from_op(Opcode::ProbePorts, 0x80, 0x01, &[])),
     );
     let hello_from = |id: u8| {
-        let payload = [id, PROTO_VER, 0, 0, 0x10, NO_ADDRESS];
+        let payload = [id, PROTO_VER, NO_ADDRESS];
         frame_of(&Pdu::from_op(Opcode::NodeHello, id, 0x01, &payload))
     };
     feed(&mut resp, 0, hello_from(0x05));
@@ -2312,7 +2310,7 @@ fn a_tune_pdu_is_handed_back_whether_or_not_the_board_is_armed() {
     // ARMED board hands a TUNE_WRITE straight to the caller that owns the RAM, exactly as a
     // disarmed one does, and no flash path is entered on either.
     let mut flash = TestFlash::erased(PS);
-    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], 0x10, MOTOR, 0x0001);
+    let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
     let key = Key {
         field_id: 0x71,
         index: 0,
@@ -2411,14 +2409,9 @@ fn the_controller_reports_its_grant_only_once_the_hello_is_answered() {
     c.on_reply(&buf[..n]);
     assert_eq!(c.granted(), None);
     // The board 0x01 grants 0x88 from its slice.
-    let n = Pdu::from_op(
-        Opcode::NodeHello,
-        0x01,
-        0x80,
-        &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
-    )
-    .encode(&mut buf)
-    .unwrap();
+    let n = Pdu::from_op(Opcode::NodeHello, 0x01, 0x80, &[0x01, PROTO_VER, 0x88])
+        .encode(&mut buf)
+        .unwrap();
     c.on_reply(&buf[..n]);
     assert_eq!(c.granted(), Some(0x88));
     assert_eq!(c.guest_addr(), 0x88);
@@ -2571,7 +2564,7 @@ fn a_late_ports_from_a_previous_probe_is_ignored() {
         Opcode::NodeHello,
         NO_ADDRESS,
         0x80,
-        &[NO_ADDRESS, PROTO_VER, 0, 0, 0x10, 0x80],
+        &[NO_ADDRESS, PROTO_VER, 0x80],
     )));
     c.next_request().unwrap();
     assert!(c.on_reply(&pdu_bytes(
@@ -2623,7 +2616,7 @@ fn an_assign_ack_naming_another_address_is_ignored() {
         Opcode::NodeHello,
         NO_ADDRESS,
         0x80,
-        &[NO_ADDRESS, PROTO_VER, 0, 0, 0x10, 0x80],
+        &[NO_ADDRESS, PROTO_VER, 0x80],
     )));
     c.next_request().unwrap(); // AssignGateway(0x01)
 
@@ -2684,12 +2677,7 @@ fn a_hello_reply_to_a_stale_guest_address_is_ignored() {
     let mut c = Controller::new();
     let hello = Pdu::decode(&c.next_request().unwrap()).unwrap().src;
     assert_eq!(hello, 0x80);
-    let stale = pdu_bytes(
-        Opcode::NodeHello,
-        0x01,
-        0x81,
-        &[0x01, PROTO_VER, 0, 0, 0x10, 0x89],
-    );
+    let stale = pdu_bytes(Opcode::NodeHello, 0x01, 0x81, &[0x01, PROTO_VER, 0x89]);
     assert!(!c.on_reply(&stale));
     assert_eq!(c.granted(), None);
     assert_eq!(c.guest_addr(), 0x80);
@@ -2699,7 +2687,43 @@ fn a_hello_reply_to_a_stale_guest_address_is_ignored() {
         Opcode::NodeHello,
         0x01,
         0x80,
-        &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
+        &[0x01, PROTO_VER, 0x88],
     )));
+    assert_eq!(c.granted(), Some(0x88));
+}
+
+/// The controller answers a board's probe of its port with the 3 B `NODE_HELLO` reply
+/// (`specs/machine-settings.md` section 6.1), naming its guest address and granting nothing; the
+/// first-contact reply it reads is 3 B too, and a reply of any other length is not one.
+#[test]
+fn the_hello_reply_is_three_bytes_both_ways() {
+    let c = Controller::new();
+    let probe = frame_of(&Pdu::from_op(
+        Opcode::NodeHello,
+        0x01,
+        NO_ADDRESS,
+        &[KIND_PROBE],
+    ));
+    let reply = c.reply_to_probe(&probe).expect("a probe is answered");
+    let p = Pdu::decode(&reply).unwrap();
+    assert_eq!(p.payload, [GUEST_FIRST, PROTO_VER, NO_ADDRESS]);
+    assert_eq!(p.payload.len(), HELLO_REPLY_LEN);
+
+    let mut c = Controller::new();
+    let _ = c.next_request();
+    let long = frame_of(&Pdu::from_op(
+        Opcode::NodeHello,
+        0x01,
+        GUEST_FIRST,
+        &[0x01, PROTO_VER, 0x88, 0],
+    ));
+    assert!(!c.on_reply(&long), "a 4 B reply is not a hello reply");
+    let ok = frame_of(&Pdu::from_op(
+        Opcode::NodeHello,
+        0x01,
+        GUEST_FIRST,
+        &[0x01, PROTO_VER, 0x88],
+    ));
+    assert!(c.on_reply(&ok));
     assert_eq!(c.granted(), Some(0x88));
 }

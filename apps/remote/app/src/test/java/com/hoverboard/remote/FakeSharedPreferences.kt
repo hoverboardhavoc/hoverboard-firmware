@@ -7,7 +7,7 @@ import android.content.SharedPreferences
  * about persistence does not have to boot an Android runtime to construct a
  * [com.hoverboard.remote.ble.LinkSettings].
  *
- * Deliberately only the string operations are real: that is all LinkSettings uses. The rest return
+ * Deliberately only the string and boolean operations are real: that is all LinkSettings uses. The rest return
  * the caller's default rather than throwing, so an accidental new call site shows up as a test
  * behaving oddly rather than as an exception from a stub.
  *
@@ -31,7 +31,7 @@ class FakeSharedPreferences : SharedPreferences {
 
     override fun getFloat(key: String, defValue: Float): Float = defValue
 
-    override fun getBoolean(key: String, defValue: Boolean): Boolean = defValue
+    override fun getBoolean(key: String, defValue: Boolean): Boolean = values[key]?.toBoolean() ?: defValue
 
     override fun contains(key: String): Boolean = values.containsKey(key)
 
@@ -65,7 +65,9 @@ class FakeSharedPreferences : SharedPreferences {
 
         override fun putFloat(key: String, value: Float): SharedPreferences.Editor = this
 
-        override fun putBoolean(key: String, value: Boolean): SharedPreferences.Editor = this
+        override fun putBoolean(key: String, value: Boolean): SharedPreferences.Editor = apply {
+            pending[key] = value.toString()
+        }
 
         override fun remove(key: String): SharedPreferences.Editor = apply { pending[key] = null }
 

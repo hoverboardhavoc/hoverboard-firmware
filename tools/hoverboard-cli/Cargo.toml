@@ -6,7 +6,7 @@ name = "hoverboard-cli"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
-description = "Terminal tool for the hoverboard bridge: scan, info, id, flash (a firmware bundle or an ELF), firmware pack and info, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
+description = "Terminal tool for the hoverboard bridge: commands by noun (board, machine, bridge) for the boards' settings, the machine file, flashing (a firmware bundle or an ELF) and target control over SWD, firmware bundles (pack, info), the bridge's own update and install, and watching and driving the machine, over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
 
 [features]
 default = ["ble"]
@@ -44,7 +44,7 @@ serialport = { version = "4", default-features = false }
 espflash = { version = "~4.6", default-features = false, features = ["serialport"] }
 # `drive` sends its stop frames on Ctrl-C.
 ctrlc = "3"
-# A board's store as a JSON file (`dump`, `apply`, `replace`, `diff`, `fields --json`), in the order
+# A board's store as a JSON file (`board dump`, `apply`, `replace`, `diff`, `board fields --json`), in the order
 # a file gives its keys and the name table gives its fields.
 serde_json = { version = "1", features = ["preserve_order"] }
 # The firmware bundle (specs/firmware-bundle.md): a zip of the image ELFs and a manifest. Stored
