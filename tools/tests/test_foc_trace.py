@@ -4,7 +4,8 @@
 Run: python3 tools/tests/test_foc_trace.py
 
 Covers specs/foc-torque.md section 9, "tools": the decode of CTRL_OBS words 47 to 49 (and the other
-words the sampler prints) out of `hoverboard-cli board read`'s hexdump, the word map against the
+words the sampler prints) out of `hoverboard-cli board read`'s hexdump and out of the sample lines of
+its `--hz` stream (specs/board-route.md section 2), the word map against the
 firmware's own offset pins, the 0x4C read, and the host-side frame arithmetic of `--frame`
 (Clarke, forward Park, the sine table and `angle_path_offset`) against motorcontroller/commutation's check
 values. stdlib only, no hardware.
@@ -94,6 +95,21 @@ class FakeCli:
             err = f"error: no answer from {board}"
             return types.SimpleNamespace(returncode=1, stdout="", stderr=err)
         return types.SimpleNamespace(returncode=2, stdout="", stderr="usage")
+
+
+class FakeStream:
+    """A `hoverboard-cli board read <board> <addr> <len> --hz <n>` process behind a fake popen: one
+    sample line per entry of `samples` (each a bytes value, or a line given as it is), 100 ms
+    apart, then the end of the stream with `said` on stderr."""
+
+    def __init__(self, samples, said="error: no answer from the bridge"):
+        self.samples, self.said, self.argv = samples, said, None
+
+    def __call__(self, argv):
+        self.argv = argv
+        lines = [s if isinstance(s, str) else f"{0.1 * i:.3f} {s.hex()}\n" for i, s in enumerate(self.samples)]
+        return types.SimpleNamespace(stdout=iter(lines), stderr=io.StringIO(self.said),
+                                     wait=lambda: 1, kill=lambda: None)
 
 
 def ram_of(addr, words):
@@ -187,6 +203,31 @@ class Decode(unittest.TestCase):
             returncode=1, stdout="", stderr="error: no answer"))
         with self.assertRaises(RuntimeError):
             failing.read_words(CTRL, 4)
+
+    def test_the_sample_line(self):
+        """`board read --hz`'s line: seconds to the millisecond, then the bytes as hex
+        (tools/hoverboard-cli/src/client.rs, `sample_line`)."""
+        self.assertEqual(ft.parse_sample("1.234 4d4200ff\n", 4), (1.234, b"\x4d\x42\x00\xff"))
+        for bad in ("1.234 4d4200", "1.2 4d4200ff", "4d4200ff", "error: no answer", "1.234 4d4200zz"):
+            with self.assertRaises(RuntimeError, msg=bad):
+                ft.parse_sample(bad, 4)
+
+    def test_one_stream_for_every_sample(self):
+        """The samples come from one `board read --hz` process, whatever the target, with their
+        times as the stream gave them; its end is an error naming what it said."""
+        words = [block(iq=i) for i in range(3)]
+        stream = FakeStream([to_bytes(w) for w in words])
+        b = ft.Bridge("hb", ["--tcp", "x:1"], "5822", popen=stream)
+        got = b.stream_words(CTRL, swdobs.CTRL_OBS_WORDS, 10.0)
+        for i, w in enumerate(words):
+            t, ws = next(got)
+            self.assertAlmostEqual(t, 0.1 * i)
+            self.assertEqual(ws, [x & 0xFFFFFFFF for x in w])
+        with self.assertRaises(RuntimeError) as e:
+            next(got)
+        self.assertIn("no answer from the bridge", str(e.exception))
+        self.assertEqual(stream.argv, ["hb", "--tcp", "x:1", "board", "read", "5822", f"0x{CTRL:08x}",
+                                       str(4 * swdobs.CTRL_OBS_WORDS), "--hz", "10"])
 
     def test_the_cal_read(self):
         cli = FakeCli({}, cal={"left": 455, "low": 40})
@@ -325,29 +366,29 @@ class EndToEnd(unittest.TestCase):
         ram = ram_of(CTRL, words)
         ram.update(ram_of(GAINS, [4000, 1024, 119, 1024, 32767, 32767 * 1024]))
         cli = FakeCli(ram, cal={"0x01": 455})
-
-        class Stop(Exception):
-            pass
-
-        def stop(_secs):
-            raise Stop()
+        stream = FakeStream([to_bytes(words)], said="error: interrupted")
 
         out = io.StringIO()
         with mock.patch.object(ft, "resolve", return_value=(CTRL, GAINS)), \
                 mock.patch.object(ft.subprocess, "run", side_effect=lambda argv, **_: cli(argv)), \
-                mock.patch.object(ft.time, "sleep", side_effect=stop), \
+                mock.patch.object(ft.subprocess, "Popen", side_effect=lambda argv, **_: stream(argv)), \
                 mock.patch.object(ft.signal, "signal"), \
                 contextlib.redirect_stdout(out):
-            with self.assertRaises(Stop):
+            with self.assertRaises(SystemExit) as e:
                 ft.main(["--tcp", "bridge.local:5333", "--board", "0x01", "--cli", "hb",
                          "--frame", "0", "1"])
+        self.assertIn("the board read stream ended: error: interrupted", str(e.exception.code))
         text = out.getvalue()
         self.assertIn(f"FOC_GAINS at 0x{GAINS:08x}", text)
         self.assertIn("kp_divisor 1024", text)
         self.assertIn("motors[0].current.cal (0x4C) on 0x01 = 455", text)
+        # One-shot reads are the gains alone; the samples are the stream's.
         reads = [c for c in cli.calls if "read" in c]
-        self.assertTrue(reads and all(c[3:6] == ["board", "read", "0x01"] for c in reads), reads)
+        self.assertEqual([c[6] for c in reads], [f"0x{GAINS:08x}"], reads)
+        self.assertEqual(stream.argv[3:], ["board", "read", "0x01", f"0x{CTRL:08x}",
+                                           str(4 * swdobs.CTRL_OBS_WORDS), "--hz", "10"])
         row = text.strip().splitlines()[-1].split()
+        self.assertEqual(row[0], "0.0", "the stream's time")
         self.assertEqual(row[1], "-5000")
         self.assertEqual(row[10:16], ["-300", "150", "-12", "430", "430", "420"])
         self.assertEqual(row[19], f"{430 / 455:.2f}")
@@ -357,9 +398,9 @@ class EndToEnd(unittest.TestCase):
     def test_a_wrong_image_is_refused(self):
         words = block()
         words[0] = 0xDEADBEEF
-        cli = FakeCli(ram_of(CTRL, words))
+        stream = FakeStream([to_bytes(words)])
         with mock.patch.object(ft, "resolve", return_value=(CTRL, None)), \
-                mock.patch.object(ft.subprocess, "run", side_effect=lambda argv, **_: cli(argv)), \
+                mock.patch.object(ft.subprocess, "Popen", side_effect=lambda argv, **_: stream(argv)), \
                 contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as e:
                 ft.main(["--tcp", "x:1", "--board", "0x01", "--cal", "455", "--cli", "hb"])
