@@ -196,6 +196,9 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
   cargo --config 'patch."https://github.com/hoverboardhavoc/runtime-hal".runtime-hal.path="../../runtime-hal"' image
   ```
 
+  For `clippy`, put the `--config` after the subcommand (`cargo clippy --config '...'`): placed
+  before it, clippy builds against the git pin and says nothing.
+
   A patched build rewrites the runtime-hal entry in each lockfile it touches to the local path,
   with no `source` line. Afterwards run `git checkout motorcontroller/Cargo.lock` (and
   `shared/Cargo.lock`, `tools/Cargo.lock` or `bridge/Cargo.lock` if the build touched them). A
