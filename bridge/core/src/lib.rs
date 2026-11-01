@@ -20,8 +20,6 @@
 
 pub mod flash;
 pub mod gdb;
-/// The one-off fleet move (`specs/machine-settings.md` section 8); reverted once the fleet moved.
-pub mod keymove;
 pub mod loader;
 pub mod mailbox;
 pub mod node;
