@@ -55,6 +55,7 @@ mod firmware {
 
     use crate::arm;
     use crate::guest_tx::{emit_mailbox_samples, GuestSlots, GuestStaged};
+    use crate::imu_attempts;
     use crate::layout;
     use crate::link_drain::bounded_drain;
     use crate::motor;
@@ -63,7 +64,7 @@ mod firmware {
     use board::status::{Reason, StatusRecord};
     use core::mem::MaybeUninit;
     use core::ptr::{addr_of, addr_of_mut};
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
     use cortex_m::asm::nop;
     use cortex_m::peripheral::syst::SystClkSource;
     use cortex_m_rt::entry;
@@ -393,6 +394,14 @@ mod firmware {
     /// `.bss`, written once on the boot path and read-only thereafter, so the 250 Hz publish
     /// re-publishes the same value every pass.
     static RESET_CAUSE: AtomicU32 = AtomicU32::new(0);
+
+    /// The IMU bring-up's attempt count ([`imu_attempts::ImuAttempts::retries`]): 0 the first probe and init
+    /// answered, 1 the second did after a bus clear, 2 the IMU did not come up. Published as
+    /// `CTRL_OBS` word 51 (`specs/imu-probe-retry.md`).
+    ///
+    /// `.bss`, written once on the boot path, as [`RESET_CAUSE`]. A board that never probed (no IMU
+    /// staged, or a refusal before the bus) reads 0 here; the flags byte's b0 and b6 tell those apart.
+    static IMU_RETRIES: AtomicU8 = AtomicU8::new(0);
 
     // ===================== The stack high-water instrument (`crate::stack_paint`) ================
     //
@@ -1040,6 +1049,12 @@ mod firmware {
         /// calibration's block-pair count this boot, 30 that calibration refused for
         /// disagreement). Live in every method.
         foc_hold: u32,
+        /// Word 51, low byte ([`IMU_RETRIES`]): the boot's IMU attempts, 0 first attempt, 1
+        /// second attempt after a bus clear, 2 not up (`specs/imu-probe-retry.md`). Appended LAST,
+        /// offset-preserving. The bench reads it beside each boot report; nothing else consumes it.
+        imu_retries: u8,
+        /// The rest of word 51, published zero so the word reads clean out of `.uninit`.
+        pad_51: [u8; 3],
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1142,8 +1157,11 @@ mod firmware {
         assert!(offset_of!(CtrlObs, foc_ref_vq) == 0xC4);
         // Word 50: the hold word (round 3).
         assert!(offset_of!(CtrlObs, foc_hold) == 0xC8);
-        // And no tail padding hiding a mis-sized field: 51 words (204 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 51 * 4);
+        // Word 51: the IMU bring-up's attempt count, low byte.
+        assert!(offset_of!(CtrlObs, imu_retries) == 0xCC);
+        assert!(offset_of!(CtrlObs, pad_51) == 0xCD);
+        // And no tail padding hiding a mis-sized field: 52 words (208 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 52 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1288,6 +1306,8 @@ mod firmware {
             addr_of_mut!((*p).foc_ref_vq)
                 .write_volatile(motor::OBS_FOC_REF.load(Ordering::Relaxed));
             addr_of_mut!((*p).foc_hold).write_volatile(motor::OBS_FOC_HOLD.load(Ordering::Relaxed));
+            addr_of_mut!((*p).imu_retries).write_volatile(IMU_RETRIES.load(Ordering::Relaxed));
+            addr_of_mut!((*p).pad_51).write_volatile([0; 3]);
         }
     }
 
@@ -1782,15 +1802,25 @@ mod firmware {
             }
         };
         let mut dev = imu::Imu::new(model, cfg);
-        if dev.probe(&mut bus).is_ok() && dev.init(&mut bus).is_ok() {
-            // The caller-owned post-init settle (specs/imu.md; the imu-bench pause) before the
-            // first cyclic read.
-            cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * IMU_SETTLE_MS);
-            (Some(bus), Some(dev))
-        } else {
-            // The IMU did not answer its probe: NotUp with detail 0.
-            status.record(scl_id, 0, Reason::NotUp, 0);
-            (None, None)
+        // Probe and init at most twice, with a bus clear between (`specs/imu-probe-retry.md`): a
+        // warm reset taken while the IMU drove SDA can fail the first probe and no later one.
+        let attempts = imu_attempts::run(
+            &mut bus,
+            |bus| dev.probe(bus).is_ok() && dev.init(bus).is_ok(),
+            I2c::bus_clear,
+        );
+        IMU_RETRIES.store(attempts.retries(), Ordering::Relaxed);
+        match attempts.not_up_detail(|e| e.code()) {
+            None => {
+                // The caller-owned post-init settle (specs/imu.md; the imu-bench pause) before the
+                // first cyclic read.
+                cortex_m::asm::delay((CLOCK.sysclk_hz / 1000) * IMU_SETTLE_MS);
+                (Some(bus), Some(dev))
+            }
+            Some(detail) => {
+                status.record(scl_id, 0, Reason::NotUp, detail);
+                (None, None)
+            }
         }
     }
 
@@ -3031,6 +3061,158 @@ mod firmware {
     fn halt() -> ! {
         loop {
             nop();
+        }
+    }
+}
+
+/// The IMU's boot probe and init, at most twice with a bus clear between
+/// (`specs/imu-probe-retry.md`), factored out of the target-only `bring_up_imu` over closures so the
+/// attempt logic is host-testable against a fake bus. Compiled on all targets for the host test run;
+/// `allow(dead_code)` because its one caller is target-only (the same reason as [`probe_window`]).
+#[allow(dead_code)]
+mod imu_attempts {
+    /// What the attempts came to.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ImuAttempts<E> {
+        /// Probe and init both answered, on the first attempt (0) or the second (1).
+        Up(u8),
+        /// Both attempts failed: `NotUp`, detail 0.
+        Down,
+        /// The bus clear between the attempts failed (`BusHeld`); no second attempt ran.
+        ClearFailed(E),
+    }
+
+    impl<E> ImuAttempts<E> {
+        /// The `CTRL_OBS` word-51 count: 0 or 1 when the IMU came up, 2 when it did not (both
+        /// attempts failed, or the clear between them did).
+        pub fn retries(&self) -> u8 {
+            match self {
+                ImuAttempts::Up(n) => *n,
+                ImuAttempts::Down | ImuAttempts::ClearFailed(_) => 2,
+            }
+        }
+
+        /// The `NotUp` status detail when the IMU did not come up, `None` when it did: 0 for an
+        /// IMU that did not answer either attempt, the HAL's error `code` for a failed clear.
+        /// `inline(always)`: outlined, this one match at its one call site cost 44 B of flash.
+        #[inline(always)]
+        pub fn not_up_detail(&self, code: impl FnOnce(&E) -> u8) -> Option<u8> {
+            match self {
+                ImuAttempts::Up(_) => None,
+                ImuAttempts::Down => Some(0),
+                ImuAttempts::ClearFailed(e) => Some(code(e)),
+            }
+        }
+    }
+
+    /// Run `attempt` (probe, then init; `true` when both succeed) on `bus`; on failure run `clear`
+    /// once and, if it succeeds, `attempt` once more. One call site for `attempt`, so the probe and
+    /// init it inlines are in the image once.
+    pub fn run<B, E>(
+        bus: &mut B,
+        mut attempt: impl FnMut(&mut B) -> bool,
+        mut clear: impl FnMut(&mut B) -> Result<(), E>,
+    ) -> ImuAttempts<E> {
+        let mut retries = 0;
+        loop {
+            if attempt(bus) {
+                return ImuAttempts::Up(retries);
+            }
+            if retries == 1 {
+                return ImuAttempts::Down;
+            }
+            if let Err(e) = clear(bus) {
+                return ImuAttempts::ClearFailed(e);
+            }
+            retries = 1;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{run, ImuAttempts};
+
+        /// The bus `bring_up_imu` drives, faked: whether each attempt answers, in order, whether
+        /// the clear reports a held line, and what was asked of it.
+        struct FakeBus {
+            answers: &'static [bool],
+            held: bool,
+            probes: usize,
+            clears: usize,
+        }
+
+        impl FakeBus {
+            fn new(answers: &'static [bool], held: bool) -> Self {
+                FakeBus {
+                    answers,
+                    held,
+                    probes: 0,
+                    clears: 0,
+                }
+            }
+
+            fn attempt(&mut self) -> bool {
+                let ok = self.answers[self.probes];
+                self.probes += 1;
+                ok
+            }
+
+            fn clear(&mut self) -> Result<(), &'static str> {
+                self.clears += 1;
+                if self.held {
+                    Err("BusHeld")
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        fn run_on(bus: &mut FakeBus) -> ImuAttempts<&'static str> {
+            run(bus, FakeBus::attempt, FakeBus::clear)
+        }
+
+        #[test]
+        fn a_first_attempt_that_answers_is_one_probe_and_no_clear() {
+            let mut bus = FakeBus::new(&[true], false);
+            let r = run_on(&mut bus);
+            assert_eq!(r, ImuAttempts::Up(0));
+            assert_eq!(r.retries(), 0);
+            assert_eq!(r.not_up_detail(|_| 0x88), None);
+            assert_eq!((bus.probes, bus.clears), (1, 0));
+        }
+
+        #[test]
+        fn a_second_attempt_that_answers_is_one_clear_and_count_one() {
+            let mut bus = FakeBus::new(&[false, true], false);
+            let r = run_on(&mut bus);
+            assert_eq!(r, ImuAttempts::Up(1));
+            assert_eq!(r.retries(), 1);
+            assert_eq!(r.not_up_detail(|_| 0x88), None);
+            assert_eq!((bus.probes, bus.clears), (2, 1));
+        }
+
+        #[test]
+        fn both_attempts_failing_is_down_and_count_two() {
+            let mut bus = FakeBus::new(&[false, false], false);
+            let r = run_on(&mut bus);
+            assert_eq!(r, ImuAttempts::Down);
+            assert_eq!(r.retries(), 2);
+            assert_eq!(r.not_up_detail(|_| 0x88), Some(0), "NotUp, detail 0");
+            assert_eq!((bus.probes, bus.clears), (2, 1));
+        }
+
+        #[test]
+        fn a_held_bus_after_the_clear_gives_up_without_a_second_probe() {
+            let mut bus = FakeBus::new(&[false], true);
+            let r = run_on(&mut bus);
+            assert_eq!(r, ImuAttempts::ClearFailed("BusHeld"));
+            assert_eq!(r.retries(), 2);
+            assert_eq!(
+                r.not_up_detail(|e| if *e == "BusHeld" { 0x88 } else { 0 }),
+                Some(0x88),
+                "NotUp with the clear's error"
+            );
+            assert_eq!((bus.probes, bus.clears), (1, 1));
         }
     }
 }
