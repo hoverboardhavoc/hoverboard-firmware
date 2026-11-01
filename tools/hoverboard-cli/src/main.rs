@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use espsvc::FAMILY_F1X0;
 use net::pdu::NO_ADDRESS;
-use net::walk::CLASS_BRIDGE;
+use net::walk::{Controller, CLASS_BRIDGE};
 
 use hoverboard_cli::cli::{self, Command, Link, Mode, Noun, Swd};
 use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
@@ -519,7 +519,13 @@ fn attach(wire: &mut impl Wire) -> Result<guest::Attached, String> {
 
 /// Walk the machine, then ask every node's `IDENTITY` and read its name.
 fn walk(wire: &mut impl Wire) -> Result<Walked, String> {
-    let w = nodes::walk_all(wire)?;
+    let started = nodes::start(wire)?;
+    walk_on(wire, started)
+}
+
+/// [`walk`] on from the start `nodes::start` made.
+fn walk_on(wire: &mut impl Wire, started: Controller) -> Result<Walked, String> {
+    let w = nodes::finish(wire, started)?;
     eprintln!("walked {} nodes as guest {:#04x}", w.found.len(), w.src);
     Ok(w)
 }
@@ -564,21 +570,7 @@ fn reach(wire: &mut impl Wire, spec: &str, noun: Noun) -> Result<(u8, Found), St
     let (src, f) = match target::parse(spec)? {
         Target::Address(addr) => {
             let src = attach(wire)?.guest;
-            let identity = nodes::identify(wire, src, addr).map_err(|_| no_answer(addr))?;
-            let name = nodes::read(wire, src, addr, store::DEVICE_NAME.key())
-                .ok()
-                .and_then(|r| match r.value() {
-                    Some(store::Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
-                    _ => None,
-                });
-            (
-                src,
-                Found {
-                    addr,
-                    identity: Some(identity),
-                    name,
-                },
-            )
+            (src, found_at(wire, src, addr)?)
         }
         Target::Lookup(_) => {
             let w = walk(wire)?;
@@ -588,6 +580,22 @@ fn reach(wire: &mut impl Wire, spec: &str, noun: Noun) -> Result<(u8, Found), St
     };
     check_class(&f, noun)?;
     Ok((src, f))
+}
+
+/// The node at `addr` as its `IDENTITY` and `device.name` give it, asked from `src`.
+fn found_at(wire: &mut impl Wire, src: u8, addr: u8) -> Result<Found, String> {
+    let identity = nodes::identify(wire, src, addr).map_err(|_| no_answer(addr))?;
+    let name = nodes::read(wire, src, addr, store::DEVICE_NAME.key())
+        .ok()
+        .and_then(|r| match r.value() {
+            Some(store::Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+            _ => None,
+        });
+    Ok(Found {
+        addr,
+        identity: Some(identity),
+        name,
+    })
 }
 
 /// The client for a bridge command to the bridge `spec` names. An address needs no walk: the
@@ -814,14 +822,46 @@ fn listen(wire: &mut impl Wire) -> Tally {
 }
 
 /// The client to the bridge wired to the board `spec` names, for its SWD commands; `erase` asks for
-/// the board's own bridge. The walk, the board, the bridge's address and its mailbox port.
+/// the board's own bridge. The tool's guest address, the board, the bridge's address and its
+/// mailbox port.
+///
+/// An address the attached bridge's `PROBE_PORTS` names on its mailbox goes straight through that
+/// bridge, with no walk (`specs/machine-settings.md` section 6.3): a `board read` costs an attach,
+/// one `PROBE_PORTS` and the read. Only `erase` asks that board its `IDENTITY` and name, for its
+/// lines. Anything else walks on from the same start.
 fn swd_route(
     link: &Link,
     spec: &str,
     erase: bool,
-) -> Result<(EspClient, Walked, Found, u8, u8), String> {
+) -> Result<(EspClient, u8, Found, u8, u8), String> {
+    let target = target::parse(spec)?;
     let mut wire = wire_on(link)?;
-    let w = walk(&mut wire)?;
+    let started = nodes::start(&mut wire)?;
+    if let Target::Address(addr) = target {
+        if let Some((bridge, port)) = target::wired_here(&started, addr) {
+            let src = started.guest_addr();
+            let board = if erase {
+                let f = found_at(&mut wire, src, addr)?;
+                check_class(&f, Noun::Board)?;
+                f
+            } else {
+                Found {
+                    addr,
+                    identity: None,
+                    name: None,
+                }
+            };
+            eprintln!("{addr:#04x} is on the mailbox of bridge {bridge:#04x}, guest {src:#04x}");
+            return Ok((
+                Client::addressed(wire, src, NO_ADDRESS),
+                src,
+                board,
+                bridge,
+                port,
+            ));
+        }
+    }
+    let w = walk_on(&mut wire, started)?;
     let board = target::at(&w.found, target::resolve(spec, &w.found)?)?.clone();
     check_class(&board, Noun::Board)?;
     let (bridge, port) = if erase {
@@ -835,18 +875,18 @@ fn swd_route(
         bridge
     };
     let c = Client::addressed(wire, w.src, dst);
-    Ok((c, w, board, bridge, port))
+    Ok((c, w.src, board, bridge, port))
 }
 
 /// `board erase` (`specs/hoverboard-bridge.md`, "Erasing the store"): print what the erase loses
 /// that a dump leaves out, ask, send `STORE_ERASE` through the board's own bridge, wait for the
 /// board's mailbox, and give the board its old address back out the bridge's mailbox port.
 fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
-    let (mut c, w, board, bridge, mailbox) = swd_route(link, spec, true)?;
+    let (mut c, src, board, bridge, mailbox) = swd_route(link, spec, true)?;
     let name = node_name(&board);
     let mut on = Board {
         wire: c.wire(),
-        src: w.src,
+        src,
         dst: board.addr,
         name: name.clone(),
         class: CLASS_MOTOR,
@@ -876,7 +916,7 @@ fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
         ));
     }
     println!("erased");
-    let line = erase::restore(c.wire(), w.src, bridge, mailbox, &name, &reads)?;
+    let line = erase::restore(c.wire(), src, bridge, mailbox, &name, &reads)?;
     println!("{line}");
     Ok(())
 }

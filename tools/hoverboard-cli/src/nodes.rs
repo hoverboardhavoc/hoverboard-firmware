@@ -93,9 +93,20 @@ pub struct Walked {
     pub topology: Topology,
 }
 
-/// Walk the machine, then ask every node its `IDENTITY` and read its name ([`survey`]).
-pub fn walk_all<W: Wire>(wire: &mut W) -> Result<Walked, String> {
-    let c = walk(wire)?;
+/// The walk's first two exchanges and no more: first contact, then the attached node's own
+/// `PROBE_PORTS`. An attached node with no address stops after the first, since the walk's next
+/// request would assign it. What the reply placed is enough to tell the board on the attached
+/// bridge's mailbox (`target::wired_here`); [`finish`] walks on from here.
+pub fn start<W: Wire>(wire: &mut W) -> Result<Controller, String> {
+    walk_until(wire, Controller::new(), REPLY_WAIT, |c, replies| {
+        replies >= 2 || (replies == 1 && c.gateway_addr().is_none())
+    })
+}
+
+/// The rest of the walk [`start`] began, then ask every node its `IDENTITY` and read its name
+/// ([`survey`]).
+pub fn finish<W: Wire>(wire: &mut W, c: Controller) -> Result<Walked, String> {
+    let c = walk_until(wire, c, REPLY_WAIT, |_, _| false)?;
     Ok(Walked {
         src: c.guest_addr(),
         found: survey(wire, &c),
@@ -164,9 +175,20 @@ pub fn walk<W: Wire>(wire: &mut W) -> Result<Controller, String> {
 /// the outstanding request's reply (telemetry, a duplicate or late reply) is dropped here; the
 /// walk runs before `watch` and `drive` start counting.
 fn walk_within<W: Wire>(wire: &mut W, reply_wait: Duration) -> Result<Controller, String> {
-    let mut c = Controller::new();
+    walk_until(wire, Controller::new(), reply_wait, |_, _| false)
+}
+
+/// Walk on from `c` until it is complete or `stop` says so, given the controller and how many
+/// replies this call has taken.
+fn walk_until<W: Wire>(
+    wire: &mut W,
+    mut c: Controller,
+    reply_wait: Duration,
+    stop: impl Fn(&Controller, u32) -> bool,
+) -> Result<Controller, String> {
     let mut last: Option<(Vec<u8>, Instant, u32)> = None;
-    while !c.is_complete() {
+    let mut replies = 0;
+    while !c.is_complete() && !stop(&c, replies) {
         if let Some(req) = c.next_request() {
             wire.send(&req);
             last = Some((req.to_vec(), Instant::now(), 1));
@@ -176,6 +198,7 @@ fn walk_within<W: Wire>(wire: &mut W, reply_wait: Duration) -> Result<Controller
                 wire.send(&r);
             } else if c.on_reply(&pkt) {
                 last = None;
+                replies += 1;
             }
         }
         if let Some((req, at, tries)) = last.as_mut() {
@@ -433,7 +456,7 @@ pub fn parse_key(s: &str) -> Result<Key, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use net::walk::{NB_ASSIGNED, PORT_UART, PROTO_VER};
+    use net::walk::{NB_ASSIGNED, NB_EMPTY, PORT_BLE, PORT_SWD, PORT_UART, PROTO_VER};
     use std::collections::VecDeque;
 
     /// One board at `0x01` behind a link that streams telemetry without pause and loses the
@@ -496,5 +519,119 @@ mod tests {
         assert_eq!(wire.probes, 2, "the probe was resent once");
         assert_eq!(c.assigned_addrs().to_vec(), [0x01]);
         assert_eq!(c.guest_addr(), 0x88);
+    }
+
+    /// A bridge on the tool's link holding `addr` (`NO_ADDRESS` for none): `NODE_HELLO` granting
+    /// guest `0x88`, its own `PROBE_PORTS` answered with `ports`, and any other node's with no
+    /// ports. Counts the requests by opcode.
+    struct Bridge {
+        addr: u8,
+        ports: Vec<u8>,
+        replies: VecDeque<Vec<u8>>,
+        sent: Vec<Opcode>,
+    }
+
+    impl Bridge {
+        /// A bridge at `0x03`: BLE empty, the mailbox (port 1) neighbour `swd`, the tool on its
+        /// console.
+        fn at_0x03(swd: (u8, u8)) -> Self {
+            Bridge {
+                addr: 0x03,
+                ports: vec![
+                    3,
+                    0,
+                    PORT_BLE,
+                    NB_EMPTY,
+                    0,
+                    1,
+                    PORT_SWD,
+                    swd.0,
+                    swd.1,
+                    2,
+                    PORT_UART,
+                    NB_ASSIGNED,
+                    0x88,
+                ],
+                replies: VecDeque::new(),
+                sent: Vec::new(),
+            }
+        }
+    }
+
+    impl Wire for Bridge {
+        fn send(&mut self, pdu: &[u8]) {
+            let p = Pdu::decode(pdu).unwrap();
+            let op = p.known().unwrap();
+            self.sent.push(op);
+            let reply = match op {
+                Opcode::NodeHello => encode(
+                    Opcode::NodeHello.to_u8(),
+                    self.addr,
+                    p.src,
+                    &[self.addr, PROTO_VER, 0x88],
+                ),
+                Opcode::ProbePorts if p.dst == self.addr => {
+                    encode(Opcode::Ports.to_u8(), self.addr, p.src, &self.ports)
+                }
+                Opcode::ProbePorts => encode(Opcode::Ports.to_u8(), p.dst, p.src, &[0]),
+                _ => return,
+            };
+            self.replies.push_back(reply);
+        }
+        fn recv(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+            self.replies.pop_front()
+        }
+        fn window(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn start_stops_at_the_attached_bridges_ports_and_names_the_board_on_its_mailbox() {
+        let mut wire = Bridge::at_0x03((NB_ASSIGNED, 0x01));
+        let c = start(&mut wire).unwrap();
+        assert_eq!(wire.sent, [Opcode::NodeHello, Opcode::ProbePorts]);
+        assert_eq!(crate::target::wired_here(&c, 0x01), Some((0x03, 1)));
+        // Another address, the bridge's own and the tool's are not on its mailbox.
+        for other in [0x02, 0x03, 0x88] {
+            assert_eq!(crate::target::wired_here(&c, other), None, "{other:#04x}");
+        }
+    }
+
+    #[test]
+    fn a_mailbox_with_no_neighbour_names_no_board_and_the_walk_goes_on_from_the_start() {
+        for swd in [(NB_EMPTY, 0), (net::walk::NB_UNASSIGNED, 0)] {
+            let mut wire = Bridge::at_0x03(swd);
+            let c = start(&mut wire).unwrap();
+            assert_eq!(crate::target::wired_here(&c, 0x01), None, "{swd:?}");
+        }
+        // Another board on the mailbox: no route to 0x01, and finishing probes that board without
+        // a second first contact.
+        let mut wire = Bridge::at_0x03((NB_ASSIGNED, 0x02));
+        let c = start(&mut wire).unwrap();
+        assert_eq!(crate::target::wired_here(&c, 0x01), None);
+        let w = finish(&mut wire, c).unwrap();
+        let addrs: Vec<u8> = w.found.iter().map(|f| f.addr).collect();
+        assert_eq!(addrs, [0x02, 0x03]);
+        assert_eq!(
+            wire.sent[..3],
+            [Opcode::NodeHello, Opcode::ProbePorts, Opcode::ProbePorts]
+        );
+        assert_eq!(
+            wire.sent
+                .iter()
+                .filter(|&&o| o == Opcode::NodeHello)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn start_sends_nothing_after_first_contact_with_a_node_holding_no_address() {
+        let mut wire = Bridge::at_0x03((NB_ASSIGNED, 0x01));
+        wire.addr = NO_ADDRESS;
+        let c = start(&mut wire).unwrap();
+        assert_eq!(wire.sent, [Opcode::NodeHello]);
+        assert_eq!(crate::target::wired_here(&c, 0x01), None);
     }
 }

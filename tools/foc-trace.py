@@ -5,9 +5,11 @@ The bench sampler of specs/foc-torque.md sections 7 and 10. The rover and the of
 reached only through their bridges (specs/hoverboard-bridge.md; the OpenOCD tools do not reach
 them), so this polls `hoverboard-cli board read <board>` of the whole CTRL_OBS block, at up to
 10 Hz, and never halts the core: the bridge wired to the board reads RAM through the MEM-AP exactly
-as tools/motor-trace.py's OpenOCD does. Each `board read` walks the machine to find that bridge
-(specs/machine-settings.md section 6.3), so a sample costs a walk and the rate the bench reaches is
-well below 10 Hz.
+as tools/motor-trace.py's OpenOCD does. Given the board's address over the board's own bridge, each
+`board read` is an attach, one PROBE_PORTS and the read, with no walk (specs/machine-settings.md
+section 6.3). The bridge answers PROBE_PORTS only when its half-second probe window closes, so a
+sample still costs over 0.5 s and the rate stays below 2 Hz. A name, a uid prefix, or a board on
+another bridge walks the machine for every sample, which is slower again.
 
 Usage:
     tools/foc-trace.py --tcp HOST:PORT --board BOARD [--cal COUNTS] [--hz 10]

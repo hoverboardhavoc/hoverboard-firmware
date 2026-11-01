@@ -668,6 +668,12 @@ fn a_fresh_bridge_in_front_of_an_addressed_pair_ends_at_0x03_and_the_boards_keep
     assert_eq!(m.ctrl.ctrl.port_of_kind(0x01, PORT_SWD), Some(0));
     assert_eq!(m.ctrl.ctrl.port_of_kind(0x02, PORT_BLE), Some(2));
     assert_eq!(m.ctrl.ctrl.port_of_kind(0x7E, PORT_SWD), None);
+    // The neighbour each port holds: the master on the bridge's mailbox, the slave on the
+    // master's link; nothing for the console (a controller) or for the master's link back.
+    assert_eq!(m.ctrl.ctrl.neighbour_on(0x03, 1), Some(0x01));
+    assert_eq!(m.ctrl.ctrl.neighbour_on(0x01, 1), Some(0x02));
+    assert_eq!(m.ctrl.ctrl.neighbour_on(0x03, 2), None);
+    assert_eq!(m.ctrl.ctrl.neighbour_on(0x01, 0), None);
 
     // Each node reports its class: 2 for the bridge, 1 for the boards.
     for (addr, class) in [(0x03, CLASS_BRIDGE), (0x01, MOTOR), (0x02, MOTOR)] {

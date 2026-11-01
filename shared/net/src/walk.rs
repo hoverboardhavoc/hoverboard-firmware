@@ -1171,6 +1171,17 @@ impl Controller {
         v
     }
 
+    /// The node the walk placed on port `port` of the node at `addr`, reached through it; `None`
+    /// when that port's neighbour was not placed (nothing wired, unassigned, a controller, or the
+    /// link back to `addr`'s own relay). A bridge's [`PORT_SWD`] neighbour is the board on its
+    /// mailbox, which is how `hoverboard-cli` sends an SWD command to an address with no walk.
+    pub fn neighbour_on(&self, addr: u8, port: u8) -> Option<u8> {
+        self.assigned
+            .iter()
+            .find(|p| p.relay == addr && p.egress == port)
+            .map(|p| p.addr)
+    }
+
     /// The first port of the node at `addr` whose medium is `kind` ([`PORT_SWD`], [`PORT_UART`],
     /// [`PORT_BLE`]), as its `PORTS` reply reported it; `None` for a node not probed or with no
     /// such port. A bridge's mailbox is its [`PORT_SWD`] port: the egress `hoverboard-cli

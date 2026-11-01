@@ -2,7 +2,7 @@
 //! else an exact `device.name`, else a prefix of a node's factory unique ID; and, for a board, the
 //! bridge wired to it, which carries the commands that use SWD.
 
-use net::walk::{CLASS_BRIDGE, CLASS_MOTOR, UID_LEN};
+use net::walk::{Controller, CLASS_BRIDGE, CLASS_MOTOR, PORT_SWD, UID_LEN};
 
 use crate::nodes::{class_name, uid_hex, Found, Topology};
 
@@ -150,6 +150,17 @@ pub fn wired_bridge(found: &[Found], topo: &Topology, board: u8) -> Result<(u8, 
         .mailbox(bridge.addr)
         .ok_or_else(|| format!("{} reported no mailbox port", label(bridge)))?;
     Ok((bridge.addr, port))
+}
+
+/// The bridge an SWD command to the address `board` goes through without a walk
+/// (`specs/machine-settings.md` section 6.3): the attached node and its mailbox port, when
+/// [`crate::nodes::start`]'s `PROBE_PORTS` reply named `board` on that node's [`PORT_SWD`] port.
+/// `None` sends the command the walked way ([`wired_bridge`]). The attached node is the one this
+/// link reaches, so the route also passes [`erase_bridge`]'s rule.
+pub fn wired_here(started: &Controller, board: u8) -> Option<(u8, u8)> {
+    let node = started.gateway_addr()?;
+    let port = started.port_of_kind(node, PORT_SWD)?;
+    (started.neighbour_on(node, port) == Some(board)).then_some((node, port))
 }
 
 /// The bridge `board erase` goes through: the board's own bridge, which has to be the node this

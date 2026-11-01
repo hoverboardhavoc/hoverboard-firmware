@@ -981,6 +981,63 @@ fn erase_store_prints_what_a_dump_leaves_out_refuses_without_a_terminal_and_eras
     );
 }
 
+#[test]
+fn an_swd_command_to_an_address_on_the_connected_bridges_mailbox_skips_the_walk() {
+    // `specs/machine-settings.md` section 6.3: the tool attaches, sends the bridge one
+    // `PROBE_PORTS`, and when its mailbox neighbour is the address sends the command straight
+    // through it. Another address, a name and a `uid` prefix walk.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 7));
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+
+    // The walk gives the fresh bridge its address, 0x03.
+    let (code, _, err) = run(&["machine", "nodes"]);
+    assert_eq!(code, Some(0), "{err}");
+    let (code, _, err) = run(&["board", "target-id", "0x01"]);
+    assert_eq!(code, Some(0), "{err}");
+    // The slave is not on the bridge's mailbox: walked, and refused as before.
+    let (code, _, err) = run(&["board", "target-id", "0x02"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("no bridge is wired to 0x02"), "{err}");
+    let (code, _, err) = run(&["board", "set", "0x01", "device.name", "rover-left"]);
+    assert_eq!(code, Some(0), "{err}");
+    let (code, _, err) = run(&["board", "target-id", "rover-left"]);
+    assert_eq!(code, Some(0), "{err}");
+    let (code, _, err) = run(&["board", "target-id", "01010101"]);
+    assert_eq!(code, Some(0), "{err}");
+    // board erase through the same check: the address's own bridge, with no walk.
+    let (code, out, err) = run(&["board", "erase", "0x01", "--yes"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.starts_with("rover-left: node.address = 1"), "{out}");
+    assert!(out.ends_with("erased\nnode.address 1 restored\n"), "{out}");
+
+    let after = server.join().unwrap();
+    let probe = net::pdu::Opcode::ProbePorts.to_u8();
+    let identify = net::pdu::Opcode::Identify.to_u8();
+    let probes: Vec<usize> = after
+        .ops
+        .iter()
+        .map(|o| o.iter().filter(|&&op| op == probe).count())
+        .collect();
+    // The straight connections send one `PROBE_PORTS`; the walked ones probe the bridge and both
+    // boards, the first walk once more as the fresh bridge moves to 0x03, and the `board set` by
+    // address sends none.
+    assert_eq!(probes, [4, 1, 3, 0, 3, 3, 1], "{:02x?}", after.ops);
+    assert!(!after.ops[1].contains(&identify), "{:02x?}", after.ops[1]);
+    assert_eq!(
+        after.ops[6].iter().filter(|&&op| op == identify).count(),
+        1,
+        "erase asks the board alone: {:02x?}",
+        after.ops[6]
+    );
+    assert!(after.ops[6].contains(&espsvc::OP_STORE_ERASE));
+}
+
 /// A `CYCLIC_STATE` PDU from board `src` with `fault`, `flags` and the machine digest `machine`,
 /// every other word zero, as a board sends it to `0x00` on its mailbox.
 fn cyclic(src: u8, fault: u16, flags: u8, machine: u16) -> Vec<u8> {
