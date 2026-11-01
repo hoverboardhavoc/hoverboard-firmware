@@ -1,0 +1,12 @@
+# No default target: `cargo test -p handheld-core --target <host>` builds the core for the host,
+# and `cargo image` builds the firmware for the ESP32 (source ~/export-esp.sh first; it puts the
+# Xtensa GCC linker on the path).
+[alias]
+image = "build --release -Zbuild-std=core,alloc --target xtensa-esp32-none-elf"
+
+[target.xtensa-esp32-none-elf]
+rustflags = [
+  "-C", "link-arg=-nostartfiles",
+  # Required to obtain backtraces (esp-backtrace).
+  "-C", "force-frame-pointers",
+]

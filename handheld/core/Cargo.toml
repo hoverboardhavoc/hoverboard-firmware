@@ -1,0 +1,15 @@
+[package]
+name = "handheld-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The hardware-free half of the handheld remote (specs/handheld-remote.md): the L2 byte adapter, the walk session, the touch classifier and lift state machine, the throttle mapping, the arm rules, the pump, the readings and the layout. no_std, host-tested."
+
+[dependencies]
+link = { path = "../../shared/link" }
+net = { path = "../../shared/net" }
+linkctl = { path = "../../shared/linkctl" }
+store = { path = "../../shared/store" }
+base = { path = "../../shared/base" }
+heapless = "0.8"
+embedded-io = "0.6"

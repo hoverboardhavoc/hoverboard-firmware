@@ -1,0 +1,60 @@
+# The handheld remote (`specs/handheld-remote.md`): a Ride screen on the ESP32-2432S028R "Cheap
+# Yellow Display", a BLE central to one hoverboard bridge. The binary package is the hardware half;
+# `core` (`handheld-core`) is the hardware-free half, host-tested.
+[workspace]
+resolver = "2"
+members = ["core"]
+
+[package]
+name = "handheld"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Handheld remote firmware for the ESP32 Cheap Yellow Display (specs/handheld-remote.md): BLE central to a hoverboard bridge, the Ride view, BOOT to arm, a relative whole-screen throttle."
+
+[[bin]]
+name = "handheld"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+handheld-core = { path = "core" }
+net = { path = "../shared/net" }
+linkctl = { path = "../shared/linkctl" }
+# The bridge's GATT link UUIDs only.
+espsvc = { path = "../shared/espsvc" }
+esp-hal = { version = "1.0.0", features = ["esp32", "unstable"] }
+esp-radio = { version = "0.17.0", features = ["esp32", "ble", "unstable"] }
+esp-rtos = { version = "0.2.0", features = ["esp32", "embassy", "esp-alloc", "esp-radio"] }
+esp-alloc = "0.9.0"
+esp-backtrace = { version = "0.18.1", features = ["esp32", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32"] }
+esp-println = { version = "0.16.0", features = ["esp32"] }
+embassy-executor = "0.9"
+embassy-time = "0.5"
+embassy-sync = "0.7"
+embassy-futures = "0.1"
+trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "94e15ffe139bc992c1a8b4c34c1fd6a6359356ef", features = ["default-packet-pool-mtu-255", "scan", "gatt-client-notification-queue-size-16"] }
+static_cell = "2.1"
+heapless = "0.8"
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+
+# The bridge's revisions (`bridge/Cargo.toml`): the fork's one commit bumps esp-radio's bt-hci to
+# the version this trouble-host rev speaks.
+[patch.crates-io]
+esp-alloc = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-backtrace = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-bootloader-esp-idf = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-hal = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-println = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-radio = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-rtos = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
