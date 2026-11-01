@@ -308,11 +308,10 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "embedded-hal 1.0.0",
+ "hal",
  "imu",
  "panic-halt",
- "runtime-hal",
  "test-shared",
- "vectors",
 ]
 
 [[package]]
@@ -329,11 +328,10 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "embedded-io",
+ "hal",
  "link",
  "panic-halt",
- "runtime-hal",
  "test-shared",
- "vectors",
 ]
 
 [[package]]
@@ -614,11 +612,10 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "hal",
  "panic-halt",
- "runtime-hal",
  "scheduler",
  "test-shared",
- "vectors",
 ]
 
 [[package]]

@@ -2,9 +2,10 @@
 //! `specs/silicon-queue.md` section 2).
 //!
 //! Target: the bench F130 slave with the clone IMU (`imu::CLONE_2E`, WHO_AM_I `0x2E`) on hardware
-//! **I2C0 PB6/PB7** (AF1 on the F1x0; the silicon-proven mux). The image, in order:
+//! **I2C0 PB6/PB7** (AF1 on the F1x0; the silicon-proven mux). One image per chip on the `hal`
+//! crate (the `gd32f130c8` or `gd32f103c8` feature, with `hardware`). The image, in order:
 //!
-//! 1. `detect_chip`, bring up the production 72 MHz tree (`ClockConfig::REFERENCE_72M_IRC8M`).
+//! 1. `Chip::take`, bring up the production 72 MHz tree (`ClockConfig::REFERENCE_72M_IRC8M`).
 //! 2. Bring up I2C0 on PB6/PB7 at 400 kHz fast mode (the production rate, `specs/imu.md`; at
 //!    72 MHz APB1 = 36 MHz, so I2CCLK = 0x24 / RT = 0x0B / CKCFG = 0x801E per `timing_for`).
 //! 3. `Imu::probe` as `CLONE_2E` (records WHO_AM_I + probe verdict; an identity mismatch records
@@ -38,16 +39,14 @@ mod firmware {
     use cortex_m::peripheral::SYST;
     use cortex_m_rt::entry;
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
-    // which cortex-m-rt no longer provides once its `device` feature is on.
-    use vectors as _;
 
     use attitude::Mahony;
-    use embedded_hal::delay::DelayNs;
+    use cortex_m::delay::Delay;
     use embedded_hal::i2c::I2c as _;
+    use hal::clock::{self, ClockConfig};
+    use hal::i2c::FastDuty;
+    use hal::{Chip, I2c, I2cMode, PeriphLabel};
     use imu::{Config, Error, Fix, Imu, CLONE_2E, CONFIG_WRITES};
-    use runtime_hal::clock::{self, ClockConfig};
-    use runtime_hal::{detect_chip, Delay, I2c, I2cMode, PeriphLabel};
     use test_shared::obs_store;
 
     // --- parameters -----------------------------------------------------------------------------
@@ -58,6 +57,9 @@ mod firmware {
     /// I2C bus rate: 400 kHz fast mode (`specs/imu.md`, "Hardware I2C first": the production
     /// rate; clone-validated here 2026-07-18, sustained 251/s bursts with zero errors).
     const I2C_HZ: u32 = 400_000;
+    /// The IMU bus pins, packed `port << 4 | pin` (`Chip::pin`): PB6 = SCL, PB7 = SDA.
+    const PB6: u8 = 0x16;
+    const PB7: u8 = 0x17;
     /// The sample/tick rate: the spec'd 250 Hz control tick.
     const TICK_HZ: u32 = 250;
     /// Post-`init` settling pause before the first burst read (the caller-owned pause the spec
@@ -103,8 +105,8 @@ mod firmware {
     pub struct Obs {
         /// `0x494D_5542` ("IMUB").
         magic: u32,
-        /// Fatal bring-up error, busy-spinning: 0 ok, 1 detect_chip failed, 2 clock tree failed,
-        /// 3 GPIOB split failed, 4 I2C bring-up failed, 5 probe bus error, 6 probe identity
+        /// Fatal bring-up error, busy-spinning: 0 ok, 1 `Chip::take` failed, 2 clock tree failed,
+        /// 3 PB6/PB7 pin bring-up failed, 4 I2C bring-up failed, 5 probe bus error, 6 probe identity
         /// mismatch (`who_am_i` holds the returned value), 7 init write failed, 8 config readback
         /// bus error.
         err: u8,
@@ -206,10 +208,7 @@ mod firmware {
         // Peripherals::take(), same as ble-loopback).
         let cp = cortex_m::Peripherals::take().unwrap();
 
-        let chip = match detect_chip() {
-            Ok(c) => c,
-            Err(_) => fail(1),
-        };
+        let Some(chip) = Chip::take() else { fail(1) };
 
         // The production 72 MHz tree, before any peripheral bring-up (I2C timing and SysTick
         // pacing are both derived from it).
@@ -217,21 +216,21 @@ mod firmware {
             fail(2);
         }
 
-        // GPIOB carries the IMU bus pins PB6 (SCL) / PB7 (SDA). Split once to configure them.
-        let gpiob = match chip.gpiob() {
-            Ok(p) => p.split(),
-            Err(_) => fail(3),
+        // The IMU bus pins PB6 (SCL) / PB7 (SDA), as floating inputs with the port clock on.
+        let (Ok(scl), Ok(sda)) = (chip.pin(PB6), chip.pin(PB7)) else {
+            fail(3)
         };
 
         // Hardware I2C0 on PB6/PB7 (AF1 on the F1x0, the silicon-proven mux), 400 kHz fast
-        // mode. `I2c::new` consumes the named pins, enables the peripheral clock, configures the
-        // pins AF open-drain, and programs the SPL-faithful timing from APB1 = 36 MHz.
+        // mode. `I2c::new` consumes the pins, enables the peripheral clock, clears the bus,
+        // configures the pins AF open-drain, and programs the SPL-faithful timing from
+        // APB1 = 36 MHz.
         let mut i2c = match I2c::new(
             &chip,
             &CLOCK,
             PeriphLabel::I2c0,
-            (gpiob.pb6, gpiob.pb7),
-            I2cMode::fast(I2C_HZ, runtime_hal::i2c::FastDuty::Two),
+            (scl, sda),
+            I2cMode::fast(I2C_HZ, FastDuty::Two),
         ) {
             Ok(b) => b,
             Err(_) => fail(4),

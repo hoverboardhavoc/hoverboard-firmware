@@ -6,42 +6,42 @@
 # step). Everything observable over SWD via the IMU_BENCH_OBS block (offsets documented on the
 # struct). Bench-only, not a production path.
 #
-# BUILD (the queued Phase-A IMU gate image; specs/silicon-queue.md section 2):
-#   cargo build --release --features hardware -p imu-bench
-#   -> motorcontroller/target/thumbv7m-none-eabi/release/imu-bench  (~13 KiB, fits the F130's 64 KiB FLASH)
+# BUILD, one image per chip on the hal crate (specs/hal.md section 3.2). A chip feature is required,
+# so the workspace sweep skips this crate (`default-members` in motorcontroller/Cargo.toml):
+#   cargo build --release -p imu-bench --features "hardware gd32f130c8"   (or gd32f103c8)
+#   -> motorcontroller/target/thumbv7m-none-eabi/release/imu-bench  (~10 KiB, fits the 64 KiB FLASH)
 #
-# The `imu-bench` bin is `required-features = ["hardware"]` (below) so a bare `cargo build` (the
-# CI build job, DEV profile) SKIPS it. That is deliberate: the Mahony/CORDIC math is ~87 KiB of
-# `.text` at the default dev opt-level 0 and overflows 64 KiB, but the SHIPPED release image is
-# ~13 KiB (full-LTO crushes it) and the dev image never reaches hardware. Gating it out of the
-# default build keeps CI green while the release+feature build produces the flashable gate image.
-# There is NO oversized static (`.data == 0` both profiles); the dev overflow is pure `.text`
-# bloat, release-eliminated. On a host target the bin still degrades to an empty main (only when
-# the feature is on), so it never links the HAL.
+# Both bins are `required-features = ["hardware"]` (below), so a build without it SKIPS them: the
+# Mahony/CORDIC math overflowed 64 KiB of `.text` at the dev opt-level 0, while the release image
+# is ~10 KiB (full LTO crushes it) and the dev image never reaches hardware. There is NO oversized
+# static (`.data == 0` both profiles). On a host target the bin degrades to an empty main (only
+# when the feature is on), so it never links the HAL.
 [package]
 name = "imu-bench"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "Bench-only IMU + attitude silicon validator (thumbv7m): CLONE_2E probe/init/readback on I2C0 PB6/PB7, 250 Hz burst reads feeding Mahony, bias-cal capture + feedback, results in the SWD-readable IMU_BENCH_OBS block. Build with --features hardware (release); gated out of the default dev build (see the header)."
+description = "Bench-only IMU + attitude silicon validator (thumbv7m, one image per chip on the hal crate): CLONE_2E probe/init/readback on I2C0 PB6/PB7, 250 Hz burst reads feeding Mahony, bias-cal capture + feedback, results in the SWD-readable IMU_BENCH_OBS block. Build release with --features \"hardware <chip>\" (see the header)."
 
 [features]
-# `hardware` gates the bench bin (below). OFF by default so the CI dev `cargo build` skips the
-# image (its dev-profile `.text` overflows 64 KiB; the release build under this feature fits).
+# `hardware` gates the bench bins (below). OFF by default, so a dev build skips the images.
 hardware = []
+# One per chip (specs/hal.md section 3.2); none is the default, so the workspace sweep skips this
+# crate (`default-members`).
+gd32f103c8 = ["hal/gd32f103c8"]
+gd32f130c8 = ["hal/gd32f130c8"]
 
-# The bench image is built ONLY under `--features hardware`, so a bare workspace `cargo build`
-# (dev) does not compile it. `path` is the default auto-discovery location, restated because an
-# explicit `[[bin]]` disables auto-discovery for this target.
+# The bench image is built ONLY under `--features hardware`. `path` is the default auto-discovery
+# location, restated because an explicit `[[bin]]` disables auto-discovery for this target.
 [[bin]]
 name = "imu-bench"
 path = "src/bin/imu-bench.rs"
 required-features = ["hardware"]
 
 # The controlled ISR-load repro for the I2C master-receive race (the 2026-07-18 imu_live=0 root
-# cause): back-to-back 14-byte bursts under an aggressive SysTick interrupt. Built A/B against the
-# pre-fix and fixed runtime-hal to prove the Solution-A race wedges and Solution B survives. Same
-# feature gate as the main bench bin (release-only, bench-only).
+# cause): back-to-back 14-byte bursts under an aggressive SysTick interrupt, to prove a receive
+# path survives the race that wedged the Solution-A driver. Same feature gate as the main bench bin
+# (release-only, bench-only).
 [[bin]]
 name = "imu-irqload"
 path = "src/bin/imu-irqload.rs"
@@ -58,14 +58,10 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
 
-# The HAL: detect_chip(), the GPIO split, hardware I2C (I2c0 on PB6/PB7), the SysTick Delay.
-# Target-gated exactly like firmware / ble-loopback / l2-uart-bench; the host build degrades to an
-# empty main and never links the HAL. runtime-hal is the workspace git dependency (motorcontroller/Cargo.toml).
+# The HAL for the compiled chip: the chip context, the clock tree, the pins, hardware I2C (I2c0 on
+# PB6/PB7) and the flash vector table (linked through cortex-m-rt's `device` feature). Target-gated
+# like the firmware's; the host build degrades to an empty main and never links the HAL. The
+# SysTick delay is cortex-m's `delay::Delay`.
 [target.'cfg(target_arch = "arm")'.dependencies]
-runtime-hal = { workspace = true }
-# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
-# `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
-# one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
-# `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.
-vectors = { path = "../vectors" }
+hal = { path = "../hal" }
 embedded-hal = "1.0"

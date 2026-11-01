@@ -1,19 +1,31 @@
-# L2 Tier-2 bench firmware (specs/l2.md, "Tier 2 - master <-> slave on silicon"). One universal image
-# for the wired GD32 pair: detect the family (F10x = master / driver, F1x0 = slave / echo responder),
-# bring up the inter-board UART (USART1 PA2/PA3 @115200, the proven inter-board link), and run L2 over
-# it with DMA-driven RX (runtime-hal RingBufferedRx + USART IDLE) feeding the link crate's StreamFramer
-# + fragmentation/reassembly. Results land in the SWD-readable `LINK_OBS` symbol on each board.
+# L2 Tier-2 bench firmware (specs/l2.md, "Tier 2 - master <-> slave on silicon"), for the wired GD32
+# pair. One image per chip on the hal crate (specs/hal.md section 3.2), and the chip sets the role:
+# the GD32F103C8 build is the master / driver, the GD32F130C8 build the slave / echo responder. Each
+# brings up the inter-board UART (USART1 PA2/PA3 at link::INTER_BOARD_BAUD) and runs L2 over it with
+# DMA-driven TX and RX (hal DmaTx, RingBufferedRx + USART IDLE) feeding the link crate's
+# StreamFramer + fragmentation/reassembly. Results land in the SWD-readable `LINK_OBS` symbol on
+# each board.
 #
-# The L2 logic comes from the HAL-free `link` crate; THIS crate owns the runtime-hal adapter (the
-# StreamFramer <-> RingBufferedRx wiring), keeping `link` transport-free. Bench-only, not a production
-# path. On a host target it degrades to an empty main (like ble-loopback / firmware), so a bare host
-# `cargo build` / `cargo test` over the workspace stays green and never links the HAL.
+# BUILD: `cargo build --release -p l2-uart-bench --features gd32f103c8` for the master,
+# `--features gd32f130c8` for the slave. A chip feature is required, so the workspace sweep skips
+# this crate (`default-members` in motorcontroller/Cargo.toml).
+#
+# The L2 logic comes from the HAL-free `link` crate; THIS crate wires it to the hal serial adapter
+# (StreamFramer <-> SplitSerial), keeping `link` transport-free. Bench-only, not a production path.
+# On a host target it degrades to an empty main and never links the HAL.
 [package]
 name = "l2-uart-bench"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "Bench-only L2 Tier-2 validator (thumbv7m): inter-board UART (USART1 PA2/PA3) L2 link with DMA RX, master drives / slave echoes, results in the SWD-readable LINK_OBS block."
+description = "Bench-only L2 Tier-2 validator (thumbv7m, one image per chip on the hal crate): inter-board UART (USART1 PA2/PA3) L2 link with DMA TX and RX, the GD32F103C8 master drives / the GD32F130C8 slave echoes, results in the SWD-readable LINK_OBS block."
+
+# One per chip (specs/hal.md section 3.2), which also picks the role (gd32f103c8 master,
+# gd32f130c8 slave); none is the default, so the workspace sweep skips this crate
+# (`default-members`).
+[features]
+gd32f103c8 = ["hal/gd32f103c8"]
+gd32f130c8 = ["hal/gd32f130c8"]
 
 [dependencies]
 # The HAL-free L2 logic: the frag-hdr codec, the byte-stream StreamFramer, fragmentation/reassembly,
@@ -27,13 +39,9 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
 
-# The HAL: detect_chip(), the GPIO split, Usart (polled TX) + RingBufferedRx (DMA RX + IDLE), the RAM
-# vector table. Target-gated exactly like firmware / ble-loopback; the host build degrades to an empty
-# main and never links the HAL. runtime-hal is the workspace git dependency (motorcontroller/Cargo.toml).
+# The HAL for the compiled chip: the chip context, the pins, Usart, DmaTx + RingBufferedRx under
+# SplitSerial, and the flash vector table (linked through cortex-m-rt's `device` feature) that
+# carries the serial drivers' own USART and DMA vectors. Target-gated like the firmware's; the host
+# build degrades to an empty main and never links the HAL.
 [target.'cfg(target_arch = "arm")'.dependencies]
-runtime-hal = { workspace = true }
-# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
-# `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
-# one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
-# `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.
-vectors = { path = "../vectors" }
+hal = { path = "../hal" }

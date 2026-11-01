@@ -194,7 +194,9 @@ jobs:
 
       # The per-chip builds (specs/hal.md): the HAL and the two test images for each of its chips, on
       # both surfaces the HAL has (the board target, and the host where its pure parts are tested),
-      # and the firmware's two per-chip images, whose chip-only code the default build does not see.
+      # and the firmware's two per-chip images, whose chip-only code the default build does not see,
+      # with the bench images on hal (imu-bench, wdg-bench, l2-uart-bench), which carry those two
+      # chip features only (imu-bench with `hardware`, the feature its bins require).
       - name: clippy (motorcontroller, per-chip builds of hal, the test images and firmware)
         working-directory: hoverboard-firmware/motorcontroller
         run: |
@@ -207,6 +209,9 @@ jobs:
           done
           for chip in gd32f103c8 gd32f130c8; do
             cargo clippy -p firmware --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p imu-bench --features "hardware $chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p wdg-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p l2-uart-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
           done
 
       - name: clippy (shared, thumbv7m build surface)
@@ -243,9 +248,9 @@ jobs:
 
   # Embedded build for the real target, in motorcontroller/. A bare `cargo build` there uses the
   # thumbv7m-none-eabi default from motorcontroller/.cargo/config.toml and builds the default members
-  # (the firmware as the universal image, the bench images), which compile the pinned runtime-hal.
+  # (the firmware as the universal image), which compile the pinned runtime-hal.
   # The HAL's test images (dummy-test, store-test) build per chip in the emulator job, and the
-  # per-chip firmware images below.
+  # per-chip firmware images and bench images below.
   #
   # The upper flashed-span size gate (against the 62 KiB no-bootloader region) is enforced below,
   # after objcopy (specs/decision-flash-budget.md); the LTO-gutted floor guard is its lower companion.
@@ -557,6 +562,18 @@ jobs:
         run: |
           cargo image-f103
           cargo image-f130
+
+      # The bench images on hal, one per chip, as the bench builds them (release; imu-bench's bins
+      # need `hardware`). They need a chip feature, so the default `cargo build` above skips them;
+      # this is their link check.
+      - name: Build the bench images per chip (imu-bench, wdg-bench, l2-uart-bench)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: |
+          for chip in gd32f103c8 gd32f130c8; do
+            cargo build --release -p imu-bench --features "hardware $chip"
+            cargo build --release -p wdg-bench --features "$chip"
+            cargo build --release -p l2-uart-bench --features "$chip"
+          done
 
       # The per-chip size gate (specs/hal.md section 6): each image's flashed span against its
       # chip's flash less the store's two pages, and its static RAM (.data + .bss + .uninit) against
