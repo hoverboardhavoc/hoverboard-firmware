@@ -172,7 +172,9 @@ pub enum FmcError {
     BadArg,
     /// A program over a half-word that is not erased.
     NotErased,
-    /// The controller did not unlock.
+    /// The span's last half-word is the high half of a 32-bit word whose successor in the same
+    /// page is already programmed, which closes it until the page is erased: the controller would
+    /// refuse it with `PGERR` while it reads erased. The page was programmed out of ascending order.
     Closed,
     /// The page is write-protected (`WPERR`).
     WriteProtect,
