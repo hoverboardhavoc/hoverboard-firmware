@@ -319,6 +319,28 @@ pub struct I2c {
     /// Polls left in the current acquisition, shared by every wait in it. A fresh transfer resets
     /// it; a repeated START keeps counting it down.
     txn_left: Cell<u32>,
+    /// The SCL and SDA pins `new` took, so [`I2c::bus_clear`] can take them back from the block.
+    pins: BusPins,
+    /// The bus-clear settle between edges, core cycles (a 100 kHz half period at the bring-up
+    /// clock).
+    settle_cycles: u32,
+}
+
+/// The port base and packed pin of SCL and SDA.
+#[derive(Debug, Clone, Copy)]
+struct BusPins {
+    scl_base: u32,
+    scl: u8,
+    sda_base: u32,
+    sda: u8,
+}
+
+impl BusPins {
+    /// Both pins as AF open-drain with the pull-up: the block owns the bus from here.
+    fn claim_af(&self) {
+        gpio::configure_af(self.scl_base, self.scl, PinRole::I2cAfOpenDrain);
+        gpio::configure_af(self.sda_base, self.sda, PinRole::I2cAfOpenDrain);
+    }
 }
 
 impl I2c {
@@ -346,9 +368,17 @@ impl I2c {
         let timing = timing_for(clock.apb1_hz(), mode).ok_or(DescriptorError::Unsupported)?;
         crate::clock::enable_i2c(chip.rcu_base()?, chip.clock(), instance)?;
 
-        clear_bus(&scl, &sda, clock.sysclk_hz);
-        gpio::configure_af(scl.port_base(), scl.pin(), PinRole::I2cAfOpenDrain);
-        gpio::configure_af(sda.port_base(), sda.pin(), PinRole::I2cAfOpenDrain);
+        let pins = BusPins {
+            scl_base: scl.port_base(),
+            scl: scl.pin(),
+            sda_base: sda.port_base(),
+            sda: sda.pin(),
+        };
+        let settle_cycles = (clock.sysclk_hz / 200_000).max(1);
+        // A bus still held after this is not an error here: the owner's first transfer finds it,
+        // and `bus_clear` is the owner's second attempt.
+        let _ = clear_bus(&pins, settle_cycles);
+        pins.claim_af();
 
         let dev = I2c {
             base,
@@ -356,6 +386,8 @@ impl I2c {
             poll_budget: poll_budget(clock.sysclk_hz),
             idle_budget: idle_budget(clock.sysclk_hz),
             txn_left: Cell::new(0),
+            pins,
+            settle_cycles,
         };
         dev.configure();
         Ok(dev)
@@ -373,6 +405,24 @@ impl I2c {
         self.reg(SADDR0).write(OWN_ADDR & SADDR0_MASK);
         self.reg(CTL0).set_bits(CTL0_I2CEN);
         self.set_ack(true);
+    }
+
+    /// Clear the bus again on the pins this `I2c` owns, for an owner whose first transfer failed
+    /// (the firmware's IMU probe retry): the pins back to open-drain outputs with their latches
+    /// high, the clock-pulse sequence, the pins back to AF open-drain, then `SRESET` and the
+    /// bring-up programming. The block is reprogrammed either way;
+    /// `Err(`[`I2cError::BusHeld`]`)` when SDA still reads low after the sequence.
+    pub fn bus_clear(&mut self) -> Result<(), I2cError> {
+        let released = clear_bus(&self.pins, self.settle_cycles);
+        self.pins.claim_af();
+        self.reg(CTL0).write(CTL0_SRESET);
+        self.reg(CTL0).write(0);
+        self.configure();
+        if released {
+            Ok(())
+        } else {
+            Err(I2cError::BusHeld)
+        }
     }
 
     #[inline]
@@ -646,20 +696,76 @@ enum Budget {
     Own,
 }
 
-/// The bus clear on SCL and SDA as open-drain outputs, with a settle of a 100 kHz half period
-/// between edges. A clean bus costs one SDA read.
-fn clear_bus(scl: &Pin<Input<Floating>>, sda: &Pin<Input<Floating>>, sysclk_hz: u32) {
-    let (scl_base, scl_pin) = (scl.port_base(), scl.pin());
-    let (sda_base, sda_pin) = (sda.port_base(), sda.pin());
-    gpio::configure_output_od(scl_base, scl_pin, true);
-    gpio::configure_output_od(sda_base, sda_pin, true);
-    let half = (sysclk_hz / 200_000).max(1);
+/// The bus clear on SCL and SDA as open-drain outputs, with a settle of `settle_cycles` (a 100 kHz
+/// half period) between edges. A clean bus costs one SDA read. Returns whether SDA reads high
+/// (released) at the end.
+///
+/// Both output latches go high BEFORE the pins become outputs: `configure_output_od` does not
+/// preset the latch, and after a warm reset it reads 0, so a pin made an output with its latch
+/// low drives the line low at once and the slave sees an SCL edge and a STOP-like SDA edge before
+/// the clean-bus check (runtime-hal 71c39e3, "bus clear without the entry glitch"). With the
+/// latches high the pins come up released and the first edge on the bus is the sequence's own.
+fn clear_bus(pins: &BusPins, settle_cycles: u32) -> bool {
+    let BusPins {
+        scl_base,
+        scl,
+        sda_base,
+        sda,
+    } = *pins;
+    let at = move |line: Line| match line {
+        Line::Scl => (scl_base, scl),
+        Line::Sda => (sda_base, sda),
+    };
+    clear_bus_with(
+        |line, high| {
+            let (base, pin) = at(line);
+            gpio::set_pin(base, pin, high)
+        },
+        |line| {
+            let (base, pin) = at(line);
+            gpio::configure_output_od(base, pin, true)
+        },
+        || gpio::read_pin(sda_base, sda),
+        || settle(settle_cycles),
+    )
+}
+
+/// One of the two bus lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Line {
+    Scl,
+    Sda,
+}
+
+/// [`clear_bus`] over closures, so the host tests see the order of the pin operations: `latch`
+/// sets a line's output latch (`true` = released), `make_output` makes it an open-drain output.
+fn clear_bus_with(
+    mut latch: impl FnMut(Line, bool),
+    mut make_output: impl FnMut(Line),
+    mut read_sda: impl FnMut() -> bool,
+    mut settle: impl FnMut(),
+) -> bool {
+    latch(Line::Scl, true);
+    latch(Line::Sda, true);
+    make_output(Line::Scl);
+    make_output(Line::Sda);
+    let latch = core::cell::RefCell::new(latch);
     bus_clear(
-        || gpio::read_pin(sda_base, sda_pin),
-        |high| gpio::set_pin(scl_base, scl_pin, high),
-        |high| gpio::set_pin(sda_base, sda_pin, high),
-        || cortex_m::asm::delay(half),
+        &mut read_sda,
+        |high| (latch.borrow_mut())(Line::Scl, high),
+        |high| (latch.borrow_mut())(Line::Sda, high),
+        &mut settle,
     );
+    read_sda()
+}
+
+/// Busy-wait between two bus-clear edges (the host has no bus to time).
+#[inline(always)]
+fn settle(cycles: u32) {
+    #[cfg(target_arch = "arm")]
+    cortex_m::asm::delay(cycles);
+    #[cfg(not(target_arch = "arm"))]
+    let _ = cycles;
 }
 
 impl ErrorType for I2c {
@@ -806,6 +912,57 @@ mod tests {
         assert_eq!(idle_budget(1_000_000), 18);
         assert_eq!(idle_budget(0), 1);
         assert_eq!(worst_case_block_us(999_999), u32::MAX);
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Op {
+        Latch(Line, bool),
+        Output(Line),
+    }
+
+    /// The pin operations `clear_bus_with` makes on a bus whose SDA reads `sda`, and its result.
+    fn clear_ops(sda: bool) -> (Vec<Op>, bool) {
+        let ops = core::cell::RefCell::new(Vec::new());
+        let released = clear_bus_with(
+            |l, h| ops.borrow_mut().push(Op::Latch(l, h)),
+            |l| ops.borrow_mut().push(Op::Output(l)),
+            || sda,
+            || {},
+        );
+        (ops.into_inner(), released)
+    }
+
+    #[test]
+    fn the_latches_go_high_before_the_pins_become_outputs() {
+        // runtime-hal 71c39e3: a pin made an output with its latch at the warm-reset 0 drives the
+        // line low at once, an SCL edge and a STOP-like SDA edge before the clean-bus check.
+        let (ops, released) = clear_ops(true);
+        assert!(released);
+        assert_eq!(
+            ops[..4],
+            [
+                Op::Latch(Line::Scl, true),
+                Op::Latch(Line::Sda, true),
+                Op::Output(Line::Scl),
+                Op::Output(Line::Sda),
+            ]
+        );
+        // A clean bus: after that only the sequence's own release of both lines, no low edge.
+        assert!(ops[4..].iter().all(|op| matches!(op, Op::Latch(_, true))));
+    }
+
+    #[test]
+    fn a_held_bus_reports_not_released_after_the_pulses() {
+        let (ops, released) = clear_ops(false);
+        assert!(!released);
+        let scl_lows = ops
+            .iter()
+            .filter(|op| **op == Op::Latch(Line::Scl, false))
+            .count();
+        assert_eq!(scl_lows as u32, BUS_CLEAR_MAX_PULSES);
+        // Never an output before both latches are high.
+        let first_output = ops.iter().position(|op| matches!(op, Op::Output(_)));
+        assert_eq!(first_output, Some(2));
     }
 
     /// A simulated bus: SDA held low by a slave until `release_after` SCL pulses (never if `None`).
