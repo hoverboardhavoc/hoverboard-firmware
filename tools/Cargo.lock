@@ -1330,6 +1330,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "golden-trace"
+version = "0.1.0"
+dependencies = [
+ "object 0.36.7",
+ "serde",
+ "toml",
+ "unicorn-engine",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

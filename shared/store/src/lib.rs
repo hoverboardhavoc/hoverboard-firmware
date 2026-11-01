@@ -34,9 +34,14 @@ pub mod value;
 #[cfg(feature = "test-fields")]
 pub mod scenarios;
 
-// The on-target FmcFlash adapter: the only runtime-hal dependency, target-gated to thumbv7m so the
-// host build (which uses MockFlash) never compiles it or links the HAL.
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+// The on-target FmcFlash adapter, target-gated to thumbv7m so the host build (which uses MockFlash)
+// never compiles it or links a HAL: over `hal` with the `hal` feature (the per-chip images), over
+// runtime-hal without it (the universal image). `fmc_flash_universal.rs` is the runtime-hal copy and
+// goes with the universal image (specs/hal.md section 9, step 2).
+#[cfg(all(target_arch = "arm", target_os = "none", feature = "hal"))]
+pub mod fmc_flash;
+#[cfg(all(target_arch = "arm", target_os = "none", not(feature = "hal")))]
+#[path = "fmc_flash_universal.rs"]
 pub mod fmc_flash;
 
 #[cfg(test)]

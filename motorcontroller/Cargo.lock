@@ -135,9 +135,9 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "hal",
  "panic-halt",
  "test-shared",
- "vectors",
 ]
 
 [[package]]
@@ -208,6 +208,7 @@ dependencies = [
  "cortex-m-rt",
  "embedded-hal 1.0.0",
  "embedded-io",
+ "hal",
  "heapless",
  "imu",
  "inputs",
@@ -234,6 +235,30 @@ dependencies = [
  "bytemuck",
  "half",
  "typenum",
+]
+
+[[package]]
+name = "hal"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "embedded-hal 1.0.0",
+ "embedded-io",
+ "heapless",
+]
+
+[[package]]
+name = "hal-bench"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "embedded-hal 1.0.0",
+ "embedded-io",
+ "hal",
+ "heapless",
+ "panic-halt",
 ]
 
 [[package]]
@@ -501,6 +526,7 @@ name = "store"
 version = "0.1.0"
 dependencies = [
  "base",
+ "hal",
  "runtime-hal",
 ]
 
@@ -510,11 +536,10 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "hal",
  "panic-halt",
- "runtime-hal",
  "store",
  "test-shared",
- "vectors",
 ]
 
 [[package]]

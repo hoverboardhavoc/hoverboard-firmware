@@ -1,0 +1,52 @@
+# Mode: final_state: configuration only, no poll. End state:
+#   ADC0 CTL0  = 0x00060000 (scan off | SYNCM = 6, regular parallel)
+#   ADC0 CTL1  = 0x001E0001 (ADCON | ETSRC software | ETERC)
+#   ADC0 SAMPT1 = 0x00001000 (channel 4 at 7.5 cycles)    ADC0 RSQ2 = 0x00000004 (rank 0 = channel 4)
+#   ADC1 CTL1  = 0x001E0001                               ADC1 SAMPT1 = 0x00008000 (channel 5)
+#   ADC1 RSQ2  = 0x00000005 (rank 0 = channel 5)
+# The read (read_simultaneous) polls ADC0 EOC and is not traced here.
+description = """
+The two ADCs of the GD32F10x in regular simultaneous mode: ADC0 (master) on channel 4, ADC1 (slave)
+on channel 5, both at 7.5 cycles, single software-triggered conversion each, and ADC0 CTL0 SYNCM =
+regular parallel. The GD32F1x0 has one ADC; this vector is F10x only.
+
+Vendor: the single-channel regular configuration on each ADC, then
+        adc_mode_config(ADC_DAUL_REGULAL_PARALLEL) (the SPL's spelling).
+HAL: chip.dual_adc() then configure_simultaneous(4, 5, 1).
+"""
+family = "gd32f10x"
+mode = "final_state"
+
+[vendor]
+body = '''
+    adc_special_function_config(ADC0, ADC_SCAN_MODE, DISABLE);
+    adc_special_function_config(ADC0, ADC_CONTINUOUS_MODE, DISABLE);
+    adc_data_alignment_config(ADC0, ADC_DATAALIGN_RIGHT);
+    adc_channel_length_config(ADC0, ADC_REGULAR_CHANNEL, 1U);
+    adc_regular_channel_config(ADC0, 0U, ADC_CHANNEL_4, ADC_SAMPLETIME_7POINT5);
+    adc_external_trigger_source_config(ADC0, ADC_REGULAR_CHANNEL, ADC0_1_2_EXTTRIG_REGULAR_NONE);
+    adc_external_trigger_config(ADC0, ADC_REGULAR_CHANNEL, ENABLE);
+    adc_enable(ADC0);
+
+    adc_special_function_config(ADC1, ADC_SCAN_MODE, DISABLE);
+    adc_special_function_config(ADC1, ADC_CONTINUOUS_MODE, DISABLE);
+    adc_data_alignment_config(ADC1, ADC_DATAALIGN_RIGHT);
+    adc_channel_length_config(ADC1, ADC_REGULAR_CHANNEL, 1U);
+    adc_regular_channel_config(ADC1, 0U, ADC_CHANNEL_5, ADC_SAMPLETIME_7POINT5);
+    adc_external_trigger_source_config(ADC1, ADC_REGULAR_CHANNEL, ADC0_1_2_EXTTRIG_REGULAR_NONE);
+    adc_external_trigger_config(ADC1, ADC_REGULAR_CHANNEL, ENABLE);
+    adc_enable(ADC1);
+
+    adc_mode_config(ADC_DAUL_REGULAL_PARALLEL);
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        chip.dual_adc().configure_simultaneous(4, 5, 1); // ADC0 channel 4, ADC1 channel 5, 7.5 cycles
+    }
+'''

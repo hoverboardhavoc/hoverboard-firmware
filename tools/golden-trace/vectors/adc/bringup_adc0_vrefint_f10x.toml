@@ -1,0 +1,46 @@
+# Mode: final_state. The vendor builds CTL1 with a read-modify-write per helper (scan, continuous,
+# alignment, internal channels, trigger source, trigger enable, ADC on); the HAL writes the fields
+# in its own count and order. The end state:
+#   CTL0   = 0x00000000 (scan off)
+#   CTL1   = 0x009E0001 (ADCON | ETSRC software (7 << 17) | ETERC (20) | TSVREN (23))
+#   SAMPT0 = 0x00E00000 (channel 17 at 239.5 cycles, bits 23:21)
+#   RSQ0   = 0x00000000 (one conversion)
+#   RSQ2   = 0x00000011 (rank 0 = channel 17)
+# Calibration polls and is compared by calibrate_adc0_f10x.
+description = """
+ADC0 configured for one software-triggered regular conversion of the internal VREFINT channel (17)
+at the slowest sample time, 239.5 cycles, right-aligned, on the GD32F10x; no conversion, no
+calibration. The ADC register block is the same on both families; the F10x SPL takes the ADC as its
+first argument.
+
+Vendor: scan and continuous off, right alignment, regular length 1, rank 0 = channel 17 at 239.5,
+        adc_tempsensor_vrefint_enable, the software trigger selected and enabled, adc_enable.
+HAL: chip.adc() then configure_single(17, 7).
+"""
+family = "gd32f10x"
+mode = "final_state"
+
+[vendor]
+body = '''
+    adc_special_function_config(ADC0, ADC_SCAN_MODE, DISABLE);
+    adc_special_function_config(ADC0, ADC_CONTINUOUS_MODE, DISABLE);
+    adc_data_alignment_config(ADC0, ADC_DATAALIGN_RIGHT);
+    adc_channel_length_config(ADC0, ADC_REGULAR_CHANNEL, 1U);
+    adc_regular_channel_config(ADC0, 0U, ADC_CHANNEL_17, ADC_SAMPLETIME_239POINT5);
+    adc_tempsensor_vrefint_enable();
+    adc_external_trigger_source_config(ADC0, ADC_REGULAR_CHANNEL, ADC0_1_2_EXTTRIG_REGULAR_NONE);
+    adc_external_trigger_config(ADC0, ADC_REGULAR_CHANNEL, ENABLE);
+    adc_enable(ADC0);
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.configure_single(17, 7); // VREFINT at 239.5 cycles
+    }
+'''

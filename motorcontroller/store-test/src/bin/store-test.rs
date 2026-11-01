@@ -19,12 +19,9 @@ mod firmware {
     use cortex_m::asm::nop;
     use cortex_m_rt::entry;
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
-    // which cortex-m-rt no longer provides once its `device` feature is on.
     use store::{FmcFlash, VAR_VALUE};
-    use store_test::{publish_scalar, publish_var, read_cmd, selected_chip};
+    use store_test::{publish_scalar, publish_var, read_cmd};
     use test_shared::RESULT_BUF_LEN;
-    use vectors as _;
 
     #[entry]
     fn main() -> ! {
@@ -32,7 +29,12 @@ mod firmware {
         let scenario = cmd >> 16;
 
         // Build the FmcFlash over the compile-time-selected Chip (NEVER runtime detect_chip()).
-        let chip = selected_chip();
+        // The compiled chip's context: the first take always succeeds; a second cannot happen here.
+        let Some(chip) = hal::Chip::take() else {
+            loop {
+                nop();
+            }
+        };
         let mut flash = FmcFlash::new(&chip);
 
         if scenario == VAR_VALUE {

@@ -1,0 +1,64 @@
+# Mode: final_state over the ADC0 block. The HAL's injected bring-up (InjectedAdcController::
+# configure) ends with ADCON, the calibration and ADCON again, so the vendor body ends with
+# adc_enable, adc_calibration_enable and adc_enable. The family table makes CTL1's RSTCLB and CLB
+# self-clearing: the calibration polls end at once, and the vendor's last CTL1 write (the CLB
+# command; its second adc_enable writes nothing with ADCON already set) compares without the
+# command bit. End state:
+#   CTL0   = 0x00000180 (SM, bit 8: the group has two ranks | EOICIE, bit 7)
+#   CTL1   = 0x00009801 (ETEIC | ETSIC = TIMER0 CH3 (1 << 12) | DAL (left) | ADCON)
+#   SAMPT1 = 0x00009000 (channels 4 and 5 at 7.5 cycles)
+#   ISQ    = 0x00129000 (IL = 1 (two ranks) | rank 0 channel 4 | rank 1 channel 5, the SPL packing)
+# SM: a multi-rank inserted group converts only rank 0 with scan off. CTL1's ETSIC is the ADC side
+# of the timer-to-ADC coupling whose timer side is timer/trgo_trigger_timer0_f1x0.
+description = """
+ADC0's injected group for the phase currents on the GD32F1x0: channels 4 and 5 at 7.5 cycles,
+left-aligned, scan on, triggered by TIMER0 CH3, the injected end-of-conversion interrupt enabled,
+ADC on, calibrated. No conversion.
+
+Vendor: scan on, left alignment, inserted length 2, ranks 0/1 = channels 4/5 at 7.5, trigger source
+        TIMER0 CH3 (ADC_EXTTRIG_INSERTED_T0_CH3) enabled, adc_interrupt_enable(ADC_INT_EOIC), adc_enable,
+        adc_calibration_enable, adc_enable.
+HAL: InjectedAdcController::new().configure(&chip, &InjectedAdcConfig { Adc0, [4, 5] at code 1,
+     left-aligned, Timer0 Ch3, /6 }).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+assert_only = ["<ADC0_BASE>"]
+
+[vendor]
+body = '''
+    adc_special_function_config(ADC_SCAN_MODE, ENABLE);
+    adc_data_alignment_config(ADC_DATAALIGN_LEFT);
+    adc_channel_length_config(ADC_INSERTED_CHANNEL, 2U);
+    adc_inserted_channel_config(0U, ADC_CHANNEL_4, ADC_SAMPLETIME_7POINT5);
+    adc_inserted_channel_config(1U, ADC_CHANNEL_5, ADC_SAMPLETIME_7POINT5);
+    adc_external_trigger_source_config(ADC_INSERTED_CHANNEL, ADC_EXTTRIG_INSERTED_T0_CH3);
+    adc_external_trigger_config(ADC_INSERTED_CHANNEL, ENABLE);
+    adc_interrupt_enable(ADC_INT_EOIC);
+    adc_enable();
+    adc_calibration_enable();
+    adc_enable();
+'''
+
+[hal]
+body = '''
+    use hal::config::{AdcClockDiv, InjectedAdcConfig, InjectedChannel, TimerTriggerLink};
+    use hal::{Chip, InjectedAdcController, PeriphLabel, TriggeredAdc};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let mut channels = heapless::Vec::new();
+        channels.push(InjectedChannel { channel: 4, sample_time: 1 }).unwrap();
+        channels.push(InjectedChannel { channel: 5, sample_time: 1 }).unwrap();
+        let cfg = InjectedAdcConfig {
+            adc: PeriphLabel::Adc0,
+            channels,
+            left_aligned: true,
+            trigger_timer: PeriphLabel::Timer0,
+            trigger_link: TimerTriggerLink::Ch3,
+            clock_div: AdcClockDiv::Div6,
+        };
+        InjectedAdcController::new().configure(&chip, &cfg).unwrap();
+    }
+'''

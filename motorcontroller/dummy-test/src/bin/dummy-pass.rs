@@ -13,10 +13,10 @@ mod firmware {
     use cortex_m_rt::entry;
     use dummy_test::{publish, read_input};
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
+    // Linking-only: supplies the compiled chip's `__INTERRUPTS` flash vector table (`hal`),
     // which cortex-m-rt no longer provides once its `device` feature is on.
+    use hal as _;
     use test_shared::dummy;
-    use vectors as _;
 
     #[entry]
     fn main() -> ! {

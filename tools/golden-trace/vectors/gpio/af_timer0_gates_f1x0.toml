@@ -1,0 +1,51 @@
+# Mode: final_state (register at a time on the vendor side, pin at a time on the HAL side). End
+# state:
+#   GPIOA CTL    = AF (2) at pins 8, 9, 10 over the port A reset; AFSEL1 = AF2 at pins 8, 9, 10
+#   GPIOA OSPD   = 50 MHz at pins 8, 9, 10 over the reset; OMODE push-pull; PUD no pull over the reset
+#   GPIOB CTL    = AF at pins 13, 14, 15; AFSEL1 = AF2 there; OSPD 50 MHz there
+# AF2 is non-zero, so the comparison pins the mux number (TIMER0 is AF2 on port A and B,
+# gd32f1x0_gpio.c's AF table).
+#
+# ignore RCU: Chip::route_advanced_pwm_pin enables each port clock; the vendor body does not.
+# ignore AFSEL0 on both ports: gpio_af_set rewrites both AFSEL registers, the HAL only AFSEL1, which
+# holds pins 8 to 15; both leave AFSEL0 at its reset 0.
+description = """
+The alternate-function configuration of the TIMER0 complementary gate pins on the GD32F1x0 GPIO
+model: PA8/PA9/PA10 (CH0/CH1/CH2) and PB13/PB14/PB15 (CH0N/CH1N/CH2N), AF mode, AF2, push-pull at
+50 MHz, no pull.
+
+Vendor: gpio_mode_set(AF, PUPD_NONE), gpio_af_set(AF_2), gpio_output_options_set(OTYPE_PP, 50MHZ)
+        on each port's three pins.
+HAL: chip.route_advanced_pwm_pin(pin) for each of the six.
+"""
+family = "gd32f1x0"
+mode = "final_state"
+ignore = [
+    "<RCU_BASE>",
+    "<GPIOA_BASE>+0x20",
+    "<GPIOB_BASE>+0x20",
+]
+
+[vendor]
+body = '''
+    gpio_mode_set(GPIOA, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10);
+    gpio_af_set(GPIOA, GPIO_AF_2, GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10);
+    gpio_output_options_set(GPIOA, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10);
+
+    gpio_mode_set(GPIOB, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15);
+    gpio_af_set(GPIOB, GPIO_AF_2, GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15);
+    gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15);
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        for pin in [0x08, 0x09, 0x0A, 0x1D, 0x1E, 0x1F] {
+            chip.route_advanced_pwm_pin(pin).unwrap();
+        }
+    }
+'''

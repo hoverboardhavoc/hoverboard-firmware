@@ -1,0 +1,41 @@
+# Mode: with_polling over the ADC0 block. adc_calibration_enable sets RSTCLB, polls it clear, sets
+# CLB, polls it clear.
+#
+# CTL1 (0x08) reads in order (each read the next value, the last one repeats):
+#   0x00000000  the read-modify-write that sets RSTCLB
+#   0x00000008  RSTCLB poll: busy
+#   0x00000000  RSTCLB poll: done
+#   0x00000000  the read-modify-write that sets CLB
+#   0x00000004  CLB poll: busy
+#   0x00000000  CLB poll: done
+# The bits are the ones the vendor polls, not a silicon capture.
+description = """
+The ADC0 calibration on the GD32F10x: reset the calibration and wait for RSTCLB to clear, start it and
+wait for CLB to clear. Each poll spins once; a dropped or reordered poll fails.
+
+Vendor: adc_calibration_enable(ADC0).
+HAL: chip.adc() then calibrate().
+"""
+family = "gd32f10x"
+mode = "with_polling"
+assert_only = ["<ADC0_BASE>"]
+
+[read_responses]
+"<ADC0_BASE>+0x08" = [0x0000_0000, 0x0000_0008, 0x0000_0000, 0x0000_0000, 0x0000_0004, 0x0000_0000]
+
+[vendor]
+body = '''
+    adc_calibration_enable(ADC0);
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.calibrate().unwrap();
+    }
+'''

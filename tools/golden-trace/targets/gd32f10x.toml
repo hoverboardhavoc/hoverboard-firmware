@@ -1,0 +1,114 @@
+# The GD32F10x peripheral blocks the vectors touch, as the vendor headers place them
+# (third_party/gd32-spl/GD32F10x: gd32f10x.h bus bases plus the per-peripheral offsets in each
+# gd32f10x_<periph>.h). The table is taken from the vendor side, not from the HAL's descriptor, so a
+# wrong HAL base shows up as an access to the wrong symbol rather than being renamed to agree.
+#
+# `registers` name the offsets for the comments in a rendered trace. `reset` is the value the
+# emulator seeds before a run, where a read-modify-write depends on it (every other register reads
+# 0); a vector overrides a seed with `reset_overrides`. `write_only` bits read as 0 (the silicon's
+# read is undefined). `self_clearing` command bits read as 0 too (the emulator completes the
+# command at once; a vector that polls one scripts its reads instead), and a final_state comparison
+# leaves them out of the last written value.
+
+[blocks.AFIO_BASE]
+base = 0x4001_0000
+size = 0x400
+registers = { "0x00" = "EC", "0x04" = "PCF0" }
+# PCF0.SWJ_CFG (bits 26:24) is write-only (GD32F10x User Manual 7.5.9).
+write_only = { "0x04" = 0x0700_0000 }
+
+[blocks.GPIOA_BASE]
+base = 0x4001_0800
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "ISTAT", "0x0C" = "OCTL", "0x10" = "BOP", "0x14" = "BC" }
+# The F10x GPIO reset: every pin a floating input (nibble 0x4).
+reset = { "0x00" = 0x4444_4444, "0x04" = 0x4444_4444 }
+
+[blocks.GPIOB_BASE]
+base = 0x4001_0C00
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "ISTAT", "0x0C" = "OCTL", "0x10" = "BOP", "0x14" = "BC" }
+reset = { "0x00" = 0x4444_4444, "0x04" = 0x4444_4444 }
+
+[blocks.GPIOC_BASE]
+base = 0x4001_1000
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "ISTAT", "0x0C" = "OCTL", "0x10" = "BOP", "0x14" = "BC" }
+
+[blocks.GPIOD_BASE]
+base = 0x4001_1400
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "ISTAT", "0x0C" = "OCTL", "0x10" = "BOP", "0x14" = "BC" }
+
+[blocks.GPIOE_BASE]
+base = 0x4001_1800
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "ISTAT", "0x0C" = "OCTL", "0x10" = "BOP", "0x14" = "BC" }
+
+[blocks.GPIOF_BASE]
+base = 0x4001_1C00
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "ISTAT", "0x0C" = "OCTL", "0x10" = "BOP", "0x14" = "BC" }
+
+[blocks.ADC0_BASE]
+base = 0x4001_2400
+size = 0x400
+registers = { "0x00" = "STAT", "0x04" = "CTL0", "0x08" = "CTL1", "0x0C" = "SAMPT0", "0x10" = "SAMPT1", "0x2C" = "RSQ0", "0x30" = "RSQ1", "0x34" = "RSQ2", "0x38" = "ISQ", "0x3C" = "IDATA0", "0x40" = "IDATA1", "0x44" = "IDATA2", "0x48" = "IDATA3", "0x4C" = "RDATA" }
+# CTL1.RSTCLB and CLB (bits 3, 2): set by software, cleared by hardware when the step finishes.
+self_clearing = { "0x08" = 0x0000_000C }
+
+# The second ADC (F10x only), the same register block as ADC0.
+[blocks.ADC1_BASE]
+base = 0x4001_2800
+size = 0x400
+registers = { "0x00" = "STAT", "0x04" = "CTL0", "0x08" = "CTL1", "0x0C" = "SAMPT0", "0x10" = "SAMPT1", "0x2C" = "RSQ0", "0x30" = "RSQ1", "0x34" = "RSQ2", "0x38" = "ISQ", "0x3C" = "IDATA0", "0x40" = "IDATA1", "0x44" = "IDATA2", "0x48" = "IDATA3", "0x4C" = "RDATA" }
+# CTL1.RSTCLB and CLB (bits 3, 2): set by software, cleared by hardware when the step finishes.
+self_clearing = { "0x08" = 0x0000_000C }
+
+[blocks.TIMER0_BASE]
+base = 0x4001_2C00
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "SMCFG", "0x0C" = "DMAINTEN", "0x10" = "INTF", "0x14" = "SWEVG", "0x18" = "CHCTL0", "0x1C" = "CHCTL1", "0x20" = "CHCTL2", "0x24" = "CNT", "0x28" = "PSC", "0x2C" = "CAR", "0x30" = "CREP", "0x34" = "CH0CV", "0x38" = "CH1CV", "0x3C" = "CH2CV", "0x40" = "CH3CV", "0x44" = "CCHP" }
+
+[blocks.SPI0_BASE]
+base = 0x4001_3000
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "STAT", "0x0C" = "DATA", "0x1C" = "I2SCTL", "0x20" = "I2SPSC" }
+
+[blocks.USART0_BASE]
+base = 0x4001_3800
+size = 0x400
+registers = { "0x00" = "STAT", "0x04" = "DATA", "0x08" = "BAUD", "0x0C" = "CTL0", "0x10" = "CTL1", "0x14" = "CTL2", "0x18" = "GP" }
+
+[blocks.USART1_BASE]
+base = 0x4000_4400
+size = 0x400
+registers = { "0x00" = "STAT", "0x04" = "DATA", "0x08" = "BAUD", "0x0C" = "CTL0", "0x10" = "CTL1", "0x14" = "CTL2", "0x18" = "GP" }
+
+[blocks.USART2_BASE]
+base = 0x4000_4800
+size = 0x400
+registers = { "0x00" = "STAT", "0x04" = "DATA", "0x08" = "BAUD", "0x0C" = "CTL0", "0x10" = "CTL1", "0x14" = "CTL2", "0x18" = "GP" }
+
+[blocks.I2C0_BASE]
+base = 0x4000_5400
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "SADDR0", "0x0C" = "SADDR1", "0x10" = "DATA", "0x14" = "STAT0", "0x18" = "STAT1", "0x1C" = "CKCFG", "0x20" = "RT" }
+
+[blocks.RCU_BASE]
+base = 0x4002_1000
+size = 0x400
+registers = { "0x00" = "CTL", "0x04" = "CFG0", "0x08" = "INT", "0x0C" = "APB2RST", "0x10" = "APB1RST", "0x14" = "AHBEN", "0x18" = "APB2EN", "0x1C" = "APB1EN", "0x20" = "BDCTL", "0x24" = "RSTSCK" }
+# CFG0 is seeded with the fleet's running 72 MHz tree so the vendor's rcu_clock_freq_get (which the
+# USART and I2C helpers call for their dividers) computes the right bus clock without SystemInit
+# running: SCSS = PLL (bits 3:2 = 2), AHB /1, APB1PSC /2 (bits 10:8 = 4), PLLSEL = HXTAL (bit 16),
+# PLLMF x9 (bits 21:18 = 7). With the 8 MHz HXTAL_VALUE default that is 72 MHz, APB1 36 MHz, APB2
+# 72 MHz: the bus clocks of the IRC8M / 2 x 18 tree the HAL's ClockConfig::REFERENCE_72M_IRC8M names.
+# The clock-tree vectors override it back to 0. AHBEN holds its reset value (the SRAM and FMC clocks
+# on, GD32F10x User Manual 5.3.6).
+reset = { "0x04" = 0x001D_0408, "0x14" = 0x0000_0014 }
+
+[blocks.FMC_BASE]
+base = 0x4002_2000
+size = 0x400
+registers = { "0x00" = "WS", "0x04" = "KEY", "0x08" = "OBKEY", "0x0C" = "STAT", "0x10" = "CTL", "0x14" = "ADDR" }

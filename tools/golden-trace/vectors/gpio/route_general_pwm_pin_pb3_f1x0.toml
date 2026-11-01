@@ -1,0 +1,36 @@
+# Mode: final_state. End state on GPIOB pin 3:
+#   CTL = AF (2) at bits 7:6; AFSEL0 = AF2 at bits 15:12; OSPD = 50 MHz at bits 7:6; OMODE push-pull;
+#   PUD no pull.
+# ignore RCU: the HAL enables the port clock as part of routing; the vendor body does not.
+# ignore AFSEL1: gpio_af_set rewrites both AFSEL registers, the HAL only AFSEL0; both leave AFSEL1 0.
+description = """
+The routing of the general timer's PWM output TIMER1_CH1 to PB3 on the GD32F1x0: a per-pin mux
+write, PB3 at AF2, AF push-pull at 50 MHz. The F1x0 has no AFIO remap.
+
+Vendor: gpio_mode_set(AF, PUPD_NONE), gpio_af_set(AF_2), gpio_output_options_set(PP, 50MHZ) on PB3.
+HAL: chip.route_general_pwm_pin(PB3).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+ignore = [
+    "<RCU_BASE>",
+    "<GPIOB_BASE>+0x24",
+]
+
+[vendor]
+body = '''
+    gpio_mode_set(GPIOB, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO_PIN_3);
+    gpio_af_set(GPIOB, GPIO_AF_2, GPIO_PIN_3);
+    gpio_output_options_set(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        chip.route_general_pwm_pin(0x13).unwrap(); // PB3 = TIMER1_CH1
+    }
+'''

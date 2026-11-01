@@ -3,7 +3,7 @@ name = "firmware"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "The universal firmware binary: one thumbv7m image that detects which GD32 it is on at boot (runtime-hal detect_chip), mounts the flash store at the detected top-of-flash, and runs the bare housekeeping loop. The shipping image: `cargo image` (the build-std alias in .cargo/config.toml) -> the universal `firmware` ELF -> `.bin`, valid on every part (memory.x sized to the smallest, the F130)."
+description = "The firmware binary: the universal thumbv7m image that detects its GD32 at boot (runtime-hal detect_chip; `cargo image`, no feature), or one image per chip on the hal crate (`gd32f103c8`, `gd32f130c8`; `cargo image-f103`, `cargo image-f130`). Mounts the flash store at the top of flash and runs the service loop."
 
 # The images this crate builds, one table per image, keyed by image name (specs/firmware-bundle.md
 # section 3.3; the name's form is section 3.2's `<role>-<chip>`). `hoverboard-cli firmware pack`
@@ -81,13 +81,30 @@ base = { path = "../../shared/base" }
 # `orchestrator`, which does not re-export it; host-test only, no bytes in the image.
 state = { path = "../state" }
 
-# The HAL providing the runtime `detect_chip()` and the FMC flash driver. Target-gated exactly like
-# the store's dependency: the host build of this crate degrades to an empty `main`, so it never links
-# the HAL. runtime-hal is the workspace git dependency (motorcontroller/Cargo.toml).
+# The HAL, one of two, chosen by the image's feature (below). Target-gated: the host build of this
+# crate degrades to an empty `main`, so it never links a HAL.
+# - `runtime-hal` (the workspace git dependency, motorcontroller/Cargo.toml) with the workspace flash
+#   vector table (motorcontroller/vectors): the universal image, the build with no chip feature. It
+#   detects its chip at boot and runs from a RAM vector table. Both stay plain dependencies, not
+#   optional ones behind a `universal` feature, because the universal image must come out byte for
+#   byte as before: a feature changes this crate's metadata hash, the hash orders functions in the
+#   fat-LTO link, and the order moves code relative to the flash fetch line (measured: a `universal`
+#   feature moved `configure_output_od` and changed 11,780 bytes). A per-chip build compiles them and
+#   links neither (nothing in it names them). Both go after the bench parity gate (specs/hal.md
+#   section 9, step 2).
+# - `hal` (motorcontroller/hal, specs/hal.md): the per-chip images, `gd32f103c8` and `gd32f130c8`.
 [target.'cfg(target_arch = "arm")'.dependencies]
 runtime-hal = { workspace = true }
-# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
-# `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
-# one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
-# `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.
+# The universal image's flash vector table: once ANY crate enables cortex-m-rt's `device` feature,
+# feature unification removes the default 240-entry `__INTERRUPTS` from the one shared cortex-m-rt
+# build, so the universal binary needs the shared table (and the `device.x` its build.rs emits).
+# Linking-only: `use vectors as _;` in the image source. A per-chip image takes both from `hal`.
 vectors = { path = "../vectors" }
+hal = { path = "../hal", optional = true }
+
+# Which image this build is. No feature: the universal image, `cargo image`. One chip feature: that
+# chip's image on `hal` (`cargo image-f103`, `cargo image-f130`), with the store's FmcFlash on the
+# same HAL. Two is refused (src/main.rs).
+[features]
+gd32f103c8 = ["dep:hal", "hal/gd32f103c8", "store/hal"]
+gd32f130c8 = ["dep:hal", "hal/gd32f130c8", "store/hal"]

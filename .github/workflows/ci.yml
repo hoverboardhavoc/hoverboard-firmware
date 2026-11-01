@@ -16,7 +16,7 @@ name: CI
 # ESP32-C3 image, 1.92). Each cargo step runs from inside its workspace, so that workspace's
 # rust-toolchain.toml and .cargo/ apply; the root holds no Cargo workspace.
 #
-# Eight checks:
+# Nine checks:
 #   - lint: rustfmt over the motorcontroller, shared and tools workspaces (the bridge's runs in its
 #     own job), then clippy over both build surfaces of the motorcontroller and shared workspaces
 #     (thumbv7m and host --all-targets; without --all-targets clippy lints only the lib and skips
@@ -29,6 +29,9 @@ name: CI
 #   - run swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite), in tools/,
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
 #     emulator-runner (it lives in that job because its unicorn build needs cmake),
+#   - run the golden register traces (tools/golden-trace, specs/hal.md section 8.1): rebuild every
+#     vendor trace from third_party/gd32-spl and require the checked-in files byte for byte, then
+#     compare every HAL trace against them, plus the harness's tests and clippy,
 #   - run the Kotlin protocol mirror's drift gate: it reads the Rust as text and compares it to
 #     shared/protocol-kotlin's mirror of the wire protocol,
 #   - run the remote app's unit tests (both variants) and detekt. That job and the drift gate are
@@ -78,8 +81,8 @@ jobs:
   # swd-mailbox's board-only code) is the code the motorcontroller build compiles into the image;
   # both surfaces run on the pinned nightly that shared/rust-toolchain.toml names.
   # The tools/ workspace: rustfmt covers every member here; swd-bridge is clippy'd here;
-  # emulator-runner is clippy'd in the emulator-tests job (its unicorn native build needs cmake,
-  # installed there); hoverboard-cli in its own job, per platform; hardware-runner is ONLY
+  # emulator-runner is clippy'd in the emulator-tests job and golden-trace in the golden-traces job
+  # (their unicorn native build needs cmake, installed there); hoverboard-cli in its own job, per platform; hardware-runner is ONLY
   # fmt-checked (it drives real probes over probe-rs, so nothing in CI compiles or runs it). The
   # bridge workspace's rustfmt and clippy run in the bridge job, which carries its toolchain.
   lint:
@@ -177,14 +180,34 @@ jobs:
         working-directory: hoverboard-firmware/motorcontroller
         run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
 
+      # `--exclude hal --exclude hal-bench --exclude dummy-test --exclude store-test`: they build for exactly one chip
+      # (specs/hal.md section 3.2) and are linted per chip in the next step; `--workspace` would
+      # build them with none.
       - name: clippy (motorcontroller, host-test surface, all targets)
         working-directory: hoverboard-firmware/motorcontroller
         run: >
           cargo clippy
-          --workspace --all-targets
+          --workspace --exclude hal --exclude hal-bench --exclude dummy-test --exclude store-test --all-targets
           --target ${{ env.HOST_TARGET }}
           -F store/test-fields
           -- -D warnings
+
+      # The per-chip builds (specs/hal.md): the HAL and the two test images for each of its chips, on
+      # both surfaces the HAL has (the board target, and the host where its pure parts are tested),
+      # and the firmware's two per-chip images, whose chip-only code the default build does not see.
+      - name: clippy (motorcontroller, per-chip builds of hal, the test images and firmware)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: |
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
+            cargo clippy -p hal --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p hal --features "$chip" --all-targets --target ${{ env.HOST_TARGET }} -- -D warnings
+            cargo clippy -p dummy-test --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p store-test --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p hal-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+          done
+          for chip in gd32f103c8 gd32f130c8; do
+            cargo clippy -p firmware --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+          done
 
       - name: clippy (shared, thumbv7m build surface)
         working-directory: hoverboard-firmware/shared
@@ -199,6 +222,16 @@ jobs:
           -F store/test-fields
           -- -D warnings
 
+      # The store's FmcFlash over `hal` (its `hal` feature), which the plain thumbv7m pass above does
+      # not compile: it needs a chip, and one is enough for the adapter's code.
+      - name: clippy (shared, the store's hal adapter)
+        working-directory: hoverboard-firmware/shared
+        run: >
+          cargo clippy -p store
+          --features hal,hal/gd32f130c8
+          --target thumbv7m-none-eabi
+          -- -D warnings
+
       - name: clippy (swd-bridge, all targets)
         working-directory: hoverboard-firmware/tools
         run: >
@@ -209,9 +242,10 @@ jobs:
           -- -D warnings
 
   # Embedded build for the real target, in motorcontroller/. A bare `cargo build` there uses the
-  # thumbv7m-none-eabi default from motorcontroller/.cargo/config.toml and builds the workspace images
-  # (dummy-test, store-test), which compile the pinned runtime-hal (store/store-test's target-gated
-  # FmcFlash dep).
+  # thumbv7m-none-eabi default from motorcontroller/.cargo/config.toml and builds the default members
+  # (the firmware as the universal image, the bench images), which compile the pinned runtime-hal.
+  # The HAL's test images (dummy-test, store-test) build per chip in the emulator job, and the
+  # per-chip firmware images below.
   #
   # The upper flashed-span size gate (against the 62 KiB no-bootloader region) is enforced below,
   # after objcopy (specs/decision-flash-budget.md); the LTO-gutted floor guard is its lower companion.
@@ -514,9 +548,56 @@ jobs:
           fi
           echo "flashed span within the ${ceiling} B ceiling"
 
+      # The per-chip images (specs/hal.md section 6): `cargo image-f103` and `cargo image-f130`, the
+      # same build-std release build of `firmware` with one chip feature, each in its own target
+      # directory (motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware). Built beside
+      # the universal image, which they replace after the bench parity gate (hal.md section 9).
+      - name: Build the per-chip images (cargo image-f103, cargo image-f130)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: |
+          cargo image-f103
+          cargo image-f130
+
+      # The per-chip size gate (specs/hal.md section 6): each image's flashed span against its
+      # chip's flash less the store's two pages, and its static RAM (.data + .bss + .uninit) against
+      # its SRAM less the SWD mailbox carve. Both budgets are the image's own linker regions, which
+      # memory-chip.x exports as `__image_flash_budget` / `__image_ram_budget` from the hal crate's
+      # chip facts, so the numbers have one owner. The link already refuses an overflow; this step
+      # states the margin on every build and fails a build that leaves the stack no room.
+      - name: Per-chip image size gate (flash span, static RAM)
+        run: |
+          fail=0
+          for chip in gd32f103c8 gd32f130c8; do
+            elf=motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
+            arm-none-eabi-objcopy -O binary "$elf" "$elf.bin"
+            span=$(wc -c < "$elf.bin")
+            syms=$(arm-none-eabi-nm "$elf")
+            flash=$((16#$(printf '%s\n' "$syms" | awk '$3=="__image_flash_budget"{print $1}')))
+            ram=$((16#$(printf '%s\n' "$syms" | awk '$3=="__image_ram_budget"{print $1}')))
+            static=$(arm-none-eabi-size -A "$elf" | awk '$1==".data" || $1==".bss" || $1==".uninit" {t+=$2} END{print t+0}')
+            echo "$chip: flashed span ${span} B of ${flash} B ($((flash - span)) B free); static RAM ${static} B of ${ram} B ($((ram - static)) B left for the stack)"
+            if [ "$span" -gt "$flash" ]; then
+              echo "FAIL: $chip flashed span ${span} B exceeds its ${flash} B region" >&2
+              fail=1
+            fi
+            if [ "$static" -ge "$ram" ]; then
+              echo "FAIL: $chip static RAM ${static} B leaves no stack in its ${ram} B region" >&2
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      # Panic reachability on the per-chip images: the same gate as the universal image's above,
+      # for the period ISR, the control task and the input task of each chip's build.
+      - name: Assert no panic reachable from the motor hot paths (per-chip images)
+        run: |
+          for chip in gd32f103c8 gd32f130c8; do
+            python3 tools/panic-reach.py motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
+          done
+
       # The firmware bundle (specs/firmware-bundle.md section 5): every image this job built, in one
-      # .hbfw (a zip of the stripped ELFs and a manifest), which `hoverboard-cli flash` takes and
-      # picks the image for the board's chip from. The packer is the CLI itself, built here for the
+      # .hbfw (a zip of the stripped ELFs and a manifest), which `hoverboard-cli board update` takes
+      # and picks the image for the board's chip from. The packer is the CLI itself, built here for the
       # runner without BLE (it needs no radio, and the D-Bus headers BLE wants are not installed in
       # this job). It reads each image's table from its crate's Cargo.toml and its guards from
       # tools/image-guard-syms.sh, strips the debug sections, and refuses an image those guards or
@@ -1043,8 +1124,9 @@ jobs:
   # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
   # flashes). emulator-runner is a tools/ workspace member (it links Unicorn's cmake-built native lib,
   # which cannot cross-compile to thumbv7m), built/tested there on the host target, behind the
-  # `unicorn` feature. The tests build the dummy-test AND store-test images first, in
-  # motorcontroller/, so that workspace's target directory is cached here too.
+  # `unicorn` feature. The tests build the dummy-test AND store-test images first, once per chip on
+  # the hal crate (specs/hal.md section 8.3), in motorcontroller/, so that workspace's target
+  # directory is cached here too.
   emulator-tests:
     name: Emulator tests (Unicorn, tier 2)
     runs-on: ubuntu-latest
@@ -1091,6 +1173,70 @@ jobs:
           cargo clippy
           -p emulator-runner
           --features unicorn
+          --all-targets
+          --target ${{ env.HOST_TARGET }}
+          -- -D warnings
+
+  # The golden register traces (specs/hal.md, section 8.1). tools/golden-trace runs each vector's
+  # vendor body (C against the GD standard peripheral library in third_party/gd32-spl) and its HAL
+  # body (motorcontroller/hal, built for thumbv7m per chip feature) under Unicorn and compares the
+  # peripheral accesses. The vendor traces are checked in: `regen --check` rebuilds every one from
+  # the pinned source with the pinned compiler and fails unless it reproduces the checked-in file
+  # byte for byte, so arm-none-eabi-gcc is pinned to the release they were generated with
+  # (15.2.Rel1; the harness refuses any other). `check` then compares every HAL trace against them
+  # and fails on any mismatch; a vector whose HAL module does not exist yet reports as pending. The
+  # unicorn dep is the cmake-built native lib emulator-runner uses, so this job installs cmake too
+  # and carries golden-trace's clippy (the lint job covers its rustfmt).
+  golden-traces:
+    name: Golden register traces (vendor SPL vs HAL)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Install Rust (pinned nightly) + host and thumbv7m targets + clippy
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi
+          components: rustfmt, clippy, rust-src
+
+      - name: Install build tools for Unicorn (cmake + pkg-config)
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
+
+      - name: Install arm-none-eabi-gcc (the release the vendor traces are generated with)
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: "15.2.Rel1"
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            hoverboard-firmware/tools
+
+      - name: Harness tests
+        working-directory: hoverboard-firmware/tools
+        run: cargo test -p golden-trace --target ${{ env.HOST_TARGET }}
+
+      - name: Vendor traces reproduce from the pinned source
+        working-directory: hoverboard-firmware/tools
+        run: cargo run -p golden-trace --target ${{ env.HOST_TARGET }} -- regen --check
+
+      - name: HAL traces against the vendor traces
+        working-directory: hoverboard-firmware/tools
+        run: cargo run -p golden-trace --target ${{ env.HOST_TARGET }} -- check
+
+      - name: clippy (golden-trace, all targets)
+        working-directory: hoverboard-firmware/tools
+        run: >
+          cargo clippy
+          -p golden-trace
           --all-targets
           --target ${{ env.HOST_TARGET }}
           -- -D warnings

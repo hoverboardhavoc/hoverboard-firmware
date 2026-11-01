@@ -8,8 +8,8 @@
 //! planting a crafted region as the scenario needs), and judges the device's read-back on the host.
 //!
 //! The 12-FET 2 KiB part is a DEFERRED bench task (OpenOCD + ESP32 elaphureLink, which probe-rs has no
-//! backend for); this binary drives only the `--features chip1k` (1 KiB) parts. The 2 KiB-page logic is
-//! CI-covered by the emulated `chip2k` path.
+//! backend for); this binary drives only the 1 KiB-page parts (`--features gd32f103c8` or `gd32f130c8`). The 2 KiB-page logic is
+//! CI-covered by the emulated GD32F103RC path.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -46,7 +46,7 @@ enum Scenario {
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
 struct Args {
-    /// The `store-test` ELF image to flash (built `--features chip1k` for the 1 KiB bench parts).
+    /// The `store-test` ELF image to flash (built `--features gd32f103c8` or `gd32f130c8` for the 1 KiB bench parts).
     image: PathBuf,
 
     /// The scenario to run.
@@ -232,7 +232,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
-    // chip1k is the only silicon part this driver runs (the 12-FET 2 KiB part is a deferred bench task
+    // The 1 KiB parts are the only silicon this driver runs (the 12-FET 2 KiB part is a deferred bench task
     // over OpenOCD + ESP32 elaphureLink, which probe-rs has no backend for).
     let result = (|| -> Result<(), String> {
         let mut driver = StoreDriver::attach(

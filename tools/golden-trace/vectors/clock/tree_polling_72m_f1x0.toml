@@ -1,0 +1,69 @@
+# Mode: with_polling, narrowed with assert_only to FMC_WS and RCU_CTL0. On those two registers both
+# sides make the same accesses: one read-modify-write per enable, and one read per poll iteration. On
+# RCU_CFG0 the vendor clears then sets each field (two read-modify-writes) where the HAL makes one, a
+# difference of style the final state of clock/tree_72m_irc8m_f1x0 already compares. The narrowing
+# leaves the CFG0 SCSS confirm poll uncompared: no address filter separates its reads from the
+# field read-modify-writes on the same register.
+#
+# RCU_CTL0 reads in order (each read the next value, the last one repeats):
+#   0x00000000  the read-modify-write that sets IRC8MEN
+#   0x00000001  stable poll: IRC8MEN on, IRC8MSTB clear (busy)
+#   0x00000003  stable poll: IRC8MSTB set (done)
+#   0x00000003  the read-modify-write that sets PLLEN
+#   0x01000003  lock poll: PLLEN on, PLLSTB clear (busy)
+#   0x03000003  lock poll: PLLSTB set (done)
+# so each poll spins once before it exits. CFG0 reads with SCSS = PLL set (the OR form), so the
+# confirm exits. The flags are the ones the vendor body polls, not a silicon capture.
+description = """
+The poll loops of the 72 MHz clock-tree bring-up on the GD32F1x0: every IRC8M-stable and PLL-lock poll
+is present, in order, and each waits for its flag. The operation and both bodies are those of
+clock/tree_72m_irc8m_f1x0.
+"""
+family = "gd32f1x0"
+mode = "with_polling"
+assert_only = [
+    "<FMC_BASE>+0x00",
+    "<RCU_BASE>+0x00",
+]
+
+[read_responses]
+"<RCU_BASE>+0x00" = [0x0000_0000, 0x0000_0001, 0x0000_0003, 0x0000_0003, 0x0100_0003, 0x0300_0003]
+"<RCU_BASE>+0x04" = { or = 0x0000_0008 }
+
+[reset_overrides]
+"<RCU_BASE>+0x00" = 0
+"<RCU_BASE>+0x04" = 0
+"<FMC_BASE>+0x00" = 0
+
+[vendor]
+body = '''
+    fmc_wscnt_set(WS_WSCNT_1);
+    RCU_CTL0 |= RCU_CTL0_IRC8MEN;
+    while(0U == (RCU_CTL0 & RCU_CTL0_IRC8MSTB)){}
+    RCU_CFG0 &= ~RCU_CFG0_AHBPSC;
+    RCU_CFG0 |= RCU_AHB_CKSYS_DIV1;
+    RCU_CFG0 &= ~RCU_CFG0_APB2PSC;
+    RCU_CFG0 |= RCU_APB2_CKAHB_DIV1;
+    RCU_CFG0 &= ~RCU_CFG0_APB1PSC;
+    RCU_CFG0 |= RCU_APB1_CKAHB_DIV2;
+    RCU_CFG0 &= ~RCU_CFG0_PLLSEL;
+    RCU_CFG0 |= RCU_PLLSRC_IRC8M_DIV2;
+    RCU_CFG0 &= ~RCU_CFG0_PLLMF;
+    RCU_CFG0 |= RCU_PLL_MUL18;
+    RCU_CTL0 |= RCU_CTL0_PLLEN;
+    while(0U == (RCU_CTL0 & RCU_CTL0_PLLSTB)){}
+    RCU_CFG0 &= ~RCU_CFG0_SCS;
+    RCU_CFG0 |= RCU_CKSYSSRC_PLL;
+    while(RCU_SCSS_PLL != (RCU_CFG0 & RCU_CFG0_SCSS)){}
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, ClockConfig};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        clock::configure_tree(&chip, &ClockConfig::REFERENCE_72M_IRC8M).unwrap();
+    }
+'''

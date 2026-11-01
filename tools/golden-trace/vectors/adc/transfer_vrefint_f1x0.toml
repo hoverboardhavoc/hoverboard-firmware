@@ -1,0 +1,52 @@
+# Mode: with_polling over the ADC0 block less SAMPT0. The vendor's one call that sets a regular
+# rank, adc_regular_channel_config, also rewrites the channel's sample time; the HAL's read points
+# the rank and keeps the sample time configure_single set (bringup_adc0_vrefint_f1x0 compares it).
+#
+# STAT (0x00) reads: 0x00000000 (EOC clear, busy), then 0x00000002 (EOC set). RDATA (0x4C) reads
+# 0x05D2, about 1.2 V on a 3.3 V reference (a placeholder, not a silicon capture).
+#
+# The conversion starts the way the HAL's does, which silicon needs (the rover master, a GD32F103C8,
+# 2026-11-01, specs bench-evidence/2026-11-01/hal-step2/logs/t01-adc-diag-f103.txt): EOC cleared
+# by a plain write of every STAT flag but EOC (the flags clear on a written 0, so the SPL's
+# read-modify-write adc_flag_clear could clear an EOIC set between its read and write), and SWRCST
+# cleared before adc_software_trigger_enable sets it, so the trigger is an edge. Without either, a
+# second read returned the first conversion: SWRCST still read 1, and RDATA's read left EOC set.
+# The vendor body writes the two with the SPL's register macros.
+description = """
+One software-triggered conversion of VREFINT (channel 17) and its result on the GD32F1x0: clear EOC, point
+regular rank 0 at channel 17, trigger on a fresh SWRCST edge, wait for EOC, read RDATA. A read of RDATA before EOC fails.
+
+Vendor: STAT = ~EOC; adc_regular_channel_config(rank 0, channel 17, 239.5); CTL1 &= ~SWRCST;
+        adc_software_trigger_enable(REGULAR);
+        wait ADC_FLAG_EOC; adc_regular_data_read.
+HAL: chip.adc() then read_channel(17).
+"""
+family = "gd32f1x0"
+mode = "with_polling"
+ignore = ["<ADC0_BASE>+0x0C"]
+
+[read_responses]
+"<ADC0_BASE>+0x00" = [0x0000_0000, 0x0000_0002]
+"<ADC0_BASE>+0x4C" = 0x0000_05D2
+
+[vendor]
+body = '''
+    ADC_STAT = ~ADC_STAT_EOC;
+    adc_regular_channel_config(0U, ADC_CHANNEL_17, ADC_SAMPLETIME_239POINT5);
+    ADC_CTL1 &= ~ADC_CTL1_SWRCST;
+    adc_software_trigger_enable(ADC_REGULAR_CHANNEL);
+    while(RESET == adc_flag_get(ADC_FLAG_EOC)){}
+    (void)adc_regular_data_read();
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.read_channel(17).unwrap();
+    }
+'''

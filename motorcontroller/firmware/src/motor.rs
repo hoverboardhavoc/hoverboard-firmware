@@ -2,7 +2,7 @@
 //! "Firmware bring-up, disarmed").
 //!
 //! This is the motor half of the one universal image. It is **disarmed by construction**: the
-//! arming gate (the sole MOE writer, `runtime_hal::timer::arming`) is never named anywhere in this
+//! arming gate (the sole MOE writer, `hal::timer::arming`) is never named anywhere in this
 //! MODULE, so no code path here can energize a bridge. The timer is configured, the counter runs
 //! and the compare units toggle, the injected ADC converts and its end-of-conversion ISR steps the
 //! commutator, but with MOE clear nothing reaches the gate drivers.
@@ -1803,15 +1803,17 @@ pub mod hw {
     use commutation::foc::PhaseOffsets;
     use commutation::Commutator;
     use core::ptr::addr_of_mut;
-    use heapless::Vec;
-    use runtime_hal::config::{
+    use hal::config::{
         AdcClockDiv, BreakConfig, ClockDiv, InjectedAdcConfig, InjectedChannel, OcMode, PwmAlign,
         PwmChannelConfig, PwmConfig, TimerTriggerLink, TrgoSource,
     };
-    use runtime_hal::{
+    #[cfg(not(universal_image))]
+    use hal::interrupt;
+    use hal::{
         clock, irq, Chip, InjectedAdcController, InjectedHandle, InputGroup, PeriphLabel,
         PwmHandle, PwmTimer, TriggeredAdc,
     };
+    use heapless::Vec;
 
     /// The PWM period: `commutation::ARR`, the crate that owns the constant (the stock 16 kHz
     /// centre-aligned contract at the fleet's 72 MHz timer clock).
@@ -2346,7 +2348,13 @@ pub mod hw {
                         Ordering::Relaxed,
                     );
                 }
-                BringUpStep::RegisterPeriodHandler => irq::register_control_handler(period_isr),
+                // The universal image registers the period ISR into its RAM vector table; a
+                // per-chip image's period vector is `ADC0_1` / `ADC_CMP` below, in its flash table,
+                // so the step has nothing to do there and is kept so both images walk one sequence.
+                BringUpStep::RegisterPeriodHandler => {
+                    #[cfg(universal_image)]
+                    irq::register_control_handler(period_isr);
+                }
                 BringUpStep::EnablePeriodVector => {
                     let period_irq = irq::period_irq(chip.irq());
                     irq::unmask_irq(period_irq);
@@ -2451,7 +2459,7 @@ pub mod hw {
     /// A `Timer7` gate set resolves its label here and then FAILS the bring-up at
     /// `ConfigureInjectedGroup`, and that is the honest outcome rather than a gap in this match:
     /// the HAL has the label, and it is the ADC's injected trigger mux that refuses it
-    /// (`runtime_hal::adc::etsic_for_link` returns `None` for any trigger timer but TIMER0,
+    /// (`hal::adc::etsic_for_link` returns `None` for any trigger timer but TIMER0,
     /// because ADC0's injected external-trigger selector has no TIMER7 TRGO slot on these parts).
     /// So this change makes the second motor fail LOUDLY where it used to silently drive TIMER0's
     /// registers, which is the point; it does not make a second motor work. The 12-FET's second
@@ -2575,6 +2583,12 @@ pub mod hw {
     /// **596 below it** (F103, same binary: 600). `motorcontroller/firmware/memory.x` owns the placement and
     /// asserts the window at link time.
     #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
+    // A per-chip image calls this from its period vector rather than through a registered pointer,
+    // so without the attribute LTO folds it into the vector's trampoline: the symbol the
+    // panic-reach root, the hot-window guard and the bench tools name would be gone. One `bl` of
+    // cost; the universal image reached it through two (its RAM table's HAL ISR, then the
+    // registered handler).
+    #[cfg_attr(not(universal_image), inline(never))]
     extern "C" fn period_isr() {
         // SAFETY: the `MOTOR` invariant (see the static), which is NOT "the ISR is the only
         // accessor after the unmask" any more: this ISR is the only accessor WHENEVER THE PERIOD
@@ -2737,6 +2751,24 @@ pub mod hw {
             (duties[2] as u32) | ((comm.angle as u32) << 16),
             Ordering::Relaxed,
         );
+    }
+
+    /// A per-chip image's period vector: the ADC vector of its flash table (`ADC0_1` on the
+    /// GD32F103, `ADC_CMP` on the GD32F130, the vendor names), which carries the injected end of
+    /// conversion. The universal image routes the same ISR through its RAM vector table instead
+    /// (`RegisterPeriodHandler`). Both run `period_isr`; the trampoline is placed with it in the
+    /// zero-wait window.
+    #[cfg(feature = "gd32f103c8")]
+    #[interrupt]
+    #[link_section = ".hotcode"]
+    fn ADC0_1() {
+        period_isr();
+    }
+    #[cfg(feature = "gd32f130c8")]
+    #[interrupt]
+    #[link_section = ".hotcode"]
+    fn ADC_CMP() {
+        period_isr();
     }
 }
 

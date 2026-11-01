@@ -1,0 +1,31 @@
+# Mode: register_writes. Two read-modify-writes in the same order, to two registers:
+#   W4 APB2EN = 0x00000004 (GPIOA, bit 2)
+#   W4 APB1EN = 0x00020000 (USART1, bit 17)
+description = """
+The clock enables for USART1 and its port (TX/RX on PA2/PA3) on the GD32F10x: GPIOA is APB2EN bit 2
+(the F10x has no GPIO enables on AHBEN) and USART1 APB1EN bit 17.
+
+Vendor: rcu_periph_clock_enable(RCU_GPIOA); rcu_periph_clock_enable(RCU_USART1).
+HAL: clock::enable_gpio_port(Gpioa); clock::enable_usart(Usart1).
+"""
+family = "gd32f10x"
+mode = "register_writes"
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_USART1);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let rcu = chip.rcu_base().unwrap();
+        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpioa).unwrap();
+        clock::enable_usart(rcu, chip.clock(), PeriphLabel::Usart1).unwrap();
+    }
+'''

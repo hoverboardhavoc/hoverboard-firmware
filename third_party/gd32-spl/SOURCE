@@ -1,0 +1,21 @@
+Repository: https://github.com/CommunityGD32Cores/GD32Firmware
+Commit:     4ead0d8a549820330ebb5e03907fb8bb2e6ac5b5
+
+Taken unmodified from that commit, at the same relative paths:
+
+  GD32F10x/GD32F10x_standard_peripheral/      (Include/ and Source/, V2.2.0)
+  GD32F10x/CMSIS/core_cm3.h
+  GD32F10x/CMSIS/core_cmInstr.h
+  GD32F10x/CMSIS/core_cmFunc.h
+  GD32F10x/CMSIS/GD/GD32F10x/Include/
+  GD32F1x0/GD32F1x0_standard_peripheral/      (Include/ and Source/, V3.3.0)
+  GD32F1x0/CMSIS/core_cm3.h
+  GD32F1x0/CMSIS/GD/GD32F1x0/Include/
+
+These are the directories tools/golden-trace compiles for its vendor traces (specs/hal.md, section
+8.1). The startup files and system_*.c under CMSIS/GD/*/Source are not taken: the harness runs no
+startup code. The GD32F1x0 CMSIS directory has no core_cmInstr.h or core_cmFunc.h; the harness
+takes them from the GD32F10x one (the same ARM CMSIS V3.30 release; the two core_cm3.h files are
+identical).
+
+Line endings are the upstream CRLF. Licence: LICENSE.

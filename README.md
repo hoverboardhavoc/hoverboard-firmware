@@ -189,6 +189,24 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
 - **Shipping image: `cargo image` in `motorcontroller/`.** This is the build-std release build whose
   bytes reach flash (`motorcontroller/.cargo/config.toml` explains why it is an alias and not a
   config key). The ELF is `motorcontroller/target/thumbv7m-none-eabi/release/firmware`.
+- **Per-chip images: `cargo image-f103` and `cargo image-f130` in `motorcontroller/`** (`specs/hal.md`).
+  The same build-std release build of `firmware` for one chip, on the `hal` crate
+  (`motorcontroller/hal`) instead of runtime-hal: no boot detection, the chip's own flash vector
+  table, its own flash and SRAM sizes. The ELFs are
+  `motorcontroller/target/gd32f103c8/thumbv7m-none-eabi/release/firmware` and
+  `motorcontroller/target/gd32f130c8/thumbv7m-none-eabi/release/firmware`. An F103 board needs the
+  F103 image and an F130 board the F130 image; nothing on the board checks which it got. They build
+  beside the universal image until the bench parity gate retires it (`specs/hal.md` section 9).
+- **The HAL builds for exactly one chip** (`gd32f103c8`, `gd32f130c8` or `gd32f103rc`), so it and
+  `store-test` are left out of the workspace's default members and are always built with
+  `-p <crate> --features <chip>`. `./tools/host-test.sh` runs the HAL's host tests once per chip.
+- **Golden register traces: `cargo run -p golden-trace -- check` in `tools/`.** It compares the
+  HAL's register accesses for every vector in `tools/golden-trace/vectors/` against the checked-in
+  trace of the same operation through GigaDevice's standard peripheral library, under Unicorn
+  (specs/hal.md, section 8.1). `-- regen --check` rebuilds those vendor traces from
+  `third_party/gd32-spl/` and fails unless they reproduce byte for byte; it, `-- regen` (write them)
+  and `-- trace VECTOR --vendor` need `arm-none-eabi-gcc` from the Arm GNU Toolchain 15.2.Rel1, and
+  every command needs cmake for Unicorn's build. `-- trace VECTOR --chip CHIP` prints one HAL trace.
 - **runtime-hal is a git dependency pinned by the lockfiles** (`[workspace.dependencies]` in
   `motorcontroller/Cargo.toml` and, identically, `shared/Cargo.toml`). A plain build uses the
   pinned commit, locally and in CI. To build against a local runtime-hal checkout beside this one
@@ -235,6 +253,10 @@ terms of the GNU General Public License as published by the Free Software Founda
 be useful, but WITHOUT ANY WARRANTY, without even the implied warranty of MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE), or
 [gnu.org/licenses](https://www.gnu.org/licenses/).
+
+`third_party/gd32-spl/` is GigaDevice's standard peripheral library and ARM's CMSIS headers, under
+their BSD-3-Clause licences ([third_party/gd32-spl/LICENSE](third_party/gd32-spl/LICENSE)); the
+golden-trace harness compiles it and nothing in the firmware links it.
 
 ## Prior art
 

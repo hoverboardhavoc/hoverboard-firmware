@@ -11,9 +11,14 @@ cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
 
+# The chip's flash vector table, from `hal` for the build's chip (specs/hal.md section 8.3: the Tier-2
+# images run per chip). Target-gated: the host build degrades to an empty main.
 [target.'cfg(target_arch = "arm")'.dependencies]
-# The workspace flash vector table (motorcontroller/vectors): once ANY crate enables cortex-m-rt's
-# `device` feature, feature unification removes the default 240-entry `__INTERRUPTS` from the
-# one shared cortex-m-rt build, so EVERY thumbv7m binary needs the shared table (and the
-# `device.x` its build.rs emits). Linking-only: `use vectors as _;` in the image source.
-vectors = { path = "../vectors" }
+hal = { path = "../hal" }
+
+# One per chip; none is the default, so the workspace sweep skips this crate (`default-members`)
+# and every build names its chip, as tools/emulator-runner's dummy tests do.
+[features]
+gd32f103c8 = ["hal/gd32f103c8"]
+gd32f130c8 = ["hal/gd32f130c8"]
+gd32f103rc = ["hal/gd32f103rc"]

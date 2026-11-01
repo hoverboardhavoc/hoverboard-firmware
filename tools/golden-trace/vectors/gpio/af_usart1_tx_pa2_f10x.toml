@@ -1,0 +1,33 @@
+# Mode: final_state, narrowed with assert_only to GPIOA. The HAL routes USART pins only inside
+# Usart::new, which also enables clocks and programs USART1; it routes TX and RX together, and both
+# sit in CTL0, so this vector and af_usart1_rx_pa3_f10x trace the same call. End state:
+#   CTL0 = 0x44444B44 (PA2 TX AF push-pull 50 MHz = 0xB; PA3 RX floating input = 0x4, the reset nibble)
+description = """
+The routing of the USART1 TX pin PA2 (with RX on PA3) on the GD32F10x GPIO model: TX AF push-pull at
+50 MHz, RX a floating input.
+
+Vendor: gpio_init(GPIOA, AF_PP, 50MHZ, PIN_2); gpio_init(GPIOA, IN_FLOATING, 50MHZ, PIN_3).
+HAL: Usart::new(USART1, (PA2, PA3), 115200).
+"""
+family = "gd32f10x"
+mode = "final_state"
+assert_only = ["<GPIOA_BASE>"]
+
+[vendor]
+body = '''
+    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
+    gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let pins = (chip.pin(0x02).unwrap(), chip.pin(0x03).unwrap()); // TX PA2, RX PA3
+        Usart::new(&chip, &ClockConfig::REFERENCE_72M_IRC8M, PeriphLabel::Usart1, pins, 115_200)
+            .unwrap();
+    }
+'''

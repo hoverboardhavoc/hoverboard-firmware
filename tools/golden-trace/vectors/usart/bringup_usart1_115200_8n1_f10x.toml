@@ -1,0 +1,47 @@
+# Mode: final_state. The vendor's config helpers clear then set each field (two writes per field);
+# the HAL writes each field in one read-modify-write. The end state configures the hardware:
+#   BAUD = 0x00000139 (115200 on the 36 MHz APB1)    +0x08
+#   CTL0 = 0x0000200C (UEN bit 13 | TEN bit 3 | REN bit 2)    +0x0C
+#   CTL1 = 0x00000000 (one stop bit)    +0x10
+description = """
+USART1 brought up at 115200 8N1 on the GD32F10x register model (STAT 0x00, DATA 0x04, BAUD 0x08,
+CTL0 0x0C with UEN at bit 13), no transfer. The family table seeds RCU_CFG0 with the running 72 MHz
+tree, so the vendor's usart_baudrate_set reads APB1 = 36 MHz through rcu_clock_freq_get without
+SystemInit; the HAL takes the same tree as ClockConfig::REFERENCE_72M_IRC8M. Both give BAUD = 0x139.
+
+Vendor: usart_disable; usart_baudrate_set(115200); word length 8, one stop bit, no parity; transmit
+        and receive on; usart_enable.
+HAL: Usart::bring_up(&chip, &REFERENCE_72M_IRC8M, &UsartConfig { Usart1, 115200, 8N1, by 16 }).
+"""
+family = "gd32f10x"
+mode = "final_state"
+
+[vendor]
+body = '''
+    usart_disable(USART1);
+    usart_baudrate_set(USART1, 115200U);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+    usart_enable(USART1);
+'''
+
+[hal]
+body = '''
+    use hal::config::{Oversampling, UsartConfig, UsartFrame};
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let cfg = UsartConfig {
+            usart: PeriphLabel::Usart1,
+            baud: 115_200,
+            frame: UsartFrame::EIGHT_N_ONE,
+            oversampling: Oversampling::By16,
+        };
+        let _usart = Usart::bring_up(&chip, &ClockConfig::REFERENCE_72M_IRC8M, &cfg).unwrap();
+    }
+'''

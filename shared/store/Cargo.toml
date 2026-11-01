@@ -8,14 +8,18 @@ description = "Layer 1 flash key-value config store: log-structured, wear-aware,
 [dependencies]
 base = { path = "../base" }
 
-# The on-target FmcFlash adapter wraps runtime-hal's FMC primitive. It is the ONLY runtime-hal
-# dependency and is TARGET-GATED (thumbv7m only): the host `cargo test` build never links the HAL
-# (it uses MockFlash), so the store core + field set stay base-only on the host. The chip2k Tier-2
-# build needs the HAL's `detect-internals` feature (the public descriptors are both 1 KiB, so the
-# 2 KiB `Chip` comes from `synthesize`); store-test forwards it through this crate's `chip2k`
-# feature. runtime-hal is the workspace git dependency (shared/Cargo.toml).
+# The on-target FmcFlash adapter, over one of two HALs:
+# - `hal` (motorcontroller/hal, specs/hal.md section 3.3), behind the `hal` feature: the per-chip
+#   images enable it together with their chip feature (`firmware`'s `gd32f103c8`/`gd32f130c8`,
+#   `store-test`'s three);
+# - `runtime-hal` (the git dependency, shared/Cargo.toml) otherwise: the universal image, until it is
+#   retired with runtime-hal after the bench parity gate (hal.md section 9, step 2). A plain
+#   dependency rather than a feature, so the universal image's build of this crate is unchanged.
+# Both are TARGET-GATED (thumbv7m only): the host `cargo test` build never links a HAL (it uses
+# MockFlash), so the store core and field set stay base-only on the host.
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
 runtime-hal = { workspace = true }
+hal = { path = "../../motorcontroller/hal", optional = true }
 
 # HOST-TEST ONLY (no bytes in any image, and no runtime dependency: `store` does not depend on
 # `control`, and must not -- the cascade is pure math with no notion of persistence). It is here so
@@ -30,10 +34,8 @@ control = { path = "../../motorcontroller/control" }
 imu = { path = "../../motorcontroller/imu" }
 
 [features]
-# Forwarded by the store-test firmware crate so the 2 KiB-page Chip can be synthesized from the HAL's
-# detection internals (there is no public 2 KiB descriptor). OFF by default; pulls in no HAL code on
-# the host (the runtime-hal dep itself is target-gated above).
-chip2k = ["runtime-hal/detect-internals"]
+# The adapter over `hal` instead of runtime-hal (see the dependency block above).
+hal = ["dep:hal"]
 
 # The reserved store-test fields (T_KEY/T_BLOB), their value consts, the scenario ids, and the
 # `run`/`run_var` scenario dispatch. OFF by default so a production build's field set is exactly the
