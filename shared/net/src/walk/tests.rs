@@ -360,7 +360,6 @@ impl Mesh {
             .expect("a CONFIG_RESP")
     }
 
-    /// `CONFIG_READ(dst, key)` -> the CONFIG_RESP.
     /// `IDENTIFY` to `dst`, decoded.
     fn identify(&mut self, dst: u8) -> Option<Identity> {
         let r = self.controller_send(Opcode::Identify.to_u8(), dst, &[])?;
@@ -377,9 +376,17 @@ impl Mesh {
         (p.known() == Some(Opcode::Status)).then(|| p.payload.to_vec())
     }
 
+    /// `CONFIG_READ(dst, key)`, built by the controller side ([`config_read`]) -> the CONFIG_RESP,
+    /// checked to answer it ([`ConfigResp::answering`]).
     fn config_read(&mut self, dst: u8, key: store::Key) -> StdVec<u8> {
-        self.controller_send(Opcode::ConfigRead.to_u8(), dst, &[key.field_id, key.index])
-            .expect("a CONFIG_RESP")
+        let src = self.ctrl.ctrl.guest_addr();
+        let req = config_read(src, dst, key);
+        self.ctrl.link.as_mut().unwrap().send(&req).unwrap();
+        self.settle();
+        let r = self.ctrl.inbox.pop().expect("a CONFIG_RESP");
+        let p = Pdu::decode(&r).unwrap();
+        assert!(ConfigResp::answering(&p, src, dst, [key.field_id, key.index]).is_some());
+        r
     }
 
     /// Reboot every board: clear its routing table (soft state) and re-read its persisted address.
@@ -848,12 +855,48 @@ fn ack_status(emits: &Emits) -> Option<(u8, u8)> {
 // A captured CONFIG_RESP is a full PDU frame; its payload is `[field_id, index, status, type_tag,
 // value...]`.
 fn resp_status(frame: &[u8]) -> u8 {
-    Pdu::decode(frame).unwrap().payload[2]
+    ConfigResp::decode(Pdu::decode(frame).unwrap().payload)
+        .unwrap()
+        .status
 }
 fn resp_value(frame: &[u8]) -> Option<Value<'_>> {
-    let payload = Pdu::decode(frame).ok()?.payload;
-    let kind = Type::from_tag(*payload.get(3)?)?;
-    Value::decode(kind, &payload[4..])
+    ConfigResp::decode(Pdu::decode(frame).ok()?.payload)?.value()
+}
+
+#[test]
+fn a_config_resp_answers_only_its_own_request() {
+    let key = NODE_ADDRESS.key();
+    let req = config_read(0x80, 0x02, key);
+    let p = Pdu::decode(&req).unwrap();
+    assert_eq!(p.known(), Some(Opcode::ConfigRead));
+    assert_eq!(p.payload, &[key.field_id, key.index]);
+
+    let resp = |src: u8, dst: u8, echo: [u8; 2]| {
+        let payload = [echo[0], echo[1], CFG_OK, Type::U8.tag(), 0x01];
+        let mut b = [0u8; MAX_PDU];
+        let n = Pdu::from_op(Opcode::ConfigResp, src, dst, &payload)
+            .encode(&mut b)
+            .unwrap();
+        b[..n].to_vec()
+    };
+    let echo = [key.field_id, key.index];
+    let ok = resp(0x02, 0x80, echo);
+    let r = ConfigResp::answering(&Pdu::decode(&ok).unwrap(), 0x80, 0x02, echo).unwrap();
+    assert_eq!((r.status, r.value()), (CFG_OK, Some(Value::U8(0x01))));
+    // Another source, another requester, another key: not the reply.
+    for other in [
+        resp(0x03, 0x80, echo),
+        resp(0x02, 0x81, echo),
+        resp(0x02, 0x80, [0x04, 0]),
+    ] {
+        let p = Pdu::decode(&other).unwrap();
+        assert!(ConfigResp::answering(&p, 0x80, 0x02, echo).is_none());
+    }
+    // A request to 0x00 takes the reply from whichever node answers on the link.
+    let p = Pdu::decode(&ok).unwrap();
+    assert!(ConfigResp::answering(&p, 0x80, NO_ADDRESS, echo).is_some());
+    // A payload shorter than its four head bytes is no reply.
+    assert!(ConfigResp::decode(&[0x03, 0x00, CFG_OK]).is_none());
 }
 
 fn walked_pair() -> Mesh {

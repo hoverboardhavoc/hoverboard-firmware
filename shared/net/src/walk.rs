@@ -1474,11 +1474,13 @@ impl Controller {
     fn build_request(&self, task: &Task) -> PduBuf {
         let src = self.guest_addr;
         match *task {
-            Task::Hello => request(Opcode::NodeHello, src, pdu::NO_ADDRESS, &[KIND_CONTROLLER]),
+            // One or no payload byte: these always fit.
+            Task::Hello => request(Opcode::NodeHello, src, pdu::NO_ADDRESS, &[KIND_CONTROLLER])
+                .unwrap_or_default(),
             Task::AssignGateway { new_addr } => {
                 assign_request(src, pdu::NO_ADDRESS, EGRESS_SELF, new_addr)
             }
-            Task::Probe { addr } => request(Opcode::ProbePorts, src, addr, &[]),
+            Task::Probe { addr } => request(Opcode::ProbePorts, src, addr, &[]).unwrap_or_default(),
             Task::AssignNeighbor {
                 relay,
                 egress,
@@ -1526,14 +1528,94 @@ impl Controller {
     }
 }
 
-/// A controller request `op` from `src` to `dst`, encoded.
-fn request(op: Opcode, src: u8, dst: u8, payload: &[u8]) -> PduBuf {
-    let r = Pdu::from_op(op, src, dst, payload);
+/// A controller request `op` from `src` to `dst` with `payload`, encoded; `None` if it does not
+/// fit one PDU ([`MAX_PDU`]). Every request a controller sends is encoded here: the walk's, the
+/// `CONFIG_*` requests ([`config_request`]) and the CLI's `IDENTIFY` and `STATUS_READ`.
+pub fn request(op: Opcode, src: u8, dst: u8, payload: &[u8]) -> Option<PduBuf> {
     let mut tmp = [0u8; MAX_PDU];
-    let n = r.encode(&mut tmp).unwrap_or(0);
+    let n = Pdu::from_op(op, src, dst, payload).encode(&mut tmp).ok()?;
     let mut b: PduBuf = Vec::new();
-    let _ = b.extend_from_slice(&tmp[..n]);
-    b
+    b.extend_from_slice(&tmp[..n]).ok()?;
+    Some(b)
+}
+
+/// Whether `pdu` is an `op` reply to a request from `src` to `dst`: of that opcode, addressed to
+/// `src`, and from `dst` (`specs/l3.md`, "A reply is bound to the request it answers"). A request
+/// to [`pdu::NO_ADDRESS`] is answered by the node on the requester's own link, whatever its
+/// address, so its reply is taken from any source.
+pub fn is_reply(pdu: &Pdu, op: Opcode, src: u8, dst: u8) -> bool {
+    let from = dst == pdu::NO_ADDRESS || pdu.src == dst;
+    pdu.known() == Some(op) && pdu.dst == src && from
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The controller side of `CONFIG_*`: the request a host sends and the `CONFIG_RESP` it reads back.
+// The responder above answers these; the CLI and the handheld remote send them.
+// ---------------------------------------------------------------------------------------------------
+
+/// A `CONFIG_*` request `op` for `key` from `src` to `dst`: the payload is `[field_id, index]` then
+/// `rest` (a write's `[type_tag, value...]`; nothing for a read). `None` if it does not fit one
+/// PDU ([`MAX_PDU`]).
+pub fn config_request(op: Opcode, src: u8, dst: u8, key: Key, rest: &[u8]) -> Option<PduBuf> {
+    let mut payload: Vec<u8, MAX_PDU> = Vec::new();
+    payload.push(key.field_id).ok()?;
+    payload.push(key.index).ok()?;
+    payload.extend_from_slice(rest).ok()?;
+    request(op, src, dst, &payload)
+}
+
+/// `CONFIG_READ` of `key` from `src` to `dst`.
+pub fn config_read(src: u8, dst: u8, key: Key) -> PduBuf {
+    // Three header bytes and two key bytes always fit.
+    config_request(Opcode::ConfigRead, src, dst, key, &[]).unwrap_or_default()
+}
+
+/// A `CONFIG_RESP` as the requester reads it: `[field_id, index, status, type_tag, value...]`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ConfigResp<'a> {
+    /// The two bytes the reply echoes: the key, or `[0, 0]` for the acks that name none
+    /// (`CONFIG_COMPACT`'s).
+    pub echo: [u8; 2],
+    /// The `CFG_*` status.
+    pub status: u8,
+    /// The value's type tag, `0` with no value.
+    pub tag: u8,
+    /// The value bytes.
+    pub bytes: &'a [u8],
+}
+
+impl<'a> ConfigResp<'a> {
+    /// The `CONFIG_RESP` in `pdu` that answers a request from `src` to `dst` ([`is_reply`]) whose
+    /// reply echoes `echo`, or `None` if `pdu` is not that reply.
+    pub fn answering(pdu: &Pdu<'a>, src: u8, dst: u8, echo: [u8; 2]) -> Option<Self> {
+        if !is_reply(pdu, Opcode::ConfigResp, src, dst) {
+            return None;
+        }
+        Self::echoing(pdu.payload, echo)
+    }
+
+    /// The reply in a `CONFIG_RESP` payload when it echoes `echo`, else `None`.
+    pub fn echoing(payload: &'a [u8], echo: [u8; 2]) -> Option<Self> {
+        Self::decode(payload).filter(|r| r.echo == echo)
+    }
+
+    /// The reply in a `CONFIG_RESP` payload, or `None` if it is shorter than its four head bytes.
+    pub fn decode(payload: &'a [u8]) -> Option<Self> {
+        if payload.len() < CONFIG_RESP_HEAD {
+            return None;
+        }
+        Some(ConfigResp {
+            echo: [payload[0], payload[1]],
+            status: payload[2],
+            tag: payload[3],
+            bytes: &payload[CONFIG_RESP_HEAD..],
+        })
+    }
+
+    /// The value, decoded by its type tag; `None` with no value or one that does not decode.
+    pub fn value(&self) -> Option<Value<'a>> {
+        Value::decode(Type::from_tag(self.tag)?, self.bytes)
+    }
 }
 
 /// `ASSIGN(egress, new_addr)` from the controller at `src` to `dst`, encoded: to a relay for the
@@ -1541,7 +1623,8 @@ fn request(op: Opcode, src: u8, dst: u8, payload: &[u8]) -> PduBuf {
 /// (`dst = 0x00`, `egress =` [`EGRESS_SELF`]). Every walk assignment is built here, and so is the
 /// one `hoverboard-cli erase-store` sends to give an erased board its address back.
 pub fn assign_request(src: u8, dst: u8, egress: u8, new_addr: u8) -> PduBuf {
-    request(Opcode::Assign, src, dst, &[egress, new_addr])
+    // Two payload bytes always fit.
+    request(Opcode::Assign, src, dst, &[egress, new_addr]).unwrap_or_default()
 }
 
 /// The status byte ([`STATUS_OK`], [`STATUS_ERR`]) of `pdu` when it is the `ASSIGN_ACK` for
