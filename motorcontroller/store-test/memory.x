@@ -8,7 +8,7 @@
  * FLASH here is only the region cortex-m-rt LINKS the firmware code + vector table into (low flash).
  * The store region itself is NOT linked: it is the top two DETECTED pages of flash, written by the
  * FMC at absolute addresses the store derives from the Chip (0x0800_F800 on a 64 KiB 1 KiB-page
- * part, 0x0803_F000 on the 256 KiB 2 KiB-page chip2k part). The store-test image is small (well
+ * part, 0x0803_F000 on the 256 KiB 2 KiB-page GD32F103RC). The store-test image is small (well
  * under 64 KiB) so the linked code never reaches the 1 KiB-page store region at the top of 64 KiB.
  */
 MEMORY

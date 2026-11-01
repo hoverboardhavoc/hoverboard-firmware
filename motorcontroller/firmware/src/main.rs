@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The universal firmware binary: ONE image that detects which GD32 it is on at boot and runs
-//! everywhere (F103 master, F130 slave, 12-FET). There is no per-part build, the binary detects its
-//! silicon at runtime and adapts (specs/firmware.md).
+//! The firmware binary, in two forms (Cargo.toml `[features]`):
+//!
+//! - **the universal image** (no chip feature, `cargo image`): ONE image that detects which GD32 it
+//!   is on at boot and runs everywhere (F103 master, F130 slave, 12-FET), on runtime-hal
+//!   (specs/firmware.md);
+//! - **one image per chip** (`gd32f103c8`, `gd32f130c8`; `cargo image-f103`, `cargo image-f130`), on
+//!   the `hal` crate (specs/hal.md): no detection, the chip's flash vector table, its own flash and
+//!   SRAM. The code differs from the universal image's only where detection was used (hal.md
+//!   section 4.2), each such place behind `cfg(universal_image)`.
 //!
 //! It wires the libraries it does not own (`store` + `FmcFlash`, `net`'s L3 `Responder`, `link`'s L2,
 //! the `swd-mailbox`, and `runtime-hal`'s detect / clock / USART) into one cooperative service loop:
@@ -42,6 +48,17 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
+// Which image this build is (Cargo.toml `[features]`): no chip feature is the universal image on
+// runtime-hal (cfg `universal_image`, set by build.rs), one chip feature is that chip's image on
+// `hal` (specs/hal.md). Two is refused.
+#[cfg(all(feature = "gd32f103c8", feature = "gd32f130c8"))]
+compile_error!("firmware: enable at most one chip feature (gd32f103c8 or gd32f130c8)");
+
+// The universal image names its HAL `hal` too, so the code below names one crate whichever image
+// it builds; the per-chip images get `hal` as the dependency itself.
+#[cfg(all(target_os = "none", universal_image))]
+extern crate runtime_hal as hal;
+
 mod arm;
 mod layout;
 mod motor;
@@ -68,6 +85,17 @@ mod firmware {
     use cortex_m::peripheral::syst::SystClkSource;
     use cortex_m_rt::entry;
     use embedded_hal::digital::OutputPin;
+    use hal::clock::{self, ClockConfig};
+    #[cfg(universal_image)]
+    use hal::descriptor::ClockPath;
+    #[cfg(universal_image)]
+    use hal::detect_chip;
+    #[cfg(universal_image)]
+    use hal::irq::{install, RamVectorTable, MAX_VECTORS};
+    use hal::{
+        DescriptorError, DmaTx, Floating, FreeWatchdog, I2c, I2cMode, Input, InputGroup,
+        PeriphLabel, Pin as GpioPin, RingBufferedRx, SplitSerial, Usart, WdgTimeout,
+    };
     use link::{Link, SerialTransport};
     use linkctl::{ChipTag, CyclicState};
     use net::walk::{Emits, Responder, MCU_F10X, MCU_F1X0, PORT_SWD, PORT_UART};
@@ -76,15 +104,6 @@ mod firmware {
         InputSample, Obs, OrchestratorState,
     };
     use panic_halt as _;
-    // Linking-only: supplies the workspace `__INTERRUPTS` flash vector table (motorcontroller/vectors),
-    // which cortex-m-rt no longer provides once its `device` feature is on.
-    use runtime_hal::clock::{self, ClockConfig};
-    use runtime_hal::descriptor::ClockPath;
-    use runtime_hal::irq::{install, RamVectorTable, MAX_VECTORS};
-    use runtime_hal::{
-        detect_chip, DescriptorError, DmaTx, Floating, FreeWatchdog, I2c, I2cMode, Input,
-        InputGroup, PeriphLabel, Pin as GpioPin, RingBufferedRx, SplitSerial, Usart, WdgTimeout,
-    };
     use scheduler::{systick_load, Scheduler};
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_BATTERY_CAL, BOARD_BATTERY_FLOOR,
@@ -93,6 +112,10 @@ mod firmware {
         IMU_AXIS_SIGN, IMU_GYRO_BIAS, NODE_CLASS,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
+    // Linking-only: the universal image's `__INTERRUPTS` flash vector table (motorcontroller/vectors),
+    // which cortex-m-rt no longer provides once its `device` feature is on. A per-chip image links
+    // its chip's table from `hal`.
+    #[cfg(universal_image)]
     use vectors as _;
 
     /// This firmware's L3 protocol/firmware version, reported in `NODE_HELLO`.
@@ -171,6 +194,7 @@ mod firmware {
     /// alignment covers its size (a runtime guard at the call site double-checks the placed
     /// address). Stated against the type, not a number: the HAL sizes the table (64 slots, 256 B
     /// since 2026-10-24), and this holds whatever it picks.
+    #[cfg(universal_image)]
     const _: () =
         assert!(core::mem::align_of::<RamVectorTable>() >= core::mem::size_of::<RamVectorTable>());
 
@@ -181,9 +205,9 @@ mod firmware {
     /// pair map to a USART on this family, and through which AF or remap); `supports_rx` is the
     /// RECEIVE half (can the HAL take that instance's RX with a DMA ring). `None` from either means
     /// the link is not routable here, recorded as such (`specs/configured-links.md` section 4).
-    fn link_usart(chip: &runtime_hal::Chip, tx: u8, rx: u8) -> Option<PeriphLabel> {
-        let mapping = runtime_hal::pincap::usart_pins(chip, tx, rx)?;
-        runtime_hal::supports_rx(chip, mapping.usart).then_some(mapping.usart)
+    fn link_usart(chip: &hal::Chip, tx: u8, rx: u8) -> Option<PeriphLabel> {
+        let mapping = hal::pincap::usart_pins(chip, tx, rx)?;
+        hal::supports_rx(chip, mapping.usart).then_some(mapping.usart)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -226,11 +250,11 @@ mod firmware {
     /// read spends nearly the whole window the motor has to tolerate a quiet control task, leaving
     /// nothing for the ordinary jitter the coast was sized for in the first place.
     const IMU_READ_BLOCK_FITS_COAST: () =
-        assert!(runtime_hal::i2c::worst_case_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
+        assert!(hal::i2c::worst_case_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
     const _: () = IMU_READ_BLOCK_FITS_COAST;
 
     /// The same assertion for the OTHER polled peripheral the main loop blocks on: the serial
-    /// write path (`runtime_hal::serial`'s write budget).
+    /// write path (`hal::serial`'s write budget).
     ///
     /// One pass can take more than one write call (the inter-board cyclic emission, plus a PDU
     /// forwarded to the peer), and they share the pass with the control task that has to refresh
@@ -240,7 +264,7 @@ mod firmware {
     /// `while !flag {}`, and the offroad master answered it with eleven independent-watchdog
     /// resets in one bench session (`RCU_RSTSCK` bit 29 set on the master, clear on its peer).
     const UART_WRITE_BLOCK_FITS_COAST: () =
-        assert!(runtime_hal::serial::worst_case_write_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
+        assert!(hal::serial::worst_case_write_block_us(CLOCK.sysclk_hz) * 2 < COAST_US);
     const _: () = UART_WRITE_BLOCK_FITS_COAST;
 
     /// The rate the period ISR runs at, derived from the configured clock tree and the timer
@@ -289,6 +313,7 @@ mod firmware {
 
     /// The RAM vector table (.bss, zero-init; the VTOR alignment rides the type). A plain
     /// static so its initialization costs no stack (see the bring-up comment at its use).
+    #[cfg(universal_image)]
     static mut RAM_VECTORS: RamVectorTable = RamVectorTable {
         slots: [0; MAX_VECTORS],
     };
@@ -373,7 +398,7 @@ mod firmware {
     static ODOMETER_TOTAL: AtomicU32 = AtomicU32::new(0);
 
     /// Write calls the inter-board port's serial adapter ABANDONED because a transmit flag did not
-    /// come up inside its write budget (`runtime_hal::serial`'s `tx_timeouts`, saturating u16): link
+    /// come up inside its write budget (`hal::serial`'s `tx_timeouts`, saturating u16): link
     /// 0's in the low half, link 1's in the high half (`specs/configured-links.md` section 4).
     ///
     /// **The expected reading is zero**, and a non-zero one is specific: the port
@@ -509,7 +534,7 @@ mod firmware {
     static INJECT_UART_LINE_ERROR: AtomicU32 = AtomicU32::new(0);
 
     /// The 250 Hz tick body (R1 verbatim): advance the scheduler one tick, nothing else.
-    /// Registered through the HAL's G7 tick seam (`runtime_hal::register_tick_handler`), NOT a
+    /// Registered through the HAL's G7 tick seam (`hal::register_tick_handler`), NOT a
     /// `#[exception] SysTick`: `irq::install()` flips VTOR to the HAL-owned RAM vector table,
     /// whose SysTick slot routes to the HAL's `on_systick` -> this registered callback, so a
     /// flash-table exception symbol would be dead code (the slice-7 P0, silicon-found: the HAL
@@ -522,6 +547,28 @@ mod firmware {
         unsafe { (*addr_of!(SCHEDULER)).tick() };
         TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// A per-chip image's SysTick vector (its flash table; no RAM table to register into): the
+    /// entry count `CTRL_OBS` publishes, then the tick body above, exactly what the universal
+    /// image's HAL `on_systick` does for it.
+    #[cfg(not(universal_image))]
+    #[cortex_m_rt::exception]
+    fn SysTick() {
+        hal::irq::SYSTICK_ISR_METRIC.record();
+        systick_tick_cb();
+    }
+
+    /// The descriptor's identity bytes are values the wire allocates: the `NODE_HELLO` mcu byte is
+    /// one of `net`'s family tags and the cyclic chip tag names a part (`ChipTag::Unknown` is the
+    /// tag for "cannot name it", which a per-chip image always can).
+    #[cfg(not(universal_image))]
+    const CHIP_IDENTITY_IS_ALLOCATED: () = {
+        let d = &hal::descriptor::DESCRIPTOR;
+        assert!(d.node_mcu == MCU_F10X || d.node_mcu == MCU_F1X0);
+        assert!(!matches!(ChipTag::from_u8(d.chip_tag), ChipTag::Unknown));
+    };
+    #[cfg(not(universal_image))]
+    const _: () = CHIP_IDENTITY_IS_ALLOCATED;
 
     /// The plan-driven input pins (integration.md, "The input task"): a resolve-once
     /// `InputGroup` over up to three configured pins (button, pad A, pad B) plus the per-line
@@ -1222,11 +1269,11 @@ mod firmware {
             addr_of_mut!((*p).link_lap_overruns)
                 .write_volatile(LINK_LAP_OVERRUNS.load(Ordering::Relaxed));
             addr_of_mut!((*p).systick_isr_entries)
-                .write_volatile(runtime_hal::irq::SYSTICK_ISR_METRIC.entries());
+                .write_volatile(hal::irq::SYSTICK_ISR_METRIC.entries());
             addr_of_mut!((*p).usart1_isr_entries)
-                .write_volatile(runtime_hal::irq::USART1_RX_ISR_METRIC.entries());
+                .write_volatile(hal::irq::USART1_RX_ISR_METRIC.entries());
             addr_of_mut!((*p).dma_isr_entries)
-                .write_volatile(runtime_hal::irq::DMA_RX_ISR_METRIC.entries());
+                .write_volatile(hal::irq::DMA_RX_ISR_METRIC.entries());
             addr_of_mut!((*p).roll_milli).write_volatile(o.roll_milli_deg);
             addr_of_mut!((*p).motor_periods).write_volatile(motor::PERIODS.load(Ordering::Relaxed));
             addr_of_mut!((*p).motor_state).write_volatile(
@@ -1699,7 +1746,7 @@ mod firmware {
     /// `I2c::new`'s own frame are gone before the loop exists.
     #[inline(never)]
     fn bring_up_imu<F: store::Flash>(
-        chip: &runtime_hal::Chip,
+        chip: &hal::Chip,
         store: &Store<F>,
         status: &mut StatusRecord,
     ) -> (Option<I2c>, Option<imu::Imu>) {
@@ -1709,8 +1756,7 @@ mod firmware {
         let (scl_id, scl_packed) = (store::IMU_SCL_PIN.id(), ip.scl.packed());
         // The instance behind the staged pair, from the pin model that owns the pair -> instance
         // fact, so the label handed to `I2c::new` comes from the same table that routes the pins.
-        let Some(instance) = runtime_hal::pincap::i2c_instance(chip, scl_packed, ip.sda.packed())
-        else {
+        let Some(instance) = hal::pincap::i2c_instance(chip, scl_packed, ip.sda.packed()) else {
             status.record(scl_id, 0, Reason::NotRouted, scl_packed);
             return (None, None);
         };
@@ -1765,7 +1811,7 @@ mod firmware {
             &CLOCK,
             instance,
             (scl, sda),
-            I2cMode::fast(IMU_I2C_HZ, runtime_hal::i2c::FastDuty::Two),
+            I2cMode::fast(IMU_I2C_HZ, hal::i2c::FastDuty::Two),
         ) {
             Ok(bus) => bus,
             Err(e) => {
@@ -1892,7 +1938,7 @@ mod firmware {
     /// `pin` as a typed HAL handle with its port clock on, or `None` recorded against the function
     /// `field`/`index` (an SWD pin, or a port this silicon does not carry).
     fn typed_pin(
-        chip: &runtime_hal::Chip,
+        chip: &hal::Chip,
         pin: u8,
         field: u8,
         index: u8,
@@ -1926,7 +1972,7 @@ mod firmware {
     /// not carry) drives nothing and is recorded; on battery that board powers off rather than
     /// holding a wrong pin high.
     fn assert_self_hold<F: store::Flash>(
-        chip: &runtime_hal::Chip,
+        chip: &hal::Chip,
         store: &Store<F>,
         status: &mut StatusRecord,
     ) {
@@ -1985,7 +2031,7 @@ mod firmware {
         // Before the motor bring-up starts the counter, and before anything could halt: the
         // register is power-reset-only, so a debugger setting it in-session is lost at the next
         // power cycle and the firmware must set it on every cold boot. One set-only RMW.
-        runtime_hal::debug_hold_timer0();
+        hal::debug_hold_timer0();
 
         // Paint the free stack, SECOND: as early as anything can run while still leaving the FET
         // backstop above it, and before the first thing in this function with a frame worth
@@ -2112,7 +2158,15 @@ mod firmware {
         mailbox.init_header();
 
         // Detect the silicon (fail loud: a wrong register layout is worse than a halt).
+        #[cfg(universal_image)]
         let chip = detect_chip().unwrap();
+        // A per-chip image is built for its chip: the context is the compiled chip's, with no
+        // detection (specs/hal.md section 4.2).
+        #[cfg(not(universal_image))]
+        let chip = match hal::Chip::take() {
+            Some(c) => c,
+            None => halt(),
+        };
 
         // Why this boot happened, read and then CLEARED, as early as the RCU base is known.
         //
@@ -2131,12 +2185,13 @@ mod firmware {
         // configured either, and `configure_tree` below halts on exactly that. One instrument does
         // not get to be the second thing deciding what an impossible chip does.
         if let Ok(rcu_base) = chip.rcu_base() {
-            RESET_CAUSE.store(runtime_hal::reset_cause_flags(rcu_base), Ordering::Relaxed);
-            runtime_hal::clear_reset_cause(rcu_base);
+            RESET_CAUSE.store(hal::reset_cause_flags(rcu_base), Ordering::Relaxed);
+            hal::clear_reset_cause(rcu_base);
         }
         // `mcu` is the intrinsic chip-FAMILY tag the board reports in `NODE_HELLO` (NOT a role: family
         // != master/slave). Identity is positional - the walk assigns addresses by where a board sits,
         // never by reading a hardware id - so this tag is informational only.
+        #[cfg(universal_image)]
         let mcu = match chip.clock() {
             ClockPath::F10xRcc => MCU_F10X,
             ClockPath::F1x0Rcu => MCU_F1X0,
@@ -2147,9 +2202,17 @@ mod firmware {
         // to pick the capability table that predicts this board's layout verdict, which is why
         // the app has had to ask an operator which part it is talking to
         // (`specs/remote-ui.md` 3.5). Read once, here, where the detect result is.
+        #[cfg(universal_image)]
         let chip_tag = ChipTag::from_detected(
             matches!(chip.clock(), ClockPath::F10xRcc),
             chip.descriptor().adv_timers,
+        );
+        // A per-chip image reads both from its descriptor's constants (specs/hal.md section 4.2);
+        // `CHIP_IDENTITY_IS_ALLOCATED` below pins them to the wire's allocated values.
+        #[cfg(not(universal_image))]
+        let (mcu, chip_tag) = (
+            chip.descriptor().node_mcu,
+            ChipTag::from_u8(chip.descriptor().chip_tag),
         );
 
         // Bring up the production 72 MHz tree before the store + UARTs (baud divisor, flash waits).
@@ -2162,7 +2225,7 @@ mod firmware {
         // against it (the round-7a characterisation: pass-scale/wall-anchored windows are the
         // trustworthy cycle observable; below-pass NVIC-handler-mode deltas are not, which is why
         // CTRL_OBS publishes only ISR entry counts). Cheap, idempotent.
-        runtime_hal::irq::enable_cycle_counter();
+        hal::irq::enable_cycle_counter();
 
         // Mount the store; read the persisted address + link-set (0/0 = a fresh, unconfigured board).
         //
@@ -2223,12 +2286,14 @@ mod firmware {
         // frame before copying into the static (the slice-7 stack-budget fix). The `&'static mut`
         // is formed once, here, before any interrupt exists. The VTOR alignment rides the type.
         // SAFETY: the one formation of a &mut to this static, single-threaded boot.
+        #[cfg(universal_image)]
         let vectors: &'static mut RamVectorTable = unsafe { &mut *addr_of_mut!(RAM_VECTORS) };
         // VTOR requires the table aligned to its power-of-two granule, which `RamVectorTable`
         // carries as its own alignment (256 B for 64 slots) and memory.x's `.ramtables` packing
         // preserves. Guard it against the type's alignment rather than a number written here, so
         // the HAL resizing its table cannot leave this check stating the old granule: a misplaced
         // table is a silent boot brick (VTOR ignores the low bits), so fail loud here instead.
+        #[cfg(universal_image)]
         if !(vectors.slots.as_ptr() as usize)
             .is_multiple_of(core::mem::align_of::<RamVectorTable>())
         {
@@ -2236,14 +2301,18 @@ mod firmware {
         }
         // Route interrupts through the RAM vector table and enable them BEFORE arming DMA RX.
         // SAFETY (install): RAM init done, no peripheral IRQ enabled yet, `vectors` is a 'static table.
-        unsafe { install(vectors, chip.irq()) };
+        // (A per-chip image runs from its flash vector table and has nothing to install.)
+        #[cfg(universal_image)]
+        unsafe {
+            install(vectors, chip.irq())
+        };
         // The motor-era interrupt-priority ordering (HAL R7, `specs/motor-integration.md`'s
         // execution model): the period (ADC injected-EOC) vector above every USART RX vector above
         // the DMA vectors above SysTick at the stock 0xF0. Applied here, BEFORE any of those
         // vectors is unmasked (the link bring-up is below, the period vector is the motor
         // bring-up's last step), and it is the single owner of the SysTick priority too. Writing
         // priorities enables nothing.
-        runtime_hal::irq::apply_motor_era_priorities(chip.irq());
+        hal::irq::apply_motor_era_priorities(chip.irq());
         // SAFETY (enable): the table is installed; RingBufferedRx::new registers + unmasks its handlers.
         unsafe { cortex_m::interrupt::enable() };
 
@@ -2337,7 +2406,7 @@ mod firmware {
         let vbatt = layout::read_adc_input(
             store,
             store::BOARD_BATTERY_PIN,
-            |p| runtime_hal::pincap::adc_channel(&chip, p),
+            |p| hal::pincap::adc_channel(&chip, p),
             status,
         );
 
@@ -2357,7 +2426,7 @@ mod firmware {
             store,
             0,
             |hi, lo| {
-                runtime_hal::pincap::gate_set(&chip, hi, lo).map(|t| {
+                hal::pincap::gate_set(&chip, hi, lo).map(|t| {
                     if t == PeriphLabel::Timer7 {
                         1
                     } else {
@@ -2365,7 +2434,7 @@ mod firmware {
                     }
                 })
             },
-            |p| runtime_hal::pincap::adc_channel(&chip, p),
+            |p| hal::pincap::adc_channel(&chip, p),
             status,
         );
         match motor::bring_up(
@@ -2482,7 +2551,9 @@ mod firmware {
             // before-enable ordering is positional (not expressible as a compile-time
             // assertion with the current APIs; the pre-registration window is a safe no-op
             // in the HAL regardless).
-            runtime_hal::register_tick_handler(systick_tick_cb);
+            // A per-chip image's SysTick is `SysTick` below, in the flash vector table.
+            #[cfg(universal_image)]
+            hal::register_tick_handler(systick_tick_cb);
             sched.mark_tick_source_enabled();
         }
         let mut syst = core.SYST;
@@ -2545,7 +2616,7 @@ mod firmware {
     fn place_link<F: store::Flash>(
         slot: *mut Option<UartLink>,
         i: u8,
-        chip: &runtime_hal::Chip,
+        chip: &hal::Chip,
         store: &Store<F>,
         status: &mut StatusRecord,
     ) {
@@ -2559,7 +2630,7 @@ mod firmware {
     #[inline(always)]
     fn bring_up_link<F: store::Flash>(
         i: u8,
-        chip: &runtime_hal::Chip,
+        chip: &hal::Chip,
         store: &Store<F>,
         status: &mut StatusRecord,
     ) -> Option<UartLink> {

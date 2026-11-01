@@ -177,14 +177,31 @@ jobs:
         working-directory: hoverboard-firmware/motorcontroller
         run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
 
+      # `--exclude hal --exclude store-test`: both build for exactly one chip (specs/hal.md section
+      # 3.2) and are linted per chip in the next step; `--workspace` would build them with none.
       - name: clippy (motorcontroller, host-test surface, all targets)
         working-directory: hoverboard-firmware/motorcontroller
         run: >
           cargo clippy
-          --workspace --all-targets
+          --workspace --exclude hal --exclude store-test --all-targets
           --target ${{ env.HOST_TARGET }}
           -F store/test-fields
           -- -D warnings
+
+      # The per-chip builds (specs/hal.md): the HAL and the store image for each of its chips, on
+      # both surfaces the HAL has (the board target, and the host where its pure parts are tested),
+      # and the firmware's two per-chip images, whose chip-only code the default build does not see.
+      - name: clippy (motorcontroller, per-chip builds of hal, store-test and firmware)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: |
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
+            cargo clippy -p hal --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p hal --features "$chip" --all-targets --target ${{ env.HOST_TARGET }} -- -D warnings
+            cargo clippy -p store-test --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+          done
+          for chip in gd32f103c8 gd32f130c8; do
+            cargo clippy -p firmware --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+          done
 
       - name: clippy (shared, thumbv7m build surface)
         working-directory: hoverboard-firmware/shared
@@ -197,6 +214,16 @@ jobs:
           --workspace --all-targets
           --target ${{ env.HOST_TARGET }}
           -F store/test-fields
+          -- -D warnings
+
+      # The store's FmcFlash over `hal` (its `hal` feature), which the plain thumbv7m pass above does
+      # not compile: it needs a chip, and one is enough for the adapter's code.
+      - name: clippy (shared, the store's hal adapter)
+        working-directory: hoverboard-firmware/shared
+        run: >
+          cargo clippy -p store
+          --features hal,hal/gd32f130c8
+          --target thumbv7m-none-eabi
           -- -D warnings
 
       - name: clippy (swd-bridge, all targets)
@@ -506,6 +533,53 @@ jobs:
             exit 1
           fi
           echo "flashed span within the ${ceiling} B ceiling"
+
+      # The per-chip images (specs/hal.md section 6): `cargo image-f103` and `cargo image-f130`, the
+      # same build-std release build of `firmware` with one chip feature, each in its own target
+      # directory (motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware). Built beside
+      # the universal image, which they replace after the bench parity gate (hal.md section 9).
+      - name: Build the per-chip images (cargo image-f103, cargo image-f130)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: |
+          cargo image-f103
+          cargo image-f130
+
+      # The per-chip size gate (specs/hal.md section 6): each image's flashed span against its
+      # chip's flash less the store's two pages, and its static RAM (.data + .bss + .uninit) against
+      # its SRAM less the SWD mailbox carve. Both budgets are the image's own linker regions, which
+      # memory-chip.x exports as `__image_flash_budget` / `__image_ram_budget` from the hal crate's
+      # chip facts, so the numbers have one owner. The link already refuses an overflow; this step
+      # states the margin on every build and fails a build that leaves the stack no room.
+      - name: Per-chip image size gate (flash span, static RAM)
+        run: |
+          fail=0
+          for chip in gd32f103c8 gd32f130c8; do
+            elf=motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
+            arm-none-eabi-objcopy -O binary "$elf" "$elf.bin"
+            span=$(wc -c < "$elf.bin")
+            syms=$(arm-none-eabi-nm "$elf")
+            flash=$((16#$(printf '%s\n' "$syms" | awk '$3=="__image_flash_budget"{print $1}')))
+            ram=$((16#$(printf '%s\n' "$syms" | awk '$3=="__image_ram_budget"{print $1}')))
+            static=$(arm-none-eabi-size -A "$elf" | awk '$1==".data" || $1==".bss" || $1==".uninit" {t+=$2} END{print t+0}')
+            echo "$chip: flashed span ${span} B of ${flash} B ($((flash - span)) B free); static RAM ${static} B of ${ram} B ($((ram - static)) B left for the stack)"
+            if [ "$span" -gt "$flash" ]; then
+              echo "FAIL: $chip flashed span ${span} B exceeds its ${flash} B region" >&2
+              fail=1
+            fi
+            if [ "$static" -ge "$ram" ]; then
+              echo "FAIL: $chip static RAM ${static} B leaves no stack in its ${ram} B region" >&2
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      # Panic reachability on the per-chip images: the same gate as the universal image's above,
+      # for the period ISR, the control task and the input task of each chip's build.
+      - name: Assert no panic reachable from the motor hot paths (per-chip images)
+        run: |
+          for chip in gd32f103c8 gd32f130c8; do
+            python3 tools/panic-reach.py motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
+          done
 
       # Every CI build uploads the .bin and .elf as a workflow artifact, so any commit's image can be
       # downloaded from its Actions run without a local toolchain. One .bin, any part.

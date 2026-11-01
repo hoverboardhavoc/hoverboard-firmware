@@ -2,9 +2,11 @@
 //! FMC board model, persistent flash across the two-phase reset, and host-planted crafted regions.
 //!
 //! Like the dummy tests, these build the firmware image in the motorcontroller workspace and read it
-//! from its target path. `store-test` is built TWICE: `--features chip1k` (two 1 KiB pages) and
-//! `--no-default-features --features chip2k` (two 2 KiB pages); the two binaries share a name, so each
-//! is copied aside after its build. The host plants crafted regions with the store's OWN codec
+//! from its target path. `store-test` is built once per chip on the `hal` crate (specs/hal.md section
+//! 8.3): `gd32f130c8` and `gd32f103c8` (two 1 KiB pages at the top of 64 KiB) and `gd32f103rc` (two
+//! 2 KiB pages at the top of 256 KiB). The scenario matrix runs on the GD32F130C8 build for the 1 KiB
+//! page size and on the GD32F103RC build for the 2 KiB one; the GD32F103C8 build runs the persist
+//! round trip. The binaries share a name, so each is copied aside after its build. The host plants crafted regions with the store's OWN codec
 //! (`store::record::encode`), so a planted record is byte-identical to what the firmware writes.
 //!
 //! The judgments live on the host (the same non-circular shape as the dummy): the host knows the
@@ -22,9 +24,9 @@ use store::{
 };
 use test_shared::RESULT_READY;
 
-// The chip flash EXTENTS the emulator's store region geometry derives from (matching FmcFlash): the
-// chip1k 1 KiB-page part is the 64 KiB F103 (store at 0x0800_F800), the chip2k 2 KiB-page part is the
-// 256 KiB high-density F10x (store at 0x0803_F000).
+// The chip flash EXTENTS the emulator's store region geometry derives from (matching FmcFlash and
+// the hal descriptors): the 1 KiB-page parts are 64 KiB (store at 0x0800_F800), the 2 KiB-page
+// GD32F103RC is 256 KiB (store at 0x0803_F000).
 const FLASH_1K: u32 = 64 * 1024;
 const FLASH_2K: u32 = 256 * 1024;
 
@@ -44,19 +46,21 @@ fn workspace_root() -> PathBuf {
         .join("motorcontroller")
 }
 
-/// Build `store-test` with the given feature args and copy the ELF to a stable per-feature path so
-/// the chip1k and chip2k binaries (same crate, same name) do not clobber each other.
-fn build_store_test(feature_args: &[&str], tag: &str) -> PathBuf {
+/// Build `store-test` for `chip` (its `hal` chip feature) and copy the ELF to a stable per-chip
+/// path so the builds (same crate, same name) do not clobber each other.
+fn build_store_test(chip: &str) -> PathBuf {
     let root = workspace_root();
-    let mut args = vec![
+    let args = vec![
         "build",
         "--release",
         "-p",
         "store-test",
         "--target",
         "thumbv7m-none-eabi",
+        "--features",
+        chip,
     ];
-    args.extend_from_slice(feature_args);
+    let tag = chip;
     let status = Command::new(env!("CARGO"))
         .current_dir(&root)
         .args(&args)
@@ -71,14 +75,22 @@ fn build_store_test(feature_args: &[&str], tag: &str) -> PathBuf {
     dst
 }
 
-fn chip1k_image() -> &'static Path {
+/// The GD32F130C8 build: the 1 KiB-page scenario matrix.
+fn f130c8_image() -> &'static Path {
     static P: OnceLock<PathBuf> = OnceLock::new();
-    P.get_or_init(|| build_store_test(&["--features", "chip1k"], "chip1k"))
+    P.get_or_init(|| build_store_test("gd32f130c8"))
 }
 
-fn chip2k_image() -> &'static Path {
+/// The GD32F103C8 build: the other 1 KiB-page chip.
+fn f103c8_image() -> &'static Path {
     static P: OnceLock<PathBuf> = OnceLock::new();
-    P.get_or_init(|| build_store_test(&["--no-default-features", "--features", "chip2k"], "chip2k"))
+    P.get_or_init(|| build_store_test("gd32f103c8"))
+}
+
+/// The GD32F103RC build: the 2 KiB-page scenarios.
+fn f103rc_image() -> &'static Path {
+    static P: OnceLock<PathBuf> = OnceLock::new();
+    P.get_or_init(|| build_store_test("gd32f103rc"))
 }
 
 /// Build a crafted region for a planted scenario into a fresh `Vec`, via the store's SHARED builders
@@ -110,20 +122,25 @@ fn run_persist(image: &Path, page_size: u32, flash_size: u32) {
 }
 
 #[test]
-fn persist_survives_reboot_chip1k() {
-    run_persist(chip1k_image(), 1024, FLASH_1K);
+fn persist_survives_reboot_f130c8() {
+    run_persist(f130c8_image(), 1024, FLASH_1K);
 }
 
 #[test]
-fn persist_survives_reboot_chip2k() {
-    run_persist(chip2k_image(), 2048, FLASH_2K);
+fn persist_survives_reboot_f103c8() {
+    run_persist(f103c8_image(), 1024, FLASH_1K);
 }
 
 #[test]
-fn no_write_negative_control_chip1k() {
+fn persist_survives_reboot_f103rc() {
+    run_persist(f103rc_image(), 2048, FLASH_2K);
+}
+
+#[test]
+fn no_write_negative_control_f130c8() {
     // The store analog of dummy-fail: send ONLY the read phase, never the set. The read returns the
     // default, not T_VAL, so the rig CATCHES a vacuous pass.
-    let mut emu = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
+    let mut emu = StoreEmu::new(f130c8_image(), 1024, FLASH_1K).expect("build emu");
     let r = emu.run_phase(cmd(PERSIST, 1));
     assert_eq!(r.ready, RESULT_READY, "read phase should still publish");
     assert_ne!(r.output, T_VAL, "no write happened, yet T_VAL was read");
@@ -134,8 +151,8 @@ fn no_write_negative_control_chip1k() {
 // =====================================================================================
 
 #[test]
-fn variable_value_round_trip_chip1k() {
-    let mut emu = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
+fn variable_value_round_trip_f130c8() {
+    let mut emu = StoreEmu::new(f130c8_image(), 1024, FLASH_1K).expect("build emu");
     // Phase 0: set_str(DEVICE_NAME) + set_bytes(T_BLOB).
     let _ = emu.run_phase(cmd(VAR_VALUE, 0));
     // Phase 1: get_text(DEVICE_NAME) -> buf == T_STR_VAL.
@@ -161,13 +178,13 @@ fn variable_value_round_trip_chip1k() {
 // =====================================================================================
 
 #[test]
-fn compaction_preserves_keys_chip1k() {
+fn compaction_preserves_keys_f130c8() {
     // Plant more than one record (known T_KEY + a couple of unknown keys), with an OLDER T_KEY value
     // superseded by T_VAL, so the latest-per-key survivor the device reads is T_VAL.
     let ps = 1024usize;
     let image = planted_region(COMPACT, ps);
 
-    let mut emu = StoreEmu::new(chip1k_image(), ps as u32, FLASH_1K).expect("build emu");
+    let mut emu = StoreEmu::new(f130c8_image(), ps as u32, FLASH_1K).expect("build emu");
     emu.load_region(&image);
     let r = emu.run_phase(cmd(COMPACT, 1));
     assert_eq!(r.ready, RESULT_READY);
@@ -175,13 +192,13 @@ fn compaction_preserves_keys_chip1k() {
 }
 
 #[test]
-fn torn_payload_recovery_chip1k() {
+fn torn_payload_recovery_f130c8() {
     // A good T_KEY=T_VAL record, then a half-written PAYLOAD of a newer value (hdr_crc good, val_crc
     // corrupt). Mount skips the torn record; the last good value (T_VAL) reads. No erase.
     let ps = 1024usize;
     let image = planted_region(TORN_PAYLOAD, ps);
 
-    let mut emu = StoreEmu::new(chip1k_image(), ps as u32, FLASH_1K).expect("build emu");
+    let mut emu = StoreEmu::new(f130c8_image(), ps as u32, FLASH_1K).expect("build emu");
     emu.load_region(&image);
     let r = emu.run_phase(cmd(TORN_PAYLOAD, 1));
     assert_eq!(r.ready, RESULT_READY);
@@ -192,13 +209,13 @@ fn torn_payload_recovery_chip1k() {
 }
 
 #[test]
-fn torn_header_auto_compaction_chip1k() {
+fn torn_header_auto_compaction_f130c8() {
     // A good T_KEY=T_VAL record, then a torn HEADER (hdr_crc bad). Mount auto-compacts; the survivor
     // reads back and the frontier is clean.
     let ps = 1024usize;
     let image = planted_region(TORN_HEADER, ps);
 
-    let mut emu = StoreEmu::new(chip1k_image(), ps as u32, FLASH_1K).expect("build emu");
+    let mut emu = StoreEmu::new(f130c8_image(), ps as u32, FLASH_1K).expect("build emu");
     emu.load_region(&image);
     let r = emu.run_phase(cmd(TORN_HEADER, 1));
     assert_eq!(r.ready, RESULT_READY);
@@ -209,8 +226,8 @@ fn torn_header_auto_compaction_chip1k() {
 }
 
 #[test]
-fn full_then_compact_then_retry_chip1k() {
-    run_full_then_compact(chip1k_image(), 1024, FLASH_1K);
+fn full_then_compact_then_retry_f130c8() {
+    run_full_then_compact(f130c8_image(), 1024, FLASH_1K);
 }
 
 /// The only scenario that makes the device RUN a compaction, so it is the only one that exercises
@@ -218,8 +235,8 @@ fn full_then_compact_then_retry_chip1k() {
 /// both families, and the emulator's FMC models the closed-halfword rule that order exists for, so
 /// a descending commit fails here as it does on silicon.
 #[test]
-fn full_then_compact_then_retry_chip2k() {
-    run_full_then_compact(chip2k_image(), 2048, FLASH_2K);
+fn full_then_compact_then_retry_f103rc() {
+    run_full_then_compact(f103rc_image(), 2048, FLASH_2K);
 }
 
 /// Plant an active page filled to within less than one small record of its end, with NO `T_KEY`
@@ -247,10 +264,10 @@ fn run_full_then_compact(image_path: &Path, ps: usize, flash: u32) {
 // =====================================================================================
 
 #[test]
-fn hang_image_is_caught_chip1k() {
+fn hang_image_is_caught_f130c8() {
     let root = workspace_root();
     // The hang binary is built alongside store-test by the same -p store-test build.
-    let _ = chip1k_image(); // ensure the crate is built
+    let _ = f130c8_image(); // ensure the crate is built
     let hang = root.join("target/thumbv7m-none-eabi/release/store-hang");
     let mut emu = StoreEmu::new(&hang, 1024, FLASH_1K).expect("build emu");
     let r = emu.run_phase(cmd(PERSIST, 1));
@@ -266,11 +283,11 @@ fn hang_image_is_caught_chip1k() {
 // =====================================================================================
 
 #[test]
-fn dynamic_value_round_trip_chip1k() {
+fn dynamic_value_round_trip_f130c8() {
     // The dynamic path's own correctness gate: `set_value` persists and `get_value` reads it back
     // across a reboot, exactly as the typed path does. Before this existed, no tier-2 or tier-3 test
     // drove `set_value` / `get_value` at all, even though it is the ONLY path L3's `CONFIG_*` uses.
-    let mut emu = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
+    let mut emu = StoreEmu::new(f130c8_image(), 1024, FLASH_1K).expect("build emu");
     let _ = emu.run_phase(cmd(DYN_VALUE, 0));
     let r = emu.run_phase(cmd(DYN_VALUE, 1));
     assert_eq!(r.ready, RESULT_READY, "dynamic read phase did not publish");
@@ -304,16 +321,16 @@ fn dynamic_value_round_trip_chip1k() {
 const DYN_PATH_STACK_ALLOWANCE: u64 = 192;
 
 #[test]
-fn dynamic_config_write_costs_no_extra_stack_chip1k() {
+fn dynamic_config_write_costs_no_extra_stack_f130c8() {
     // Two fresh emulators rather than two phases of one, so each measurement sits on its own paint of
     // RAM and neither can inherit the other's high-water. (The instrument is a floor over the whole
     // run; on hardware the equivalent is that confirming a fix needs a fresh BOOT to repaint.)
-    let mut typed = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
+    let mut typed = StoreEmu::new(f130c8_image(), 1024, FLASH_1K).expect("build emu");
     let r = typed.run_phase(cmd(PERSIST, 0));
     assert_eq!(r.ready, RESULT_READY, "typed write phase did not publish");
     let typed_depth = typed.stack_depth();
 
-    let mut dynamic = StoreEmu::new(chip1k_image(), 1024, FLASH_1K).expect("build emu");
+    let mut dynamic = StoreEmu::new(f130c8_image(), 1024, FLASH_1K).expect("build emu");
     let r = dynamic.run_phase(cmd(DYN_VALUE, 0));
     assert_eq!(r.ready, RESULT_READY, "dynamic write phase did not publish");
     let dynamic_depth = dynamic.stack_depth();
@@ -365,16 +382,16 @@ fn dynamic_config_write_costs_no_extra_stack_chip1k() {
 const COMPACT_PATH_STACK_ALLOWANCE: u64 = 64;
 
 #[test]
-fn compaction_costs_no_record_sized_stack_chip1k() {
+fn compaction_costs_no_record_sized_stack_f130c8() {
     // Same two-fresh-emulators shape as the dynamic-path gate: each measurement sits on its own
     // paint of RAM, so neither run can inherit the other's high-water.
     let ps = 1024usize;
-    let mut plain = StoreEmu::new(chip1k_image(), ps as u32, FLASH_1K).expect("build emu");
+    let mut plain = StoreEmu::new(f130c8_image(), ps as u32, FLASH_1K).expect("build emu");
     let r = plain.run_phase(cmd(PERSIST, 0));
     assert_eq!(r.ready, RESULT_READY, "plain write phase did not publish");
     let plain_depth = plain.stack_depth();
 
-    let mut compacting = StoreEmu::new(chip1k_image(), ps as u32, FLASH_1K).expect("build emu");
+    let mut compacting = StoreEmu::new(f130c8_image(), ps as u32, FLASH_1K).expect("build emu");
     compacting.load_region(&planted_region(FULL, ps));
     let r = compacting.run_phase(cmd(FULL, 0));
     assert_eq!(

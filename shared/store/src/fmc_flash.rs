@@ -1,14 +1,14 @@
-//! The on-target [`Flash`] adapter over the HAL's FMC primitive (the store's only `runtime-hal`
-//! dependency, target-gated to thumbv7m).
+//! The on-target [`Flash`] adapter over the HAL's FMC primitive (`hal::fmc::Fmc`, specs/hal.md
+//! section 3.3), target-gated to thumbv7m and enabled by the `hal` feature.
 //!
 //! `FmcFlash` is the **policy** half of the mechanism/policy split (see the storage spec, "Ownership
-//! and the HAL boundary"): `runtime-hal::fmc::Fmc` owns the unlock/erase/program register dance at
+//! and the HAL boundary"): `hal::fmc::Fmc` owns the unlock/erase/program register sequence at
 //! ABSOLUTE flash addresses and knows nothing about placement; this adapter owns the store region
 //! (base + length) and maps the store's region-relative offset / page index to an absolute address.
-//! It is NOT a pass-through of `Fmc`, it adds exactly the things the HAL deliberately omits:
+//! It adds exactly the things the HAL leaves out:
 //!
 //! - **owns the region**: `store_base = (FLASH_BASE + flash_size_bytes()) - 2 * page_size()`, the
-//!   top two detected pages, both numbers derived from the detected [`Chip`];
+//!   top two pages, both numbers from the compiled chip's descriptor;
 //! - **maps** region-relative `off` / `page` to an absolute address and **bounds-checks** every
 //!   access against the region length (an own `OutOfBounds`, not trusting the HAL with an
 //!   out-of-region absolute address);
@@ -17,18 +17,14 @@
 //! - **maps errors**: `FmcError` -> `base::error::FlashError` per the spec's PINNED mapping.
 //!
 //! Only `page_size()` forwards straight to the HAL.
-//!
-//! This module is `cfg(target_arch = "arm")`-gated, so the host `cargo test` build never compiles it
-//! (it uses [`crate::flash::MockFlash`]) and never links the HAL.
 
 use base::error::FlashError;
-use runtime_hal::chip::Chip;
-use runtime_hal::error::FmcError;
-use runtime_hal::fmc::Fmc;
+use hal::error::FmcError;
+use hal::fmc::Fmc;
+use hal::Chip;
 
 use crate::flash::Flash;
 
-/// Main flash base on both families (the absolute-address space the store region lives in).
 use crate::geometry;
 
 /// Whether a [`FmcError`] arose from a program or an erase, so the `NotErased`/`ProgramError`/
@@ -48,37 +44,39 @@ fn map_err(e: FmcError, op: Op) -> FlashError {
     match e {
         FmcError::BadArg => FlashError::Misaligned,
         FmcError::WriteProtect => FlashError::Locked,
-        // `NotErased` / `ProgramError` / `Timeout` (and any future `#[non_exhaustive]` variant) are
-        // an op failure: ProgramFailed from a program, EraseFailed from an erase.
-        FmcError::NotErased | FmcError::ProgramError | FmcError::Timeout | _ => match op {
-            Op::Program => FlashError::ProgramFailed,
-            Op::Erase => FlashError::EraseFailed,
-        },
+        // Every other error is an op failure: ProgramFailed from a program, EraseFailed from an
+        // erase.
+        FmcError::NotErased | FmcError::ProgramError | FmcError::Timeout | FmcError::Closed => {
+            match op {
+                Op::Program => FlashError::ProgramFailed,
+                Op::Erase => FlashError::EraseFailed,
+            }
+        }
     }
 }
 
 /// The on-target [`Flash`] implementation: the HAL's FMC primitive plus the store region geometry.
 ///
-/// Takes the detected [`Chip`] at construction (the chip is detected once at boot and threaded to the
-/// store at mount), since the HAL's `Fmc` needs it and the region base/length derive from it.
+/// Takes the [`Chip`] context at construction: the HAL's `Fmc` needs it, and the region base and
+/// length derive from the chip's flash size and page size (its descriptor's constants).
 pub struct FmcFlash {
     fmc: Fmc,
     /// Absolute base of the store region (`(FLASH_BASE + flash_size) - 2 * page_size`).
     store_base: u32,
     /// Region length in bytes (`2 * page_size`).
     region_len: usize,
-    /// One detected page in bytes.
+    /// One page in bytes.
     page_size: usize,
 }
 
 impl FmcFlash {
-    /// Build the adapter for the detected `chip`: the FMC primitive plus the top-two-pages store
-    /// region derived from the chip's flash size + page size.
+    /// Build the adapter for `chip`: the FMC primitive plus the top-two-pages store region derived
+    /// from the chip's flash size and page size.
     pub fn new(chip: &Chip) -> Self {
         let fmc = Fmc::new(chip);
         let page_size = fmc.page_size() as usize;
         let flash_size = fmc.flash_size_bytes();
-        // The placement rule's one owner (crate::geometry): the top two detected pages of flash.
+        // The placement rule's one owner (crate::geometry): the top two pages of flash.
         let store_base = geometry::store_base(flash_size, page_size as u32);
         Self {
             fmc,
@@ -115,7 +113,7 @@ impl Flash for FmcFlash {
     fn as_bytes(&self) -> &[u8] {
         // Flash is memory-mapped at the absolute store base, so the whole region is a plain borrowed
         // slice (a read never touches the FMC). SAFETY: `[store_base, store_base + region_len)` is
-        // inside main flash by construction (the top two pages of the detected extent), readable,
+        // inside main flash by construction (the top two pages of the chip's extent), readable,
         // and immutable for the borrow's lifetime (the store holds `&mut self` for any write, so no
         // concurrent program/erase can run while this slice is live).
         unsafe { core::slice::from_raw_parts(self.store_base as *const u8, self.region_len) }

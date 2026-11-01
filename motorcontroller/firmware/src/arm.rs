@@ -3,7 +3,7 @@
 //!
 //! `motorcontroller/firmware/src/motor.rs` is disarmed by construction and stays that way: it configures the
 //! timer, runs the counter and steps the commutator, and it never names the arming gate. This file
-//! is the complement. It holds the [`runtime_hal::ArmGate`] for the configured motor and it holds
+//! is the complement. It holds the [`hal::ArmGate`] for the configured motor and it holds
 //! nothing else, so **the whole energize decision is one file, one static, one `arm()` call**, which
 //! is bring-up step 11's "keep the energize point one visible boundary in one place" made
 //! structural. A host test in this module enforces it over the crate's source.
@@ -621,7 +621,7 @@ pub mod hw {
     use crate::motor;
     use core::ptr::addr_of_mut;
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use runtime_hal::ArmGate;
+    use hal::ArmGate;
 
     /// The configured motor's arming gate, installed once at boot from the bring-up's timer and
     /// read only by the 250 Hz control task afterwards. `None` on a board whose motor was not
@@ -683,7 +683,7 @@ pub mod hw {
     /// Install the arming gate for a brought-up motor. Called once, on the boot thread, from the
     /// bring-up's summary. Installing it does not arm anything: MOE is untouched here, and the
     /// mode machine is in OFF for the whole of boot.
-    pub fn install(timer: &runtime_hal::PwmTimer) {
+    pub fn install(timer: &hal::PwmTimer) {
         // SAFETY: the one write, on the boot thread, before the scheduler exists and therefore
         // before any control task can read it.
         unsafe { *addr_of_mut!(GATE) = Some(timer.arm_gate()) };

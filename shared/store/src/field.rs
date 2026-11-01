@@ -965,7 +965,7 @@ pub const FULL: u32 = 5;
 /// It is a distinct scenario from [`PERSIST`] rather than a variant of it because the two differ in
 /// exactly one thing: the dynamic path goes through [`lookup`] and the typed path does not. That makes
 /// the PAIR a controlled measurement of what the registry lookup costs the stack, which is the whole
-/// point of `dynamic_config_write_costs_no_extra_stack_chip1k` in the emulator suite. Until this
+/// point of `dynamic_config_write_costs_no_extra_stack_f130c8` in the emulator suite. Until this
 /// existed, no tier-2 or tier-3 test drove `set_value` / `get_value` at all, which is how a 920 B
 /// `lookup` frame reached silicon unnoticed (`specs/bench-evidence/2026-08-13/negative-control.md`).
 #[cfg(feature = "test-fields")]
@@ -1343,7 +1343,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
 /// It scans [`REGISTRY`] **by reference** and builds a [`FieldDef`] from the one matching 8 B row.
 /// Iterating by value (`REGISTRY.into_iter()`, or the old `registry()` call) would first copy the
 /// whole table into this frame, which is the regression this shape exists to prevent. The gate on that is
-/// `dynamic_config_write_costs_no_extra_stack_chip1k` in `tools/emulator-runner`, which measures the
+/// `dynamic_config_write_costs_no_extra_stack_f130c8` in `tools/emulator-runner`, which measures the
 /// real image's stack excursion under Unicorn; there is no host-side gate, and
 /// `shared/store/src/tests.rs` records why one is not possible.
 pub fn lookup(field_id: u8) -> Option<FieldDef> {
