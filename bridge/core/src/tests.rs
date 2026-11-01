@@ -70,6 +70,7 @@ fn every_transfer_returns_the_right_data_or_an_error_and_the_counters_match() {
             noack: 8,
             parity: 15,
             dead: false,
+            hung_ap: false,
         };
         let mut s = board(Family::F1x0, inject, seed);
         s.connect().unwrap();
@@ -88,6 +89,25 @@ fn every_transfer_returns_the_right_data_or_an_error_and_the_counters_match() {
         assert!(c.waits > 0 && c.faults > 0 && c.parity_errors > 0 && c.reconnects > 0);
         assert_counters_match(&mut s);
     }
+}
+
+#[test]
+fn an_access_port_stuck_on_wait_is_freed_by_dapabort() {
+    // The rover master on 2026-11-01: after connect, every AP access answers WAIT until a DP
+    // ABORT with DAPABORT abandons the transaction the target's bus never completed.
+    let mut s = board(Family::F10x, Inject::default(), 5);
+    s.connect().unwrap();
+    s.write_words(0x2000_0040, &[0xA5A5_5A5A]).unwrap();
+    s.pins().inject.hung_ap = true;
+    let mut back = [0u32; 1];
+    s.read_words(0x2000_0040, &mut back).unwrap();
+    assert_eq!(back, [0xA5A5_5A5A]);
+    assert_eq!(s.pins().dapaborts, 1, "one DAPABORT freed the port");
+    assert!(
+        s.counters().waits > 256,
+        "the transfer waited out its budget first"
+    );
+    assert_counters_match(&mut s);
 }
 
 #[test]
@@ -321,6 +341,7 @@ fn flashing_through_a_noisy_line_still_verifies() {
             noack: 3,
             parity: 10,
             dead: false,
+            hung_ap: false,
         },
         7,
     );
