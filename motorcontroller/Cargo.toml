@@ -11,6 +11,7 @@ members = [
     "control",
     "dummy-test",
     "firmware",
+    "hal",
     "imu",
     "imu-bench",
     "inputs",
@@ -23,6 +24,31 @@ members = [
     "vectors",
     "wdg-bench",
 ]
+
+# What a bare `cargo build`, `cargo clippy` or `cargo test` here covers: every member but the ones
+# that need a chip feature. `hal` refuses to build without exactly one (specs/hal.md, section 3.2),
+# so it, and every image built on it, is built with `-p <crate> --features <chip>` (the `image-f103`
+# and `image-f130` aliases, tools/host-test.sh, CI's per-chip steps), never by the workspace sweep.
+default-members = [
+    "attitude",
+    "board",
+    "commutation",
+    "control",
+    "dummy-test",
+    "firmware",
+    "imu",
+    "imu-bench",
+    "inputs",
+    "l2-uart-bench",
+    "orchestrator",
+    "scheduler",
+    "state",
+    "store-test",
+    "test-shared",
+    "vectors",
+    "wdg-bench",
+]
+
 
 # The licence every workspace member inherits (`license.workspace = true`), so the string lives in
 # one place per workspace (../shared and ../tools carry the same one).
