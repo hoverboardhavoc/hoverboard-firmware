@@ -42,6 +42,10 @@ pub struct Inject {
     pub parity: u32,
     /// No target at all: nothing ever answers.
     pub dead: bool,
+    /// The memory access port is stuck on a transaction the target's bus never completes (the
+    /// rover master's hung AHB, `specs/hoverboard-bridge.md`, "SWD engine"): every AP request
+    /// answers `WAIT` until a DP `ABORT` write with DAPABORT (bit 0) abandons it.
+    pub hung_ap: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +119,8 @@ pub struct SimPins<B: Bus> {
     /// Requests that got no ACK because the port was lost (no target, an injected missing ACK or
     /// a request it could not decode).
     pub noacks: u64,
+    /// DP `ABORT` writes with DAPABORT set.
+    pub dapaborts: u64,
 }
 
 const DPIDR: u32 = 0x1BA0_1477;
@@ -146,6 +152,7 @@ impl<B: Bus> SimPins<B> {
             released: 0,
             noack_release: None,
             noacks: 0,
+            dapaborts: 0,
         }
     }
 
@@ -215,7 +222,7 @@ impl<B: Bus> SimPins<B> {
         }
         // The requests a debug port answers even with a sticky error, and never with WAIT.
         let exempt = is_idcode || (!ap && read && a == 1) || (!ap && !read && a == 0);
-        let resp = if !exempt && self.roll(self.inject.wait) {
+        let resp = if (ap && self.inject.hung_ap) || (!exempt && self.roll(self.inject.wait)) {
             self.injected.waits += 1;
             Resp::Wait
         } else if !exempt && self.roll(self.inject.fault) {
@@ -280,6 +287,11 @@ impl<B: Bus> SimPins<B> {
                 0 => {
                     if val & 0x04 != 0 {
                         self.sticky = false;
+                    }
+                    if val & 0x01 != 0 {
+                        // DAPABORT: the stuck AP transaction is abandoned.
+                        self.inject.hung_ap = false;
+                        self.dapaborts += 1;
                     }
                 }
                 1 => self.ctrl = val & 0x5000_0000,

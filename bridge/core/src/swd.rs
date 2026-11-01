@@ -5,8 +5,10 @@
 //! - **Read parity is checked.** A debug port read with bad parity is retried on the spot (those
 //!   reads are idempotent); a memory access port read with bad parity has already moved `TAR`, so
 //!   the memory operation restarts from the last word that arrived intact.
-//! - **ACK handling.** `WAIT` retries the same request (up to [`SwdConfig::wait_retries`]); `FAULT`
-//!   writes `ABORT` = `0x1E` and the operation restarts; no ACK is a line fault, answered with a line
+//! - **ACK handling.** `WAIT` retries the same request (up to [`SwdConfig::wait_retries`]), and a
+//!   transfer still answered `WAIT` after that writes `ABORT` = `0x1F` (DAPABORT and the sticky
+//!   clears) before the operation restarts; `FAULT` writes `ABORT` = `0x1E` and the operation
+//!   restarts; no ACK is a line fault, answered with a line
 //!   reset and reconnect before the operation restarts. Restarts are bounded by a count without
 //!   progress ([`SwdConfig::op_retries`]) and a deadline without progress
 //!   ([`SwdConfig::deadline_us`]), so a dead line returns an error in bounded time.
@@ -150,6 +152,9 @@ const AP_DRW: u8 = 0xC;
 
 /// `ABORT` value that clears every sticky flag: `ORUNERRCLR | WDERRCLR | STKERRCLR | STKCMPCLR`.
 pub const ABORT_CLEAR: u32 = 0x1E;
+/// `ABORT` value that also abandons the access port's transaction in flight (`DAPABORT`, bit 0),
+/// written when a transfer has had [`SwdConfig::wait_retries`] `WAIT`s in a row.
+pub const ABORT_DAP: u32 = 0x1F;
 /// `CTRL/STAT` power-up requests.
 const CSYSPWRUPREQ: u32 = 1 << 30;
 const CDBGPWRUPREQ: u32 = 1 << 28;
@@ -453,7 +458,15 @@ impl<P: SwdPins> Swd<P> {
                     self.wake()
                         .and_then(|_| self.dp_write(DP_ABORT, ABORT_CLEAR))
                 }
-                XferError::Wait | XferError::Parity => Ok(()),
+                // A transfer that took `wait_retries` WAITs in a row (256, about 7 ms at the bench's
+                // 571 kHz) is past any wait a working target makes: the FMC is polled through its
+                // registers, which answer during a flash operation, and the loader runs from SRAM.
+                // The engine abandons the transfer here either way; DAPABORT also abandons it in
+                // the access port, so the restart is not queued behind a transaction the target's
+                // bus may never complete (the rover master, 2026-11-01: a hung AHB answered WAIT to
+                // every access for good, and the sticky-only ABORT on a reconnect never cleared it).
+                XferError::Wait => self.dp_write(DP_ABORT, ABORT_DAP),
+                XferError::Parity => Ok(()),
             };
             r.tries += 1;
             let late = self.pins.now_us().saturating_sub(r.since) > self.cfg.deadline_us;
