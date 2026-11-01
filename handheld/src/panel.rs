@@ -22,10 +22,12 @@ use u8g2_fonts::{fonts, FontRenderer};
 
 use handheld_core::layout::{self, Drawn, Rect, Widget};
 use handheld_core::model::{
-    ArmBand, Body, Card, Corner, Dial, Dot, LampCell, Lower, Overlay, Pack, PhaseBar, Ride,
-    SpeedShow, Statement, Tone, Top, View,
+    ArmBand, Body, Card, ConnectView, Corner, Dial, Dot, LampCell, Lower, Overlay, Pack, PhaseBar,
+    Ride, RowShow, SpeedShow, Statement, Tone, Top, View, CANCEL,
 };
+use handheld_core::pick::addr_text;
 use handheld_core::readings::attitude::Attitude;
+use handheld_core::scan::{ROWS, ROWS_Y, ROW_H};
 
 /// `specs/remote-ui.md` 3.10's tokens in RGB565.
 pub mod color {
@@ -237,8 +239,12 @@ pub struct Frame<'a> {
 /// What the panel shows, as last painted.
 #[derive(Default)]
 pub struct Cache {
-    /// Which screen: 0 a card, 1 the Ride view. `None` before the first frame.
+    /// Which screen: 0 a card, 1 the Ride view, 2 the Connect screen. `None` before the first
+    /// frame.
     screen: Drawn<u8>,
+    /// The Connect screen's rows: each one's content but the RSSI, and its RSSI.
+    rows: [Drawn<u64>; ROWS],
+    rssi: [Drawn<i8>; ROWS],
     top: Drawn<u64>,
     card: Drawn<u64>,
     ring: Drawn<(u8, bool)>,
@@ -294,6 +300,7 @@ pub fn frame<D: DrawTarget<Color = Rgb565>>(
     let screen = match v.body {
         Body::Card(_) => 0,
         Body::Ride(_) => 1,
+        Body::Connect(_) => 2,
     };
     let full = c.screen.update(screen);
     if full {
@@ -312,6 +319,7 @@ pub fn frame<D: DrawTarget<Color = Rgb565>>(
             }
         }
         Body::Ride(r) => ride_dirty(&mut d, r, c),
+        Body::Connect(cv) => connect_dirty(&mut d, cv, c),
     }
     line_dirty(&mut d, v, f.debug, c);
     if c.armed.update(v.armed) {
@@ -339,6 +347,32 @@ pub fn frame<D: DrawTarget<Color = Rgb565>>(
     Painted {
         full,
         rects: if full { 1 } else { d.len() },
+    }
+}
+
+/// Row `i` of the Connect screen, and the part its RSSI takes.
+fn row_rect(i: usize) -> Rect {
+    let y = ROWS_Y + ROW_H * i as i32;
+    Rect::new(0, y, layout::WIDTH, y + ROW_H)
+}
+
+fn rssi_rect(i: usize) -> Rect {
+    let r = row_rect(i);
+    Rect::new(176, r.y0 + 16, r.x1, r.y0 + 28)
+}
+
+/// Only a row whose content changed is painted, its RSSI alone when only that changed (section
+/// 5.8).
+fn connect_dirty(d: &mut Dirty, cv: &ConnectView, c: &mut Cache) {
+    for (i, row) in cv.rows.iter().enumerate() {
+        let content = hash(&row.as_ref().map(|r| (&r.name, r.addr, r.picked)));
+        let rssi = row.as_ref().map_or(i8::MIN, |r| r.rssi);
+        if c.rows[i].update(content) {
+            dirty(d, row_rect(i));
+            c.rssi[i].update(rssi);
+        } else if c.rssi[i].update(rssi) {
+            dirty(d, rssi_rect(i));
+        }
     }
 }
 
@@ -479,6 +513,13 @@ fn draw_scene(s: &mut Strip, f: &Frame) {
             }
             None
         }
+        Body::Connect(cv) => {
+            draw_connect(s, cv);
+            if s.meets(Widget::Statement.rect()) {
+                draw_line(s, v.line.as_ref(), None);
+            }
+            return;
+        }
     };
     let mut grid_drawn = false;
     for w in layout::meeting(s.area) {
@@ -523,6 +564,80 @@ fn draw_scene(s: &mut Strip, f: &Frame) {
     }
 }
 
+/// The Connect screen (section 5.8): the title, the rows that meet the strip.
+fn draw_connect(s: &mut Strip, cv: &ConnectView) {
+    if s.meets(Widget::TopStrip.rect()) {
+        text(
+            s,
+            "Connect",
+            Point::new(4, 4),
+            &FONT_8X13,
+            FG,
+            Alignment::Left,
+        );
+        text(
+            s,
+            "scanning",
+            Point::new(236, 6),
+            &FONT_6X10,
+            FG_MUTED,
+            Alignment::Right,
+        );
+    }
+    for (i, row) in cv.rows.iter().enumerate() {
+        let r = row_rect(i);
+        if !s.meets(r) {
+            continue;
+        }
+        if let Some(row) = row {
+            draw_row(s, r, row);
+        }
+        fill(s, Rect::new(r.x0, r.y1 - 1, r.x1, r.y1), BORDER);
+    }
+}
+
+fn draw_row<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: Rect, row: &RowShow) {
+    if row.picked {
+        fill(d, Rect::new(r.x0, r.y0, r.x0 + 3, r.y1 - 1), PRIMARY);
+    }
+    match &row.name {
+        Some(n) => text(
+            d,
+            n,
+            Point::new(8, r.y0 + 3),
+            &FONT_8X13,
+            FG,
+            Alignment::Left,
+        ),
+        None => text(
+            d,
+            "(no name)",
+            Point::new(8, r.y0 + 3),
+            &FONT_8X13,
+            FG_MUTED,
+            Alignment::Left,
+        ),
+    }
+    text(
+        d,
+        &addr_text(&row.addr),
+        Point::new(8, r.y0 + 18),
+        &FONT_6X10,
+        FG_MUTED,
+        Alignment::Left,
+    );
+    let mut rssi: String<12> = String::new();
+    let _ = write!(rssi, "{} dBm", row.rssi);
+    text(
+        d,
+        &rssi,
+        Point::new(236, r.y0 + 18),
+        &FONT_6X10,
+        FG_MUTED,
+        Alignment::Right,
+    );
+}
+
 fn draw_top<D: DrawTarget<Color = Rgb565>>(d: &mut D, t: &Top) {
     let mut x = 6;
     for dot in t.dots.iter().flatten() {
@@ -532,21 +647,41 @@ fn draw_top<D: DrawTarget<Color = Rgb565>>(d: &mut D, t: &Top) {
         text(
             d,
             "TEST",
-            Point::new(234, 4),
+            Point::new(120, 4),
             &FONT_8X13,
             FG_MUTED,
-            Alignment::Right,
+            Alignment::Center,
         );
     } else if t.low {
+        caution_glyph(d, Point::new(100, 5), 10, CAUTION);
         text(
             d,
             "LOW",
-            Point::new(234, 4),
+            Point::new(114, 4),
             &FONT_8X13,
             CAUTION,
-            Alignment::Right,
+            Alignment::Left,
         );
-        caution_glyph(d, Point::new(196, 5), 10, CAUTION);
+    }
+    // The disconnect control (section 5.8), while connected and disarmed.
+    match t.disconnect {
+        Some(false) => text(
+            d,
+            "DISCONNECT",
+            Point::new(236, 6),
+            &FONT_6X10,
+            FG_MUTED,
+            Alignment::Right,
+        ),
+        Some(true) => text(
+            d,
+            "RELEASE",
+            Point::new(236, 6),
+            &FONT_6X10,
+            PRIMARY,
+            Alignment::Right,
+        ),
+        None => {}
     }
 }
 
@@ -599,18 +734,32 @@ fn draw_card<D: DrawTarget<Color = Rgb565>>(d: &mut D, card: &Card) {
                 .build(),
         )
         .draw(d);
-    let mid = 140;
+    let mid = 130;
     match card {
-        Card::NoBridge => card_text(d, "No bridge set.", mid, &FONT_8X13, FG),
-        Card::Connecting(a) => {
-            card_text(d, "Connecting to", mid - 10, &FONT_8X13, FG);
-            let mut s: String<24> = String::new();
-            let _ = write!(
-                s,
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\u{2026}",
-                a[0], a[1], a[2], a[3], a[4], a[5]
-            );
-            card_text(d, &s, mid + 8, &FONT_8X13, FG_MUTED);
+        Card::Connecting { label, addr } => {
+            card_text(d, "Connecting to", mid - 18, &FONT_8X13, FG);
+            // At most 27 characters fit the card at 8 px.
+            let mut l: String<32> = String::new();
+            if label.chars().count() > 27 {
+                for ch in label.chars().take(26) {
+                    let _ = l.push(ch);
+                }
+                let _ = l.push('\u{2026}');
+            } else {
+                let _ = l.push_str(label);
+            }
+            card_text(d, &l, mid, &FONT_8X13, FG);
+            card_text(d, &addr_text(addr), mid + 18, &FONT_8X13, FG_MUTED);
+            let _ = RoundedRectangle::with_equal_corners(er(CANCEL), Size::new(8, 8))
+                .into_styled(
+                    PrimitiveStyleBuilder::new()
+                        .fill_color(BG_CODE)
+                        .stroke_color(BORDER)
+                        .stroke_width(1)
+                        .build(),
+                )
+                .draw(d);
+            card_text(d, "Cancel", CANCEL.y0 + 12, &FONT_8X13, FG);
         }
         Card::MotorOff => {
             power_glyph(d, Point::new(120, 100));

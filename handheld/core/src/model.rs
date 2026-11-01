@@ -15,6 +15,7 @@ use crate::arm::{Action, Arm, Conditions, Dropped, HoldShow, Refused, BOARDS_OFF
 use crate::drive::{self, Board, Refusal, Targets};
 use crate::inbox::Inbox;
 use crate::lamps::{self, Lamp, LampFacts, LatchHold};
+use crate::pick::{self, Pick};
 use crate::pump::{Command, Outbox, Pump, Tick};
 use crate::readings::attitude::Attitude;
 use crate::readings::battery::{self, BatteryReading};
@@ -22,6 +23,7 @@ use crate::readings::current::{self, CurrentReading};
 use crate::readings::missing;
 use crate::readings::slots::{self, RideSlot, RideSlots};
 use crate::readings::speed::{self, SpeedFacts, SpeedReading};
+use crate::scan::{self, ScanList, Tap};
 use crate::session::{Fact, Phase, Sends, Session, CLASS_MOTOR};
 use crate::throttle;
 use crate::touch::{Lift, TouchView};
@@ -29,16 +31,29 @@ use crate::touch::{Lift, TouchView};
 /// How long the lamp test runs after the first ride facts read, ms (section 5.6).
 pub const LAMP_TEST_MS: u32 = 2000;
 
-/// The link's state.
+/// The link's state (section 3.2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Link {
-    /// No `HANDHELD_BRIDGE` in the build: never connects.
-    NoBridge,
-    /// Connecting to the pinned bridge.
+    /// The Connect screen: scanning, waiting for a tap.
+    Picking,
+    /// Connecting to the pick, again 500 ms after each failure, until it connects or the rider
+    /// cancels.
     Connecting,
     /// Connected since `at`.
     Connected { at: u32 },
 }
+
+/// What a tap can land on outside the Ride view.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Target {
+    /// A row of the Connect screen.
+    Row(usize),
+    /// The connecting card's Cancel button.
+    Cancel,
+}
+
+/// The connecting card's Cancel button (section 5.5).
+pub const CANCEL: crate::layout::Rect = crate::layout::Rect::new(60, 220, 180, 256);
 
 /// What the sampler reports alongside the touch, for the debug line.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -54,8 +69,17 @@ pub struct TouchDebug {
 
 /// Everything the handheld knows.
 pub struct Model {
-    pub bridge: Option<[u8; 6]>,
     pub link: Link,
+    /// The bridge being connected to, or connected.
+    pub pick: Option<Pick>,
+    /// What the flash record holds (section 3.2).
+    stored: Option<Pick>,
+    /// A record the link task is to write to flash.
+    write: Option<Pick>,
+    pub scan: ScanList,
+    /// The Connect screen's statement after a not-a-bridge disconnect.
+    note: Option<String<64>>,
+    taps: Tap<Target>,
     pub session: Session,
     pub inbox: Inbox,
     pub arm: Arm,
@@ -126,15 +150,21 @@ impl Overlay {
 }
 
 impl Model {
-    /// A model for the pinned `bridge` (`None`: no bridge set).
-    pub fn new(bridge: Option<[u8; 6]>) -> Model {
+    /// A model at boot with the flash's `stored` pick: it connects at once, or with none shows the
+    /// Connect screen (section 3.2).
+    pub fn new(stored: Option<Pick>) -> Model {
         Model {
-            bridge,
-            link: if bridge.is_some() {
+            link: if stored.is_some() {
                 Link::Connecting
             } else {
-                Link::NoBridge
+                Link::Picking
             },
+            pick: stored.clone(),
+            stored,
+            write: None,
+            scan: ScanList::default(),
+            note: None,
+            taps: Tap::default(),
             session: Session::new(),
             inbox: Inbox::default(),
             arm: Arm::default(),
@@ -160,6 +190,9 @@ impl Model {
     /// The link came up at `now`: a new session, nothing known.
     pub fn connected(&mut self, now: u32) {
         self.link = Link::Connected { at: now };
+        // A hold on the Connect screen's bottom rows is refused as not ready; that says nothing
+        // about this machine.
+        self.arm.refused = None;
         self.session = Session::new();
         self.inbox.clear();
         self.latch = LatchHold::new();
@@ -170,13 +203,75 @@ impl Model {
         self.outbox = Outbox::default();
     }
 
-    /// The link went away: disarm locally, forget the machine.
+    /// The link went away: disarm locally, forget the machine, and connect to the same pick again
+    /// (section 3.4). A disconnect the rider asked for has already left the link `Picking`, and it
+    /// stays there.
     pub fn disconnected(&mut self) {
         self.arm.drop_for(Dropped::Link);
-        self.link = Link::Connecting;
+        if let Link::Connected { .. } = self.link {
+            self.link = Link::Connecting;
+        }
         self.inbox.clear();
         self.pump.reset();
         self.outbox = Outbox::default();
+    }
+
+    /// Show the Connect screen with an empty list: the link task scans while it shows.
+    fn show_connect(&mut self) {
+        self.arm.drop_for(Dropped::Link);
+        self.link = Link::Picking;
+        self.scan = ScanList::default();
+        self.inbox.clear();
+        self.pump.reset();
+        self.outbox = Outbox::default();
+    }
+
+    /// An advertisement while the Connect screen shows (section 5.8): `addr` most significant
+    /// octet first.
+    pub fn on_adv(&mut self, addr: [u8; 6], name: Option<&str>, rssi: i8, now: u32) {
+        if self.link == Link::Picking {
+            self.scan.heard(addr, name, rssi, now);
+        }
+    }
+
+    /// Drop the scan rows silent for 10 s.
+    pub fn expire_scan(&mut self, now: u32) {
+        self.scan.expire(now);
+    }
+
+    /// The connected peer has no link service (section 3.2): the stored pick is erased (the link
+    /// task erases the sector) and the Connect screen returns with the statement.
+    pub fn not_a_bridge(&mut self) {
+        let mut note = String::new();
+        if let Some(p) = &self.pick {
+            let _ = write!(note, "{} is not a hoverboard bridge.", p.shown());
+        }
+        self.note = Some(note);
+        self.stored = None;
+        self.write = None;
+        self.pick = None;
+        self.show_connect();
+    }
+
+    /// The record the link task is to write to flash, once.
+    pub fn take_write(&mut self) -> Option<Pick> {
+        self.write.take()
+    }
+
+    /// Row `i` of the Connect screen was tapped: it is the pick, written to flash at the tap when
+    /// it differs from the record (the app's rule 3), and the connect starts.
+    fn pick_row(&mut self, i: usize) {
+        let Some(row) = self.scan.rows()[i].as_ref() else {
+            return;
+        };
+        let p = Pick::new(row.addr, row.name.as_deref().unwrap_or(""));
+        if pick::needs_write(self.stored.as_ref(), &p) {
+            self.write = Some(p.clone());
+            self.stored = Some(p.clone());
+        }
+        self.pick = Some(p);
+        self.note = None;
+        self.link = Link::Connecting;
     }
 
     /// One received PDU: a reply the session takes, or telemetry for the inbox.
@@ -313,10 +408,36 @@ impl Model {
         let mut arm = self.arm;
         let action = arm.on_touch(lift, now, || self.conditions());
         self.arm = arm;
-        if let Some(Action::Armed) = action {
-            self.latch.clear_on_arm();
-            self.armed_targets = self.drive().unwrap_or_default();
-            self.lamp_test_until = None;
+        match action {
+            Some(Action::Armed) => {
+                self.latch.clear_on_arm();
+                self.armed_targets = self.drive().unwrap_or_default();
+                self.lamp_test_until = None;
+            }
+            // The disconnect hold (section 5.8): the pick stays, and nothing retries.
+            Some(Action::Disconnect) if matches!(self.link, Link::Connected { .. }) => {
+                self.show_connect();
+            }
+            _ => {}
+        }
+        // Taps on the Connect screen's rows and the connecting card's Cancel.
+        let link = self.link;
+        let rows = &self.scan;
+        let tapped = self.taps.step(lift, |p| match link {
+            Link::Picking => scan::row_at(p)
+                .filter(|&i| rows.rows()[i].is_some())
+                .map(Target::Row),
+            Link::Connecting => {
+                let (x, y) = (p.x / crate::touch::SUB, p.y / crate::touch::SUB);
+                ((CANCEL.x0..CANCEL.x1).contains(&x) && (CANCEL.y0..CANCEL.y1).contains(&y))
+                    .then_some(Target::Cancel)
+            }
+            Link::Connected { .. } => None,
+        });
+        match (self.link, tapped) {
+            (Link::Picking, Some(Target::Row(i))) => self.pick_row(i),
+            (Link::Connecting, Some(Target::Cancel)) => self.show_connect(),
+            _ => {}
         }
     }
 
@@ -437,6 +558,20 @@ impl Model {
         let line = match &body {
             Body::Ride(r) if matches!(r.lower, Lower::Grid(_)) => None,
             Body::Card(Card::MotorOff) | Body::Ride(_) => self.statement(&slots),
+            Body::Connect(_) => Some(match &self.note {
+                Some(n) => Statement {
+                    text: n.clone(),
+                    tone: Tone::Caution,
+                },
+                None => {
+                    let mut text = String::new();
+                    let _ = text.push_str("Tap a bridge to connect.");
+                    Statement {
+                        text,
+                        tone: Tone::Muted,
+                    }
+                }
+            }),
             Body::Card(_) => None,
         };
         View {
@@ -488,10 +623,28 @@ impl Model {
         };
         let (ring_board, ring) = battery::ring_reading(&self.reporting(), |a| self.battery_of(a));
         let floor = ring_board.and_then(|b| self.fact(b, Fact::Floor).map(|v| v as i16));
+        let connected = matches!(self.link, Link::Connected { .. });
         Top {
             dots: [dot(slots.left), dot(slots.right)],
             low: battery::battery_low(&ring, floor),
             test: self.lamp_test(now),
+            disconnect: (connected && !self.arm.armed())
+                .then(|| self.arm.disconnect_hold(now).unwrap_or(false)),
+        }
+    }
+
+    /// The Connect screen's rows (section 5.8).
+    fn connect_view(&self) -> ConnectView {
+        let picked = self.stored.as_ref().map(|p| p.addr);
+        ConnectView {
+            rows: self.scan.rows().clone().map(|r| {
+                r.map(|r| RowShow {
+                    picked: picked == Some(r.addr),
+                    name: r.name,
+                    addr: r.addr,
+                    rssi: r.rssi,
+                })
+            }),
         }
     }
 
@@ -502,8 +655,14 @@ impl Model {
 
     fn body(&self, slots: &RideSlots, now: u32) -> Body {
         match self.link {
-            Link::NoBridge => return Body::Card(Card::NoBridge),
-            Link::Connecting => return Body::Card(Card::Connecting(self.bridge.unwrap_or([0; 6]))),
+            Link::Picking => return Body::Connect(self.connect_view()),
+            Link::Connecting => {
+                let p = self.pick.clone().unwrap_or(Pick::new([0; 6], ""));
+                return Body::Card(Card::Connecting {
+                    label: p.shown(),
+                    addr: p.addr,
+                });
+            }
             Link::Connected { .. } => {}
         }
         // While the machine is walked and read, the Ride view shows with its no-value forms and
@@ -772,6 +931,9 @@ pub struct Top {
     pub dots: [Option<Dot>; 2],
     pub low: bool,
     pub test: bool,
+    /// The disconnect control (section 5.8), shown while connected and disarmed: `true` once its
+    /// hold has reached 1 s ("RELEASE").
+    pub disconnect: Option<bool>,
 }
 
 /// One link dot.
@@ -788,14 +950,34 @@ pub struct Dot {
 pub enum Body {
     Card(Card),
     Ride(Ride),
+    /// The Connect screen, in place of the whole Ride view (section 5.8).
+    Connect(ConnectView),
 }
 
 /// The cards (section 5.5).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Card {
-    NoBridge,
-    Connecting([u8; 6]),
+    /// Connecting to `label` at `addr`, with Cancel.
+    Connecting {
+        label: String<{ pick::LABEL_MAX }>,
+        addr: [u8; 6],
+    },
     MotorOff,
+}
+
+/// The Connect screen's rows, top to bottom.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ConnectView {
+    pub rows: [Option<RowShow>; scan::ROWS],
+}
+
+/// One row: the advertised name, the address, the RSSI, and whether it is the remembered pick.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RowShow {
+    pub name: Option<String<{ pick::LABEL_MAX }>>,
+    pub addr: [u8; 6],
+    pub rssi: i8,
+    pub picked: bool,
 }
 
 /// The instruments.
@@ -957,6 +1139,11 @@ mod tests {
     use net::pdu::{Opcode, Pdu};
     use std::vec::Vec as StdVec;
 
+    /// The bench bridge as a pick.
+    fn bench() -> Pick {
+        Pick::new([0xdc, 6, 0x75, 0xf8, 0x52, 0x6c], "bench")
+    }
+
     fn pdu(op: u8, src: u8, dst: u8, payload: &[u8]) -> StdVec<u8> {
         let mut b = [0u8; 64];
         let n = Pdu::new(op, src, dst, payload)
@@ -1086,9 +1273,23 @@ mod tests {
     #[test]
     fn the_cards_then_the_ride_view() {
         let m = Model::new(None);
-        assert_eq!(m.view(0).body, Body::Card(Card::NoBridge));
-        let mut m = Model::new(Some([0xdc, 6, 0x75, 0xf8, 0x52, 0x6c]));
-        assert!(matches!(m.view(0).body, Body::Card(Card::Connecting(_))));
+        assert!(
+            matches!(m.view(0).body, Body::Connect(_)),
+            "no pick: the Connect screen"
+        );
+        let mut m = Model::new(Some(bench()));
+        assert_eq!(
+            m.link,
+            Link::Connecting,
+            "a remembered pick connects at boot"
+        );
+        assert_eq!(
+            m.view(0).body,
+            Body::Card(Card::Connecting {
+                label: heapless::String::try_from("bench").unwrap(),
+                addr: bench().addr
+            })
+        );
         m.connected(0);
         // The Ride view at once, its values in their no-value forms, the band cannot-arm and the
         // walk on the statement line.
@@ -1173,7 +1374,7 @@ mod tests {
 
     #[test]
     fn the_lamp_test_shows_the_grid_for_two_seconds_after_the_facts_read() {
-        let mut m = Model::new(Some([0; 6]));
+        let mut m = Model::new(Some(bench()));
         m.connected(0);
         let mut now = 0;
         while !m.session.ready() {
@@ -1195,7 +1396,7 @@ mod tests {
 
     #[test]
     fn a_blocking_bit_shows_the_grid_refuses_the_arm_and_disarms() {
-        let mut m = Model::new(Some([0; 6]));
+        let mut m = Model::new(Some(bench()));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
         hold_band(&mut m, now);
@@ -1237,7 +1438,7 @@ mod tests {
 
     #[test]
     fn no_motor_controller_for_a_second_shows_the_card_and_disarms() {
-        let mut m = Model::new(Some([0; 6]));
+        let mut m = Model::new(Some(bench()));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
         hold_band(&mut m, now);
@@ -1256,7 +1457,7 @@ mod tests {
 
     #[test]
     fn the_pump_drives_the_demand_while_armed_and_down() {
-        let mut m = Model::new(Some([0; 6]));
+        let mut m = Model::new(Some(bench()));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
         assert!(m.run_pump(now));
@@ -1312,7 +1513,7 @@ mod tests {
     #[test]
     fn the_band_follows_a_hold_and_a_tap_disarms() {
         let at = |y: i32| Point::new(120 * SUB, y);
-        let mut m = Model::new(Some([0; 6]));
+        let mut m = Model::new(Some(bench()));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
         let band = |m: &Model, at: u32| {
@@ -1334,7 +1535,7 @@ mod tests {
         m.inbox.clear();
         assert_eq!(band(&m, now + 520), ArmBand::CannotArm);
         // A throttle touch while disarmed does nothing.
-        let mut m = Model::new(Some([0; 6]));
+        let mut m = Model::new(Some(bench()));
         m.connected(0);
         let now = run(&mut m, 0, 4000, 0);
         let t = at(100 * SUB);
@@ -1353,7 +1554,7 @@ mod tests {
 
     /// The bench machine set to DIFFERENTIAL (board 0x03 the right wheel), armed.
     fn differential() -> (Model, u32) {
-        let mut m = Model::new(Some([0; 6]));
+        let mut m = Model::new(Some(bench()));
         m.connected(0);
         let mut now = run_mode(&mut m, 0, 4000, 0, 2);
         assert_eq!(m.drive().unwrap().right, Some(3));
@@ -1445,5 +1646,161 @@ mod tests {
         assert_eq!(o(30, Some(12)).text(), "F 30 %  R 12 %");
         assert_eq!(o(-100, Some(-100)).text(), "B 100 %  L 100 %");
         assert_eq!(o(0, Some(0)).text(), "0 %  0 %");
+    }
+
+    /// A tap at `(x, y)` px from `now`: down, lifting, confirmed; the time after.
+    fn tap(m: &mut Model, x: i32, y: i32, now: u32, held: u32) -> u32 {
+        let p = Point::new(x * SUB, y * SUB);
+        m.on_touch(Lift::Down { p0: p, pf: p }, now);
+        m.on_touch(
+            Lift::Lifting {
+                p0: p,
+                pf: p,
+                since: now + held,
+                resume: 0,
+            },
+            now + held,
+        );
+        m.on_touch(Lift::Idle, now + held + 40);
+        now + held + 40
+    }
+
+    #[test]
+    fn a_tap_on_a_row_picks_it_writes_it_once_and_connects() {
+        let mut m = Model::new(None);
+        let a = [0xe0, 0x6e, 0xf1, 0x12, 0x34, 0x56];
+        m.on_adv([0xe0, 1, 2, 3, 4, 5], None, -80, 0);
+        m.on_adv(a, Some("left"), -62, 0);
+        let Body::Connect(c) = m.view(0).body else {
+            panic!()
+        };
+        assert_eq!(c.rows[1].as_ref().unwrap().name.as_deref(), Some("left"));
+        assert!(!c.rows[1].as_ref().unwrap().picked);
+        assert_eq!(m.view(0).line.unwrap().text, "Tap a bridge to connect.");
+        // Row 1 is y 57..90.
+        tap(&mut m, 100, 70, 100, 100);
+        assert_eq!(m.link, Link::Connecting);
+        assert_eq!(m.pick.as_ref().unwrap().addr, a);
+        assert_eq!(
+            m.take_write(),
+            Some(Pick::new(a, "left")),
+            "written at the tap"
+        );
+        assert_eq!(m.take_write(), None);
+        // Cancel on the connecting card: the Connect screen, the pick kept and marked.
+        tap(&mut m, 120, 238, 400, 100);
+        assert_eq!(m.link, Link::Picking);
+        m.on_adv(a, Some("left"), -62, 600);
+        let Body::Connect(c) = m.view(600).body else {
+            panic!()
+        };
+        assert!(
+            c.rows[0].as_ref().unwrap().picked,
+            "the remembered pick's bar"
+        );
+        // The same row again: equal to the record, nothing written.
+        tap(&mut m, 100, 40, 700, 100);
+        assert_eq!(m.link, Link::Connecting);
+        assert_eq!(m.take_write(), None);
+    }
+
+    #[test]
+    fn a_drag_across_rows_and_a_tap_on_an_empty_row_pick_nothing() {
+        let mut m = Model::new(None);
+        m.on_adv([0xe0, 0, 0, 0, 0, 1], None, -60, 0);
+        let (p0, pf) = (
+            Point::new(100 * SUB, 40 * SUB),
+            Point::new(100 * SUB, 80 * SUB),
+        );
+        m.on_touch(Lift::Down { p0, pf: p0 }, 0);
+        m.on_touch(Lift::Down { p0, pf }, 50);
+        m.on_touch(
+            Lift::Lifting {
+                p0,
+                pf,
+                since: 100,
+                resume: 0,
+            },
+            100,
+        );
+        m.on_touch(Lift::Idle, 140);
+        assert_eq!(m.link, Link::Picking);
+        tap(&mut m, 100, 200, 200, 100);
+        assert_eq!(m.link, Link::Picking);
+    }
+
+    #[test]
+    fn the_disconnect_hold_shows_the_connect_screen_and_keeps_the_pick() {
+        let mut m = Model::new(Some(bench()));
+        m.connected(0);
+        let now = run(&mut m, 0, 4000, 0);
+        assert_eq!(m.view(now).top.disconnect, Some(false));
+        let p = Point::new(200 * SUB, 10 * SUB);
+        m.on_touch(Lift::Down { p0: p, pf: p }, now);
+        assert_eq!(m.view(now + 1000).top.disconnect, Some(true), "RELEASE");
+        let now = tap(&mut m, 200, 10, now + 1010, 0);
+        assert_eq!(m.link, Link::Picking);
+        assert_eq!(m.take_write(), None);
+        // The link task's session ends and reports the loss: it does not retry.
+        m.disconnected();
+        assert_eq!(m.link, Link::Picking);
+        assert!(!m.run_pump(now), "nothing goes out from the Connect screen");
+        let Body::Connect(_) = m.view(now).body else {
+            panic!()
+        };
+        // A lost link, by contrast, connects again.
+        let mut m = Model::new(Some(bench()));
+        m.connected(0);
+        m.disconnected();
+        assert_eq!(m.link, Link::Connecting);
+    }
+
+    #[test]
+    fn while_armed_the_disconnect_control_is_hidden_and_the_zone_is_throttle() {
+        let mut m = Model::new(Some(bench()));
+        m.connected(0);
+        let now = run(&mut m, 0, 4000, 0);
+        let now = hold_band(&mut m, now);
+        assert!(m.arm.armed());
+        assert_eq!(m.view(now).top.disconnect, None);
+        let p = Point::new(200 * SUB, 10 * SUB);
+        let pf = Point::new(200 * SUB, 40 * SUB);
+        m.on_touch(Lift::Down { p0: p, pf }, now);
+        m.touch.drive = Some((p, pf));
+        assert!(m.command().demands.iter().all(|&(_, v)| v < 0), "reverse");
+        tap(&mut m, 200, 10, now + 10, 1500);
+        assert!(matches!(m.link, Link::Connected { .. }));
+        assert!(m.arm.armed());
+    }
+
+    #[test]
+    fn a_peer_with_no_link_service_erases_the_pick() {
+        let mut m = Model::new(Some(bench()));
+        m.not_a_bridge();
+        assert_eq!(m.link, Link::Picking);
+        assert_eq!(m.pick, None);
+        let v = m.view(0);
+        assert!(matches!(v.body, Body::Connect(_)));
+        assert_eq!(v.line.unwrap().text, "bench is not a hoverboard bridge.");
+        // A tap on a row clears the statement.
+        m.on_adv([0xe0, 0, 0, 0, 0, 1], None, -60, 0);
+        tap(&mut m, 100, 40, 100, 100);
+        assert_eq!(
+            m.view(300).line,
+            None,
+            "the connecting card has no statement"
+        );
+        assert_eq!(m.take_write(), Some(Pick::new([0xe0, 0, 0, 0, 0, 1], "")));
+    }
+
+    #[test]
+    fn a_long_press_on_the_connect_screen_leaves_no_refusal_behind() {
+        let mut m = Model::new(None);
+        tap(&mut m, 100, 270, 0, 1500);
+        assert_eq!(m.arm.refused, Some(Refused::NotReady));
+        m.on_adv([0xe0, 0, 0, 0, 0, 1], None, -60, 2000);
+        tap(&mut m, 100, 40, 2000, 100);
+        m.connected(3000);
+        assert_eq!(m.arm.refused, None);
     }
 }

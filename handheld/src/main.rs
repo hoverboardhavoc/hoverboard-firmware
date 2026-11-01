@@ -18,6 +18,7 @@ mod link;
 mod panel;
 #[cfg(feature = "test-pattern")]
 mod pattern;
+mod pick_flash;
 mod xpt2046;
 
 use core::cell::RefCell;
@@ -56,8 +57,6 @@ use trouble_host::prelude::ExternalController;
 
 use handheld_core::model::{Model, TouchDebug};
 use handheld_core::touch::{median_spread, Lift, Touch, PERIOD_MS};
-
-include!(concat!(env!("OUT_DIR"), "/bridge.rs"));
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -139,22 +138,28 @@ async fn main(spawner: Spawner) {
     let sw = SoftwareInterruptControl::new(p.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw.software_interrupt0);
 
-    MODEL.lock(|m| m.replace(Some(Model::new(BRIDGE))));
+    // The remembered bridge (section 3.2): connect to it at once, or show the Connect screen.
+    let mut flash =
+        pick_flash::PickFlash::open(esp_storage::FlashStorage::new(p.FLASH).multicore_auto_park());
+    let stored = flash.as_mut().and_then(|f| f.load());
+    println!(
+        "handheld: remembered bridge {:?}",
+        stored
+            .as_ref()
+            .map(|s| (handheld_core::pick::addr_text(&s.addr), s.label.clone()))
+    );
+    MODEL.lock(|m| m.replace(Some(Model::new(stored))));
 
     // The RGB LED is active low; blue stays off, red and green are PWM below.
     let _blue = Output::new(p.GPIO17, Level::High, OutputConfig::default());
 
     // The radio before the backlight (section 2.2).
-    let connector = if BRIDGE.is_some() {
-        match BleConnector::new(p.BT, Default::default()) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                println!("handheld: BLE controller failed: {:?}", e);
-                None
-            }
+    let connector = match BleConnector::new(p.BT, Default::default()) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            println!("handheld: BLE controller failed: {:?}", e);
+            None
         }
-    } else {
-        None
     };
     let heap = esp_alloc::HEAP.free() as u32;
     println!("handheld: radio up, heap {} B free", heap);
@@ -266,8 +271,8 @@ async fn main(spawner: Spawner) {
     #[cfg(not(feature = "test-pattern"))]
     spawner.must_spawn(led_task(led));
     if let Some(c) = connector {
-        let controller: ExternalController<_, 20> = ExternalController::new(c);
-        link::run(controller, BRIDGE.unwrap_or([0; 6])).await;
+        let controller: link::Ctl = ExternalController::new(c);
+        link::run(controller, flash).await;
     }
     loop {
         Timer::after(Duration::from_secs(3600)).await;
@@ -364,6 +369,10 @@ fn log_view(v: &handheld_core::model::View, debug: &(heapless::String<40>, heapl
     use handheld_core::model::{Body, Lower};
     match &v.body {
         Body::Card(c) => println!("view: card {:?}", c),
+        Body::Connect(c) => {
+            let n = c.rows.iter().flatten().count();
+            println!("view: connect, {} rows", n);
+        }
         Body::Ride(r) => {
             let phase = match &r.lower {
                 Lower::Bars { phase, band } => {

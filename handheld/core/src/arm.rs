@@ -6,11 +6,17 @@
 //! arm-zone touch, any other a throttle touch. While disarmed, an arm-zone touch
 //! held for [`ARM_HOLD_MS`] to [`ARM_HOLD_MAX_MS`] with `yf` in the zone the whole time arms on the
 //! sample that confirms its release. While armed, an arm-zone touch disarms on its `Down`.
+//!
+//! While disarmed, a touch that goes down in the disconnect zone at the top (section 5.8) and is
+//! held there [`ARM_HOLD_MS`] disconnects on its confirmed release. While armed that zone is
+//! throttle like the rest.
 
 use crate::touch::{Lift, SUB};
 
 /// The arm zone's top edge: every panel point with `y` at or past it, the full width, px.
 pub const ARM_ZONE_Y: i32 = 250;
+/// The disconnect zone's bottom edge: every point with `y` above it, px (section 5.8).
+pub const DISCONNECT_ZONE_Y: i32 = 40;
 /// The shortest hold that arms, from the touch's `Down` to the sample that confirms its release, ms.
 pub const ARM_HOLD_MS: u32 = 1000;
 /// The longest hold that arms (a longer one is a resting palm), ms.
@@ -27,17 +33,31 @@ pub const BOARDS_OFF_MS: u32 = 1000;
 pub enum Zone {
     /// `y0` in the arm zone: the arm band.
     Arm,
-    /// `y0` above the arm zone: the throttle.
+    /// `y0` in the disconnect zone, while disarmed: the disconnect control.
+    Disconnect,
+    /// Anywhere else: the throttle.
     Throttle,
 }
 
 impl Zone {
-    /// The zone of a point `y`, in sixteenths of a pixel.
-    pub fn of(y: i32) -> Zone {
+    /// The zone of a touch-down point `y`, in sixteenths of a pixel, with the arm level at that
+    /// moment.
+    pub fn of(y: i32, armed: bool) -> Zone {
         if y >= ARM_ZONE_Y * SUB {
             Zone::Arm
+        } else if !armed && y < DISCONNECT_ZONE_Y * SUB {
+            Zone::Disconnect
         } else {
             Zone::Throttle
+        }
+    }
+
+    /// Whether a point `y` lies inside the zone a hold must stay in.
+    fn holds(self, y: i32) -> bool {
+        match self {
+            Zone::Arm => y >= ARM_ZONE_Y * SUB,
+            Zone::Disconnect => y < DISCONNECT_ZONE_Y * SUB,
+            Zone::Throttle => true,
         }
     }
 }
@@ -48,7 +68,7 @@ struct Held {
     zone: Zone,
     /// When it went `Down`, ms.
     at: u32,
-    /// `yf` has left the arm zone at some sample.
+    /// `yf` has left its zone at some sample.
     left: bool,
     /// Its `Down` disarmed the machine, so its release does not arm.
     disarmed: bool,
@@ -154,6 +174,8 @@ pub enum Action {
     Armed,
     Disarmed,
     Refused(Refused),
+    /// The disconnect control's hold was released (section 5.8).
+    Disconnect,
 }
 
 impl Arm {
@@ -173,11 +195,11 @@ impl Arm {
         let prev = core::mem::replace(&mut self.lift, lift);
         match (lift.points(), &mut self.touch) {
             (Some((p0, pf)), None) => {
-                let zone = Zone::of(p0.y);
+                let zone = Zone::of(p0.y, self.armed);
                 let mut t = Held {
                     zone,
                     at: now,
-                    left: Zone::of(pf.y) != Zone::Arm,
+                    left: !zone.holds(pf.y),
                     disarmed: false,
                 };
                 let mut action = None;
@@ -193,7 +215,7 @@ impl Arm {
                 action
             }
             (Some((_, pf)), Some(t)) => {
-                if Zone::of(pf.y) != Zone::Arm {
+                if !t.zone.holds(pf.y) {
                     t.left = true;
                 }
                 None
@@ -213,6 +235,9 @@ impl Arm {
 
     fn release(&mut self, t: Held, now: u32, cond: impl FnOnce() -> Conditions) -> Option<Action> {
         let held = now.wrapping_sub(t.at);
+        if t.zone == Zone::Disconnect {
+            return (!t.left && !self.armed && held >= ARM_HOLD_MS).then_some(Action::Disconnect);
+        }
         if t.zone != Zone::Arm
             || t.left
             || t.disarmed
@@ -255,6 +280,14 @@ impl Arm {
                 (held / FILL_STEP_MS * FILL_STEP_MS) as u16,
             ))
         }
+    }
+
+    /// The disconnect hold in progress at `now` (ms), while disarmed: whether it has reached
+    /// [`ARM_HOLD_MS`] ("RELEASE"), or `None` for no such hold.
+    pub fn disconnect_hold(&self, now: u32) -> Option<bool> {
+        let t = self.touch?;
+        (!self.armed && t.zone == Zone::Disconnect && !t.left)
+            .then(|| now.wrapping_sub(t.at) >= ARM_HOLD_MS)
     }
 
     /// Drop the arm level for `why` (never refused). Returns whether it was held.
@@ -501,5 +534,55 @@ mod tests {
         assert!(a.drop_for(Dropped::Link));
         assert_eq!(a.fault_disarm, None);
         assert!(!a.drop_for(Dropped::Link), "already disarmed");
+    }
+
+    /// A point in the disconnect zone.
+    const TOP: i32 = 20 * SUB;
+
+    #[test]
+    fn the_disconnect_hold_picks_it_on_the_confirmed_release_after_a_second() {
+        for (held, picks) in [(999, false), (1000, true), (9000, true)] {
+            let mut a = Arm::default();
+            let (first, last) = touch(&mut a, TOP, 100, held, ok());
+            assert_eq!(first, None);
+            assert_eq!(last, picks.then_some(Action::Disconnect), "{held} ms");
+            assert!(!a.armed());
+        }
+        // Not before the release.
+        let mut a = Arm::default();
+        a.on_touch(down(TOP, TOP), 0, ok);
+        assert_eq!(a.disconnect_hold(500), Some(false));
+        assert_eq!(a.on_touch(down(TOP, TOP), 1500, ok), None);
+        assert_eq!(a.disconnect_hold(1500), Some(true), "RELEASE");
+        a.on_touch(lifting(TOP, TOP, 1600), 1600, ok);
+        assert_eq!(a.on_touch(Lift::Idle, 1640, ok), Some(Action::Disconnect));
+        assert_eq!(a.disconnect_hold(1640), None);
+    }
+
+    #[test]
+    fn the_disconnect_hold_must_start_and_stay_in_the_zone() {
+        // Started below the zone and dragged into it.
+        let mut a = Arm::default();
+        a.on_touch(down(ABOVE, TOP), 0, ok);
+        a.on_touch(lifting(ABOVE, TOP, 1500), 1500, ok);
+        assert_eq!(a.on_touch(Lift::Idle, 1540, ok), None);
+        // Started in it and dragged out during the hold.
+        let mut a = Arm::default();
+        a.on_touch(down(TOP, TOP), 0, ok);
+        a.on_touch(down(TOP, 60 * SUB), 300, ok);
+        assert_eq!(a.disconnect_hold(400), None);
+        a.on_touch(down(TOP, TOP), 400, ok);
+        a.on_touch(lifting(TOP, TOP, 1500), 1500, ok);
+        assert_eq!(a.on_touch(Lift::Idle, 1540, ok), None);
+    }
+
+    #[test]
+    fn while_armed_a_touch_in_the_disconnect_zone_is_throttle() {
+        let mut a = armed();
+        assert_eq!(Zone::of(TOP, true), Zone::Throttle);
+        let (first, last) = touch(&mut a, TOP, 3000, 1500, ok());
+        assert_eq!((first, last), (None, None));
+        assert!(a.armed());
+        assert_eq!(a.disconnect_hold(3500), None);
     }
 }

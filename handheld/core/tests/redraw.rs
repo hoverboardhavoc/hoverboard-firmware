@@ -21,8 +21,8 @@ use embedded_graphics::primitives::Rectangle;
 
 use handheld_core::layout::{HEIGHT, WIDTH};
 use handheld_core::model::{
-    ArmBand, Body, Corner, Dial, Dot, Lower, Overlay, Pack, PhaseBar, Ride, SpeedShow, Statement,
-    Tone, Top, Turn, View,
+    ArmBand, Body, ConnectView, Corner, Dial, Dot, Lower, Overlay, Pack, PhaseBar, Ride, RowShow,
+    SpeedShow, Statement, Tone, Top, Turn, View,
 };
 use handheld_core::readings::attitude::Attitude;
 
@@ -231,6 +231,7 @@ fn ride() -> View {
             ],
             low: false,
             test: false,
+            disconnect: Some(false),
         },
         body: Body::Ride(Ride {
             dial: Dial {
@@ -425,5 +426,48 @@ fn the_read_counter_redraws_its_own_columns() {
         8 * 22,
         "one 8 px column of the 22-row statement line"
     );
+    assert_eq!(bus.transient(), 0);
+}
+
+#[test]
+fn a_connect_row_redraws_alone_and_its_rssi_alone() {
+    let mut bus = Bus::new();
+    let mut strip = vec![Rgb565::BLACK; panel::STRIP_LEN];
+    let mut cache = panel::Cache::default();
+    let row = |n: u8, rssi: i8| {
+        Some(RowShow {
+            name: Some(s("bridge")),
+            addr: [0xe0, 0, 0, 0, 0, n],
+            rssi,
+            picked: n == 1,
+        })
+    };
+    let mut rows: [Option<RowShow>; 8] = Default::default();
+    rows[0] = row(1, -60);
+    let mut v = ride();
+    v.body = Body::Connect(ConnectView { rows: rows.clone() });
+    v.line = Some(Statement {
+        text: s("Tap a bridge to connect."),
+        tone: Tone::Muted,
+    });
+    frame(&mut bus, &mut strip, &mut cache, &v, None);
+    println!("{}", bus.report("full redraw of the Connect screen"));
+    assert_eq!(bus.transient(), 0);
+    // The RSSI alone.
+    rows[0] = row(1, -61);
+    v.body = Body::Connect(ConnectView { rows: rows.clone() });
+    frame(&mut bus, &mut strip, &mut cache, &v, None);
+    let written = bus.written.iter().filter(|w| !w.is_empty()).count();
+    assert_eq!(
+        (bus.windows, written),
+        (1, 64 * 12),
+        "the RSSI's 64 x 12 px alone"
+    );
+    // A new row: that row alone.
+    rows[3] = row(4, -70);
+    v.body = Body::Connect(ConnectView { rows: rows.clone() });
+    frame(&mut bus, &mut strip, &mut cache, &v, None);
+    let written = bus.written.iter().filter(|w| !w.is_empty()).count();
+    assert_eq!((bus.windows, written), (1, 240 * 33));
     assert_eq!(bus.transient(), 0);
 }

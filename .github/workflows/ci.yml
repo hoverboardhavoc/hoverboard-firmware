@@ -1337,8 +1337,8 @@ jobs:
   # esp-rs Xtensa toolchain (rustc 1.92.0.0, handheld/rust-toolchain.toml's `esp` channel),
   # installed by esp-rs/xtensa-toolchain at a pinned tag. rustfmt; the hardware-free core's host
   # tests and clippy (all targets) on the host triple, which the esp toolchain carries; then the
-  # image for xtensa-esp32-none-elf with no HANDHELD_BRIDGE (it boots to "No bridge set."), and the
-  # merged install image with the bridge job's pinned espflash. This job is also the check that the
+  # image for xtensa-esp32-none-elf, and the merged install image with the bridge job's pinned
+  # espflash. This job is also the check that the
   # shared crates the handheld links build for Xtensa.
   handheld:
     name: Handheld remote (core tests + clippy, ESP32 image)
@@ -1379,8 +1379,8 @@ jobs:
           --target ${{ env.HOST_TARGET }}
           --all-targets -- -D warnings
 
-      - name: Image (no HANDHELD_BRIDGE)
-        run: env -u HANDHELD_BRIDGE cargo image
+      - name: Image
+        run: cargo image
 
       - name: Install espflash (pinned binary release)
         run: |
