@@ -63,7 +63,7 @@ fn style(font: &'static MonoFont<'static>, fg: Rgb565) -> MonoTextStyle<'static,
         .build()
 }
 
-fn text<D: DrawTarget<Color = Rgb565>>(
+pub fn text<D: DrawTarget<Color = Rgb565>>(
     d: &mut D,
     s: &str,
     at: Point,
@@ -78,7 +78,7 @@ fn text<D: DrawTarget<Color = Rgb565>>(
     let _ = Text::with_text_style(s, at, style(font, fg), ts).draw(d);
 }
 
-fn fill<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: Rect, c: Rgb565) {
+pub fn fill<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: Rect, c: Rgb565) {
     let _ = er(r).into_styled(PrimitiveStyle::with_fill(c)).draw(d);
 }
 
@@ -809,47 +809,6 @@ fn draw_line<D: DrawTarget<Color = Rgb565>>(
         }
         (None, None) => {}
     }
-}
-
-#[cfg(feature = "test-pattern")]
-/// Section 7.2 check 2's test pattern: red, green, blue and white bars and a line of text, to
-/// fix colour order, inversion and orientation.
-pub fn test_pattern<D: DrawTarget<Color = Rgb565>>(d: &mut D) {
-    let _ = d.clear(BG);
-    for (i, c) in [Rgb565::RED, Rgb565::GREEN, Rgb565::BLUE, Rgb565::WHITE]
-        .iter()
-        .enumerate()
-    {
-        fill(
-            d,
-            Rect::new(0, 40 + i as i32 * 40, 240, 80 + i as i32 * 40),
-            *c,
-        );
-    }
-    text(
-        d,
-        "TOP  handheld",
-        Point::new(4, 4),
-        &FONT_10X20,
-        FG,
-        Alignment::Left,
-    );
-    text(
-        d,
-        "R G B W",
-        Point::new(120, 210),
-        &FONT_10X20,
-        PRIMARY,
-        Alignment::Center,
-    );
-    text(
-        d,
-        "USB is down here",
-        Point::new(120, 300),
-        &FONT_8X13,
-        NEON,
-        Alignment::Center,
-    );
 }
 
 /// The rows the overlay covers: the zero line, and the thumb with its percent above it.

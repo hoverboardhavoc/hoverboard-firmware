@@ -1179,6 +1179,7 @@ name = "handheld-core"
 version = "0.1.0"
 dependencies = [
  "base",
+ "embedded-graphics",
  "embedded-io 0.6.1",
  "heapless 0.8.0",
  "libm",
@@ -1186,6 +1187,7 @@ dependencies = [
  "linkctl",
  "net",
  "store",
+ "u8g2-fonts",
 ]
 
 [[package]]

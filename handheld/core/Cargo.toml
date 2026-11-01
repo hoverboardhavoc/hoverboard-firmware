@@ -14,3 +14,8 @@ base = { path = "../../shared/base" }
 heapless = "0.8"
 libm = "0.2"
 embedded-io = "0.6"
+
+# The redraw measurement (`tests/redraw.rs`) compiles the binary's `src/panel.rs` for the host.
+[dev-dependencies]
+embedded-graphics = "0.8"
+u8g2-fonts = { version = "0.7", features = ["embedded_graphics_textstyle"] }

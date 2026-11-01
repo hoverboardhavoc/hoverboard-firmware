@@ -14,6 +14,8 @@
 
 mod link;
 mod panel;
+#[cfg(feature = "test-pattern")]
+mod pattern;
 mod xpt2046;
 
 use core::cell::RefCell;
@@ -184,7 +186,7 @@ async fn main(spawner: Spawner) {
         .init(&mut delay)
         .unwrap();
     #[cfg(feature = "test-pattern")]
-    panel::test_pattern(&mut panel);
+    pattern::test_pattern(&mut panel);
     #[cfg(not(feature = "test-pattern"))]
     {
         use embedded_graphics::prelude::*;
