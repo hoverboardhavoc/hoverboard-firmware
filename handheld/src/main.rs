@@ -6,6 +6,8 @@
 //! inbox) and the view on the main executor. They share one [`Model`] behind a lock.
 #![no_std]
 #![no_main]
+// The test-pattern build stops after the pattern and leaves the rest of the boot unused.
+#![cfg_attr(feature = "test-pattern", allow(unused, unreachable_code))]
 
 mod link;
 mod panel;
@@ -230,6 +232,13 @@ async fn main(spawner: Spawner) {
         .start(Priority::Priority1)
         .must_spawn(sample(touch, boot));
 
+    // The test pattern stays on the panel: no view, no link.
+    #[cfg(feature = "test-pattern")]
+    loop {
+        Timer::after(Duration::from_secs(3600)).await;
+        let _ = (&bl, &panel, &led);
+    }
+    #[cfg(not(feature = "test-pattern"))]
     spawner.must_spawn(view(panel, led));
     if let Some(c) = connector {
         let controller: ExternalController<_, 20> = ExternalController::new(c);
