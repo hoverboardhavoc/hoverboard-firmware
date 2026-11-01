@@ -348,7 +348,7 @@ pub struct CyclicState {
     pub fault: u16,
     /// Flag bits: [`Self::FLAG_RIDER`] (bit0), [`Self::FLAG_LEADER`] (bit1),
     /// [`Self::FLAG_FOLLOWER`] (bit2), [`Self::FLAG_REARM`] (bit3), [`Self::FLAG_REBOOT`] (bit4),
-    /// [`Self::FLAG_LOCKDOWN`] (bit7).
+    /// [`Self::FLAG_PEER_SILENT`] (bit5), [`Self::FLAG_LOCKDOWN`] (bit7).
     pub flags: u8,
     /// The torque this board commands its peer to apply, on the same +-28500 stock-native scale
     /// as every other demand in the system (`specs/rover-one-imu.md` section 4). **0 unless this
@@ -423,10 +423,16 @@ impl CyclicState {
     /// section 5). Cleared when it boots. Consumer: a client, which says "restart the board".
     pub const FLAG_REBOOT: u8 = 1 << 4;
 
+    /// `flags` bit5: a configured link has heard no `CYCLIC_STATE` since this board booted
+    /// (`specs/board-route.md` section 4), the first of [`Self::FAULT_MACHINE`]'s two causes. With
+    /// `FAULT_MACHINE` set and this bit clear, a peer's digest differs. Consumer: a client, which
+    /// says which (`hoverboard-cli machine nodes`, the app's MACHINE lamp).
+    pub const FLAG_PEER_SILENT: u8 = 1 << 5;
+
     /// `fault` bit13, `EV_MACHINE`: the board refuses to arm because a configured link's peer was
     /// not heard or reports another [`Self::machine`] digest (`specs/machine-settings.md` section
-    /// 4.2). It blocks arming and nothing else. Consumer: a client, which marks the board
-    /// (`hoverboard-cli machine nodes`).
+    /// 4.2); [`Self::FLAG_PEER_SILENT`] says which. It blocks arming and nothing else. Consumer: a
+    /// client, which marks the board (`hoverboard-cli machine nodes`).
     pub const FAULT_MACHINE: u16 = 1 << 13;
 
     /// `flags` bit7: lockdown, the stock master-shutdown semantic. The receiver treats it as a
@@ -457,6 +463,11 @@ impl CyclicState {
     /// Reboot flag (bit4): a boot-effect field is written and not yet running.
     pub const fn reboot(&self) -> bool {
         self.flags & Self::FLAG_REBOOT != 0
+    }
+
+    /// Peer-silent flag (bit5): a configured link has heard nothing since boot.
+    pub const fn peer_silent(&self) -> bool {
+        self.flags & Self::FLAG_PEER_SILENT != 0
     }
 
     /// The machine fault (`fault` bit13): the board refuses to arm until its peers agree.
@@ -1003,9 +1014,16 @@ mod tests {
         assert!(c.rearm() && !c.reboot() && !c.follower());
         c.flags = CyclicState::FLAG_REBOOT;
         assert!(!c.rearm() && c.reboot() && !c.lockdown());
+        assert!(!c.peer_silent());
+        c.flags = CyclicState::FLAG_PEER_SILENT;
+        assert!(c.peer_silent() && !c.reboot() && !c.lockdown());
         assert_eq!(
-            (CyclicState::FLAG_REARM, CyclicState::FLAG_REBOOT),
-            (0x08, 0x10)
+            (
+                CyclicState::FLAG_REARM,
+                CyclicState::FLAG_REBOOT,
+                CyclicState::FLAG_PEER_SILENT
+            ),
+            (0x08, 0x10, 0x20)
         );
         // Foreign bits do not bleed into the defined flags.
         c.flags = !(CyclicState::FLAG_RIDER
@@ -1013,12 +1031,14 @@ mod tests {
             | CyclicState::FLAG_FOLLOWER
             | CyclicState::FLAG_REARM
             | CyclicState::FLAG_REBOOT
+            | CyclicState::FLAG_PEER_SILENT
             | CyclicState::FLAG_LOCKDOWN);
         assert!(!c.rider_present());
         assert!(!c.leader());
         assert!(!c.follower());
         assert!(!c.rearm());
         assert!(!c.reboot());
+        assert!(!c.peer_silent());
         assert!(!c.lockdown());
     }
 

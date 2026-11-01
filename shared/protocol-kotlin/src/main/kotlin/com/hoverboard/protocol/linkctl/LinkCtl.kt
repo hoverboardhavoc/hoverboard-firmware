@@ -274,6 +274,9 @@ data class CyclicObs(
  *
  * [FLAG_REARM] and [FLAG_REBOOT] say whether the board runs what it stores (section 5): an
  * arm-effect field written since it last armed, a boot-effect field written since it booted.
+ * [FLAG_PEER_SILENT] says which of [EV_MACHINE]'s causes holds (`specs/board-route.md` section
+ * 4): set, a configured link has heard nothing since the board booted; clear, a peer's digest
+ * differs.
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
  * no rescaling: the `SPEED` cell saturated into an i16 (`motorcontroller/firmware/src/motor.rs`,
@@ -338,6 +341,9 @@ data class CyclicState(
 
     /** Reboot flag, bit4: a boot-effect field is written and not yet running. `CyclicState::reboot`. */
     fun reboot(): Boolean = flags and FLAG_REBOOT != 0
+
+    /** Peer-silent flag, bit5: a configured link has heard nothing since boot. `CyclicState::peer_silent`. */
+    fun peerSilent(): Boolean = flags and FLAG_PEER_SILENT != 0
 
     /**
      * Whether any FAULT-A producer is asserted: [fault] masked by [FAULT_A_BITS], which is what
@@ -408,6 +414,12 @@ data class CyclicState(
          * boots. `CyclicState::FLAG_REBOOT`.
          */
         const val FLAG_REBOOT = 1 shl 4
+
+        /**
+         * `flags` bit5: a configured link has heard no `CYCLIC_STATE` since the board booted, the
+         * first cause of [EV_MACHINE]. `CyclicState::FLAG_PEER_SILENT`.
+         */
+        const val FLAG_PEER_SILENT = 1 shl 5
 
         /** [fault] bit 0: comms loss. `motorcontroller/orchestrator/src/events.rs`, `EV_COMMS_LOSS`. */
         const val EV_COMMS_LOSS = 1 shl 0

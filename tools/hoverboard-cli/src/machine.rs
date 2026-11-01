@@ -429,8 +429,9 @@ pub fn digest_line(heard: &[(String, Option<u16>)]) -> String {
 }
 
 /// What `machine nodes` marks a node with (section 6.3): for a motor controller, `silent` when no
-/// `CYCLIC_STATE` of it was heard, else its `EV_MACHINE`, `FLAG_REARM` and `FLAG_REBOOT`; and the
-/// count of its boot report's entries.
+/// `CYCLIC_STATE` of it was heard, else its `EV_MACHINE` by the cause `FLAG_PEER_SILENT` names
+/// (`specs/board-route.md` section 4), `FLAG_REARM` and `FLAG_REBOOT`; and the count of its boot
+/// report's entries.
 pub fn marks(class: Option<u8>, heard: Option<&CyclicState>, status_entries: usize) -> Vec<String> {
     let mut out = Vec::new();
     if class != Some(CLASS_MOTOR) {
@@ -439,7 +440,9 @@ pub fn marks(class: Option<u8>, heard: Option<&CyclicState>, status_entries: usi
     match heard {
         None => out.push("silent".to_string()),
         Some(s) => {
-            if s.machine_mismatch() {
+            if s.machine_mismatch() && s.peer_silent() {
+                out.push("a link peer not heard".into());
+            } else if s.machine_mismatch() {
                 out.push("machine differs (\"machine diff\")".into());
             }
             if s.rearm() {
@@ -879,6 +882,12 @@ mod tests {
                 "written, runs at the next boot",
                 "2 status entries (\"board status\")",
             ]
+        );
+        // The cause comes from the flag, not from the digests.
+        let unheard = frame(CyclicState::FAULT_MACHINE, CyclicState::FLAG_PEER_SILENT);
+        assert_eq!(
+            marks(Some(CLASS_MOTOR), Some(&unheard), 0),
+            ["a link peer not heard"]
         );
         assert!(marks(Some(net::walk::CLASS_BRIDGE), None, 0).is_empty());
     }

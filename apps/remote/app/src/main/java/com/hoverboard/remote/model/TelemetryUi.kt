@@ -219,6 +219,12 @@ data class TelemetryUi(
      */
     val machineDisagrees: Boolean get() = (cyclic?.fault ?: 0) and CyclicState.EV_MACHINE != 0
 
+    /**
+     * Which of [machineDisagrees]'s causes holds (`FLAG_PEER_SILENT`, `specs/board-route.md` section
+     * 4): a configured link has heard nothing since the board started. False while the board is silent.
+     */
+    val peerSilent: Boolean get() = cyclic?.peerSilent() ?: false
+
     /** Fold a freshly decoded [CyclicState] in. Latest-wins: the board sends one state, cyclically. */
     fun merge(state: CyclicState): TelemetryUi = copy(cyclic = state)
 

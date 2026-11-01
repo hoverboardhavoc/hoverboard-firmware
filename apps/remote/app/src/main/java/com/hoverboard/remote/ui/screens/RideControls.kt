@@ -173,7 +173,7 @@ private fun ridingStatements(state: UiState): List<Statement> = buildList {
             val lamp = FaultLamp.lit(word).firstOrNull { it.blocksArm } ?: continue
             val text = stringResource(
                 R.string.ride_lamp_lit_armed,
-                stringResource(lamp.title),
+                stringResource(state.lampTitle(lamp, listOf(board))),
                 boardName(state, board, inline = true),
             )
             add(Statement(text, Tone.WARNING, lamp))

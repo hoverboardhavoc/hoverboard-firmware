@@ -291,6 +291,23 @@ class ControlScreenTest {
         compose.onNodeWithText(s(R.string.lamp_hall_when)).assertDoesNotExist()
     }
 
+    /**
+     * MACHINE's sheet says which cause from the boards' `FLAG_PEER_SILENT` (`specs/board-route.md`
+     * section 4): waiting for the other board, or boards that differ.
+     */
+    @Test
+    fun theMachineSheetSaysWhichCause() {
+        val silent = board(fault = CyclicState.EV_MACHINE, flags = CyclicState.FLAG_PEER_SILENT)
+        show(sided(armed = false).reporting(0x01, silent))
+        compose.onNodeWithTag(lampTag(FaultLamp.MACHINE)).performClick()
+        compose.onNodeWithText(s(R.string.lamp_machine_silent_title)).assertIsDisplayed()
+
+        // The open sheet follows the live frames.
+        update(sided(armed = false).reporting(0x01, board(fault = CyclicState.EV_MACHINE)))
+        compose.onNodeWithText(s(R.string.lamp_machine_differ_title)).assertIsDisplayed()
+        compose.onNodeWithText(s(R.string.lamp_machine_silent_title)).assertDoesNotExist()
+    }
+
     /** Every lamp's sheet has a title and three non-empty bodies. */
     @Test
     fun everyLampHasItsSheetText() {

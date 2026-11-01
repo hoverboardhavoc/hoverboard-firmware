@@ -129,6 +129,21 @@ class FaultLampTest {
         for (n in listOf(3, 6, 7, 14, 15)) assertNull(FaultLamp.of(1 shl n), "bit $n is not a lamp")
     }
 
+    /**
+     * MACHINE names its cause from the `FLAG_PEER_SILENT` of the boards it is lit on
+     * (`specs/board-route.md` section 4); every other lamp keeps its title.
+     */
+    @Test
+    fun `machine says which cause`() {
+        val machine = FaultLamp.MACHINE
+        assertEquals(R.string.lamp_machine_silent_title, machine.titleFor(listOf(true)))
+        assertEquals(R.string.lamp_machine_silent_title, machine.titleFor(listOf(true, true)))
+        assertEquals(R.string.lamp_machine_differ_title, machine.titleFor(listOf(false)))
+        assertEquals(R.string.lamp_machine_differ_title, machine.titleFor(listOf(true, false)), "a digest differs")
+        assertEquals(machine.title, machine.titleFor(emptyList()), "lit nowhere")
+        assertEquals(FaultLamp.HALL.title, FaultLamp.HALL.titleFor(listOf(true)))
+    }
+
     /** Only the two latches are held after their bit clears. */
     @Test
     fun `only the latches are held`() {

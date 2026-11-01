@@ -361,6 +361,7 @@ class WireDriftTest {
         assertEquals(0x04, CyclicState.FLAG_FOLLOWER, "shared/linkctl/src/lib.rs, CyclicState::FLAG_FOLLOWER")
         assertEquals(0x08, CyclicState.FLAG_REARM, "shared/linkctl/src/lib.rs, CyclicState::FLAG_REARM")
         assertEquals(0x10, CyclicState.FLAG_REBOOT, "shared/linkctl/src/lib.rs, CyclicState::FLAG_REBOOT")
+        assertEquals(0x20, CyclicState.FLAG_PEER_SILENT, "shared/linkctl/src/lib.rs, CyclicState::FLAG_PEER_SILENT")
         assertEquals(0x0F17, CyclicState.FAULT_A_BITS, "motorcontroller/orchestrator/src/events.rs, FAULT_A_BITS")
         // FAULT_A_BITS | EV_LATCH_B: Fault A and Fault B, what holds a board in OFF.
         assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS, "motorcontroller/orchestrator/src/events.rs, EV_LATCH_B")

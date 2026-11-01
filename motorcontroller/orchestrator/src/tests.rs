@@ -6393,6 +6393,37 @@ fn a_configured_link_needs_a_peer_with_the_same_digest_to_arm() {
     assert_eq!(EV_MACHINE, 1 << 13);
 }
 
+/// `specs/board-route.md` section 6, test 6: `FLAG_PEER_SILENT` is on the wire while a configured
+/// link has heard nothing since boot and clears once it has; a board with no configured link never
+/// sets it; `EV_MACHINE` from a differing digest leaves it clear.
+#[test]
+fn flag_peer_silent_names_the_unheard_link() {
+    let silent = |s: &OrchestratorState| {
+        cyclic_tx(s, true).unwrap().flags & CyclicState::FLAG_PEER_SILENT != 0
+    };
+    let mut s = linked(0xAAAA);
+    run_ticks(&mut s, 2);
+    assert!(silent(&s));
+    assert_ne!(cyclic_tx(&s, true).unwrap().fault & EV_MACHINE, 0);
+    // Heard, with another digest: EV_MACHINE stays, the flag clears.
+    s.machine.hear(0, 0xBBBB);
+    run_ticks(&mut s, 2);
+    let c = cyclic_tx(&s, true).unwrap();
+    assert_ne!(c.fault & EV_MACHINE, 0);
+    assert_eq!(c.flags & CyclicState::FLAG_PEER_SILENT, 0);
+    // The matching digest: both clear.
+    s.machine.hear(0, 0xAAAA);
+    run_ticks(&mut s, 2);
+    let c = cyclic_tx(&s, true).unwrap();
+    assert_eq!(c.fault & EV_MACHINE, 0);
+    assert_eq!(c.flags & CyclicState::FLAG_PEER_SILENT, 0);
+    // No configured link: nothing expected, nothing silent.
+    let mut one = fresh();
+    run_ticks(&mut one, 2);
+    assert!(!silent(&one));
+    assert_eq!(CyclicState::FLAG_PEER_SILENT, 1 << 5);
+}
+
 /// `EV_MACHINE` blocks arming and nothing else: it is not Fault A, so it never ends a run.
 #[test]
 fn ev_machine_never_disengages() {

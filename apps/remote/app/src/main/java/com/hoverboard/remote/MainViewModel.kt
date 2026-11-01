@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hoverboard.protocol.board.BoardStatus
@@ -287,6 +288,16 @@ data class UiState(
         get() = reporting.associateWith {
             ((telemetryByBoard[it]?.cyclic?.fault ?: 0) and FaultLamp.LAMP_BITS) or (latchHeld[it] ?: 0)
         }
+
+    /**
+     * [lamp]'s title on [boards], the boards it is lit on unless given: MACHINE names its cause
+     * from their `FLAG_PEER_SILENT` ([FaultLamp.titleFor]).
+     */
+    @StringRes
+    fun lampTitle(
+        lamp: FaultLamp,
+        boards: Collection<Int> = lampWords.filterValues { it and lamp.bit != 0 }.keys,
+    ): Int = lamp.titleFor(boards.map { telemetryByBoard[it]?.peerSilent == true })
 
     /** The lamps the grid shows ([shownLamps]). */
     val lamps: List<FaultLamp>

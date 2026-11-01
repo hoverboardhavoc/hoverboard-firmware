@@ -1074,7 +1074,8 @@ fn cyclic(src: u8, fault: u16, flags: u8, machine: u16) -> Vec<u8> {
 }
 
 /// `specs/machine-settings.md` section 6.3: `machine nodes` marks each board from the frames it
-/// hears after the walk, and `machine apply` ends with whether the reported digests agree.
+/// hears after the walk, `EV_MACHINE` by the cause `FLAG_PEER_SILENT` names (`specs/board-route.md`
+/// section 4), and `machine apply` ends with whether the reported digests agree.
 #[test]
 fn machine_nodes_marks_each_board_from_its_frames() {
     use linkctl::CyclicState as C;
@@ -1082,7 +1083,12 @@ fn machine_nodes_marks_each_board_from_its_frames() {
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
     let beat = vec![
         cyclic(0x01, C::FAULT_MACHINE, C::FLAG_REARM, 0x1234),
-        cyclic(0x02, 0, C::FLAG_REBOOT, 0x5678),
+        cyclic(
+            0x02,
+            C::FAULT_MACHINE,
+            C::FLAG_REBOOT | C::FLAG_PEER_SILENT,
+            0x5678,
+        ),
     ];
     let server = std::thread::spawn(move || serve_heard(listener, 2, |_| {}, beat));
     let run = |args: &[&str]| {
@@ -1100,8 +1106,8 @@ fn machine_nodes_marks_each_board_from_its_frames() {
     );
     assert_eq!(
         rows[2],
-        "0x02     motor controller  020202020202020202020202  Hoverboard  ! written, runs at the \
-         next boot"
+        "0x02     motor controller  020202020202020202020202  Hoverboard  ! a link peer not \
+         heard, written, runs at the next boot"
     );
     assert!(rows[3].ends_with("hb-bridge-ab12"), "{out}");
 

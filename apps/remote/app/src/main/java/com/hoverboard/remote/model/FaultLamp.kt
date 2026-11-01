@@ -102,6 +102,20 @@ enum class FaultLamp(
     /** Whether this lamp's bit stops a board arming: every lamp but CONFIG. */
     val blocksArm: Boolean get() = bit and REFUSING_BITS != 0
 
+    /**
+     * The title naming this lamp on boards whose last frames carried `FLAG_PEER_SILENT` as
+     * [peerSilent] says, one entry per board it is lit on (`specs/board-route.md` section 4). MACHINE
+     * says which cause: "Waiting for the other board" when every one of them carries the flag, and
+     * "Boards differ" when one does not, since a digest differs there. Every other lamp, and MACHINE
+     * lit nowhere, is its [title].
+     */
+    @StringRes
+    fun titleFor(peerSilent: List<Boolean>): Int = when {
+        this != MACHINE || peerSilent.isEmpty() -> title
+        peerSilent.all { it } -> R.string.lamp_machine_silent_title
+        else -> R.string.lamp_machine_differ_title
+    }
+
     companion object {
         /** The two latch bits the app holds lit ([held]): the board clears a latch about 8 ms after it trips. */
         const val LATCH_BITS = CyclicState.EV_LATCH_A or CyclicState.EV_LATCH_B

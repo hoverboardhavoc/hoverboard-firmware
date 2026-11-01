@@ -1,7 +1,7 @@
 //! Boards agree on the machine, and say what they run (`specs/machine-settings.md` sections 4 and
 //! 5): the machine digest a board publishes, the arm gate on its configured links' peers
-//! (`EV_MACHINE`), and the two digests of what it runs against what it stores (`FLAG_REARM`,
-//! `FLAG_REBOOT`).
+//! (`EV_MACHINE`, with `FLAG_PEER_SILENT` naming its cause), and the two digests of what it runs
+//! against what it stores (`FLAG_REARM`, `FLAG_REBOOT`).
 //!
 //! The digests are the store's ([`store::Store::machine_digest`], [`store::Store::effect_digest`]);
 //! this module holds them and decides from them. The firmware computes [`Digests`] at boot and
@@ -100,7 +100,7 @@ impl Machine {
     /// The `EV_MACHINE` level (section 4.2): a configured link has heard no peer since boot, or
     /// its peer's last digest differs from this board's. It blocks arming and nothing else.
     pub fn disagrees(&self) -> bool {
-        self.configured != self.heard
+        self.peer_silent()
             || self
                 .peer
                 .iter()
@@ -108,10 +108,19 @@ impl Machine {
                 .any(|(i, d)| self.heard & (1 << i) != 0 && *d != self.stored.machine)
     }
 
+    /// The first of [`Self::disagrees`]'s causes: a configured link has heard no peer since boot
+    /// (`FLAG_PEER_SILENT`, `specs/board-route.md` section 4).
+    pub fn peer_silent(&self) -> bool {
+        self.configured != self.heard
+    }
+
     /// `FLAG_REARM` and `FLAG_REBOOT` (section 5): an arm-effect field written since the last
-    /// arm, a boot-effect field written since boot.
+    /// arm, a boot-effect field written since boot; and `FLAG_PEER_SILENT`.
     pub fn flags(&self) -> u8 {
         let mut f = 0;
+        if self.peer_silent() {
+            f |= CyclicState::FLAG_PEER_SILENT;
+        }
         if self.arm_running != self.stored.arm {
             f |= CyclicState::FLAG_REARM;
         }

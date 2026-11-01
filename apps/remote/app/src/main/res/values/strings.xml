@@ -632,6 +632,8 @@
     <string name="lamp_config_when">A function this board\'s stored settings configure did not come up when the board started: a group with only some of its pins set, a pin the chip cannot use for it or that is not a pin at all, a dead time below the floor, or a part that did not answer. The board leaves that function off and runs the rest. It stays lit until the board starts with the setting corrected.</string>
     <string name="lamp_config_blocks">Nothing. The board arms as usual, without the function that did not come up.</string>
     <string name="lamp_machine_title">Boards disagree</string>
+    <string name="lamp_machine_silent_title">Waiting for the other board</string>
+    <string name="lamp_machine_differ_title">Boards differ</string>
     <string name="lamp_machine_when">This board has a link to another motor controller configured, and either it has not heard that board since it started, or that board holds different machine settings (the control mode, the frame, the method, the pack, the balance gains and limits).</string>
     <string name="lamp_machine_blocks">Arming. It never stops a machine that is already running.</string>
     <string name="lamp_machine_fix">Power the other board on. If both are on, Setup lists the machine settings that differ, board by board: set each one again under Setup, which writes every board.</string>

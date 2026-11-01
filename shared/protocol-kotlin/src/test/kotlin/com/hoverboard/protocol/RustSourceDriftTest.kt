@@ -923,7 +923,7 @@ class RustSourceDriftTest {
         }
         check(bits.isNotEmpty()) {
             "No `u8` constant in any of ${PAYLOADS.joinToString(", ")}'s impl blocks in " +
-                "shared/linkctl/src/lib.rs: the payloads carry eight bits between them, so reading " +
+                "shared/linkctl/src/lib.rs: the payloads carry nine bits between them, so reading " +
                 "none means the selector no longer finds the impls, not that the firmware dropped " +
                 "every flag."
         }
@@ -950,6 +950,7 @@ class RustSourceDriftTest {
             "CyclicState::FLAG_FOLLOWER" to CyclicState.FLAG_FOLLOWER,
             "CyclicState::FLAG_REARM" to CyclicState.FLAG_REARM,
             "CyclicState::FLAG_REBOOT" to CyclicState.FLAG_REBOOT,
+            "CyclicState::FLAG_PEER_SILENT" to CyclicState.FLAG_PEER_SILENT,
             "CyclicState::FLAG_LOCKDOWN" to CyclicState.FLAG_LOCKDOWN,
             "Inputs::BUTTON_POWER" to Inputs.BUTTON_POWER,
             "Inputs::RIDER_PRESENT" to Inputs.RIDER_PRESENT,
@@ -962,8 +963,8 @@ class RustSourceDriftTest {
      * beside it), evaluated: each is
 
      * `1 << N`, an OR of constants declared before it (`EV_MOTOR_BITS`, `FAULT_A_BITS`), or a
-     * `linkctl::CyclicState` constant, read from `shared/linkctl/src/lib.rs` where the wire owns it
-     * (`EV_MACHINE` is `CyclicState::FAULT_MACHINE`, which the CLI reads too). A constant written in
+     * `linkctl::CyclicState` constant, read where the wire owns it (`EV_MACHINE` is
+     * `shared/linkctl/src/lib.rs`, `CyclicState::FAULT_MACHINE`, which the CLI reads too). A constant written in
      * any other form fails by name in [bitValue] rather than dropping out.
      */
     private fun rustLevelMasks(): Map<String, Int> {
