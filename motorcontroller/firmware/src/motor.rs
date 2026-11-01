@@ -2583,6 +2583,12 @@ pub mod hw {
     /// **596 below it** (F103, same binary: 600). `motorcontroller/firmware/memory.x` owns the placement and
     /// asserts the window at link time.
     #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
+    // A per-chip image calls this from its period vector rather than through a registered pointer,
+    // so without the attribute LTO folds it into the vector's trampoline: the symbol the
+    // panic-reach root, the hot-window guard and the bench tools name would be gone. One `bl` of
+    // cost; the universal image reached it through two (its RAM table's HAL ISR, then the
+    // registered handler).
+    #[cfg_attr(not(universal_image), inline(never))]
     extern "C" fn period_isr() {
         // SAFETY: the `MOTOR` invariant (see the static), which is NOT "the ISR is the only
         // accessor after the unmask" any more: this ISR is the only accessor WHENEVER THE PERIOD
