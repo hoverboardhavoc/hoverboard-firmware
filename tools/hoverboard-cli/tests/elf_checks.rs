@@ -1,9 +1,11 @@
-//! The image checks `flash.sh` runs, as `hoverboard-cli flash` runs them, on built ELF fixtures.
+//! The image checks `flash.sh` runs, as `hoverboard-cli flash` runs them, on built ELF fixtures:
+//! the guards read from `tools/image-guard-syms.sh` by image name, the `wfi` scan an ELF given
+//! directly gets alone, and the debug strip a bundle stores its ELFs with.
 
 mod common;
 
-use common::all_required;
-use hoverboard_cli::elf::{self, ElfError, CODE_FLOOR};
+use common::{all_required, release_guards, Fixture, GUARD_FILE};
+use hoverboard_cli::elf::{self, ElfError, Guards, HOT_LIMIT};
 use object::write::{Object, StandardSection, Symbol, SymbolSection};
 use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
 
@@ -15,7 +17,7 @@ fn fixture(code: &[u8], pool: &[u8], syms: &[&str], bss: &[&str]) -> Vec<u8> {
     let mut body = code.to_vec();
     body.extend_from_slice(pool);
     // Pad to the code floor so the floor check does not fire on these fixtures.
-    let pad = (CODE_FLOOR as usize).saturating_sub(body.len());
+    let pad = (release_guards().code_floor as usize).saturating_sub(body.len());
     body.extend(std::iter::repeat_n(0u8, pad));
     o.append_section_data(text, &body, 4);
     fn sym(
@@ -73,12 +75,55 @@ fn refs(v: &[String]) -> Vec<&str> {
     v.iter().map(String::as_str).collect()
 }
 
+fn check(elf: &[u8]) -> Result<(), ElfError> {
+    elf::check(elf, &release_guards())
+}
+
 #[test]
-fn the_guard_list_is_read_from_the_one_copy() {
-    let p = elf::required_patterns();
-    assert!(p.len() >= 19, "{p:?}");
-    assert!(p.contains(&"T main$".to_string()));
-    assert!(p.contains(&"B CTRL_OBS$".to_string()));
+fn the_guards_are_read_from_the_one_copy_by_image_name() {
+    let g = release_guards();
+    assert_eq!(g.code_floor, 40_000);
+    assert!(g.required_symbols.len() >= 19, "{g:?}");
+    assert!(g.required_symbols.contains(&"T main$".to_string()));
+    assert!(g.required_symbols.contains(&"B CTRL_OBS$".to_string()));
+    let hot = g.hot_symbols.unwrap();
+    assert!(hot.contains(&"4base5fixed3div".to_string()), "{hot:?}");
+    assert!(elf::guards_for(GUARD_FILE, "mainboard-f103")
+        .unwrap_err()
+        .contains("no guards for image mainboard-f103"));
+}
+
+#[test]
+fn an_image_with_no_hot_window_has_no_hot_symbols() {
+    let file = "image_guards() {
+  case \"$1\" in
+    small)
+      # a comment
+      IMAGE_GUARD_FLOOR=3000
+      IMAGE_GUARD_REQ_SYMS='T main$,5probe3run'
+      IMAGE_GUARD_HOT_SYMS=''
+      ;;
+    big)
+      IMAGE_GUARD_FLOOR=40000
+      IMAGE_GUARD_REQ_SYMS='x'
+      IMAGE_GUARD_HOT_SYMS='y,z'
+      ;;
+  esac
+}";
+    assert_eq!(
+        elf::guards_for(file, "small").unwrap(),
+        Guards {
+            code_floor: 3000,
+            required_symbols: vec!["T main$".into(), "5probe3run".into()],
+            hot_symbols: None,
+        }
+    );
+    assert_eq!(
+        elf::guards_for(file, "big").unwrap().hot_symbols,
+        Some(vec!["y".into(), "z".into()])
+    );
+    let no_floor = file.replace("IMAGE_GUARD_FLOOR=3000", "");
+    assert!(elf::guards_for(&no_floor, "small").is_err());
 }
 
 #[test]
@@ -87,7 +132,7 @@ fn a_clean_image_passes() {
     // movs; bl (32-bit, its second half 0xBF30-like bytes must not be read as a wfi); nop
     let code = [0x00, 0x20, 0xFF, 0xF7, 0x30, 0xBF, 0x00, 0xBF];
     let pool = [0x30, 0xBF, 0x30, 0xBF]; // a literal that looks like wfi, in a $d region
-    elf::check(&fixture(&code, &pool, &refs(&t), &refs(&b))).unwrap();
+    check(&fixture(&code, &pool, &refs(&t), &refs(&b))).unwrap();
 }
 
 #[test]
@@ -95,12 +140,12 @@ fn a_wfi_in_code_is_refused_in_both_encodings() {
     let (t, b) = all_required();
     let narrow = [0x00, 0x20, 0x30, 0xBF];
     assert_eq!(
-        elf::check(&fixture(&narrow, &[], &refs(&t), &refs(&b))),
+        check(&fixture(&narrow, &[], &refs(&t), &refs(&b))),
         Err(ElfError::Wfi(2))
     );
     let wide = [0x00, 0xBF, 0xAF, 0xF3, 0x03, 0x80];
     assert_eq!(
-        elf::check(&fixture(&wide, &[], &refs(&t), &refs(&b))),
+        check(&fixture(&wide, &[], &refs(&t), &refs(&b))),
         Err(ElfError::Wfi(2))
     );
 }
@@ -109,16 +154,84 @@ fn a_wfi_in_code_is_refused_in_both_encodings() {
 fn a_missing_required_symbol_is_named() {
     let (mut t, b) = all_required();
     t.retain(|s| !s.contains("5probe3run"));
-    match elf::check(&fixture(&[0, 0xBF], &[], &refs(&t), &refs(&b))) {
+    match check(&fixture(&[0, 0xBF], &[], &refs(&t), &refs(&b))) {
         Err(ElfError::MissingSymbols(m)) => assert_eq!(m, vec!["5probe3run".to_string()]),
         other => panic!("{other:?}"),
     }
     // A `B` symbol in .text is not the .bss symbol the guard asks for.
     let (t, _) = all_required();
     assert!(matches!(
-        elf::check(&fixture(&[0, 0xBF], &[], &refs(&t), &[])),
+        check(&fixture(&[0, 0xBF], &[], &refs(&t), &[])),
         Err(ElfError::MissingSymbols(_))
     ));
+}
+
+#[test]
+fn a_hot_symbol_above_the_boundary_or_gone_is_refused() {
+    let g = release_guards();
+    let (mut t, b) = common::names_of(&g);
+    let at = |t: &[String]| -> Vec<(String, u32)> {
+        t.iter()
+            .map(|n| {
+                let off = if n.contains("4base5crc16") { 0x9000 } else { 0 };
+                (n.clone(), off)
+            })
+            .collect()
+    };
+    let mut f = Fixture::new(&[], g.code_floor, (t.clone(), b.clone()));
+    elf::check(&f.build(), &g).unwrap();
+    f.text_syms = at(&t);
+    match elf::check(&f.build(), &g) {
+        Err(ElfError::HotCold(c)) => {
+            assert_eq!(c, vec![("4base5crc16".to_string(), HOT_LIMIT + 0x1000)])
+        }
+        other => panic!("{other:?}"),
+    }
+    t.retain(|n| !n.contains("6record12is_committed"));
+    let f = Fixture::new(&[], g.code_floor, (t, b));
+    assert_eq!(
+        elf::check(&f.build(), &g),
+        Err(ElfError::HotMissing(vec!["6record12is_committed".into()]))
+    );
+}
+
+#[test]
+fn an_elf_given_directly_gets_the_wfi_scan_alone() {
+    // Below the floor and with no guard symbols: the guards would refuse it, the scan does not.
+    let mut f = Fixture::new(&[0x00, 0x20, 0x00, 0xBF], 0, (vec!["main".into()], vec![]));
+    f.thumb = 4;
+    let elf = f.build();
+    elf::check_wfi(&elf).unwrap();
+    assert!(matches!(check(&elf), Err(ElfError::CodeFloor(4, 40_000))));
+    f.text = vec![0x00, 0x20, 0x30, 0xBF];
+    assert_eq!(elf::check_wfi(&f.build()), Err(ElfError::Wfi(0x0800_0002)));
+}
+
+#[test]
+fn the_strip_removes_the_debug_sections_and_keeps_the_symbols_and_the_flashed_bytes() {
+    use object::{Object, ObjectSection, ObjectSymbol};
+    let g = release_guards();
+    let mut f = Fixture::new(&[1, 2, 3, 4], g.code_floor, common::names_of(&g));
+    f.debug = true;
+    let full = f.build();
+    let stripped = elf::strip_debug(&full).unwrap();
+    let names = |b: &[u8]| -> (Vec<String>, Vec<String>) {
+        let o = object::File::parse(b).unwrap();
+        let s = o
+            .sections()
+            .map(|s| s.name().unwrap().to_string())
+            .collect();
+        let y = o.symbols().map(|s| s.name().unwrap().to_string()).collect();
+        (s, y)
+    };
+    let (full_secs, full_syms) = names(&full);
+    let (secs, syms) = names(&stripped);
+    assert!(full_secs.contains(&".debug_info".to_string()));
+    assert!(!secs.iter().any(|s| s.starts_with(".debug_")), "{secs:?}");
+    assert!(secs.contains(&".symtab".to_string()));
+    assert_eq!(syms, full_syms);
+    assert_eq!(elf::to_bin(&stripped).unwrap(), elf::to_bin(&full).unwrap());
+    elf::check(&stripped, &g).unwrap();
 }
 
 /// A minimal executable ELF32 with two PT_LOAD segments: .text at 0x0800_0000 and .data whose

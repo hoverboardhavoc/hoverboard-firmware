@@ -44,6 +44,8 @@ ARM_BIN="$(dirname "$(command -v arm-none-eabi-as)")"
 # length-prefixed Rust mangling does, so those get an `x` in front. The guard greps for a SUBSTRING,
 # so `x5probe3run` still matches the pattern `5probe3run`.
 . "$FLASH/image-guard-syms.sh"
+# The universal image, the one flash.sh guards when IMAGE_PROFILE is not given.
+image_guards mainboard-gd32 || { echo "FAIL: tools/image-guard-syms.sh has no mainboard-gd32 entry"; exit 1; }
 sym_of() {  # sym_of <pattern> -> the assembler symbol name, or nothing for a .bss pattern
   local p="${1%\$}"
   case "$p" in

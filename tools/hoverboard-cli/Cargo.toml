@@ -6,7 +6,7 @@ name = "hoverboard-cli"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
-description = "Terminal tool for the hoverboard bridge: scan, info, id, flash, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
+description = "Terminal tool for the hoverboard bridge: scan, info, id, flash (a firmware bundle or an ELF), firmware pack and info, update-esp, clear-protection, target control, memory access, and watching and driving the board over BLE, the USB console, or the console over TCP (Wi-Fi or a relay)."
 
 [features]
 default = ["ble"]
@@ -31,7 +31,8 @@ embedded-io = "0.6"
 btleplug = { version = "0.11", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
 futures = { version = "0.3", optional = true }
-object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
+# `build` rewrites an ELF without its debug sections for a bundle (`firmware pack`).
+object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std", "build"] }
 regex = "1"
 sha2 = "0.10"
 uuid = "1"
@@ -46,6 +47,14 @@ ctrlc = "3"
 # A board's store as a JSON file (`dump`, `apply`, `replace`, `diff`, `fields --json`), in the order
 # a file gives its keys and the name table gives its fields.
 serde_json = { version = "1", features = ["preserve_order"] }
+# The firmware bundle (specs/firmware-bundle.md): a zip of the image ELFs and a manifest. Stored
+# entries only, so no compression backend; the image crate's Cargo.toml table is read with toml.
+zip = { version = "9", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+# The flash sizes the bridge flashes (`SUPPORTED_KIB`), so a bundle match the bridge would refuse
+# is refused before anything is streamed (specs/firmware-bundle.md section 3.3).
+hoverboard-bridge-core = { path = "../../bridge/core" }
 
 [dev-dependencies]
 # The bridge side, with the simulated board, for the client-against-service test.

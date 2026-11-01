@@ -239,7 +239,10 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: hoverboard-firmware/motorcontroller
+          # tools/ for hoverboard-cli, which packs the firmware bundle at the end of this job.
+          workspaces: |
+            hoverboard-firmware/motorcontroller
+            hoverboard-firmware/tools
 
       - name: Build (default thumbv7m target)
         working-directory: hoverboard-firmware/motorcontroller
@@ -270,17 +273,22 @@ jobs:
       # main loop while the image still links (.text 55 KB -> 16.8 KB). Fail the build if the release
       # .text has collapsed below a floor (a healthy image is ~50 KB). arm-none-eabi-size comes from
       # the binutils installed in the objcopy step above. Mirrors tools/flash.sh's flash-time guard.
+      #
+      # The floor and both symbol lists are the universal image's (`mainboard-gd32`) in
+      # tools/image-guard-syms.sh, keyed by the image name its Cargo.toml table gives.
       - name: Assert release code floor + required symbols (LTO-gutted-image guard)
         run: |
           elf=motorcontroller/target/thumbv7m-none-eabi/release/firmware
+          . tools/image-guard-syms.sh
+          image_guards mainboard-gd32 || { echo "FAIL: tools/image-guard-syms.sh has no mainboard-gd32" >&2; exit 1; }
           # Sum every CODE section, not `.text` alone: the F1x0 zero-wait-flash split
           # (specs/motor-integration.md, "Hot-path flash placement") puts the 16 kHz period ISR and the
           # 250 Hz control path in `.hotcode`, inside the first 32 KiB, so a `.text`-only floor reads a
           # healthy image as gutted. Mirrors tools/flash.sh.
           text=$(arm-none-eabi-size -A "$elf" | awk '$1==".text" || $1==".hotcode" {t+=$2} END{if(t>0) print t}')
           echo "release code (.text + .hotcode) = ${text} B"
-          if [ -z "$text" ] || [ "$text" -lt 40000 ]; then
-            echo "FAIL: release code (${text}) below the 40000 B floor (LTO-gutted image?)" >&2
+          if [ -z "$text" ] || [ "$text" -lt "$IMAGE_GUARD_FLOOR" ]; then
+            echo "FAIL: release code (${text}) below the ${IMAGE_GUARD_FLOOR} B floor (LTO-gutted image?)" >&2
             exit 1
           fi
           # Required symbols and hot-window membership. BOTH lists come from
@@ -298,7 +306,6 @@ jobs:
           # Missing = FAIL loudly, so a rename or an inline is a conscious list update (the
           # fsm_step near-miss); above the boundary = a silent 8.8x fetch regression.
           syms=$(arm-none-eabi-nm "$elf")
-          . tools/image-guard-syms.sh
           miss=""
           IFS=',' read -r -a req <<< "$IMAGE_GUARD_REQ_SYMS"
           for s in "${req[@]}"; do
@@ -507,24 +514,55 @@ jobs:
           fi
           echo "flashed span within the ${ceiling} B ceiling"
 
-      # Every CI build uploads the .bin and .elf as a workflow artifact, so any commit's image can be
-      # downloaded from its Actions run without a local toolchain. One .bin, any part.
-      - name: Upload firmware artifacts (.bin + .elf)
+      # The firmware bundle (specs/firmware-bundle.md section 5): every image this job built, in one
+      # .hbfw (a zip of the stripped ELFs and a manifest), which `hoverboard-cli flash` takes and
+      # picks the image for the board's chip from. The packer is the CLI itself, built here for the
+      # runner without BLE (it needs no radio, and the D-Bus headers BLE wants are not installed in
+      # this job). It reads each image's table from its crate's Cargo.toml and its guards from
+      # tools/image-guard-syms.sh, strips the debug sections, and refuses an image those guards or
+      # the layout check refuse, so a bundle never carries an image the flash would refuse.
+      # `firmware info` then reads the bundle back, SHA-256 checks included.
+      - name: Build hoverboard-cli (the bundle packer)
+        working-directory: hoverboard-firmware/tools
+        run: cargo build --release -p hoverboard-cli --no-default-features --target ${{ env.HOST_TARGET }}
+
+      - name: Pack the firmware bundle
+        run: |
+          cli=tools/target/${HOST_TARGET}/release/hoverboard-cli
+          out=motorcontroller/target/bundle
+          mkdir -p "$out/elfs"
+          bundle="$out/firmware-$(git rev-parse --short=7 HEAD).hbfw"
+          "$cli" firmware pack "$bundle" \
+            motorcontroller/firmware:mainboard-gd32=motorcontroller/target/thumbv7m-none-eabi/release/firmware
+          "$cli" firmware info "$bundle"
+          # The unstripped ELFs, by image name, for the tools that read symbols and DWARF from them
+          # (tools/swdobs.py and the others).
+          cp motorcontroller/target/thumbv7m-none-eabi/release/firmware "$out/elfs/mainboard-gd32.elf"
+
+      # Every CI build uploads the bundle and the unstripped ELFs as workflow artifacts, so any
+      # commit's images can be downloaded from its Actions run without a local toolchain. The bundle
+      # is the install artifact; there is no .bin upload (the .bin above feeds the span gate only).
+      - name: Upload the firmware bundle
         uses: actions/upload-artifact@v4
         with:
-          name: firmware
-          path: |
-            hoverboard-firmware/motorcontroller/target/thumbv7m-none-eabi/release/firmware.bin
-            hoverboard-firmware/motorcontroller/target/thumbv7m-none-eabi/release/firmware
+          name: firmware-bundle
+          path: hoverboard-firmware/motorcontroller/target/bundle/firmware-*.hbfw
+          if-no-files-found: error
 
-      # A tagged release additionally attaches them as GitHub Release assets, the stable download.
-      - name: Attach to GitHub Release (on tag)
+      - name: Upload the unstripped ELFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-elfs
+          path: hoverboard-firmware/motorcontroller/target/bundle/elfs/
+          if-no-files-found: error
+
+      # A tagged release additionally attaches the bundle as a GitHub Release asset, the stable
+      # download.
+      - name: Attach the bundle to the GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            hoverboard-firmware/motorcontroller/target/thumbv7m-none-eabi/release/firmware.bin
-            hoverboard-firmware/motorcontroller/target/thumbv7m-none-eabi/release/firmware
+          files: hoverboard-firmware/motorcontroller/target/bundle/firmware-*.hbfw
 
   # Host tests: the motorcontroller suite, then the shared suite. Run with an explicit host target so
   # they neither inherit the thumbv7m default nor the link.x flag scoped to it in

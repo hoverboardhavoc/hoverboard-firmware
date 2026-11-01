@@ -16,7 +16,9 @@
 //! hoverboard-cli [LINK] [--node NODE] info | id | clear-protection
 //! hoverboard-cli [LINK] [--node NODE] disarm | halt | resume | reset | reset-halt
 //! hoverboard-cli [LINK] [--node NODE] read <addr> <len> | write <addr> <hex>
-//! hoverboard-cli [LINK] [--node NODE] flash <elf>
+//! hoverboard-cli [LINK] [--node NODE] flash <bundle|elf> [--image NAME] [--yes]
+//! hoverboard-cli firmware info <bundle>
+//! hoverboard-cli firmware pack <out.hbfw> <crate-dir>:<image-name>=<elf>... [--dirty]
 //! hoverboard-cli [LINK] [--node NODE] erase-store [--yes]
 //! hoverboard-cli [LINK] [--node NODE] update-esp <bin> [--no-confirm]
 //! hoverboard-cli [--serial PORT] install-esp <image.bin> [<file>...] [--yes]
@@ -53,6 +55,20 @@
 //! walk found: `watch` counts only those nodes' `CYCLIC_STATE`, `drive` drives them and counts
 //! every source.
 //!
+//! `flash` takes a firmware bundle or an ELF, told apart by the file's first bytes
+//! (`specs/firmware-bundle.md` section 4). From a bundle it checks each ELF's SHA-256, reads
+//! `TARGET_ID`, and takes the image whose target equals the chip's family and flash size; with
+//! several, `--image` names one of them, and it cannot name one that does not match. A match the
+//! bridge would refuse (a part that is not 64 KiB) is refused before anything is streamed. It runs
+//! that image's guards from the manifest, prints the choice and asks, unless `--yes`; without a
+//! terminal it refuses unless `--yes` is given. An ELF given directly gets the `wfi` scan and the
+//! layout check only: it does not say which chip it is for or which guards apply.
+//!
+//! `firmware info` prints a bundle's manifest and reads no board. `firmware pack` builds one: each
+//! entry's role and targets from its crate's `[package.metadata.hoverboard-image.<name>]`, its
+//! guards from `tools/image-guard-syms.sh`, the commit from `git rev-parse HEAD`; a tree with
+//! changes to tracked files is refused unless `--dirty`, which suffixes the commit `-dirty`.
+//!
 //! `update-esp` sends a bridge image (`espflash save-image` output) into the bridge's other app slot,
 //! waits for the bridge to reset into it, reconnects over the same link, and confirms it; with
 //! `--no-confirm` it stops after the reconnect, and the bridge's next reset returns to the previous
@@ -86,6 +102,7 @@ use std::time::{Duration, Instant};
 use espsvc::{Ctrl, FAMILY_F1X0};
 use net::pdu::NO_ADDRESS;
 
+use hoverboard_cli::bundle::{self, Bundle, Kind, TreeEntry};
 use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
@@ -963,6 +980,7 @@ const COMMANDS: &[&str] = &[
     "info",
     "id",
     "flash",
+    "firmware",
     "update-esp",
     "install-esp",
     "clear-protection",
@@ -998,6 +1016,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
     // The first error in the options, returned once the command is known.
     let mut early: Option<String> = None;
     let mut node: Option<&str> = None;
+    let mut image_flag: Option<&str> = None;
     let mut rest: Vec<&str> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -1010,18 +1029,24 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
             "--device" => |d| Via::Ble(Some(d)),
             "--serial" => |d| Via::Serial(d),
             "--tcp" => |d| Via::Tcp(d),
-            "--secs" | "--no-confirm" | "--force" | "--yes" | "--replace" | "--json" => {
+            "--secs" | "--no-confirm" | "--force" | "--yes" | "--replace" | "--json"
+            | "--dirty" => {
                 rest.push(a); // the commands' own options
                 continue;
             }
-            "--node" => {
+            "--node" | "--image" => {
+                let slot = if opt == "--node" {
+                    &mut node
+                } else {
+                    &mut image_flag
+                };
                 match inline.or_else(|| it.next().map(String::as_str)) {
-                    Some(v) if node.replace(v).is_some() => {
-                        early.get_or_insert("give --node once".into());
+                    Some(v) if slot.replace(v).is_some() => {
+                        early.get_or_insert(format!("give {opt} once"));
                     }
                     Some(_) => {}
                     None => {
-                        early.get_or_insert("--node needs a value".into());
+                        early.get_or_insert(format!("{opt} needs a value"));
                     }
                 }
                 continue;
@@ -1074,7 +1099,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         Some(Via::Ble(_)) => Given::Device,
     };
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|status [<node>...]|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|erase-store [--yes]|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|status [<node>...]|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <bundle|elf> [--image NAME] [--yes]|firmware info <bundle>|firmware pack <out.hbfw> <crate-dir>:<image-name>=<elf>... [--dirty]|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|erase-store [--yes]|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
     let cmd = match word {
         Some(_) if COMMANDS.contains(&rest[0]) => rest[0],
         _ => return Err(usage.into()),
@@ -1400,6 +1425,43 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         return Ok(0);
     }
 
+    if image_flag.is_some() && cmd != "flash" {
+        return Err("--image chooses the image `flash` takes from a bundle".into());
+    }
+    if rest.contains(&"--dirty") && cmd != "firmware" {
+        return Err(usage.into());
+    }
+
+    if cmd == "firmware" {
+        if node.is_some() || !matches!(given, Given::Nothing) {
+            return Err(
+                "firmware reads and writes bundle files; it takes no link and no --node".into(),
+            );
+        }
+        let dirty = rest.contains(&"--dirty");
+        rest.retain(|a| *a != "--dirty");
+        return match rest[1..] {
+            ["info", path] if !dirty => {
+                let b = open_bundle(path)?;
+                print!("{}", b.describe());
+                Ok(0)
+            }
+            ["pack", out, ref entries @ ..] if !entries.is_empty() => {
+                let entries = entries
+                    .iter()
+                    .map(|a| TreeEntry::parse(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let z = bundle::pack_tree(&entries, dirty)?;
+                std::fs::write(out, &z).map_err(|e| format!("{out}: {e}"))?;
+                let b = Bundle::open(&z).map_err(|e| e.to_string())?;
+                println!("wrote {out} ({} B)", z.len());
+                print!("{}", b.describe());
+                Ok(0)
+            }
+            _ => Err(usage.into()),
+        };
+    }
+
     if cmd == "install-esp" {
         let yes = rest.contains(&"--yes");
         rest.retain(|a| *a != "--yes");
@@ -1436,13 +1498,41 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         return update_esp(&via, node, path, no_confirm).map(|()| 0);
     }
 
-    // Read the ELF before the link, so a refused image costs no connection.
-    let image = if cmd == "flash" {
-        let path = rest.get(1).ok_or("flash needs an ELF path")?;
+    // Read the file before the link, so a refused image or a damaged bundle costs no connection.
+    let flash_yes = cmd == "flash" && rest.contains(&"--yes");
+    let flash_file = if cmd == "flash" {
+        rest.retain(|a| *a != "--yes");
+        let ["flash", path] = rest[..] else {
+            return Err("flash needs <bundle|elf> [--image NAME] [--yes]".into());
+        };
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        elf::check(&bytes).map_err(|e| e.to_string())?;
-        eprintln!("ELF checks passed (no wfi, code floor, required symbols)");
-        Some(elf::to_bin(&bytes).map_err(|e| e.to_string())?)
+        Some(
+            match bundle::kind(&bytes).map_err(|e| format!("{path}: {e}"))? {
+                Kind::Bundle => {
+                    let b = Bundle::open(&bytes).map_err(|e| e.to_string())?;
+                    eprintln!(
+                        "bundle built from commit {} at {}, {} image(s), SHA-256 checked",
+                        b.manifest.commit,
+                        b.manifest.built,
+                        b.manifest.images.len()
+                    );
+                    FlashFile::Bundle(b)
+                }
+                Kind::Elf => {
+                    if image_flag.is_some() {
+                        return Err(format!(
+                            "{path} is an ELF; --image chooses an image in a bundle"
+                        ));
+                    }
+                    elf::check_wfi(&bytes).map_err(|e| e.to_string())?;
+                    let bin = elf::to_bin(&bytes).map_err(|e| e.to_string())?;
+                    eprintln!(
+                    "ELF given directly: no wfi, layout checked; the image guards run on a bundle"
+                );
+                    FlashFile::Bin(bin)
+                }
+            },
+        )
     } else {
         None
     };
@@ -1494,7 +1584,25 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
             c.write(addr, &data).map_err(e)?;
         }
         "flash" => {
-            let image = image.expect("read above");
+            let image = match flash_file.expect("read above") {
+                FlashFile::Bin(bin) => bin,
+                FlashFile::Bundle(b) => {
+                    let id = c.target_id().map_err(e)?;
+                    let (img, chip) = b.select(&id, image_flag).map_err(|e| e.to_string())?;
+                    println!("{}", bundle::choice_line(&b.manifest, img, chip));
+                    let bin = b.prepare(img).map_err(|e| e.to_string())?;
+                    eprintln!("{}: no wfi, its guards and the layout checked", img.name);
+                    if !flash_yes {
+                        if !std::io::stdin().is_terminal() {
+                            return Err("give --yes to flash without a terminal".into());
+                        }
+                        if !confirm(&format!("Flash {}?", img.name)) {
+                            return Err("not flashed".into());
+                        }
+                    }
+                    bin
+                }
+            };
             let t0 = std::time::Instant::now();
             let mut stage = None;
             let mut times = StageTimes::new();
@@ -1529,6 +1637,23 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         _ => unreachable!("{cmd} is in COMMANDS and handled above"),
     }
     Ok(0)
+}
+
+/// What `flash` was given, read before the link is opened.
+enum FlashFile {
+    /// An ELF given directly, converted.
+    Bin(Vec<u8>),
+    /// A bundle, opened and checked; the image is chosen once `TARGET_ID` is read.
+    Bundle(Bundle),
+}
+
+/// Read and open a bundle, refusing a file that is not one.
+fn open_bundle(path: &str) -> Result<Bundle, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    if bundle::kind(&bytes) != Ok(Kind::Bundle) {
+        return Err(format!("{path}: not a firmware bundle (a zip archive)"));
+    }
+    Bundle::open(&bytes).map_err(|e| e.to_string())
 }
 
 fn main() -> ExitCode {
