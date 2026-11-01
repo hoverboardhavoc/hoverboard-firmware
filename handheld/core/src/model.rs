@@ -479,13 +479,8 @@ impl Model {
             Link::Connecting => return Body::Card(Card::Connecting(self.bridge.unwrap_or([0; 6]))),
             Link::Connected { .. } => {}
         }
-        match self.session.phase() {
-            Phase::Walking | Phase::Retry { .. } => return Body::Card(Card::Walking),
-            Phase::Classes { n, total } | Phase::Facts { n, total } => {
-                return Body::Card(Card::Reading { n, total })
-            }
-            Phase::Ready => {}
-        }
+        // While the machine is walked and read, the Ride view shows with its no-value forms and
+        // the statement line reports the progress (section 5.5): no card covers it.
         if self.boards_off(now) {
             return Body::Card(Card::MotorOff);
         }
@@ -631,10 +626,22 @@ impl Model {
         s
     }
 
-    /// The statement line: the first that applies (section 5.4).
+    /// The statement line: the walk and read progress while the machine is read (section 5.5),
+    /// then the first statement that applies (section 5.4).
     fn statement(&self, slots: &RideSlots) -> Option<Statement> {
         let mut text: String<64> = String::new();
         let say = |text: String<64>, tone| Some(Statement { text, tone });
+        match self.session.phase() {
+            Phase::Walking | Phase::Retry { .. } => {
+                let _ = text.push_str("Walking the machine\u{2026}");
+                return say(text, Tone::Muted);
+            }
+            Phase::Classes { n, total } | Phase::Facts { n, total } => {
+                let _ = write!(text, "Reading settings {n}/{total}\u{2026}");
+                return say(text, Tone::Muted);
+            }
+            Phase::Ready => {}
+        }
         if let Some(Dropped::Fault { bit, board }) = self.arm.fault_disarm {
             let title = Lamp::of(bit).map_or("fault", |l| l.title());
             let _ = write!(
@@ -761,8 +768,6 @@ pub enum Body {
 pub enum Card {
     NoBridge,
     Connecting([u8; 6]),
-    Walking,
-    Reading { n: u8, total: u8 },
     MotorOff,
 }
 
@@ -1058,8 +1063,60 @@ mod tests {
         let mut m = Model::new(Some([0xdc, 6, 0x75, 0xf8, 0x52, 0x6c]));
         assert!(matches!(m.view(0).body, Body::Card(Card::Connecting(_))));
         m.connected(0);
-        assert_eq!(m.view(0).body, Body::Card(Card::Walking));
-        let now = run(&mut m, 0, 4000, 0);
+        // The Ride view at once, its values in their no-value forms, the band cannot-arm and the
+        // walk on the statement line.
+        let v = m.view(0);
+        let Body::Ride(r) = &v.body else {
+            panic!("{:?}", v.body)
+        };
+        assert_eq!(r.dial.speed, SpeedShow::Silent);
+        assert_eq!(r.pack.text, "no pack voltage");
+        assert!(matches!(
+            r.lower,
+            Lower::Bars {
+                band: ArmBand::CannotArm,
+                ..
+            }
+        ));
+        assert_eq!(
+            v.line.as_ref().map(|l| l.text.as_str()),
+            Some("Walking the machine\u{2026}")
+        );
+        // Part way through the read, one reply a step: the counter on the statement line, still
+        // cannot-arm.
+        let mut now = 0;
+        let mut counted = false;
+        let mut pending: StdVec<StdVec<u8>> = StdVec::new();
+        while !m.session.ready() {
+            let mut sends = Sends::new();
+            m.poll(now, &mut sends);
+            pending.extend(sends.iter().map(|s| s.to_vec()));
+            if let Some(r) = pending.pop() {
+                if let Some(a) = answer(&r, 0x81, 1) {
+                    let mut more = Sends::new();
+                    m.on_pdu(&a, now, &mut more);
+                    pending.extend(more.iter().map(|s| s.to_vec()));
+                }
+            }
+            if let Phase::Facts { n, total } = m.session.phase() {
+                let v = m.view(now);
+                let mut want: String<64> = String::new();
+                let _ = write!(want, "Reading settings {n}/{total}\u{2026}");
+                assert_eq!(v.line.unwrap().text, want);
+                let Body::Ride(r) = v.body else { panic!() };
+                assert!(matches!(
+                    r.lower,
+                    Lower::Bars {
+                        band: ArmBand::CannotArm,
+                        ..
+                    }
+                ));
+                counted = true;
+            }
+            now += 10;
+        }
+        assert!(counted);
+        let now = run(&mut m, now, 4000, 0);
         let v = m.view(now);
         let Body::Ride(r) = v.body else {
             panic!("{:?}", v.body)

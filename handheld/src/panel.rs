@@ -264,12 +264,6 @@ fn draw_card<D: DrawTarget<Color = Rgb565>>(d: &mut D, card: &Card) {
             );
             card_text(d, &s, mid.y + 8, &FONT_8X13, FG_MUTED);
         }
-        Card::Walking => card_text(d, "Walking the machine\u{2026}", mid.y, &FONT_8X13, FG),
-        Card::Reading { n, total } => {
-            let mut s: String<32> = String::new();
-            let _ = write!(s, "Reading settings {n}/{total}\u{2026}");
-            card_text(d, &s, mid.y, &FONT_8X13, FG);
-        }
         Card::MotorOff => {
             power_glyph(d, Point::new(120, 100));
             card_text(d, "Motor controller off", 140, &FONT_10X20, FG);
