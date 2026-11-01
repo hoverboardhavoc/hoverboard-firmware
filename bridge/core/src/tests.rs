@@ -528,6 +528,160 @@ fn clearing_protection_keeps_the_user_byte_and_takes_after_a_power_cycle() {
     run_job(&mut s, &image(1500)).unwrap();
 }
 
+// ---- erasing the store ----
+
+/// The store's first halfword in the model's flash.
+fn store_half() -> usize {
+    ((STORE_START - FLASH_BASE) / 2) as usize
+}
+
+/// A booted board whose store pages hold records (a pattern) above a running image, with the
+/// mailbox attached; and a service to send it commands.
+fn stored_board() -> (
+    MailboxPort<SimPins<Gd32>>,
+    Firmware,
+    Service<'static, SimPlatform>,
+) {
+    let (mut port, mut fw) = booted(Family::F1x0, Inject::default());
+    let g = &mut port.swd().pins().bus;
+    let at = store_half();
+    for (i, h) in g.flash[at..].iter_mut().enumerate() {
+        *h = (i as u16) ^ 0x5A5A;
+    }
+    g.flash[at - 1] = 0x1234; // the image's last halfword, just below the store
+    attach(&mut port, &mut fw);
+    (port, fw, service())
+}
+
+/// Send `STORE_ERASE` through the service and return the `RESULT` status.
+fn store_erase(port: &mut MailboxPort<SimPins<Gd32>>, svc: &mut Service<SimPlatform>) -> Status {
+    let req = encode(&Msg::StoreErase, 0x80);
+    let me = Identity {
+        addr: 0,
+        store_mounted: true,
+    };
+    let mut status = None;
+    svc.handle(&Pdu::decode(&req).unwrap(), me, port, &mut |dst, m| {
+        assert_eq!(dst, 0x80);
+        if let Msg::Result { op, status: s } = m {
+            assert_eq!(*op, espsvc::OP_STORE_ERASE);
+            status = Some(*s);
+        }
+    });
+    status.expect("a RESULT")
+}
+
+#[test]
+fn the_store_erase_erases_and_verifies_both_pages_then_boots_and_the_mailbox_reopens() {
+    let (mut port, _fw, mut svc) = stored_board();
+    port.swd().pins().bus.cchp = 1 << 15 | 0x1C; // armed, as a running board may be
+    let resets = port.swd().pins().bus.resets;
+    assert_eq!(store_erase(&mut port, &mut svc), Status::Ok);
+    let g = &mut port.swd().pins().bus;
+    assert!(
+        g.flash[store_half()..].iter().all(|&h| h == 0xFFFF),
+        "both store pages erased"
+    );
+    assert_eq!(g.store_writes, 2, "one erase per store page, nothing else");
+    assert_eq!(g.flash[store_half() - 1], 0x1234, "the image is untouched");
+    assert_eq!(g.loader_runs, 0);
+    assert_eq!(g.cchp & 1 << 15, 0, "disarmed before the halt");
+    assert_eq!(g.dbg_ctl0 & target::DEBUG_HOLD, target::DEBUG_HOLD);
+    assert_eq!(
+        g.resets,
+        resets + 2,
+        "reset and halt, then reset and release"
+    );
+    assert!(!g.halted, "released and running");
+    // The image writes its header again and the port reattaches.
+    let mut fw = Firmware::new(g.mailbox());
+    port.swd().pins().sleep_us(600_000);
+    port.poll(|_| {});
+    assert_eq!(port.state(), espsvc::MailboxState::Attaching);
+    fw.poll();
+    port.poll(|_| {});
+    assert_eq!(port.state(), espsvc::MailboxState::Up);
+}
+
+#[test]
+fn the_store_erase_is_refused_while_the_disarm_does_not_take_and_on_any_part_but_64_kib() {
+    let (mut port, _fw, mut svc) = stored_board();
+    let g = &mut port.swd().pins().bus;
+    g.cchp = 1 << 15;
+    g.moe_stuck = true;
+    assert_eq!(store_erase(&mut port, &mut svc), Status::Armed);
+    let g = &mut port.swd().pins().bus;
+    assert_eq!(g.store_writes, 0);
+    assert!(!g.halted);
+    assert_eq!(g.flash[store_half()], 0x5A5A, "the store is untouched");
+
+    for kib in [32, 128, 256] {
+        let (mut port, _fw, mut svc) = stored_board();
+        port.swd().pins().bus.flash_kib = kib;
+        assert_eq!(store_erase(&mut port, &mut svc), Status::TooLarge, "{kib}");
+        let g = &mut port.swd().pins().bus;
+        assert_eq!(g.store_writes, 0, "{kib}");
+        assert!(!g.halted, "{kib}");
+    }
+
+    let (mut port, _fw, mut svc) = stored_board();
+    port.swd().pins().bus.protect();
+    assert_eq!(store_erase(&mut port, &mut svc), Status::Protected);
+    assert_eq!(port.swd().pins().bus.store_writes, 0);
+}
+
+#[test]
+fn a_store_word_that_does_not_read_back_erased_fails_the_erase_with_its_address() {
+    let mut s = board(Family::F1x0, Inject::default(), 1);
+    let bad = STORE_START + PAGE + 0x2A;
+    model(&mut s).bad_cell = Some(bad);
+    assert_eq!(
+        flash::erase_store(&mut s),
+        Err(FlashError::NotErased { addr: bad & !3 })
+    );
+    assert_eq!(
+        FlashError::NotErased { addr: bad }.status(),
+        Status::FlashError
+    );
+    let g = model(&mut s);
+    assert!(g.halted, "left halted, as a failed flash is");
+    assert_eq!(g.store_writes, 2);
+}
+
+#[test]
+fn the_flash_guard_and_the_store_erase_use_the_store_crates_one_region() {
+    assert_eq!(
+        STORE_START,
+        store::geometry::store_base(64 * 1024, 1024),
+        "the placement rule's address for the 64 KiB part"
+    );
+    assert_eq!(flash::STORE_LEN as usize, store::geometry::region_len(1024));
+    assert_eq!(flash::MAX_IMAGE + flash::STORE_LEN as usize, 64 * 1024);
+    let mut s = board(Family::F1x0, Inject::default(), 1);
+    s.connect().unwrap();
+    target::halt(&mut s).unwrap();
+    flash::unlock(&mut s).unwrap();
+    flash::erase_page(&mut s, STORE_START - PAGE).unwrap();
+    assert_eq!(
+        model(&mut s).store_writes,
+        0,
+        "the last image page is not the store's"
+    );
+    assert_eq!(
+        flash::erase_page(&mut s, STORE_START),
+        Err(FlashError::StoreRange)
+    );
+    // The erase reaches exactly the pages the guard refuses: the model counts every bus erase of
+    // its last two pages, and an image filling everything below them is left whole.
+    let mut s = board(Family::F10x, Inject::default(), 1);
+    let img = image(flash::MAX_IMAGE);
+    model(&mut s).load(&img);
+    flash::erase_store(&mut s).unwrap();
+    let g = model(&mut s);
+    assert_eq!(g.store_writes, 2);
+    assert_eq!(&g.flash_bytes()[..img.len()], &img[..]);
+}
+
 // ---- the RAM loader ----
 
 #[test]
@@ -2470,18 +2624,22 @@ fn a_terminal_flash_is_refused_while_gdb_holds_the_core_halted() {
         },
         0x80,
     );
-    let mut status = None;
-    let (port, svc) = g.parts();
-    let me = Identity {
-        addr: 0,
-        store_mounted: true,
-    };
-    svc.handle(&Pdu::decode(&begin).unwrap(), me, port, &mut |_, m| {
-        if let Msg::Result { status: s, .. } = m {
-            status = Some(*s);
-        }
-    });
-    assert_eq!(status, Some(Status::Busy));
+    // A store erase is refused the same way.
+    for req in [begin, encode(&Msg::StoreErase, 0x80)] {
+        let mut status = None;
+        let (port, svc) = g.parts();
+        let me = Identity {
+            addr: 0,
+            store_mounted: true,
+        };
+        svc.handle(&Pdu::decode(&req).unwrap(), me, port, &mut |_, m| {
+            if let Msg::Result { status: s, .. } = m {
+                status = Some(*s);
+            }
+        });
+        assert_eq!(status, Some(Status::Busy));
+    }
+    assert_eq!(sim(&mut g).store_writes, 0);
 }
 
 fn xfer(g: &mut SimGdb<'_>, object: &str, annex: &str) -> String {

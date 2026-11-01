@@ -4,10 +4,10 @@
 //! `out` with the requester as their destination; the node puts its own address on them and the
 //! carrier they leave on.
 //!
-//! A flash or a protection clear holds the SWD engine: the mailbox port goes down for it, and the
-//! commands that use the target answer `BUSY` until it is over. A flash and a protection clear are
-//! also refused with `BUSY` while a GDB session holds the target halted. The bridge's own update
-//! ([`crate::update`]) uses no SWD and runs beside either.
+//! A flash, a store erase or a protection clear holds the SWD engine: the mailbox port goes down for
+//! it, and the commands that use the target answer `BUSY` until it is over. A flash, a store erase
+//! and a protection clear are also refused with `BUSY` while a GDB session holds the target halted.
+//! The bridge's own update ([`crate::update`]) uses no SWD and runs beside any of them.
 //!
 //! GDB's `load` ([`crate::gdb`]) fills the same image buffer and runs the same [`FlashJob`], with
 //! [`Finish::Halt`] and its result kept for the GDB session instead of sent as `FLASH_STATUS`.
@@ -278,6 +278,19 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         }
     }
 
+    /// Erase the board's store with the engine held (`specs/hoverboard-bridge.md`, "Erasing the
+    /// store"); the mailbox reopens on the next poll, once the board has booted and written its
+    /// header.
+    pub fn store_erase<P: SwdPins>(&mut self, port: &mut MailboxPort<P>) -> Result<(), FlashError> {
+        port.hold();
+        let r = flash::erase_store(port.swd());
+        port.release();
+        if let Err(FlashError::Target(TargetError::Swd(_))) = r {
+            port.swd().forget();
+        }
+        r
+    }
+
     /// An update finished and its slot is the next boot's: reset once the last reply has gone.
     pub fn reboot_requested(&self) -> bool {
         self.reboot
@@ -307,7 +320,10 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
         let src = pdu.src;
         let op = pdu.opcode;
         if (self.gdb.halted || self.gdb_owns_image())
-            && matches!(msg, Msg::ClearProtection | Msg::FlashBegin { .. })
+            && matches!(
+                msg,
+                Msg::ClearProtection | Msg::StoreErase | Msg::FlashBegin { .. }
+            )
         {
             return result(out, src, op, Status::Busy);
         }
@@ -316,6 +332,7 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                 msg,
                 Msg::TargetIdReq
                     | Msg::ClearProtection
+                    | Msg::StoreErase
                     | Msg::FlashBegin { .. }
                     | Msg::TargetCtrl(_)
                     | Msg::MemRead { .. }
@@ -362,6 +379,10 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
             },
             Msg::ClearProtection => {
                 let r = self.clear_protection(port);
+                result(out, src, op, r.map_or_else(|e| e.status(), |()| Status::Ok));
+            }
+            Msg::StoreErase => {
+                let r = self.store_erase(port);
                 result(out, src, op, r.map_or_else(|e| e.status(), |()| Status::Ok));
             }
             Msg::FlashBegin { len, sha256 } => {

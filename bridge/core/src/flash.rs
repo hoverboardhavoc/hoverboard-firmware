@@ -1,6 +1,7 @@
 //! Flashing (`specs/hoverboard-bridge.md`, "Flashing"): erase and program only the pages an image covers,
-//! never the store's last 2 KB, so the stored configuration survives; and clearing read protection
-//! with the USER-byte check.
+//! never the store's last 2 KB, so the stored configuration survives; erasing the store, the one
+//! operation that reaches its pages ([`erase_store`]); and clearing read protection with the
+//! USER-byte check.
 //!
 //! The sequence, as [`FlashJob`] runs it in bounded pieces per [`FlashJob::step`] so the caller can
 //! keep the radio serviced:
@@ -30,17 +31,21 @@ use crate::swd::{Swd, SwdError, SwdPins};
 use crate::target::{self, PortError, TargetError, RDP_OFF};
 
 /// Main flash base.
-pub const FLASH_BASE: u32 = 0x0800_0000;
+pub const FLASH_BASE: u32 = store::geometry::FLASH_BASE;
 /// The erase page.
 pub const PAGE: u32 = 1024;
-/// The store's first byte on a 64 KiB part (`specs/decision-flash-budget.md`): the last 2 KB.
-pub const STORE_START: u32 = 0x0800_F800;
-/// The largest image: everything below the store (63,488 B, the firmware's link limit).
-pub const MAX_IMAGE: usize = (STORE_START - FLASH_BASE) as usize;
 /// The only flash size this version flashes. The 12-FET's store address is an open question
 /// (`specs/hoverboard-bridge.md`, "Open questions"), so a part reporting more than 64 KiB is refused rather
 /// than guessed at; a smaller part would put the store elsewhere and is refused too.
 pub const SUPPORTED_KIB: u16 = 64;
+/// The store's first byte on the part [`check_part`] lets through: the store crate's placement rule
+/// (`shared/store/src/geometry.rs`), the one the firmware mounts its store with. The flash guard
+/// and [`erase_store`] both read it, so they cannot disagree.
+pub const STORE_START: u32 = store::geometry::store_base(SUPPORTED_KIB as u32 * 1024, PAGE);
+/// The store region's length: two pages.
+pub const STORE_LEN: u32 = store::geometry::region_len(PAGE as usize) as u32;
+/// The largest image: everything below the store (63,488 B, the firmware's link limit).
+pub const MAX_IMAGE: usize = (STORE_START - FLASH_BASE) as usize;
 
 const FMC_KEY: u32 = 0x4002_2004;
 const FMC_OBKEY: u32 = 0x4002_2008;
@@ -106,6 +111,11 @@ pub enum FlashError {
     },
     /// The new image did not write its mailbox header in time.
     Boot,
+    /// A store page did not read back erased after [`erase_store`].
+    NotErased {
+        /// The first word's address that is not `0xFFFF_FFFF`.
+        addr: u32,
+    },
 }
 
 impl From<SwdError> for FlashError {
@@ -137,9 +147,10 @@ impl FlashError {
             FlashError::UnsupportedPart(_) => Status::TooLarge,
             FlashError::StoreRange => Status::StoreRange,
             FlashError::Busy | FlashError::Boot | FlashError::Loader => Status::Timeout,
-            FlashError::Unlock | FlashError::Erase { .. } | FlashError::Program { .. } => {
-                Status::FlashError
-            }
+            FlashError::Unlock
+            | FlashError::Erase { .. }
+            | FlashError::Program { .. }
+            | FlashError::NotErased { .. } => Status::FlashError,
             FlashError::Verify { .. } => Status::VerifyMismatch,
         }
     }
@@ -194,11 +205,16 @@ fn lock<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
     Ok(swd.write_word(FMC_CTL, CTL_LK)?)
 }
 
-/// Erase one page.
+/// Erase one page of an image: refuses the store's pages.
 pub fn erase_page<P: SwdPins>(swd: &mut Swd<P>, addr: u32) -> Result<(), FlashError> {
     if addr >= STORE_START {
         return Err(FlashError::StoreRange);
     }
+    erase(swd, addr)
+}
+
+/// The page erase itself, unguarded: [`erase_page`] for an image, [`erase_store`] for the store.
+fn erase<P: SwdPins>(swd: &mut Swd<P>, addr: u32) -> Result<(), FlashError> {
     wait_idle(swd)?;
     clear_stat(swd)?;
     swd.write_word(FMC_CTL, CTL_PER)?;
@@ -432,12 +448,7 @@ impl FlashJob {
                     self.step = Step::Done;
                     Event::Finished(Ok(()))
                 } else {
-                    // The old image's header is still in RAM: clear the magic so `MBX1` means
-                    // the new one wrote it. Reset while halted, then release: whether `C_HALT`
-                    // survives the reset or not, the core starts from the reset vector.
-                    swd.write_word(swd_mailbox::MAILBOX_BASE, 0)?;
-                    target::reset(swd)?;
-                    target::release(swd)?;
+                    restart(swd)?;
                     self.step = Step::Boot(swd.now_us());
                     Event::Progress(Stage::Verifying, self.len)
                 }
@@ -455,6 +466,45 @@ impl FlashJob {
             Step::Done => Event::Finished(Ok(())),
         })
     }
+}
+
+/// Boot the board from a halt: the old image's header is still in RAM, so clear the magic first
+/// and `MBX1` means the image wrote it again. Reset while halted, then release: whether `C_HALT`
+/// survives the reset or not, the core starts from the reset vector.
+fn restart<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
+    swd.write_word(swd_mailbox::MAILBOX_BASE, 0)?;
+    target::reset(swd)?;
+    target::release(swd)?;
+    Ok(())
+}
+
+/// Erase the store (`specs/hoverboard-bridge.md`, "Erasing the store"): the one operation that
+/// reaches the store's pages, for a store change that reuses ids. The flash job's steps in its
+/// order: [`check_part`] (refused on a protected part or any part but the 64 KiB one), reset and
+/// halt (refused while the disarm does not take), unlock, erase the two pages, lock; then read both
+/// pages back, every word `0xFFFF_FFFF` or [`FlashError::NotErased`] with the first other address;
+/// then reset and release. On an error the core is left halted and the controller locked, as a
+/// failed flash leaves it. The board boots on registry defaults: no address, no link pins, no
+/// odometer total.
+pub fn erase_store<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
+    check_part(swd)?;
+    target::reset_halt(swd)?;
+    unlock(swd)?;
+    let erased = (STORE_START..STORE_START + STORE_LEN)
+        .step_by(PAGE as usize)
+        .try_for_each(|page| erase(swd, page));
+    lock(swd)?;
+    erased?;
+    let mut words = [0u32; (PAGE / 4) as usize];
+    for page in (STORE_START..STORE_START + STORE_LEN).step_by(PAGE as usize) {
+        swd.read_words(page, &mut words)?;
+        if let Some(k) = words.iter().position(|&w| w != 0xFFFF_FFFF) {
+            return Err(FlashError::NotErased {
+                addr: page + 4 * k as u32,
+            });
+        }
+    }
+    restart(swd)
 }
 
 /// Clear read protection (`specs/hoverboard-bridge.md`, "First install on a read-protected board"). This

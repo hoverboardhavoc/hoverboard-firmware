@@ -119,7 +119,7 @@ impl<P: SwdPins> MailboxPort<P> {
         self.state
     }
 
-    /// Take the port down while a flash or a protection clear holds the engine.
+    /// Take the port down while a flash, a store erase or a protection clear holds the engine.
     pub fn hold(&mut self) {
         self.close(MailboxState::Held);
     }
