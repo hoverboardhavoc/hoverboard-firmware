@@ -62,6 +62,37 @@ impl Reg32 {
     }
 }
 
+/// One register field to program: the bits in `mask` of the register at `offset` take `value`.
+///
+/// The bring-ups compute their fields as values (pure, so the host tests check them) and apply each
+/// as one read-modify-write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Field {
+    pub offset: u32,
+    pub mask: u32,
+    pub value: u32,
+}
+
+impl Field {
+    /// Read the register at `base + offset`, replace the field, write it back.
+    #[inline]
+    pub(crate) fn apply(self, base: u32) {
+        Reg32::new(base, self.offset).modify(self.mask, self.value);
+    }
+}
+
+/// The register values a sequence of fields leaves, from all-zero reset values: what the host
+/// tests compare against the golden traces' final states.
+#[cfg(test)]
+pub(crate) fn fold(fields: &[Field]) -> std::collections::BTreeMap<u32, u32> {
+    let mut regs = std::collections::BTreeMap::new();
+    for f in fields {
+        let r = regs.entry(f.offset).or_insert(0u32);
+        *r = (*r & !f.mask) | (f.value & f.mask);
+    }
+    regs
+}
+
 /// A 16-bit memory-mapped register (the FWDGT key and reload registers take half-word stores on
 /// some parts; the FMC programs half-words).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
