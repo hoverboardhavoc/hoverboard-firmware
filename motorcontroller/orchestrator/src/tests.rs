@@ -20,6 +20,19 @@ const TEST_IDENTITY: BoardIdentity = BoardIdentity {
     config_fault: false,
 };
 
+/// The machine state these vectors run under: no link configured (a one-board machine, so
+/// nothing gates arming), and running what it stores.
+fn test_machine() -> Machine {
+    Machine::new(
+        Digests {
+            machine: 0,
+            arm: 0,
+            boot: 0,
+        },
+        [false; N_LINKS],
+    )
+}
+
 fn fresh() -> OrchestratorState {
     OrchestratorState::new(
         0,
@@ -35,6 +48,7 @@ fn fresh() -> OrchestratorState {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     )
 }
 
@@ -63,6 +77,7 @@ fn balance_board(gains: control::GainShadow) -> OrchestratorState {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(s.obs().control_mode, 1, "balance mode");
@@ -144,6 +159,7 @@ fn cyclic(flags: u8) -> Payload {
         wheel_pos: 0,
         obs: PEER_OBS,
         wheel_rate: 0,
+        machine: 0,
     })
 }
 
@@ -1016,6 +1032,7 @@ fn configured_to_run() -> OrchestratorState {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     hold_power(&mut s);
     let good = good_sample();
@@ -1044,6 +1061,7 @@ fn imu_board(configured: bool, staged: bool) -> OrchestratorState {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     )
 }
 
@@ -1090,6 +1108,7 @@ fn imu_live_tracks_read_success() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
 
     // A single failing read (None) on a configured IMU: not live, and below the loss threshold
@@ -1137,6 +1156,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     let good = good_sample();
     for _ in 0..200 {
@@ -1217,6 +1237,7 @@ fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     let good = good_sample();
     control_task(&mut s, Some(&good), 1);
@@ -1302,6 +1323,7 @@ fn unconfigured_board_never_loses_imu() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     hold_power(&mut s);
     for _ in 0..(IMU_LOSS_THRESHOLD as usize + 300) {
@@ -1468,6 +1490,7 @@ fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(
@@ -1562,6 +1585,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     input_task(&mut s, &pads_on_button_held());
@@ -1779,6 +1803,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     let obs = s.obs();
     assert_eq!(obs.control_mode, 0, "demoted to Throttle");
@@ -1799,6 +1824,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     assert_eq!(s.obs().control_mode, 1);
     assert!(!s.obs().mode_fault);
@@ -1818,6 +1844,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     assert_eq!(s.obs().control_mode, 0);
     assert!(!s.obs().mode_fault);
@@ -1899,6 +1926,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
@@ -1989,6 +2017,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     let level = level_sample();
@@ -2185,6 +2214,7 @@ fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     hold_power(&mut s);
     // OFF -> INIT, then the INIT pass: MOE is granted here, and this is the pass whose
@@ -2483,6 +2513,7 @@ fn peer_rider_flag_reaches_the_engage_gate() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     walk_to_run(&mut b);
@@ -2527,6 +2558,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     let level = level_sample(); // a live, level IMU so the board stays in RUN (no IMU-loss fault)
     b.block.orientation_nz = true;
@@ -2547,6 +2579,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
         flags: 0,
         obs: PEER_OBS,
         wheel_rate: 0,
+        machine: 0,
     };
     for k in 0..160 {
         if k % 20 == 0 {
@@ -2901,6 +2934,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -2943,6 +2977,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     for _ in 0..200 {
@@ -2976,6 +3011,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     back.vbatt_raw = BENCH_CV;
     let tilted_back = imu::Sample {
@@ -3251,6 +3287,7 @@ fn ev_config_follows_the_boot_status_and_gates_nothing() {
                 config_fault,
                 ..TEST_IDENTITY
             },
+            test_machine(),
         );
         for _ in 0..3 {
             run_ticks(&mut s, 2);
@@ -3287,9 +3324,10 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
             // `EV_STOP_ALL`'s one producer (`specs/control.md` (l)).
             tilt: ev == EV_STOP_ALL,
             config: ev == EV_CONFIG,
+            machine: ev == EV_MACHINE,
         };
-        // Bit 3 and bits 13..15 have no producer: nothing can set them.
-        let producer = bit != 3 && bit < 13;
+        // Bit 3 and bits 14..15 have no producer: nothing can set them.
+        let producer = bit != 3 && bit < 14;
         let want = if producer { ev } else { 0 };
         assert_eq!(levels.mask(), want, "bit {bit}: one producer, one bit");
         assert_eq!(levels.own_mask(), want, "and the wire word says the same");
@@ -3497,6 +3535,7 @@ fn ble_peer_tx_carries_the_inbox_state_and_its_source_unchanged() {
         wheel_pos: -321,
         obs: PEER_OBS,
         wheel_rate: 0,
+        machine: 0,
     };
     let mut wire = [0u8; CyclicState::ENCODED_LEN];
     frame.encode(&mut wire);
@@ -3616,6 +3655,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     let one_rad = imu::Sample {
         gyro: [Fix::ZERO, Fix::from_num(1), Fix::ZERO],
@@ -3666,6 +3706,7 @@ fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     for count in [i16::MAX, i16::MIN] {
         control_task(&mut s, Some(&sample_with_gy_counts(count)), 1);
@@ -3772,6 +3813,7 @@ fn peer_with_battery(battery: u16) -> Payload {
         flags: 0,
         obs: PEER_OBS,
         wheel_rate: 0,
+        machine: 0,
     })
 }
 
@@ -3820,6 +3862,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     m.vbatt_raw = 995;
     for k in 0..40 {
@@ -3857,6 +3900,7 @@ fn a_sensing_board_with_no_conversions_stays_unknown() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     for k in 0..40 {
         if k % 10 == 0 {
@@ -3913,6 +3957,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     input_task(&mut s, &pads_on_button_held());
     input_task(&mut s, &pads_on_button_held());
@@ -3949,6 +3994,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     for _ in 0..200 {
         control_task(&mut d, Some(&tilted), 1);
@@ -4032,6 +4078,7 @@ fn policy_board(
         rider_required,
         battery_floor,
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     assert_eq!(
@@ -4392,6 +4439,7 @@ fn throttle_engagement_is_identical_at_either_rider_requirement() {
             byte,
             store::BOARD_BATTERY_FLOOR.default(),
             TEST_IDENTITY,
+            test_machine(),
         )
     };
     let (mut a, mut b) = (mk(1), mk(0));
@@ -4518,6 +4566,7 @@ fn the_battery_floor_does_not_gate_a_throttle_engage() {
         store::CONTROL_RIDER_REQUIRED.default(),
         i16::MAX,
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     hold_power(&mut s);
@@ -4563,6 +4612,7 @@ fn torque_mode_board(vbatt: Option<u16>, torque_is_current: bool) -> Orchestrato
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = vbatt.unwrap_or(0);
     s.block.torque_is_current = torque_is_current;
@@ -4672,6 +4722,7 @@ fn rigid_board(imu: bool) -> OrchestratorState {
         0,
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     s
@@ -4692,6 +4743,7 @@ fn leader_cyclic(mode: Mode, demand: i16) -> Payload {
         wheel_pos: 0,
         obs: PEER_OBS,
         wheel_rate: 0,
+        machine: 0,
     })
 }
 
@@ -5265,6 +5317,7 @@ fn turning_leader(side_right: bool, turn: control::DriveTurn) -> OrchestratorSta
         0,
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     hold_power(&mut s);
@@ -5803,6 +5856,7 @@ fn cyclic_at(wheel_pos: i16) -> Payload {
         wheel_pos,
         obs: PEER_OBS,
         wheel_rate: 0,
+        machine: 0,
     })
 }
 
@@ -5964,6 +6018,7 @@ fn sf_run_board(side: u8, gains: control::GainShadow) -> OrchestratorState {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     s.vbatt_raw = BENCH_CV;
     input_task(&mut s, &pads_on_button_held());
@@ -6219,7 +6274,7 @@ fn the_observation_carries_the_terms_and_the_reference() {
 
 /// **A live tune reaches the law** (section 6): the lane's write moves the shadow, and the next
 /// pass's terms are at the new gain while the machine is disarmed (the live gains are the
-/// shadow's outside RUN). The lane takes exactly 0x79 indices 0..3 and 0x7B indices 0..1.
+/// shadow's outside RUN). The lane takes exactly 0x27 indices 0..3 and 0x29 indices 0..1.
 #[test]
 fn a_live_tune_reaches_the_terms_and_the_lane_takes_exactly_its_keys() {
     let mut s = balance_board(sf_start());
@@ -6230,7 +6285,7 @@ fn a_live_tune_reaches_the_terms_and_the_lane_takes_exactly_its_keys() {
         control::sf::word(gp * s.block.pitch_word as i64 / 100, s.block.battery)
     };
     assert_eq!(s.ctl.sf.terms[0], term_p(&s, 3491));
-    assert_eq!(s.ctl.gains.set(0x79, 0, 3491 * 2), Ok(()));
+    assert_eq!(s.ctl.gains.set(0x27, 0, 3491 * 2), Ok(()));
     control_task(&mut s, Some(&tilted_sample()), 1);
     assert_eq!(s.ctl.sf.live[0], 3491 * 2);
     assert_eq!(
@@ -6240,12 +6295,12 @@ fn a_live_tune_reaches_the_terms_and_the_lane_takes_exactly_its_keys() {
     );
     assert_ne!(term_p(&s, 3491 * 2), term_p(&s, 3491));
     for i in 0..4 {
-        assert_eq!(s.ctl.gains.set(0x79, i, 1), Ok(()));
+        assert_eq!(s.ctl.gains.set(0x27, i, 1), Ok(()));
     }
     for i in 0..2 {
-        assert_eq!(s.ctl.gains.set(0x7B, i, 1), Ok(()));
+        assert_eq!(s.ctl.gains.set(0x29, i, 1), Ok(()));
     }
-    for (id, i, v) in [(0x7B, 2, 1), (0x71, 0, 1), (0x79, 0, i16::MAX)] {
+    for (id, i, v) in [(0x29, 2, 1), (0x71, 0, 1), (0x27, 0, i16::MAX)] {
         assert!(s.ctl.gains.set(id, i, v).is_err(), "{id:#x}/{i} = {v}");
     }
 }
@@ -6268,6 +6323,7 @@ fn the_position_clamp_goes_through_its_seam_at_boot_and_at_the_arm() {
         store::CONTROL_RIDER_REQUIRED.default(),
         store::BOARD_BATTERY_FLOOR.default(),
         TEST_IDENTITY,
+        test_machine(),
     );
     assert_eq!(s.ctl.pos_clamp, control::sf::POS_CLAMP_MAX);
     let mut s = s;
@@ -6283,4 +6339,131 @@ fn the_position_clamp_goes_through_its_seam_at_boot_and_at_the_arm() {
         );
         assert_eq!(s.ctl.pos_clamp, want, "stored {stored}");
     }
+}
+
+// --- The machine gate and the running flags (`specs/machine-settings.md` sections 4 and 5) -----
+
+/// A board in balance-free throttle with link 0 configured, at digest `own`.
+fn linked(own: u16) -> OrchestratorState {
+    let mut s = fresh();
+    s.machine = Machine::new(
+        Digests {
+            machine: own,
+            arm: 0x1111,
+            boot: 0x2222,
+        },
+        [true, false],
+    );
+    s
+}
+
+/// Hold the power request on and run `n` ticks; the mode it ends in.
+fn request_on(s: &mut OrchestratorState, n: usize) -> Mode {
+    s.button_pressed = true;
+    run_ticks(s, n);
+    s.mode.mode()
+}
+
+/// Section 9, test 3: a configured link with no peer heard, or with a peer whose digest differs,
+/// sets `EV_MACHINE` and refuses arming; a matching peer on every configured link arms.
+#[test]
+fn a_configured_link_needs_a_peer_with_the_same_digest_to_arm() {
+    // Never heard: refused, and the bit is on the wire.
+    let mut s = linked(0xAAAA);
+    assert_eq!(request_on(&mut s, 10), Mode::Off);
+    let c = cyclic_tx(&s, true).unwrap();
+    assert_ne!(c.fault & EV_MACHINE, 0);
+    assert_eq!(c.machine, 0xAAAA);
+    // A peer with another digest: still refused.
+    s.machine.hear(0, 0xBBBB);
+    assert_eq!(request_on(&mut s, 10), Mode::Off);
+    // A frame on the unconfigured link changes nothing.
+    s.machine.hear(1, 0xAAAA);
+    assert!(s.machine.disagrees());
+    // The matching peer: it arms, and the bit clears.
+    s.machine.hear(0, 0xAAAA);
+    assert!(!s.machine.disagrees());
+    assert_ne!(request_on(&mut s, 10), Mode::Off);
+    run_ticks(&mut s, 2);
+    assert_eq!(cyclic_tx(&s, true).unwrap().fault & EV_MACHINE, 0);
+    // No configured link: a one-board machine arms with nothing heard.
+    let mut one = fresh();
+    assert!(!one.machine.disagrees());
+    assert_ne!(request_on(&mut one, 10), Mode::Off);
+    assert_eq!(EV_MACHINE, 1 << 13);
+}
+
+/// `EV_MACHINE` blocks arming and nothing else: it is not Fault A, so it never ends a run.
+#[test]
+fn ev_machine_never_disengages() {
+    let mut s = linked(0xAAAA);
+    s.machine.hear(0, 0xAAAA);
+    assert_eq!(request_on(&mut s, 10), Mode::Run);
+    // The peer now reports another digest (it cannot, under a running machine, but the gate must
+    // not be what stops one).
+    s.machine.hear(0, 0xBBBB);
+    assert!(s.machine.disagrees());
+    run_ticks(&mut s, 50);
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert_eq!(EV_MACHINE & FAULT_A_BITS, 0);
+}
+
+/// Section 9, test 4 (the flag half): a persisted arm-effect write sets `FLAG_REARM` until the
+/// next arm, a boot-effect one `FLAG_REBOOT` until boot; a write that changes neither digest sets
+/// neither. The store half (which write moves which digest) is the store's digest tests.
+#[test]
+fn the_running_flags_follow_the_stored_digests() {
+    let boot = Digests {
+        machine: 1,
+        arm: 2,
+        boot: 3,
+    };
+    let mut m = Machine::new(boot, [false; N_LINKS]);
+    assert_eq!(m.flags(), 0);
+    // A live field moves the machine digest only.
+    m.persisted(Digests { machine: 9, ..boot });
+    assert_eq!(m.flags(), 0);
+    m.persisted(Digests { arm: 5, ..boot });
+    assert_eq!(m.flags(), linkctl::CyclicState::FLAG_REARM);
+    m.armed();
+    assert_eq!(m.flags(), 0, "the arm installs it");
+    m.persisted(Digests {
+        arm: 5,
+        boot: 7,
+        ..boot
+    });
+    assert_eq!(m.flags(), linkctl::CyclicState::FLAG_REBOOT);
+    m.armed();
+    assert_eq!(
+        m.flags(),
+        linkctl::CyclicState::FLAG_REBOOT,
+        "an arm runs no boot field"
+    );
+    // Written back to what it boots with: nothing is waiting.
+    m.persisted(Digests { arm: 5, ..boot });
+    assert_eq!(m.flags(), 0);
+    // A boot runs what it stores.
+    let m = Machine::new(
+        Digests {
+            arm: 5,
+            boot: 7,
+            ..boot
+        },
+        [false; N_LINKS],
+    );
+    assert_eq!(m.flags(), 0);
+}
+
+/// The flags reach the wire.
+#[test]
+fn the_running_flags_ride_cyclic_state() {
+    let mut s = fresh();
+    s.machine.persisted(Digests {
+        machine: 0,
+        arm: 1,
+        boot: 1,
+    });
+    run_ticks(&mut s, 2);
+    let c = cyclic_tx(&s, true).unwrap();
+    assert!(c.rearm() && c.reboot());
 }

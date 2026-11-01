@@ -125,12 +125,12 @@ class GateColourOrder(unittest.TestCase):
     #: PB3/PA15/PB4). Checked alongside, because a mapping error in the singletons would be just as
     #: wrong and just as invisible.
     BENCH_BOARD = {
-        "board.self_hold": "PB12",
-        "board.buzzer": "PB9",
-        "led.green": "PB3",
-        "led.orange": "PA15",
-        "led.red": "PB4",
-        "board.battery.pin": "PA4",
+        "power.self_hold": "PB12",
+        "buzzer": "PB9",
+        "leds.green": "PB3",
+        "leds.orange": "PA15",
+        "leds.red": "PB4",
+        "battery_sense.pin": "PA4",
     }
 
     def test_the_colour_to_phase_map_is_the_one_his_channel_convention_fixes(self):
@@ -183,11 +183,13 @@ class GateColourOrder(unittest.TestCase):
             got = {f["key"]: f["value"] for f in by_id[preset_id]["fields"]}
             self.assertEqual(got["current.phase_a"], "PB0")
             self.assertEqual(got["current.phase_b"], "PA0")
-            self.assertEqual(got["current.sense"], 1)
+            # Phase sense is fitted exactly when both phase pins are set
+            # (`specs/machine-settings.md` section 3.3): no field states it.
+            self.assertNotIn("current.sense", got)
 
 
 # --------------------------------------------------------------------------------------------------
-# Decision 2: ADC_BATTERY_VOLT to board.battery.cal
+# Decision 2: ADC_BATTERY_VOLT to battery_sense.cal
 # --------------------------------------------------------------------------------------------------
 
 
@@ -209,7 +211,7 @@ class BatteryCalibration(unittest.TestCase):
         doc = json.load(open(PRESETS))
         for p in doc["presets"]:
             for f in p["fields"]:
-                if f["key"] == "board.battery.cal":
+                if f["key"] == "battery_sense.cal":
                     self.assertLessEqual(abs(f["value"]), rp.I16_MAX, p["id"])
 
     def test_the_offset_index_is_zero_because_his_model_is_a_pure_gain(self):
@@ -217,7 +219,7 @@ class BatteryCalibration(unittest.TestCase):
             self.skipTest("the committed presets are not here")
         doc = json.load(open(PRESETS))
         for p in doc["presets"]:
-            cal = {f["index"]: f["value"] for f in p["fields"] if f["key"] == "board.battery.cal"}
+            cal = {f["index"]: f["value"] for f in p["fields"] if f["key"] == "battery_sense.cal"}
             if not cal:
                 continue
             self.assertEqual(sorted(cal), [0, 1], p["id"])
@@ -231,13 +233,13 @@ class BatteryCalibration(unittest.TestCase):
             self.skipTest("the committed presets are not here")
         doc = json.load(open(PRESETS))
         by_id = {p["id"]: p for p in doc["presets"]}
-        stated = {f["value"] for f in by_id["robo-2-1-20"]["fields"] if f["key"] == "board.battery.cal"}
+        stated = {f["value"] for f in by_id["robo-2-1-20"]["fields"] if f["key"] == "battery_sense.cal"}
         self.assertEqual(stated, {25070, 0})
-        unstated = [a for a in by_id["robo-2-1-1"]["absent"] if a["key"] == "board.battery.cal"]
+        unstated = [a for a in by_id["robo-2-1-1"]["absent"] if a["key"] == "battery_sense.cal"]
         self.assertEqual(len(unstated), 2)
         self.assertIn("global default in defines.h", unstated[0]["reason"])
         self.assertFalse(
-            [f for f in by_id["robo-2-1-1"]["fields"] if f["key"] == "board.battery.cal"]
+            [f for f in by_id["robo-2-1-1"]["fields"] if f["key"] == "battery_sense.cal"]
         )
 
     def test_every_preset_says_the_battery_sense_is_master_only(self):
@@ -300,8 +302,8 @@ class DeadTime(unittest.TestCase):
         self.assertEqual(rp.dead_time_dtg(50), 25)
 
     def test_the_result_clears_the_dead_time_floor(self):
-        # Below the floor every gated board would leave its motor down at boot, recorded in
-        # board.status as a dead time below the floor.
+        # Below the floor every gated board would leave its motor down at boot, recorded in its
+        # boot report as a dead time below the floor.
         self.assertGreaterEqual(rp.dead_time_dtg(60), 18)
 
     def test_the_dead_time_rides_only_where_there_is_a_gate_group(self):
@@ -331,12 +333,13 @@ class DeadTime(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------------------------------
-# The links: his USART pairs to link.tx / link.rx
+# The links: his USART pairs to links[i].tx / links[i].rx
 # --------------------------------------------------------------------------------------------------
 
 
 class Links(unittest.TestCase):
-    """His USART pairs to `link.tx` / `link.rx` (`specs/configured-links.md` section 6)."""
+    """His USART pairs to `links[i].tx` / `links[i].rx` (`specs/configured-links.md` section 6,
+    `specs/machine-settings.md` section 3.1)."""
 
     USART0 = {"USART0_TX": "PB6", "USART0_RX": "PB7"}
     USART1 = {"USART1_TX": "PA2", "USART1_RX": "PA3"}
@@ -383,7 +386,7 @@ class Links(unittest.TestCase):
         self.assertEqual(self.pins(links), [None, ("PB6", "PB7")])
         self.assertIn("USART1_TX/USART1_RX", empty[0])
         self.assertIn("does not route on the F1x0", reasons["USART1_TX"])
-        self.assertIn("board.status", reasons["USART1_RX"])
+        self.assertIn("boot report", reasons["USART1_RX"])
         out = rp.unmapped_entries(values, sorted(values), reasons)
         self.assertEqual(
             {u["from"]: u["value"] for u in out}, {"USART1_TX": "PA2", "USART1_RX": "PA15"}
@@ -416,7 +419,8 @@ class Links(unittest.TestCase):
         # shared/store/src/field.rs, LINKS, and the name table's count for both link fields.
         with open(FIELDS_JSON) as fh:
             table = {r["id"]: r for r in json.load(fh)}
-        for fid in (0x56, 0x57):
+        for fid in (0x0F, 0x10):
+            self.assertEqual(table[fid]["index"], "link")
             self.assertEqual(table[fid]["count"], rp.LINKS)
             self.assertEqual(table[fid]["kind"], "pin")
 
@@ -429,7 +433,7 @@ class Links(unittest.TestCase):
         def links(preset_id):
             got = {(f["key"], f["index"]): f["value"] for f in by_id[preset_id]["fields"]}
             return [
-                (got.get(("link.tx", i)), got.get(("link.rx", i))) for i in range(rp.LINKS)
+                (got.get(("tx", i)), got.get(("rx", i))) for i in range(rp.LINKS)
             ]
 
         self.assertEqual(links("robo-2-1-20"), [("PA2", "PA3"), ("PB6", "PB7")])
@@ -442,7 +446,7 @@ class Links(unittest.TestCase):
             self.assertNotIn("link_set", p, p["id"])
             self.assertNotIn("validate", p, p["id"])
             # A USART pin of his is either a link field or unmapped with a reason, never both.
-            linked = {f["from"] for f in p["fields"] if f["key"].startswith("link.")}
+            linked = {f["from"] for f in p["fields"] if f["key"] in ("tx", "rx")}
             unmapped = {u["from"] for u in p["unmapped"]}
             self.assertFalse(linked & unmapped, p["id"])
 
@@ -460,6 +464,7 @@ class KeyList(unittest.TestCase):
             row = table[f["id"]]
             self.assertEqual(f["key"], row["path"], "0x%02X" % f["id"])
             self.assertEqual("motor" in f, row["index"] == "motor", f["key"])
+            self.assertEqual(f["kind"] == "link", row["index"] == "link", f["key"])
 
     def test_every_key_the_committed_presets_carry_is_a_name_table_path(self):
         if not os.path.exists(PRESETS):
@@ -475,14 +480,14 @@ class KeyList(unittest.TestCase):
     def test_the_mapped_fields_are_in_registry_id_order(self):
         ids = [f["id"] for f in rp.FIELDS]
         self.assertEqual(ids, sorted(ids))
-        # One row per field, whatever its indices: board.battery.cal's two indices come from one row.
+        # One row per field, whatever its indices: battery_sense.cal's two indices come from one row.
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_every_field_has_a_handler_and_a_source(self):
         for f in rp.FIELDS:
             self.assertIn(
                 f["kind"],
-                {"pin", "link", "decision3", "dead_time", "current_sense", "vbatt_cal"},
+                {"pin", "link", "decision3", "dead_time", "vbatt_cal"},
                 f["key"],
             )
             if f["kind"] in {"pin", "dead_time", "vbatt_cal"}:
@@ -497,10 +502,18 @@ class KeyList(unittest.TestCase):
                 self.assertIsNone(rp.UNMAPPED_KEYS[name], name)
 
     def test_the_carried_but_unjudged_motor_facts_are_not_preset_data(self):
-        # direction (0x62), align_offset (0x63) and current.cal (0x67) are not
+        # direction (0x4F), align_offset (0x51) and current.cal (0x4C) are not
         # facts a pin map can state, so a preset must not carry them
         # (shared/protocol-kotlin/.../LayoutPresets.kt, LayoutPreset.applyTo).
-        self.assertFalse({f["id"] for f in rp.FIELDS} & {0x62, 0x63, 0x67})
+        self.assertFalse({f["id"] for f in rp.FIELDS} & {0x4F, 0x51, 0x4C})
+
+    def test_a_preset_carries_node_and_wheel_fields_and_no_machine_field(self):
+        # A preset is board facts only (`specs/remote-ui.md` 3.7): the machine block
+        # (`specs/machine-settings.md` section 3.2) is never a fact about one board.
+        with open(FIELDS_JSON) as fh:
+            table = {r["id"]: r for r in json.load(fh)}
+        for f in rp.FIELDS:
+            self.assertIn(table[f["id"]]["scope"], ("node", "wheel"), f["key"])
 
 
 # --------------------------------------------------------------------------------------------------

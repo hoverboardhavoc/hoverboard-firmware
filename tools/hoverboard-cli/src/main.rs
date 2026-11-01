@@ -33,12 +33,13 @@
 //! A node is an address (`0x03`) or a `device.name`. An address is reached directly: the tool
 //! attaches and reads the node's `device.name`, with no walk. A name needs the walk, which reads
 //! every node's name and resolves it. `nodes` walks the machine with `net`'s controller and lists
-//! every node's address, class and name; `name` writes the node's `device.name` and prints the
-//! status by name.
+//! every node's address, class, factory unique ID and name (`IDENTIFY`); `name` writes the node's
+//! `device.name` and prints the status by name. `status` reads each motor controller's boot report
+//! (`STATUS_READ`).
 //!
 //! `config`, `dump`, `diff`, `apply`, `replace` and `compact` treat a board's store as a file
 //! (`specs/cli-config.md`): a field goes by its name in the store's name table (`motors.1.hall.a`,
-//! `control.mode`) or by its raw `<id>.<index>`, and a value takes the file's forms (`PC13`,
+//! `machine.mode`) or by its raw `<id>.<index>`, and a value takes the file's forms (`PC13`,
 //! `balance`, `null` to un-store). Every line about a board starts with its `device.name`. `diff`
 //! exits 0 with no changes, 1 with changes, 2 on an error. `fields --json` prints the name table.
 //! A secret (`wifi.pass`) is never printed: it shows as `(set)`, `dump` leaves it out and says so,
@@ -541,7 +542,8 @@ fn attach(wire: &mut impl Wire) -> Result<u8, String> {
     Ok(a)
 }
 
-/// Walk the machine, then read every node's class and name; the guest address and what was found.
+/// Walk the machine, then ask every node's `IDENTITY` and read its name; the guest address and what
+/// was found.
 fn walk(wire: &mut impl Wire) -> Result<(u8, Vec<Found>), String> {
     let c = nodes::walk(wire)?;
     let found = nodes::survey(wire, &c);
@@ -564,7 +566,7 @@ fn label(f: &Found) -> String {
 /// Reach the node `spec` names (`specs/cli-config.md` section 4.1): an address by attaching and
 /// reading its `device.name`, with no walk (a frame to an address the forwarders have not learned
 /// is flooded until the reply teaches the route); a name by walking and resolving it. The node's
-/// class is read only for a name (the walk reads it); [`class_of`] reads it for an address.
+/// `IDENTITY` is asked only for a name (the walk asks it); [`identity_of`] asks it for an address.
 fn reach(wire: &mut impl Wire, spec: &str) -> Result<(u8, Found), String> {
     if nodes::parse_int(spec).is_none() {
         return walk_to(wire, spec);
@@ -584,23 +586,16 @@ fn reach(wire: &mut impl Wire, spec: &str) -> Result<(u8, Found), String> {
         src,
         Found {
             addr,
-            class: None,
+            identity: None,
             name,
         },
     ))
 }
 
-/// `f`'s `node.class`, read from the node when reaching it did not.
-fn class_of(wire: &mut impl Wire, src: u8, f: &Found) -> Option<u8> {
-    f.class.or_else(|| {
-        match nodes::read(wire, src, f.addr, store::NODE_CLASS.key())
-            .ok()?
-            .value()
-        {
-            Some(store::Value::U8(c)) => Some(c),
-            _ => None,
-        }
-    })
+/// `f`'s `IDENTITY`, asked of the node when reaching it did not.
+fn identity_of(wire: &mut impl Wire, src: u8, f: &Found) -> Option<nodes::Identity> {
+    f.identity
+        .or_else(|| nodes::identify(wire, src, f.addr).ok())
 }
 
 /// Walk and resolve `spec` to a node the walk found.
@@ -696,11 +691,9 @@ fn file_command(
     for l in config::report(&b.name, &plan, &reads, &after) {
         println!("{l}");
     }
-    // A pin field is read only at boot; what the board made of it is its `board.status`.
-    if plan
-        .steps
-        .iter()
-        .any(|s| names::row_of(s.key).is_some_and(|r| r.kind == store::Kind::Pin))
+    // What the board's bring-up made of a pin is in its boot report.
+    if config::changed_keys(&plan)
+        .any(|k| names::row_of(k).is_some_and(|r| r.kind == store::Kind::Pin))
     {
         println!("{}", hoverboard_cli::status::PIN_HINT);
     }
@@ -715,13 +708,9 @@ struct Flags {
     yes: bool,
 }
 
-/// A node's `board.status` value, or `None` when it does not answer one.
+/// A node's boot status entries (`STATUS_READ`), or `None` when it does not answer.
 fn board_status(wire: &mut impl Wire, src: u8, addr: u8) -> Option<Vec<u8>> {
-    let r = nodes::read(wire, src, addr, store::BOARD_STATUS.key()).ok()?;
-    if r.status != net::walk::CFG_OK {
-        return None;
-    }
-    hoverboard_cli::status::entries_of(r.value())
+    nodes::status_read(wire, src, addr).ok()
 }
 
 /// The motor controllers the walk found, for `watch` and `drive` with no nodes given.
@@ -729,7 +718,7 @@ fn motor_controllers(wire: &mut impl Wire) -> Result<(u8, Vec<u8>), String> {
     let (src, found) = walk(wire)?;
     let motors: Vec<u8> = found
         .iter()
-        .filter(|f| f.class == Some(CLASS_MOTOR))
+        .filter(|f| f.class() == Some(CLASS_MOTOR))
         .map(|f| f.addr)
         .collect();
     if motors.is_empty() {
@@ -745,24 +734,24 @@ fn esp_client(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
     let (src, dst) = match node {
         Some(spec) => {
             let (src, mut f) = reach(&mut wire, spec)?;
-            f.class = class_of(&mut wire, src, &f);
-            if f.class != Some(net::walk::CLASS_BRIDGE) {
+            f.identity = identity_of(&mut wire, src, &f);
+            if f.class() != Some(net::walk::CLASS_BRIDGE) {
                 return Err(format!(
                     "{} is a {}, not a bridge",
                     label(&f),
-                    class_name(f.class)
+                    class_name(f.class())
                 ));
             }
             (src, f.addr)
         }
         None => {
             let src = attach(&mut wire)?;
-            let here = nodes::read(&mut wire, src, NO_ADDRESS, store::NODE_CLASS.key())?;
-            if here.value() != Some(store::Value::U8(net::walk::CLASS_BRIDGE)) {
+            let here = nodes::identify(&mut wire, src, NO_ADDRESS)?;
+            if here.class != net::walk::CLASS_BRIDGE {
                 let (_, found) = walk(&mut wire)?;
                 let bridges: Vec<String> = found
                     .iter()
-                    .filter(|f| f.class == Some(net::walk::CLASS_BRIDGE))
+                    .filter(|f| f.class() == Some(net::walk::CLASS_BRIDGE))
                     .map(label)
                     .collect();
                 return Err(if bridges.is_empty() {
@@ -802,18 +791,18 @@ fn erase_store(via: &Via, node: Option<&str>, yes: bool) -> Result<(), String> {
     };
     let at = |a: u8| found.iter().find(|f| f.addr == a);
     let b = at(bridge).ok_or_else(|| format!("the walk found no node {bridge:#04x}"))?;
-    if b.class != Some(net::walk::CLASS_BRIDGE) {
+    if b.class() != Some(net::walk::CLASS_BRIDGE) {
         return Err(format!(
             "{} is a {}, not a bridge; give --node with a bridge",
             label(b),
-            class_name(b.class)
+            class_name(b.class())
         ));
     }
     let board = walked
         .neighbours(bridge)
         .into_iter()
         .filter_map(at)
-        .find(|f| f.class == Some(CLASS_MOTOR))
+        .find(|f| f.class() == Some(CLASS_MOTOR))
         .ok_or_else(|| format!("the walk found no board behind {}", label(b)))?;
     let name = node_name(board);
     let mailbox = walked
@@ -1208,10 +1197,10 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         }
         let mut wire = Framed::new(via.open()?);
         let (src, found) = walk(&mut wire)?;
-        println!("address  class             name");
+        println!("address  class             uid                       name");
         for f in &found {
-            // A motor controller whose boot status has entries is marked (`board.status`).
-            let n = match f.class {
+            // A motor controller whose boot report has entries is marked (`STATUS_READ`).
+            let n = match f.class() {
                 Some(CLASS_MOTOR) => board_status(&mut wire, src, f.addr)
                     .map(|v| v.len() / board::status::ENTRY_LEN)
                     .unwrap_or(0),
@@ -1222,10 +1211,11 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
             } else {
                 String::new()
             };
+            let uid = f.identity.map_or("-".into(), |i| nodes::uid_hex(&i.uid));
             println!(
-                "{:#04x}     {:<16}  {}{mark}",
+                "{:#04x}     {:<16}  {uid:<24}  {}{mark}",
                 f.addr,
-                class_name(f.class),
+                class_name(f.class()),
                 f.name.as_deref().unwrap_or("-")
             );
         }
@@ -1249,7 +1239,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         } else {
             found
                 .iter()
-                .filter(|f| f.class == Some(CLASS_MOTOR))
+                .filter(|f| f.class() == Some(CLASS_MOTOR))
                 .collect()
         };
         if targets.is_empty() {
@@ -1258,7 +1248,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         for f in targets {
             let name = node_name(f);
             let Some(value) = board_status(&mut wire, src, f.addr) else {
-                println!("{name}: no board.status answer");
+                println!("{name}: no STATUS answer");
                 continue;
             };
             let mut link_pins = |i: u8| {
@@ -1288,7 +1278,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         };
         let mut wire = Framed::new(via.open()?);
         let (src, mut f) = reach(&mut wire, spec)?;
-        f.class = class_of(&mut wire, src, &f);
+        f.identity = identity_of(&mut wire, src, &f);
         let key = store::DEVICE_NAME.key();
         let r = nodes::write(
             &mut wire,
@@ -1298,7 +1288,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
             store::Type::Str,
             text.as_bytes(),
         )?;
-        let shown = nodes::name_status(f.class, r.status);
+        let shown = nodes::name_status(f.class(), r.status);
         println!("device.name of {}: {shown}", label(&f));
         return if r.status == net::walk::CFG_OK {
             Ok(0)

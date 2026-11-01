@@ -43,6 +43,7 @@ fn state(mode: u8, peer_demand: i16, battery: u16) -> CyclicState {
             odometer: 0,
         },
         wheel_rate: 0,
+        machine: 0,
     }
 }
 
@@ -231,7 +232,7 @@ impl Wire for Board {
                     Opcode::NodeHello.to_u8(),
                     0x01,
                     dst,
-                    &[0x01, PROTO_VER, 0, 0, 0x10, addr],
+                    &[0x01, PROTO_VER, addr],
                 )
             };
             self.inbox.push_back(cyclic(0x01, &state(3, 0, 310)));
@@ -311,7 +312,7 @@ fn serve_board(listener: TcpListener, run: Duration) -> Vec<Vec<u8>> {
                     Opcode::NodeHello.to_u8(),
                     0x01,
                     p.src,
-                    &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
+                    &[0x01, PROTO_VER, 0x88],
                 );
                 w.send(&g);
                 t0 = Some(Instant::now());

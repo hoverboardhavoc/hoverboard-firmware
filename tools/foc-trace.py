@@ -26,7 +26,7 @@ tools/swdobs.py word map, which owns the indices):
 - word 31, the window's peak magnitude, `chopped` and `trips`;
 - words 47 to 49, the FOC observation, every one a 64-period window mean (specs/foc-torque.md
   section 7): `ia`, `ib` (every method), `id`, `iq`, `iq_ref` and `vq` (0 unless FOC), in counts
-  and, for the currents, in amps at the board's own `motor.current_cal` (0x67), read off it at
+  and, for the currents, in amps at the board's own `motor.current_cal` (0x4C), read off it at
   stand-up with `hoverboard-cli config` (or given with --cal, and then said so).
 
 The CSV adds word 11's mode byte.
@@ -145,7 +145,7 @@ def host_frame(ia, ib, angle, direction, align_offset):
 # The bridge read and the decode.
 # --------------------------------------------------------------------------------------------------
 HEXDUMP_RE = re.compile(r"^([0-9a-fA-F]{8}):((?: [0-9a-fA-F]{2})+)\s*$")
-# `hoverboard-cli config <node> 0x67.0` prints `0x67.0 at 0x01 (name): ok 455 (0x01c7)`.
+# `hoverboard-cli config <node> 0x4C.0` prints `0x4C.0 at 0x01 (name): ok 455 (0x01c7)`.
 CONFIG_RE = re.compile(r"^0x([0-9a-fA-F]+)\.(\d+) at .*?: (.+?)(?: (-?\d+)(?: \(0x[0-9a-fA-F]+\))?)?\s*$")
 
 
@@ -259,10 +259,10 @@ class Bridge:
 
 
 def read_cal(bridge, node):
-    """`motor.current_cal` (0x67) of motor 0 on `node`: (raw, effective). Exits when it cannot."""
+    """`motor.current_cal` (0x4C) of motor 0 on `node`: (raw, effective). Exits when it cannot."""
     status, value = bridge.config_read(node, CURRENT_CAL_FIELD)
     if status != "ok" or value is None:
-        sys.exit(f"{TOOL}: reading 0x67.0 on {node} failed (status {status}); give --cal to scale "
+        sys.exit(f"{TOOL}: reading 0x4C.0 on {node} failed (status {status}); give --cal to scale "
                  "the amps columns by hand")
     return value, clamp_current_cal(value)
 
@@ -330,7 +330,7 @@ def main(argv=None):
     ap.add_argument("--cli", default=None, help="the hoverboard-cli binary")
     cal = ap.add_mutually_exclusive_group()
     cal.add_argument("--cal-node", help="the sampled board's node (address or device.name), whose "
-                     "0x67.0 scales the amps")
+                     "0x4C.0 scales the amps")
     cal.add_argument("--cal", type=int, help="counts per amp, given rather than read off the board")
     ap.add_argument("--frame", nargs=2, type=int, metavar=("DIRECTION", "ALIGN_OFFSET"),
                     help="run Clarke and Park on the host over word 47 (gate O2)")
@@ -349,10 +349,10 @@ def main(argv=None):
         # The board's own node, not --node: that names the bridge the read goes through.
         node = args.cal_node
         if not node:
-            sys.exit(f"{TOOL}: the amps need the board's 0x67: give --cal-node (its address or "
+            sys.exit(f"{TOOL}: the amps need the board's 0x4C: give --cal-node (its address or "
                      "device.name, as `hoverboard-cli nodes` lists it) or --cal")
         raw, cpa = read_cal(bridge, node)
-        cal_note = f"motor.current_cal (0x67) on {node} = {raw} counts per amp"
+        cal_note = f"motor.current_cal (0x4C) on {node} = {raw} counts per amp"
         if cpa != raw:
             cal_note += f", which the firmware's boot seam clamps to {cpa}"
 

@@ -9,7 +9,7 @@ Linearizes the rover (body pitch theta and axle position x, both forward positiv
 convention; the firmware's signs are section 2's) about upright, solves the continuous algebraic
 Riccati equation by the Hamiltonian's stable eigenvectors (numpy only, scipy is not installed on the
 Mac), and prints the A and B matrices, the open- and closed-loop poles, K in SI, the four integer gains
-of CONTROL_SF_GAINS (0x79) in the firmware's units, the torque at the position clamp and at one count
+of CONTROL_SF_GAINS (0x27) in the firmware's units, the torque at the position clamp and at one count
 of speed error, and three simulations at the control rate with the torque clamped and the sensor
 delayed: a push, a held push released, and a full-stick step.
 

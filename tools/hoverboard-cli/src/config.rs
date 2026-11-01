@@ -15,10 +15,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use net::walk::{CFG_DEFAULT, CFG_OK, CFG_SECRET, CFG_UNKNOWN_KEY};
 use serde_json::{Map, Value as Json};
-use store::{Index, Key, Kind, Type, ERASED_TAG};
+use store::{Effect, Index, Key, Type, ERASED_TAG};
 
 use crate::names::{
-    encode, find, path_of, row_of, show, table_keys, to_json, unknown, write_checks, Problem,
+    encode, find, object_arrays, path_of, row_of, show, table_keys, to_json, unknown, write_checks,
+    Problem,
 };
 use crate::nodes::{self, parse_key, status_name, ConfigResp};
 use crate::wire::Wire;
@@ -89,6 +90,9 @@ pub fn read_files(files: &[(String, String)]) -> Files {
     out
 }
 
+/// The element of an object array a member sits in: the array and the index, `None` at the top.
+type Elem = Option<(&'static str, u8)>;
+
 /// One file's walk (`specs/cli-config.md` section 2.1, the two rules run backwards).
 struct FileReader<'a> {
     file: &'a str,
@@ -110,15 +114,15 @@ impl FileReader<'_> {
 
     fn top(&mut self, top: &Map<String, Json>) {
         for (k, v) in top {
-            if k == "motors" {
-                let Some(motors) = v.as_array() else {
-                    self.stop("motors takes a list, one object per motor".into());
+            if let Some((array, what)) = object_arrays().find(|(a, _)| a == k) {
+                let Some(items) = v.as_array() else {
+                    self.stop(format!("{array} takes a list, one object per {what}"));
                     continue;
                 };
-                for (m, obj) in motors.iter().enumerate() {
-                    match (u8::try_from(m), obj.as_object()) {
-                        (Ok(m), Some(obj)) => self.object(obj, "", Some(m)),
-                        _ => self.stop(format!("motors[{m}] is not a motor's object")),
+                for (i, obj) in items.iter().enumerate() {
+                    match (u8::try_from(i), obj.as_object()) {
+                        (Ok(i), Some(obj)) => self.object(obj, "", Some((array, i))),
+                        _ => self.stop(format!("{array}[{i}] is not a {what}'s object")),
                     }
                 }
             } else if k.starts_with(|c: char| c.is_ascii_digit()) {
@@ -132,20 +136,21 @@ impl FileReader<'_> {
         }
     }
 
-    fn object(&mut self, obj: &Map<String, Json>, prefix: &str, motor: Option<u8>) {
+    fn object(&mut self, obj: &Map<String, Json>, prefix: &str, elem: Elem) {
         for (k, v) in obj {
-            self.member(k, v, prefix, motor);
+            self.member(k, v, prefix, elem);
         }
     }
 
-    /// One member `k: v` of an object at `prefix`, under `motor` when inside `motors`.
-    fn member(&mut self, k: &str, v: &Json, prefix: &str, motor: Option<u8>) {
+    /// One member `k: v` of an object at `prefix`, under `elem` when inside an object array.
+    fn member(&mut self, k: &str, v: &Json, prefix: &str, elem: Elem) {
         let path = if prefix.is_empty() {
             k.to_string()
         } else {
             format!("{prefix}.{k}")
         };
-        if let Some(row) = find(&path, motor.is_some()) {
+        let array = elem.map(|(a, _)| a);
+        if let Some(row) = find(&path, array) {
             let at = |index| Key {
                 field_id: row.id,
                 index,
@@ -159,28 +164,31 @@ impl FileReader<'_> {
                     }
                     _ => self.stop(format!("{path} takes a list of {n} values")),
                 },
-                _ => self.add(at(motor.unwrap_or(0)), v),
+                _ => self.add(at(elem.map_or(0, |(_, i)| i)), v),
             }
             return;
         }
         let inner = format!("{path}.");
-        let nests = |per_motor: bool| {
+        let nests = |array: Option<&str>| {
             store::NAMES
                 .iter()
-                .any(|r| (r.index == Index::Motor) == per_motor && r.path.starts_with(&inner))
+                .any(|r| r.index.array() == array && r.path.starts_with(&inner))
         };
-        match v.as_object() {
-            Some(obj) if nests(motor.is_some()) => self.object(obj, &path, motor),
-            _ if find(&path, motor.is_none()).is_some() || nests(motor.is_none()) => {
-                self.stop(if motor.is_none() {
-                    format!("{path} is per motor (motors[<n>].{path})")
-                } else {
-                    format!("{path} is not per motor (it goes at the top level)")
-                })
+        if let Some(obj) = v.as_object().filter(|_| nests(array)) {
+            self.object(obj, &path, elem);
+            return;
+        }
+        // Where the path belongs instead, if anywhere: in an object array, or at the top level.
+        let belongs = |a: Option<&str>| a != array && (find(&path, a).is_some() || nests(a));
+        let other = object_arrays().find(|(a, _)| belongs(Some(a)));
+        match (other, elem) {
+            (Some((a, what)), _) => self.stop(format!("{path} is per {what} ({a}[<n>].{path})")),
+            (None, Some((a, _))) if belongs(None) => {
+                self.stop(format!("{path} is not in {a} (it goes at the top level)"))
             }
             _ => {
-                let shown = match motor {
-                    Some(m) => format!("motors.{m}.{path}"),
+                let shown = match elem {
+                    Some((a, i)) => format!("{a}.{i}.{path}"),
                     None => path,
                 };
                 self.problem(unknown(&shown));
@@ -238,11 +246,11 @@ fn secret(key: Key) -> bool {
     row_of(key).is_some_and(|r| r.secret())
 }
 
-/// The keys `dump` reads: every key the table names, less the board-owned and read-only fields.
+/// The keys `dump` reads: every key the table names, less the board-owned fields.
 pub fn dump_keys() -> Vec<Key> {
     table_keys()
         .into_iter()
-        .filter(|k| row_of(*k).is_some_and(|r| !r.board_owned() && !r.read_only()))
+        .filter(|k| row_of(*k).is_some_and(|r| !r.board_owned()))
         .collect()
 }
 
@@ -255,13 +263,10 @@ pub fn board_owned_keys() -> Vec<Key> {
         .collect()
 }
 
-/// The keys `diff`, `apply` and `replace` read: every key the table names but `node.class` (which
-/// the node answers and never stores), and every key `files` name.
+/// The keys `diff`, `apply` and `replace` read: every key the table names, and every key `files`
+/// name.
 pub fn plan_keys(files: &Files) -> Vec<Key> {
-    let mut keys: Vec<Key> = table_keys()
-        .into_iter()
-        .filter(|k| !row_of(*k).is_some_and(|r| r.read_only()))
-        .collect();
+    let mut keys: Vec<Key> = table_keys();
     for e in &files.entries {
         if !keys.contains(&e.key) {
             keys.push(e.key);
@@ -303,7 +308,7 @@ pub fn read_board<W: Wire>(
 /// among [`dump_keys`] at its path, nothing else.
 pub fn to_file(reads: &Reads) -> Json {
     let mut top = Map::new();
-    let mut motors: Vec<Map<String, Json>> = Vec::new();
+    let mut arrays: BTreeMap<&str, Vec<Map<String, Json>>> = BTreeMap::new();
     for key in dump_keys() {
         let Some(r) = reads.get(&key).filter(|r| r.status == CFG_OK) else {
             continue;
@@ -311,12 +316,15 @@ pub fn to_file(reads: &Reads) -> Json {
         let row = row_of(key).expect("a table key");
         let v = to_json(Some(row), r.tag, &r.bytes);
         match row.index {
-            Index::Motor => {
-                let m = key.index as usize;
-                if motors.len() <= m {
-                    motors.resize_with(m + 1, Map::new);
+            Index::Motor | Index::Link => {
+                let elems = arrays
+                    .entry(row.index.array().expect("an object array"))
+                    .or_default();
+                let i = key.index as usize;
+                if elems.len() <= i {
+                    elems.resize_with(i + 1, Map::new);
                 }
-                *slot(&mut motors[m], row.path) = v;
+                *slot(&mut elems[i], row.path) = v;
             }
             Index::Array(n) => {
                 let s = slot(&mut top, row.path);
@@ -328,10 +336,11 @@ pub fn to_file(reads: &Reads) -> Json {
             Index::Single => *slot(&mut top, row.path) = v,
         }
     }
-    if !motors.is_empty() {
+    // The arrays in a fixed order, after the top-level fields: `links`, then `motors`.
+    for (name, elems) in arrays {
         top.insert(
-            "motors".into(),
-            Json::Array(motors.into_iter().map(Json::Object).collect()),
+            name.into(),
+            Json::Array(elems.into_iter().map(Json::Object).collect()),
         );
     }
     Json::Object(top)
@@ -506,7 +515,7 @@ pub fn plan(
         let named = files.entries.iter().any(|e| e.key == key);
         let row = row_of(key).expect("a table key");
         let is_stored = reads.get(&key).is_some_and(stored);
-        if named || !is_stored || row.board_owned() || row.read_only() || row.secret() {
+        if named || !is_stored || row.board_owned() || row.secret() {
             continue;
         }
         if replace {
@@ -577,12 +586,44 @@ fn predicted(step: &Step) -> ConfigResp {
     }
 }
 
-/// The note a change of a pin field ends with.
-pub const PIN_NOTE: &str = "pin fields take effect at the next boot";
+/// When the changed `keys` take effect, from each key's registry effect
+/// (`specs/machine-settings.md` section 5): `3 take effect at the next arm, 1 at the next boot`.
+/// `None` when none waits for an arm or a boot: a live field applies as it is written, and a
+/// client-only one has no reader on the board.
+pub fn effect_line(keys: impl IntoIterator<Item = Key>) -> Option<String> {
+    let (mut arm, mut boot) = (0usize, 0usize);
+    for k in keys {
+        match store::lookup(k.field_id).map(|d| d.effect) {
+            Some(Effect::Arm) => arm += 1,
+            Some(Effect::Boot) => boot += 1,
+            _ => {}
+        }
+    }
+    let parts: Vec<String> = [(arm, "at the next arm"), (boot, "at the next boot")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .enumerate()
+        .map(|(i, (n, when))| match (i, n) {
+            (0, 1) => format!("1 takes effect {when}"),
+            (0, n) => format!("{n} take effect {when}"),
+            (_, n) => format!("{n} {when}"),
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The keys `plan` changes on the board: every write but a pin, which stores the value the board
+/// already runs.
+pub fn changed_keys(plan: &Plan) -> impl Iterator<Item = Key> + '_ {
+    plan.steps
+        .iter()
+        .filter(|s| s.act != Act::Pin)
+        .map(|s| s.key)
+}
 
 /// The report of `plan` on board `name`: the summary, a line per write (from `before` to `after`,
 /// what the board answered for the key after it, or, before any write, what it will), the kept keys,
-/// and the pin note when a pin field changes.
+/// and when the changed keys take effect ([`effect_line`]).
 pub fn report(
     name: &str,
     plan: &Plan,
@@ -614,13 +655,7 @@ pub fn report(
             why.note()
         ));
     }
-    if plan
-        .steps
-        .iter()
-        .any(|s| row_of(s.key).is_some_and(|r| r.kind == Kind::Pin))
-    {
-        lines.push(PIN_NOTE.into());
-    }
+    lines.extend(effect_line(changed_keys(plan)));
     lines
 }
 
@@ -732,7 +767,7 @@ pub struct Written {
     /// The value checks `--force` let through (the key's own, [`write_checks`], are the caller's
     /// to print, before the board is reached).
     pub warnings: Vec<String>,
-    /// The key's line from the read-back, and the pin note after a pin field.
+    /// The key's line from the read-back, and when the change takes effect ([`effect_line`]).
     pub lines: Vec<String>,
 }
 
@@ -783,9 +818,8 @@ pub fn config_write<W: Wire>(
     }
     let after = b.read(key)?;
     let mut lines = vec![change_line(&b.name, key, &before, &after)];
-    if row.is_some_and(|r| r.kind == Kind::Pin) {
-        lines.push(PIN_NOTE.into());
-    }
+    let changed = (after.tag, &after.bytes) != (before.tag, &before.bytes);
+    lines.extend(effect_line(changed.then_some(key)));
     Ok(Written {
         warnings: warnings(&warn, force),
         lines,
@@ -902,8 +936,8 @@ mod tests {
         Ok((plan, lines))
     }
 
-    /// Every key's answer, `node.class` and the board-owned fields included: the record set and its
-    /// `Stored` flags as the wire shows them.
+    /// Every key's answer, the board-owned fields included: the record set and its `Stored` flags
+    /// as the wire shows them.
     fn records(lp: &mut Loop) -> Reads {
         let mut b = board(lp);
         read_board(&mut b, &table_keys()).unwrap().0
@@ -916,8 +950,8 @@ mod tests {
             "layout.json",
             json!({
                 "device": { "name": "rover-left" },
-                "control": { "mode": "balance", "sf_gains": [3491, null, 197] },
-                "board": { "battery": { "cal": [null, -3] } },
+                "machine": { "mode": "balance", "balance": { "gains": [3491, null, 197] } },
+                "battery_sense": { "cal": [null, -3] },
                 "motors": [
                     { "hall": { "a": "PC13" }, "gate": { "dead_time": 25 }, "current": { "cal": 470 } },
                     {},
@@ -938,8 +972,8 @@ mod tests {
         assert_eq!(
             dumped,
             json!({
-                "board": { "battery": { "cal": [null, -3] } },
-                "control": { "mode": "balance", "sf_gains": [3491, null, 197, null] },
+                "battery_sense": { "cal": [null, -3] },
+                "machine": { "mode": "balance", "balance": { "gains": [3491, null, 197, null] } },
                 "device": { "name": "rover-left" },
                 "motors": [
                     { "current": { "cal": 470 }, "gate": { "dead_time": 25 }, "hall": { "a": "PC13" } },
@@ -955,6 +989,76 @@ mod tests {
         assert_eq!(lines, ["rover-left: 0 changed, 0 pinned, 11 unchanged"]);
     }
 
+    /// `specs/machine-settings.md` sections 3.1 and 6.2: the regrouped node paths, `links` as an
+    /// array of objects like `motors`, and `active_high` as a list of input pin paths, from a file
+    /// to the board and back to the same file.
+    #[test]
+    fn the_node_paths_links_and_active_high_round_trip() {
+        let layout = json!({
+            "power": { "self_hold": "PB12", "button": "PA5" },
+            "battery_sense": { "pin": "PA4", "cal": [25000, -5] },
+            "buzzer": "PB9",
+            "leds": { "green": "PB3", "orange": "PA15", "red": "PB4" },
+            "pads": { "a": "PA0", "b": "none" },
+            "active_high": ["power.button", "pads.b"],
+            "links": [{}, { "tx": "PB6", "rx": "PB7" }],
+            "motors": [{ "side": "right" }],
+        });
+        let mut lp = Loop::new();
+        let f = files(&[("layout.json", layout.clone())]);
+        let (plan, _) = run(&mut lp, &f, false).unwrap();
+        let keys: Vec<Key> = plan.steps.iter().map(|s| s.key).collect();
+        assert!(keys.contains(&k(0x0F, 1)) && keys.contains(&k(0x10, 1)));
+        assert!(keys.contains(&k(0x19, 0)) && keys.contains(&k(0x50, 0)));
+        let r = nodes::read(lp.board_wire(), 0x80, 0x01, k(0x19, 0)).unwrap();
+        assert_eq!(r.bytes, [0b101], "button b0 and pad B b2");
+
+        let mut b = board(&mut lp);
+        let dumped = to_file(&read_board(&mut b, &dump_keys()).unwrap().0);
+        assert_eq!(dumped, layout);
+        let f = files(&[("dump.json", dumped)]);
+        let (plan, _) = run(&mut lp, &f, false).unwrap();
+        assert!(!plan.changes(), "{:?}", plan.steps);
+
+        // Link 0 alone is a one-element array.
+        let mut lp = Loop::new();
+        let link0 = json!({ "links": [{ "tx": "PA2", "rx": "PA3" }] });
+        run(&mut lp, &files(&[("l.json", link0.clone())]), false).unwrap();
+        let mut b = board(&mut lp);
+        assert_eq!(to_file(&read_board(&mut b, &dump_keys()).unwrap().0), link0);
+    }
+
+    #[test]
+    fn a_field_outside_its_object_array_is_refused_naming_where_it_goes() {
+        let f = files(&[(
+            "a.json",
+            json!({
+                "tx": "PA2",
+                "links": [{ "hall": { "a": "PC13" }, "power": { "button": "PA5" } }],
+                "motors": [{ "rx": "PA3" }],
+                "leds": [{ "green": "PB3" }],
+            }),
+        )]);
+        let msgs: Vec<&str> = f.problems.iter().map(|p| p.msg.as_str()).collect();
+        assert_eq!(
+            msgs,
+            [
+                "a.json: tx is per link (links[<n>].tx)",
+                "a.json: hall is per motor (motors[<n>].hall)",
+                "a.json: power is not in links (it goes at the top level)",
+                "a.json: rx is per link (links[<n>].rx)",
+                "a.json: unknown field leds",
+            ]
+        );
+        let f = files(&[("b.json", json!({ "links": { "tx": "PA2" } }))]);
+        assert_eq!(
+            f.problems,
+            [Problem::stop(
+                "b.json: links takes a list, one object per link"
+            )]
+        );
+    }
+
     #[test]
     fn a_replace_from_a_dump_unstores_exactly_the_extra_keys_and_reproduces_the_records() {
         let mut source = staged();
@@ -968,8 +1072,8 @@ mod tests {
             "old.json",
             json!({
                 "motors": [{}, { "hall": { "a": "PB5" } }],
-                "board": { "battery": { "cal": [25000] } },
-                "control": { "frame": "rigid" },
+                "battery_sense": { "cal": [25000] },
+                "machine": { "frame": "rigid" },
             }),
         )]);
         run(&mut target, &extra, false).unwrap();
@@ -992,15 +1096,15 @@ mod tests {
         let unstored: Vec<Key> = plan.steps.iter().map(|s| s.key).collect();
         assert!(plan.steps.iter().all(|s| s.act == Act::Unstore));
         // The dump's null position first (the file names it), then the keys no file names.
-        assert_eq!(unstored, [k(0x69, 0), k(0x25, 0), k(0x4A, 1)]);
+        assert_eq!(unstored, [k(0x18, 0), k(0x21, 0), k(0x40, 1)]);
         assert_eq!(
             lines,
             [
                 "rover-left: 0 changed, 0 pinned, 10 unchanged, 3 un-stored",
-                "rover-left: board.battery.cal[0]: 25000 -> 25200 (default)",
-                "rover-left: control.frame: rigid -> pivoting (default)",
+                "rover-left: battery_sense.cal[0]: 25000 -> 25200 (default)",
+                "rover-left: machine.frame: rigid -> pivoting (default)",
                 "rover-left: motors[1].hall.a: PB5 -> none (default)",
-                PIN_NOTE,
+                "1 takes effect at the next arm, 2 at the next boot",
             ]
         );
         // The record set, Stored flags included, is the source's, but the board-owned odometer.
@@ -1021,7 +1125,7 @@ mod tests {
         let f = files(&[(
             "machine.json",
             json!({
-                "control": { "sf_gains": [3491, 4002] },
+                "machine": { "balance": { "gains": [3491, 4002] } },
                 "motors": [{ "gate": { "dead_time": 28 }, "hall": { "a": "PC13" }, "current": { "noise_floor": 2100 } }],
             }),
         )]);
@@ -1030,27 +1134,49 @@ mod tests {
             lines,
             [
                 "rover-left: 2 changed, 1 pinned, 2 unchanged, 5 kept",
-                "rover-left: control.sf_gains[1]: 0 (default) -> 4002",
+                "rover-left: machine.balance.gains[1]: 0 (default) -> 4002",
                 "rover-left: motors[0].gate.dead_time: 25 -> 28",
                 "rover-left: motors[0].current.noise_floor: 2100 (default) -> 2100",
                 "rover-left: kept: device.name = \"rover-left\" (stored, not in the file)",
-                "rover-left: kept: control.mode = balance (stored, not in the file)",
+                "rover-left: kept: battery_sense.cal[1] = -3 (stored, not in the file)",
+                "rover-left: kept: machine.mode = balance (stored, not in the file)",
+                "rover-left: kept: machine.balance.gains[2] = 197 (stored, not in the file)",
                 "rover-left: kept: motors[0].current.cal = 470 (stored, not in the file)",
-                "rover-left: kept: board.battery.cal[1] = -3 (stored, not in the file)",
-                "rover-left: kept: control.sf_gains[2] = 197 (stored, not in the file)",
+                // The gain is live and the pinned value runs already: only the dead time waits.
+                "1 takes effect at the next boot",
             ]
         );
         assert_eq!(plan.kept.len(), 5);
-        // No pin field changed, so no pin note; the pinned value is now stored.
-        let r = nodes::read(lp.board_wire(), 0x80, 0x01, k(0x6B, 0)).unwrap();
+        // The pinned value is now stored.
+        let r = nodes::read(lp.board_wire(), 0x80, 0x01, k(0x4D, 0)).unwrap();
         assert_eq!(r.status, CFG_OK);
+    }
+
+    /// `specs/machine-settings.md` section 5: the line counts the changed keys by the registry's
+    /// effect; a live or client-only field adds nothing.
+    #[test]
+    fn the_effect_line_counts_arm_and_boot_keys() {
+        assert_eq!(
+            effect_line([k(0x20, 0), k(0x2B, 1), k(0x50, 0), k(0x40, 0)]),
+            Some("3 take effect at the next arm, 1 at the next boot".into())
+        );
+        assert_eq!(
+            effect_line([k(0x0F, 0), k(0x10, 0)]),
+            Some("2 take effect at the next boot".into())
+        );
+        assert_eq!(
+            effect_line([k(0x15, 2)]),
+            Some("1 takes effect at the next arm".into())
+        );
+        assert_eq!(effect_line([k(0x27, 0), k(0x29, 1), k(0x24, 0)]), None);
+        assert_eq!(effect_line([k(0x99, 0)]), None);
     }
 
     #[test]
     fn an_armed_board_refuses_and_a_board_that_arms_partway_keeps_the_keys_before_it() {
         let f = files(&[(
             "m.json",
-            json!({ "control": { "mode": "balance", "frame": "rigid", "side": "right" } }),
+            json!({ "machine": { "mode": "balance", "frame": "rigid", "rider_required": false } }),
         )]);
         // Run the plan; on a refusal, the message and the lines for what was written before it.
         let refused = |lp: &mut Loop| {
@@ -1067,11 +1193,11 @@ mod tests {
         assert_eq!(
             refused(&mut lp),
             (
-                "rover-left: control.mode: refused: armed".to_string(),
+                "rover-left: machine.mode: refused: armed".to_string(),
                 vec!["rover-left: nothing was written".to_string()]
             )
         );
-        assert_eq!(records(&mut lp)[&k(0x22, 0)].status, CFG_DEFAULT);
+        assert_eq!(records(&mut lp)[&k(0x20, 0)].status, CFG_DEFAULT);
 
         // Arms after the first write: that key is read back and reported as the board holds it.
         let mut lp = Loop::new();
@@ -1079,16 +1205,16 @@ mod tests {
         assert_eq!(
             refused(&mut lp),
             (
-                "rover-left: control.frame: refused: armed".to_string(),
+                "rover-left: machine.frame: refused: armed".to_string(),
                 vec![
                     "rover-left: written before the refusal:".to_string(),
-                    "rover-left: control.mode: throttle (default) -> balance".to_string(),
+                    "rover-left: machine.mode: throttle (default) -> balance".to_string(),
                 ]
             )
         );
         let r = records(&mut lp);
         assert_eq!(
-            (r[&k(0x22, 0)].status, r[&k(0x25, 0)].status),
+            (r[&k(0x20, 0)].status, r[&k(0x21, 0)].status),
             (CFG_OK, CFG_DEFAULT)
         );
     }
@@ -1100,7 +1226,7 @@ mod tests {
     fn a_null_unstores_under_replace_and_is_left_alone_under_apply() {
         let f = files(&[(
             "dump.json",
-            json!({ "control": { "sf_gains": [3491, null, null] } }),
+            json!({ "machine": { "balance": { "gains": [3491, null, null] } } }),
         )]);
         let stored = |v: i16| ConfigResp {
             status: CFG_OK,
@@ -1112,26 +1238,26 @@ mod tests {
             ..stored(0)
         };
         let reads: Reads = [
-            (k(0x79, 0), stored(3491)),
-            (k(0x79, 1), stored(4002)),
-            (k(0x79, 2), default),
+            (k(0x27, 0), stored(3491)),
+            (k(0x27, 1), stored(4002)),
+            (k(0x27, 2), default),
         ]
         .into_iter()
         .collect();
         let apply = plan(&f, &reads, &[], false).unwrap();
         assert!(apply.steps.is_empty(), "{:?}", apply.steps);
         assert_eq!(apply.unchanged, 2);
-        assert_eq!(apply.kept, [(k(0x79, 1), Kept::NullInFile)]);
+        assert_eq!(apply.kept, [(k(0x27, 1), Kept::NullInFile)]);
         assert_eq!(
             report("rover-left", &apply, &reads, &BTreeMap::new()),
             [
                 "rover-left: 0 changed, 0 pinned, 2 unchanged, 1 kept",
-                "rover-left: kept: control.sf_gains[1] = 4002 (stored, null in the file)",
+                "rover-left: kept: machine.balance.gains[1] = 4002 (stored, null in the file)",
             ]
         );
         let replace = plan(&f, &reads, &[], true).unwrap();
         let steps: Vec<(Key, Act)> = replace.steps.iter().map(|s| (s.key, s.act)).collect();
-        assert_eq!(steps, [(k(0x79, 1), Act::Unstore)]);
+        assert_eq!(steps, [(k(0x27, 1), Act::Unstore)]);
         assert!(replace.kept.is_empty());
     }
 
@@ -1151,7 +1277,7 @@ mod tests {
             tag: Type::U8.tag(),
             bytes: vec![1],
         };
-        let reads: Reads = [(k(0x10, 0), name), (k(0x22, 0), mode)]
+        let reads: Reads = [(k(0x02, 0), name), (k(0x20, 0), mode)]
             .into_iter()
             .collect();
         let plan = plan(&f, &reads, &[], true).unwrap();
@@ -1160,12 +1286,13 @@ mod tests {
             [
                 "esp: 0 changed, 0 pinned, 0 unchanged, 2 un-stored",
                 "esp: device.name: \"rover-esp\" -> (default)",
-                "esp: control.mode: balance -> throttle (default)",
+                "esp: machine.mode: balance -> throttle (default)",
+                "1 takes effect at the next arm, 1 at the next boot",
             ]
         );
         let after: BTreeMap<Key, ConfigResp> = [
             (
-                k(0x10, 0),
+                k(0x02, 0),
                 ConfigResp {
                     status: CFG_DEFAULT,
                     tag: Type::Str.tag(),
@@ -1173,7 +1300,7 @@ mod tests {
                 },
             ),
             (
-                k(0x22, 0),
+                k(0x20, 0),
                 ConfigResp {
                     status: CFG_DEFAULT,
                     tag: Type::U8.tag(),
@@ -1194,13 +1321,13 @@ mod tests {
         let f = files(&[(
             "a.json",
             json!({
-                "control": { "mod": "balance", "frame": "bent", "side": 5 },
-                "motors": [{ "align_offset": 6 }, {}, { "hall": { "a": "PA1" } }],
-                "board": { "battery": { "cal": [1, 2, 3], "cells": "ten" } },
+                "machine": { "mod": "balance", "frame": "bent", "battery": { "cells": "ten" } },
+                "motors": [{ "align_offset": 6, "side": 5 }, {}, { "hall": { "a": "PA1" } }],
+                "battery_sense": { "cal": [1, 2, 3] },
                 "node": { "address": 4 },
                 "hall": { "b": "PA2" },
                 "0x99.0": 5,
-                "0x25": "rigid",
+                "0x21": "rigid",
             }),
         )]);
         let got: Vec<(bool, &str)> = f
@@ -1211,20 +1338,20 @@ mod tests {
         assert_eq!(
             got,
             [
-                (false, "a.json: unknown field control.mod (did you mean control.mode?)"),
-                (false, "a.json: control.frame: unknown label bent (pivoting, rigid)"),
-                (true, "a.json: control.side takes left, right, not 5 (--force writes it anyway)"),
+                (false, "a.json: unknown field machine.mod (did you mean machine.mode?)"),
+                (false, "a.json: machine.frame: unknown label bent (pivoting, rigid)"),
+                (false, "a.json: machine.battery.cells: an integer, not \"ten\""),
                 (true, "a.json: motors[0].align_offset takes 0..5, not 6 (--force writes it anyway)"),
+                (true, "a.json: motors[0].side takes left, right, not 5 (--force writes it anyway)"),
                 (true, "a.json: hall.a has 2 motors (--force writes motors[2] anyway)"),
-                (true, "a.json: board.battery.cal has 2 indices (--force writes index 2 anyway)"),
-                (false, "a.json: board.battery.cells: an integer, not \"ten\""),
+                (true, "a.json: battery_sense.cal has 2 indices (--force writes index 2 anyway)"),
                 (true, "a.json: node.address is board-owned (--force writes it anyway)"),
                 (false, "a.json: hall is per motor (motors[<n>].hall)"),
                 (
                     true,
                     "a.json: 0x99 is not in the name table (--force writes it with the type the board reports)"
                 ),
-                (false, "a.json: control.frame is named twice"),
+                (false, "a.json: machine.frame is named twice"),
             ]
         );
         // Every stop stops with --force too; without it, the forceable ones stop as well.
@@ -1244,7 +1371,7 @@ mod tests {
             ),
             (
                 "machine.json",
-                json!({ "control": { "mode": "balance" }, "0x4A.0": "PB5" }),
+                json!({ "machine": { "mode": "balance" }, "0x40.0": "PB5" }),
             ),
         ]);
         assert_eq!(
@@ -1258,11 +1385,11 @@ mod tests {
                 "layout.json",
                 json!({ "motors": [{ "hall": { "a": "PC13" } }] }),
             ),
-            ("machine.json", json!({ "control": { "mode": "balance" } })),
+            ("machine.json", json!({ "machine": { "mode": "balance" } })),
         ]);
         assert!(f.problems.is_empty());
         let keys: Vec<Key> = f.entries.iter().map(|e| e.key).collect();
-        assert_eq!(keys, [k(0x4A, 0), k(0x22, 0)]);
+        assert_eq!(keys, [k(0x40, 0), k(0x20, 0)]);
     }
 
     #[test]
@@ -1280,7 +1407,7 @@ mod tests {
         );
         // A registered id the table did not name would be written with the board's type: the raw
         // form of a named one is the same key, checked the same way.
-        let f = files(&[("x.json", json!({ "0x20": 12000 }))]);
+        let f = files(&[("x.json", json!({ "0x4E": 12000 }))]);
         assert!(f.problems.is_empty());
         let (plan, _) = run(&mut lp, &f, false).unwrap();
         assert_eq!(plan.steps[0].storage, Type::U32);
@@ -1293,7 +1420,7 @@ mod tests {
     #[test]
     fn a_secret_is_never_printed_written_whenever_given_and_kept_by_replace() {
         const PASS: &str = "hunter2hunter2";
-        let pass = k(0x12, 0);
+        let pass = k(0x04, 0);
         let mut lp = Loop::new();
         let mut all: Vec<String> = Vec::new();
 
@@ -1303,7 +1430,13 @@ mod tests {
         assert_eq!(l, "rover-left: wifi.pass = (default)");
         all.push(l);
         let w = config_write(&mut b, pass, PASS, false).unwrap();
-        assert_eq!(w.lines, ["rover-left: wifi.pass: (default) -> (set)"]);
+        assert_eq!(
+            w.lines,
+            [
+                "rover-left: wifi.pass: (default) -> (set)",
+                "1 takes effect at the next boot"
+            ]
+        );
         all.extend(w.lines);
         let l = config_read(&mut b, pass).unwrap();
         assert_eq!(l, "rover-left: wifi.pass = (set)");
@@ -1322,6 +1455,7 @@ mod tests {
                 "rover-left: 2 changed, 0 pinned, 0 unchanged",
                 "rover-left: wifi.ssid: \"\" (default) -> \"bench\"",
                 "rover-left: wifi.pass: (set) -> (set)",
+                "2 take effect at the next boot",
             ]
         );
         assert!(plan.changes());
@@ -1332,6 +1466,7 @@ mod tests {
             [
                 "rover-left: 1 changed, 0 pinned, 1 unchanged",
                 "rover-left: wifi.pass: (set) -> (set)",
+                "1 takes effect at the next boot",
             ]
         );
         assert!(
@@ -1379,6 +1514,7 @@ mod tests {
                 "rover-left: 0 changed, 0 pinned, 0 unchanged, 2 un-stored",
                 "rover-left: wifi.pass: (set) -> (default)",
                 "rover-left: wifi.ssid: \"bench\" -> \"\" (default)",
+                "2 take effect at the next boot",
             ]
         );
         all.extend(lines);
@@ -1413,60 +1549,85 @@ mod tests {
         let mut lp = Loop::new();
         let mut b = board(&mut lp);
         assert_eq!(
-            config_read(&mut b, k(0x67, 0)).unwrap(),
+            config_read(&mut b, k(0x4C, 0)).unwrap(),
             "rover-left: motors[0].current.cal = 455 (default)"
         );
         let lines =
             |b: &mut Board<'_, Loop>, key, text| config_write(b, key, text, false).unwrap().lines;
         assert_eq!(
-            lines(&mut b, k(0x22, 0), "balance"),
-            ["rover-left: control.mode: throttle (default) -> balance"]
-        );
-        assert_eq!(
-            lines(&mut b, k(0x4A, 1), "PB5"),
+            lines(&mut b, k(0x20, 0), "balance"),
             [
-                "rover-left: motors[1].hall.a: none (default) -> PB5",
-                PIN_NOTE
+                "rover-left: machine.mode: throttle (default) -> balance",
+                "1 takes effect at the next arm"
             ]
         );
-        lines(&mut b, k(0x67, 0), "470");
         assert_eq!(
-            lines(&mut b, k(0x67, 0), "null"),
-            ["rover-left: motors[0].current.cal: 470 -> 455 (default)"]
+            lines(&mut b, k(0x40, 1), "PB5"),
+            [
+                "rover-left: motors[1].hall.a: none (default) -> PB5",
+                "1 takes effect at the next boot"
+            ]
         );
         assert_eq!(
-            lines(&mut b, k(0x69, 1), "-5"),
-            ["rover-left: board.battery.cal[1]: -5 (default) -> -5"]
+            lines(&mut b, k(0x10, 0), "PA3"),
+            [
+                "rover-left: links[0].rx: none (default) -> PA3",
+                "1 takes effect at the next boot"
+            ]
         );
         assert_eq!(
-            config_write(&mut b, k(0x22, 1), "balance", false).unwrap_err(),
-            "control.mode has one index (--force writes index 1 anyway)"
+            lines(&mut b, k(0x19, 0), "power.button"),
+            [
+                "rover-left: active_high: [\"pads.a\",\"pads.b\"] (default) -> [\"power.button\"]",
+                "1 takes effect at the next boot"
+            ]
+        );
+        // A live field takes effect as it is written: no line says when.
+        assert_eq!(
+            lines(&mut b, k(0x27, 0), "3200"),
+            ["rover-left: machine.balance.gains[0]: 0 (default) -> 3200"]
+        );
+        lines(&mut b, k(0x4C, 0), "470");
+        assert_eq!(
+            lines(&mut b, k(0x4C, 0), "null"),
+            [
+                "rover-left: motors[0].current.cal: 470 -> 455 (default)",
+                "1 takes effect at the next arm"
+            ]
+        );
+        // Writing the default changes nothing the board runs.
+        assert_eq!(
+            lines(&mut b, k(0x18, 1), "-5"),
+            ["rover-left: battery_sense.cal[1]: -5 (default) -> -5"]
         );
         assert_eq!(
-            config_write(&mut b, k(0x22, 1), "balance", true).unwrap(),
+            config_write(&mut b, k(0x20, 1), "balance", false).unwrap_err(),
+            "machine.mode has one index (--force writes index 1 anyway)"
+        );
+        assert_eq!(
+            config_write(&mut b, k(0x20, 1), "balance", true).unwrap(),
             Written {
                 warnings: Vec::new(),
-                lines: vec!["rover-left: control.mode[1]: throttle (default) -> balance".into()],
+                lines: vec![
+                    "rover-left: machine.mode[1]: throttle (default) -> balance".into(),
+                    "1 takes effect at the next arm".into()
+                ],
             }
         );
         assert_eq!(
-            config_write(&mut b, k(0x63, 0), "9", false).unwrap_err(),
+            config_write(&mut b, k(0x51, 0), "9", false).unwrap_err(),
             "motors[0].align_offset takes 0..5, not 9 (--force writes it anyway)"
         );
         assert_eq!(
-            config_write(&mut b, k(0x63, 0), "9", true)
+            config_write(&mut b, k(0x51, 0), "9", true)
                 .unwrap()
                 .warnings,
             ["warning: motors[0].align_offset takes 0..5, not 9 (--force writes it anyway)"]
         );
-        assert_eq!(
-            config_write(&mut b, k(0x03, 0), "2", true).unwrap_err(),
-            "node.class is read-only"
-        );
         b.wire.board.resp.set_armed(true);
         assert_eq!(
-            config_write(&mut b, k(0x22, 0), "throttle", true).unwrap_err(),
-            "rover-left: control.mode: refused: armed"
+            config_write(&mut b, k(0x20, 0), "throttle", true).unwrap_err(),
+            "rover-left: machine.mode: refused: armed"
         );
     }
 }

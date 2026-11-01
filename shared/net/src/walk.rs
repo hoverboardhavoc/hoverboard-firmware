@@ -29,9 +29,8 @@
 
 use heapless::Vec;
 use store::{
-    DynError, Flash, Key, Store, StoreError, Stored, Type, Value, BOARD_STATUS, DEVICE_NAME,
-    ERASED_TAG, NODE_ADDRESS, NODE_CLASS, SECRET, WIFI_PASS, WIFI_SSID, WIFI_TX_POWER,
-    WIFI_TX_POWER_RANGE,
+    DynError, Flash, Key, Store, StoreError, Stored, Type, Value, DEVICE_NAME, ERASED_TAG,
+    NODE_ADDRESS, SECRET, WIFI_PASS, WIFI_SSID, WIFI_TX_POWER, WIFI_TX_POWER_RANGE,
 };
 
 use crate::forward::Forwarder;
@@ -104,19 +103,76 @@ pub const STATUS_ERR: u8 = 1;
 /// The L3 protocol version a `NODE_HELLO` reply reports.
 pub const PROTO_VER: u8 = 1;
 
-/// `NODE_HELLO` reply `mcu`: the chip family, for presets and pin routing, never the node's class
+/// `IDENTITY` `mcu`: the chip family, for presets and pin routing, never the node's class
 /// (`specs/l3.md`, "Node class"). A GD32F10x board.
 pub const MCU_F10X: u8 = 1;
-/// `NODE_HELLO` reply `mcu`: a GD32F1x0 board.
+/// `IDENTITY` `mcu`: a GD32F1x0 board.
 pub const MCU_F1X0: u8 = 2;
-/// `NODE_HELLO` reply `mcu`: the hoverboard bridge (`specs/hoverboard-bridge.md`, "Ports").
+/// `IDENTITY` `mcu`: the hoverboard bridge (`specs/hoverboard-bridge.md`, "Ports").
 pub const MCU_ESP32C3: u8 = 3;
 
-/// `node.class` of a bridge, the hoverboard bridge (`specs/l3.md`, "Node class"). A motor
-/// controller's class is the registry default of `store::NODE_CLASS`, which is where the field's
-/// model keeps it; the bridge's value has no registry row of its own, so it lives here, beside the
-/// `Responder` that answers with it.
+/// `IDENTITY` `class` of a motor controller, a mainboard running this firmware (`specs/l3.md`,
+/// "Node class").
+pub const CLASS_MOTOR: u8 = 0x01;
+/// `IDENTITY` `class` of a bridge, the hoverboard bridge (`specs/l3.md`, "Node class").
 pub const CLASS_BRIDGE: u8 = 0x02;
+
+/// The `NODE_HELLO` reply's length: `[node_id, proto_ver, your_addr]` (`specs/l3.md`). A request
+/// is one byte, `[kind]`, so the length tells the two apart.
+pub const HELLO_REPLY_LEN: usize = 3;
+
+/// The length of a factory unique ID in `IDENTITY` (`specs/machine-settings.md` section 6.1): a
+/// GD32's 96-bit ID, or a bridge's 6-byte MAC followed by six zero bytes.
+pub const UID_LEN: usize = 12;
+
+/// What a node says about itself in `IDENTITY` (`specs/machine-settings.md` section 6.1). A node
+/// is built with it ([`Responder::new`]); nothing in it is stored, and addressing never reads it
+/// (`specs/l3.md`, "No baked-in id"): the `uid` is for a client matching a file to a board.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Identity {
+    /// What the node is: [`CLASS_MOTOR`] or [`CLASS_BRIDGE`].
+    pub class: u8,
+    /// The chip family ([`MCU_F10X`], [`MCU_F1X0`], [`MCU_ESP32C3`]).
+    pub mcu: u8,
+    /// The firmware version.
+    pub fw_ver: u16,
+    /// The factory unique ID ([`UID_LEN`] bytes).
+    pub uid: [u8; UID_LEN],
+}
+
+impl Identity {
+    /// The `IDENTITY` payload's length: `class, mcu, fw_ver (u16 LE), uid`.
+    pub const LEN: usize = 4 + UID_LEN;
+
+    /// The `IDENTITY` payload.
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut b = [0u8; Self::LEN];
+        b[0] = self.class;
+        b[1] = self.mcu;
+        b[2..4].copy_from_slice(&self.fw_ver.to_le_bytes());
+        b[4..].copy_from_slice(&self.uid);
+        b
+    }
+
+    /// Decode an `IDENTITY` payload of exactly [`Self::LEN`] bytes.
+    pub fn decode(p: &[u8]) -> Option<Identity> {
+        if p.len() != Self::LEN {
+            return None;
+        }
+        let mut uid = [0u8; UID_LEN];
+        uid.copy_from_slice(&p[4..]);
+        Some(Identity {
+            class: p[0],
+            mcu: p[1],
+            fw_ver: u16::from_le_bytes([p[2], p[3]]),
+            uid,
+        })
+    }
+}
+
+/// The most bytes a `STATUS` reply carries: fourteen four-byte entries of the boot status record
+/// (`specs/configured-links.md` section 5).
+pub const STATUS_MAX: usize = 56;
 
 /// The longest `device.name` a bridge takes: what fits its BLE advertising packet beside the flags
 /// (31 B less 3 for the flags and 2 for the name's own header).
@@ -215,10 +271,6 @@ pub const OP_TUNE_READ: u8 = 0x35;
 /// allowed; `specs/integration.md`, R4). Reads are unaffected; retry after disarm.
 pub const CFG_ARMED: u8 = 5;
 
-/// `CONFIG_RESP` status: the field is read-only (`node.class`; `specs/l3.md`, "Node class"). The
-/// store refuses the write ([`DynError::ReadOnly`]) and nothing is persisted.
-pub const CFG_READ_ONLY: u8 = 6;
-
 /// `CONFIG_RESP` status: the region is genuinely out of space. The board compacted and the value
 /// still does not fit, so the live set alone fills a clean page. Nothing is wrong with the flash
 /// and retrying will not help; something has to go.
@@ -249,7 +301,6 @@ fn cfg_status(e: DynError) -> u8 {
     match e {
         DynError::UnknownKey => CFG_UNKNOWN_KEY,
         DynError::TypeMismatch => CFG_TYPE_MISMATCH,
-        DynError::ReadOnly => CFG_READ_ONLY,
         DynError::Store(_) => CFG_STORE_ERR,
     }
 }
@@ -411,20 +462,17 @@ struct Probe {
 pub struct Responder {
     fwd: Forwarder,
     port_kinds: [u8; MAX_PORTS],
-    fw_ver: u16,
-    mcu: u8,
-    /// What this node is, answered for a `CONFIG_READ` of `node.class` (`specs/l3.md`, "Node
-    /// class"): the node's own fact, never stored, so the read-only registry row only refuses
-    /// writes.
-    class: u8,
+    /// What this node says about itself, answered for `IDENTIFY`
+    /// (`specs/machine-settings.md` section 6.1).
+    identity: Identity,
     /// The node's own default `device.name`, answered for a `CONFIG_READ` of an unstored
     /// `device.name` in place of the registry's (`specs/cli-config.md` section 6.2): the bridge's
     /// MAC-based name, which it never writes to its store. `None` on a board, which answers the
     /// registry default.
     default_name: Option<&'static [u8]>,
-    /// The node's boot status record's entries, answered for a `CONFIG_READ` of `board.status`
-    /// (`specs/configured-links.md` section 5) with `CFG_OK`: the node's own fact, never stored.
-    /// Empty until [`Responder::set_status`], which is what a bridge answers.
+    /// The node's boot status record's entries, answered for `STATUS_READ`
+    /// (`specs/configured-links.md` section 5): the node's own fact, never stored. Empty until
+    /// [`Responder::set_status`], which is what a bridge answers.
     status: &'static [u8],
     /// The next grant's offset inside this node's guest slice ([`guest_slice`]). The slice itself
     /// is derived from the live address at each grant, so an `ASSIGN` or a boot-time restore moves
@@ -444,9 +492,8 @@ pub struct Responder {
 
 impl Responder {
     /// A fresh, unconfigured node (`addr = 0x00`) with `n_ports` ports of the given medium kinds,
-    /// reporting `mcu` in `NODE_HELLO` and `class` for `node.class` (a board passes
-    /// `store::NODE_CLASS`'s default, the bridge [`CLASS_BRIDGE`]).
-    pub fn new(n_ports: u8, port_kinds: [u8; MAX_PORTS], mcu: u8, class: u8, fw_ver: u16) -> Self {
+    /// answering `IDENTIFY` with `identity`.
+    pub fn new(n_ports: u8, port_kinds: [u8; MAX_PORTS], identity: Identity) -> Self {
         // The per-port arrays (`port_kinds`, the probe `states`) are sized to MAX_PORTS; a board
         // declaring more would index out of bounds in `poll_probe`. The fleet max is 4, so this never
         // fires in practice - it guards a future part with more ports.
@@ -454,9 +501,7 @@ impl Responder {
         Responder {
             fwd: Forwarder::new(pdu::NO_ADDRESS, n_ports),
             port_kinds,
-            fw_ver,
-            mcu,
-            class,
+            identity,
             default_name: None,
             status: &[],
             guest_slot: 0,
@@ -482,28 +527,22 @@ impl Responder {
         self.default_name = Some(name);
     }
 
-    /// Answer `entries` for a read of `board.status`: the boot status record's entries, four bytes
-    /// each, fixed after boot (`specs/configured-links.md` section 5). A board calls it once, after
-    /// its last bring-up.
+    /// Answer `entries` for `STATUS_READ`: the boot status record's entries, four bytes each, fixed
+    /// after boot (`specs/configured-links.md` section 5). A board calls it once, after its last
+    /// bring-up.
     pub fn set_status(&mut self, entries: &'static [u8]) {
         self.status = entries;
     }
 
     /// What a `CONFIG_READ` of `key` answers: the value and the status, [`CFG_OK`] when a record
     /// holds the value, [`CFG_DEFAULT`] when none does, and [`CFG_SECRET`] for a stored secret, whose
-    /// value no reply carries. `node.class` and `board.status` come from the node, an unstored
-    /// `device.name` from the node's own default when it has one, everything else from the store.
+    /// value no reply carries. An unstored `device.name` comes from the node's own default when it
+    /// has one, everything else from the store.
     fn read_value<'s, F: Flash>(
         &self,
         store: &'s Store<F>,
         key: Key,
     ) -> Result<(Value<'s>, u8), DynError> {
-        if key == NODE_CLASS.key() {
-            return Ok((Value::U8(self.class), CFG_OK));
-        }
-        if key == BOARD_STATUS.key() {
-            return Ok((Value::Bytes(self.status), CFG_OK));
-        }
         let (value, stored) = store.get_value(key)?;
         Ok(match (stored, self.default_name) {
             (Stored::Yes, _) if SECRET.contains(&key.field_id) => (value, CFG_SECRET),
@@ -647,6 +686,11 @@ impl Responder {
             Some(Opcode::ConfigWrite) => self.on_config_write(pdu, store, out),
             Some(Opcode::ConfigWriteMulti) => self.on_config_write_multi(pdu, store, out),
             Some(Opcode::ConfigCompact) => self.on_config_compact(pdu, store, out),
+            Some(Opcode::Identify) => {
+                let identity = self.identity.encode();
+                self.reply(Opcode::Identity, pdu.src, &identity, out);
+            }
+            Some(Opcode::StatusRead) => self.reply(Opcode::Status, pdu.src, self.status, out),
             // Delivered but not handled here: an opcode L3 does not interpret (the reserved
             // control/telemetry blocks) or a stray controller-bound walk opcode (PORTS /
             // ASSIGN_ACK / CONFIG_RESP). Handed back to the caller by copy; the firmware decides
@@ -802,7 +846,7 @@ impl Responder {
             let Some(value) = Value::decode(kind, bytes) else {
                 return CFG_BAD;
             };
-            if self.class == CLASS_BRIDGE && !bridge_value_usable(key, &value) {
+            if self.identity.class == CLASS_BRIDGE && !bridge_value_usable(key, &value) {
                 return CFG_BAD;
             }
             Some(value)
@@ -861,7 +905,12 @@ impl Responder {
 
     /// Emit a `CONFIG_RESP` toward `dst` (the requester), routed by the learned table.
     fn reply_config(&self, dst: u8, payload: &[u8], out: &mut Emits) {
-        let r = Pdu::from_op(Opcode::ConfigResp, self.addr(), dst, payload);
+        self.reply(Opcode::ConfigResp, dst, payload, out);
+    }
+
+    /// Emit an `op` reply toward `dst` (the requester), routed by the learned table.
+    fn reply(&self, op: Opcode, dst: u8, payload: &[u8], out: &mut Emits) {
+        let r = Pdu::from_op(op, self.addr(), dst, payload);
         self.fwd.originate(&r, &mut |port, f| emit(out, port, f));
     }
 
@@ -885,8 +934,7 @@ impl Responder {
                 pdu::NO_ADDRESS
             };
             let node_id = self.addr();
-            let fw = self.fw_ver.to_le_bytes();
-            let reply = [node_id, PROTO_VER, fw[0], fw[1], self.mcu, your_addr];
+            let reply = [node_id, PROTO_VER, your_addr];
             let r = Pdu::from_op(Opcode::NodeHello, node_id, pdu.src, &reply);
             emit(out, ingress, &r);
         } else if let Some(probe) = self.probe.as_mut() {
@@ -1156,7 +1204,7 @@ impl Controller {
         if pdu.known() == Some(Opcode::NodeHello) && pdu.payload.len() == 1 {
             // node_id = whatever address the gateway last granted us (provisionally GUEST_FIRST, and
             // adopted unchecked from the grant below), so the prober records "assigned(<that addr>)".
-            let reply = [self.guest_addr, PROTO_VER, 0, 0, 0, pdu::NO_ADDRESS];
+            let reply = [self.guest_addr, PROTO_VER, pdu::NO_ADDRESS];
             let r = Pdu::from_op(Opcode::NodeHello, self.guest_addr, pdu.src, &reply);
             let mut tmp = [0u8; MAX_PDU];
             let n = r.encode(&mut tmp).ok()?;
@@ -1190,7 +1238,7 @@ impl Controller {
         match task {
             Task::Hello => {
                 let node_id = pdu.payload[0];
-                let your_addr = pdu.payload[5];
+                let your_addr = pdu.payload[2];
                 self.guest_addr = your_addr; // adopt the granted guest address
                 self.granted = true;
                 if node_id == pdu::NO_ADDRESS {
@@ -1238,7 +1286,7 @@ impl Controller {
         }
         let p = pdu.payload;
         match (task, pdu.known()) {
-            (Task::Hello, Some(Opcode::NodeHello)) => p.len() >= 6,
+            (Task::Hello, Some(Opcode::NodeHello)) => p.len() == HELLO_REPLY_LEN,
             (Task::Probe { addr }, Some(Opcode::Ports)) => pdu.src == addr,
             (Task::AssignGateway { new_addr } | Task::AssignNeighbor { new_addr, .. }, _) => {
                 assign_ack_status(pdu, self.guest_addr, new_addr).is_some()

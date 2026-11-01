@@ -8,8 +8,8 @@
 //! - `FIELD[:INDEX]=VALUE`: write, then read the field back and confirm it matches.
 //! - `FIELD[:INDEX]`: read only.
 //!
-//! - `FIELD` is a `0x`-hex or decimal store field id (e.g. `0x48` = `imu.scl_pin`).
-//! - `INDEX` (optional, default 0) is the per-motor / per-gain index (`0x79:1` = the gain `gr`).
+//! - `FIELD` is a `0x`-hex or decimal store field id (e.g. `0x11` = `imu.scl`).
+//! - `INDEX` (optional, default 0) is the per-motor / per-gain index (`0x27:1` = the gain `gr`).
 //! - `VALUE` is parsed against the field's REGISTERED type (`shared/store`; a packed `port|pin`
 //!   byte such as `0x16` = PB6 is a `u8` field). No board-model validation happens here: a
 //!   duplicate pin or a gate-capable pin in a LED field is a well-typed write this tool passes
@@ -30,10 +30,10 @@
 //! have the board bring them up):
 //!
 //! ```text
-//! swd-mailbox-config 127.0.0.1:6666 0x56=0x02 0x57=0x03 0x48=0x16 0x49=0x17 0x60=2
-//! #   link.tx[0](0x56)=PA2  link.rx[0](0x57)=PA3
-//! #   imu.scl(0x48)=PB6  imu.sda(0x49)=PB7  imu.model(0x60)=2
-//! # then REBOOT the board (bench: power-cycle via the relay) and read board.status (0x05, or the
+//! swd-mailbox-config 127.0.0.1:6666 0x0F=0x02 0x10=0x03 0x11=0x16 0x12=0x17 0x13=2
+//! #   links[0].tx(0x0F)=PA2  links[0].rx(0x10)=PA3
+//! #   imu.scl(0x11)=PB6  imu.sda(0x12)=PB7  imu.model(0x13)=2
+//! # then REBOOT the board (bench: power-cycle via the relay) and read its status (STATUS_READ, or the
 //! # BOARD_OBS record over SWD): no entries = everything configured came up. An entry with reason 7
 //! # = the IMU frame was refused (IMU_AXIS_SIGN / IMU_AXIS_ROLE not a rotation).
 //! ```

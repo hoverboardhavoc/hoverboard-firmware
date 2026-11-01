@@ -1,13 +1,14 @@
 //! The walk and the configuration requests (`specs/hoverboard-bridge.md`, "The terminal tool"): the
-//! whole walk with `net`'s [`Controller`], then `node.class` and `device.name` read from every
-//! address; `CONFIG_READ`, `CONFIG_WRITE` (a value or an un-store) and `CONFIG_COMPACT`; and `--node`
-//! resolved to an address by number or by name.
+//! whole walk with `net`'s [`Controller`], then `IDENTIFY` and `device.name` asked of every
+//! address; `CONFIG_READ`, `CONFIG_WRITE` (a value or an un-store), `CONFIG_COMPACT` and
+//! `STATUS_READ`; and a node resolved to an address by number or by name.
 
 use std::time::{Duration, Instant};
 
 use net::pdu::{Opcode, Pdu, NO_ADDRESS};
 use net::walk::{Controller, CLASS_BRIDGE};
-use store::{Key, Type, Value, DEVICE_NAME, NODE_CLASS};
+pub use net::walk::{Identity, CLASS_MOTOR};
+use store::{Key, Type, Value, DEVICE_NAME};
 
 use crate::wire::Wire;
 
@@ -20,21 +21,30 @@ const TRIES: u32 = 3;
 /// The longest one wait for a packet inside the walk, so a resend is not late by much.
 const POLL: Duration = Duration::from_millis(50);
 
-/// The motor controller's `node.class`, the registry default.
-pub const CLASS_MOTOR: u8 = NODE_CLASS.default();
-
 /// A node the walk found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     /// Its address.
     pub addr: u8,
-    /// Its `node.class`, if it answered.
-    pub class: Option<u8>,
+    /// Its `IDENTITY`, if it answered (`specs/machine-settings.md` section 6.1).
+    pub identity: Option<Identity>,
     /// Its `device.name`, if it answered.
     pub name: Option<String>,
 }
 
-/// The name of a `node.class` value.
+impl Found {
+    /// Its class, if it answered `IDENTIFY`.
+    pub fn class(&self) -> Option<u8> {
+        self.identity.map(|i| i.class)
+    }
+}
+
+/// A factory unique ID as 24 lowercase hex digits (`specs/machine-settings.md` section 6.2).
+pub fn uid_hex(uid: &[u8; net::walk::UID_LEN]) -> String {
+    uid.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The name of an `IDENTITY` class.
 pub fn class_name(class: Option<u8>) -> &'static str {
     match class {
         Some(CLASS_MOTOR) => "motor controller",
@@ -54,7 +64,6 @@ pub fn status_name(status: u8) -> String {
         CFG_TYPE_MISMATCH => "type mismatch".into(),
         CFG_STORE_ERR => "store error".into(),
         CFG_ARMED => "armed".into(),
-        CFG_READ_ONLY => "read-only".into(),
         CFG_NO_SPACE => "no space".into(),
         CFG_COMMIT_FAILED => "commit failed".into(),
         CFG_DEFAULT => "default".into(),
@@ -146,17 +155,18 @@ impl ConfigResp {
     }
 }
 
-/// Send a `CONFIG_*` request `op` with `payload` from `src` to `dst` and wait for the `CONFIG_RESP`
-/// whose first two bytes are `echo` (the key, or `[0, 0]` for the acks that name none). A request
-/// to `0x00` is answered by the node on the tool's own link, whatever its address.
-fn exchange<W: Wire>(
+/// Send request `op` with `payload` from `src` to `dst` and wait for the reply `answer` takes: a
+/// frame of opcode `reply`, addressed to `src`, from `dst`. A request to `0x00` is answered by the
+/// node on the tool's own link, whatever its address. Sent [`TRIES`] times, each waiting
+/// [`REPLY_WAIT`].
+fn ask<W: Wire, T>(
     wire: &mut W,
-    op: Opcode,
+    (op, reply): (Opcode, Opcode),
     src: u8,
     dst: u8,
     payload: &[u8],
-    echo: [u8; 2],
-) -> Result<ConfigResp, String> {
+    answer: impl Fn(&[u8]) -> Option<T>,
+) -> Result<T, String> {
     let pdu = Pdu::from_op(op, src, dst, payload);
     let mut buf = [0u8; net::walk::MAX_PDU];
     let n = pdu
@@ -168,21 +178,59 @@ fn exchange<W: Wire>(
         while let Some(pkt) = wire.recv(deadline.saturating_duration_since(Instant::now())) {
             let Ok(p) = Pdu::decode(&pkt) else { continue };
             let from = dst == NO_ADDRESS || p.src == dst;
-            if p.known() == Some(Opcode::ConfigResp)
-                && p.dst == src
-                && from
-                && p.payload.len() >= 4
-                && p.payload[..2] == echo
-            {
-                return Ok(ConfigResp {
-                    status: p.payload[2],
-                    tag: p.payload[3],
-                    bytes: p.payload[4..].to_vec(),
-                });
+            if p.known() == Some(reply) && p.dst == src && from {
+                if let Some(t) = answer(p.payload) {
+                    return Ok(t);
+                }
             }
         }
     }
-    Err(format!("no CONFIG_RESP from {dst:#04x}"))
+    Err(format!("no {reply:?} from {dst:#04x}"))
+}
+
+/// Send a `CONFIG_*` request `op` with `payload` from `src` to `dst` and wait for the `CONFIG_RESP`
+/// whose first two bytes are `echo` (the key, or `[0, 0]` for the acks that name none).
+fn exchange<W: Wire>(
+    wire: &mut W,
+    op: Opcode,
+    src: u8,
+    dst: u8,
+    payload: &[u8],
+    echo: [u8; 2],
+) -> Result<ConfigResp, String> {
+    ask(wire, (op, Opcode::ConfigResp), src, dst, payload, |p| {
+        (p.len() >= 4 && p[..2] == echo).then(|| ConfigResp {
+            status: p[2],
+            tag: p[3],
+            bytes: p[4..].to_vec(),
+        })
+    })
+    .map_err(|_| format!("no CONFIG_RESP from {dst:#04x}"))
+}
+
+/// `IDENTIFY` to `dst`: its `IDENTITY` (`specs/machine-settings.md` section 6.1).
+pub fn identify<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<Identity, String> {
+    ask(
+        wire,
+        (Opcode::Identify, Opcode::Identity),
+        src,
+        dst,
+        &[],
+        Identity::decode,
+    )
+}
+
+/// `STATUS_READ` to `dst`: the boot status record's entries, four bytes each
+/// (`specs/configured-links.md` section 5).
+pub fn status_read<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<Vec<u8>, String> {
+    ask(
+        wire,
+        (Opcode::StatusRead, Opcode::Status),
+        src,
+        dst,
+        &[],
+        |p| Some(p.to_vec()),
+    )
 }
 
 /// Send a `CONFIG_*` request for `key` and wait for its `CONFIG_RESP`.
@@ -262,7 +310,8 @@ pub fn assign<W: Wire>(
     Err(format!("no ASSIGN_ACK from {new_addr:#04x}"))
 }
 
-/// Read `node.class` and `device.name` from every address the walk found, in address order.
+/// Ask every address the walk found for its `IDENTITY` and read its `device.name`, in address
+/// order (`specs/machine-settings.md` section 6.1).
 pub fn survey<W: Wire>(wire: &mut W, walked: &Controller) -> Vec<Found> {
     let src = walked.guest_addr();
     let mut addrs = walked.assigned_addrs().to_vec();
@@ -270,13 +319,7 @@ pub fn survey<W: Wire>(wire: &mut W, walked: &Controller) -> Vec<Found> {
     addrs
         .into_iter()
         .map(|addr| {
-            let class =
-                read(wire, src, addr, NODE_CLASS.key())
-                    .ok()
-                    .and_then(|r| match r.value() {
-                        Some(Value::U8(c)) => Some(c),
-                        _ => None,
-                    });
+            let identity = identify(wire, src, addr).ok();
             let name =
                 read(wire, src, addr, DEVICE_NAME.key())
                     .ok()
@@ -284,7 +327,11 @@ pub fn survey<W: Wire>(wire: &mut W, walked: &Controller) -> Vec<Found> {
                         Some(Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
                         _ => None,
                     });
-            Found { addr, class, name }
+            Found {
+                addr,
+                identity,
+                name,
+            }
         })
         .collect()
 }
@@ -373,7 +420,7 @@ mod tests {
                     Opcode::NodeHello.to_u8(),
                     0x01,
                     p.src,
-                    &[0x01, PROTO_VER, 0, 0, 0x10, 0x88],
+                    &[0x01, PROTO_VER, 0x88],
                 )),
                 Some(Opcode::ProbePorts) => {
                     self.probes += 1;

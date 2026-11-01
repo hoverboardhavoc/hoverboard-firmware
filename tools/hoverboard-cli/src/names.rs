@@ -4,7 +4,7 @@
 
 use net::walk::{CONFIG_RESP_VALUE_MAX, CONFIG_WRITE_VALUE_MAX};
 use serde_json::{Map, Value as Json};
-use store::{by_id, FieldName, Index, Key, Kind, Type, Value, MOTORS, NAMES, PIN_ABSENT};
+use store::{by_id, FieldName, Index, Key, Kind, Type, Value, NAMES, PIN_ABSENT};
 
 use crate::nodes::{parse_int, parse_key};
 
@@ -46,13 +46,18 @@ pub fn row_of(key: Key) -> Option<&'static FieldName> {
     by_id(key.field_id)
 }
 
-/// The path `key` prints as: `control.mode`, `board.battery.cal[1]`, `motors[0].hall.a`, or the raw
-/// `0x99.0` for an id the table does not name. A single field at an index past its one prints with
-/// the index, so a forced write names what it wrote.
+/// The path `key` prints as: `machine.mode`, `battery_sense.cal[1]`, `motors[0].hall.a`,
+/// `links[0].tx`, or the raw `0x99.0` for an id the table does not name. A single field at an
+/// index past its one prints with the index, so a forced write names what it wrote.
 pub fn path_of(key: Key) -> String {
     match row_of(key) {
         Some(r) => match r.index {
-            Index::Motor => format!("motors[{}].{}", key.index, r.path),
+            Index::Motor | Index::Link => format!(
+                "{}[{}].{}",
+                r.index.array().expect("an object array"),
+                key.index,
+                r.path
+            ),
             Index::Single if key.index == 0 => r.path.to_string(),
             Index::Single | Index::Array(_) => format!("{}[{}]", r.path, key.index),
         },
@@ -74,11 +79,29 @@ pub fn table_keys() -> Vec<Key> {
         .collect()
 }
 
-/// The row named `path` among the motor fields (`motor`) or the others.
-pub fn find(path: &str, motor: bool) -> Option<&'static FieldName> {
+/// The row named `path` among the fields of the object array `array` (`motors`, `links`), or
+/// among the others with `None`.
+pub fn find(path: &str, array: Option<&str>) -> Option<&'static FieldName> {
     NAMES
         .iter()
-        .find(|r| r.path == path && (r.index == Index::Motor) == motor)
+        .find(|r| r.path == path && r.index.array() == array)
+}
+
+/// The object array a field of index kind `index` sits in and what one element of it is
+/// (`motors` and `motor`, `links` and `link`; `specs/machine-settings.md` section 3.1), or `None`
+/// for a field at its own path. The array's key is the store's ([`Index::array`]).
+pub fn element(index: Index) -> Option<(&'static str, &'static str)> {
+    let what = match index {
+        Index::Motor => "motor",
+        Index::Link => "link",
+        Index::Single | Index::Array(_) => return None,
+    };
+    Some((index.array()?, what))
+}
+
+/// Every object array a file holds, as [`element`] names it: `motors`, then `links`.
+pub fn object_arrays() -> impl Iterator<Item = (&'static str, &'static str)> {
+    [Index::Motor, Index::Link].into_iter().filter_map(element)
 }
 
 /// The problem with writing index `index` of `row`, if it is past the table's count.
@@ -95,10 +118,14 @@ fn index_check(row: &FieldName, index: u8) -> Option<Problem> {
             "{} has {n} indices (--force writes index {index} anyway)",
             row.path
         ),
-        Index::Motor => format!(
-            "{} has {MOTORS} motors (--force writes motors[{index}] anyway)",
-            row.path
-        ),
+        Index::Motor | Index::Link => {
+            let (array, what) = element(row.index).expect("an object array");
+            format!(
+                "{} has {} {what}s (--force writes {array}[{index}] anyway)",
+                row.path,
+                row.index.count()
+            )
+        }
     }))
 }
 
@@ -114,13 +141,11 @@ pub fn key_checks(key: Key) -> Vec<Problem> {
     }
 }
 
-/// The problems with WRITING `key` beyond [`key_checks`]: a board-owned field, or a read-only one.
+/// The problems with WRITING `key` beyond [`key_checks`]: a board-owned field.
 pub fn write_checks(key: Key) -> Vec<Problem> {
     let mut p = key_checks(key);
     if let Some(row) = row_of(key) {
-        if row.read_only() {
-            p.push(Problem::stop(format!("{} is read-only", row.path)));
-        } else if row.board_owned() {
+        if row.board_owned() {
             p.push(Problem::forceable(format!(
                 "{} is board-owned (--force writes it anyway)",
                 path_of(key)
@@ -130,8 +155,8 @@ pub fn write_checks(key: Key) -> Vec<Problem> {
     p
 }
 
-/// A command-line path (`specs/cli-config.md` section 2.1): `motors.1.hall.a`,
-/// `board.battery.cal.0`, `control.mode`, or the raw `0x4A.1` / `0x22`. The form a path prints as
+/// A command-line path (`specs/cli-config.md` section 2.1): `motors.1.hall.a`, `links.0.tx`,
+/// `battery_sense.cal.0`, `machine.mode`, or the raw `0x40.1` / `0x20`. The form a path prints as
 /// (`motors[1].hall.a`) is taken too. The key, with [`key_checks`]'s problems; `Err` when the path
 /// names no key.
 pub fn parse_path(s: &str) -> Result<(Key, Vec<Problem>), Problem> {
@@ -144,16 +169,18 @@ pub fn parse_path(s: &str) -> Result<(Key, Vec<Problem>), Problem> {
         field_id: row.id,
         index,
     };
-    if let Some(rest) = norm.strip_prefix("motors.") {
-        let found = rest.split_once('.').and_then(|(i, name)| {
-            let row = find(name, true)?;
-            Some((row, i.parse::<u8>().ok()?))
-        });
-        let (row, i) = found.ok_or_else(|| unknown(s))?;
-        let k = key(row, i);
-        return Ok((k, key_checks(k)));
+    for (array, _) in object_arrays() {
+        if let Some(rest) = norm.strip_prefix(array).and_then(|r| r.strip_prefix('.')) {
+            let found = rest.split_once('.').and_then(|(i, name)| {
+                let row = find(name, Some(array))?;
+                Some((row, i.parse::<u8>().ok()?))
+            });
+            let (row, i) = found.ok_or_else(|| unknown(s))?;
+            let k = key(row, i);
+            return Ok((k, key_checks(k)));
+        }
     }
-    if let Some(row) = find(&norm, false) {
+    if let Some(row) = find(&norm, None) {
         return match row.index {
             Index::Array(n) => Err(Problem::stop(format!(
                 "{} has {n} indices ({}.<index>)",
@@ -162,14 +189,16 @@ pub fn parse_path(s: &str) -> Result<(Key, Vec<Problem>), Problem> {
             _ => Ok((key(row, 0), Vec::new())),
         };
     }
-    if let Some(row) = find(&norm, true) {
-        return Err(Problem::stop(format!(
-            "{} is per motor (motors.<n>.{})",
-            row.path, row.path
-        )));
+    for (array, what) in object_arrays() {
+        if let Some(row) = find(&norm, Some(array)) {
+            return Err(Problem::stop(format!(
+                "{} is per {what} ({array}.<n>.{})",
+                row.path, row.path
+            )));
+        }
     }
     if let Some((name, i)) = norm.rsplit_once('.') {
-        if let (Some(row), Ok(i)) = (find(name, false), i.parse::<u8>()) {
+        if let (Some(row), Ok(i)) = (find(name, None), i.parse::<u8>()) {
             let k = key(row, i);
             return Ok((k, key_checks(k)));
         }
@@ -182,19 +211,23 @@ pub fn unknown(s: &str) -> Problem {
     Problem::stop(format!("unknown field {s}{}", suggest(s)))
 }
 
-/// ` (did you mean X?)` for the name closest to `s`, or nothing when none is close. A motor field
-/// is suggested under the motor `s` names.
+/// ` (did you mean X?)` for the name closest to `s`, or nothing when none is close. A motor or
+/// link field is suggested under the motor or link `s` names.
 fn suggest(s: &str) -> String {
-    let motor = s
-        .strip_prefix("motors.")
-        .and_then(|r| r.split_once('.'))
-        .map(|(i, _)| i);
+    let element = |array: &str| {
+        s.strip_prefix(array)
+            .and_then(|r| r.strip_prefix('.'))
+            .and_then(|r| r.split_once('.'))
+            .map(|(i, _)| i.to_string())
+    };
     let best = NAMES
         .iter()
-        .map(|r| match (r.index, motor) {
-            (Index::Motor, Some(i)) => format!("motors.{i}.{}", r.path),
-            _ => r.path.to_string(),
-        })
+        .map(
+            |r| match r.index.array().and_then(|a| Some((a, element(a)?))) {
+                Some((a, i)) => format!("{a}.{i}.{}", r.path),
+                None => r.path.to_string(),
+            },
+        )
         .min_by_key(|c| distance(s, c));
     match best {
         Some(b) if distance(s, &b) <= (s.len() / 3).max(2) => format!(" (did you mean {b}?)"),
@@ -509,6 +542,17 @@ fn fits(key: Key, bytes: Vec<u8>) -> Result<Vec<u8>, Problem> {
     Ok(bytes)
 }
 
+/// When a written field takes effect, as the effect lines and the field table say it
+/// (`specs/machine-settings.md` section 5).
+pub fn effect_name(e: store::Effect) -> &'static str {
+    match e {
+        store::Effect::Live => "live",
+        store::Effect::Arm => "arm",
+        store::Effect::Boot => "boot",
+        store::Effect::Client => "client only",
+    }
+}
+
 /// The name table as `fields --json` prints it (`specs/cli-config.md` section 3, "The other
 /// consumers"): one object per row, for the tools that check their own copy of the names.
 pub fn table_json() -> Json {
@@ -520,13 +564,13 @@ pub fn table_json() -> Json {
             "type".into(),
             format!("{:?}", r.storage).to_lowercase().into(),
         );
-        let (index, count) = match r.index {
-            Index::Single => ("single", 1),
-            Index::Array(n) => ("array", n),
-            Index::Motor => ("motor", MOTORS),
+        let index = match r.index {
+            Index::Single => "single",
+            Index::Array(_) => "array",
+            Index::Motor | Index::Link => element(r.index).expect("an object array").1,
         };
         o.insert("index".into(), index.into());
-        o.insert("count".into(), count.into());
+        o.insert("count".into(), r.index.count().into());
         let (kind, labels) = match r.kind {
             Kind::Pin => ("pin", None),
             Kind::Int => ("int", None),
@@ -547,8 +591,15 @@ pub fn table_json() -> Json {
         if let Some((lo, hi)) = r.range {
             o.insert("range".into(), vec![lo, hi].into());
         }
+        let scope = match r.scope() {
+            Some(store::Scope::Node) => "node",
+            Some(store::Scope::Machine) => "machine",
+            Some(store::Scope::Wheel) => "wheel",
+            None => "none",
+        };
+        o.insert("scope".into(), scope.into());
+        o.insert("effect".into(), effect_name(r.effect()).into());
         o.insert("board_owned".into(), r.board_owned().into());
-        o.insert("read_only".into(), r.read_only().into());
         Json::Object(o)
     });
     Json::Array(rows.collect())
@@ -582,23 +633,85 @@ mod tests {
 
     #[test]
     fn the_spec_paths_name_their_keys() {
-        assert_eq!(parse_path("motors.1.hall.a").unwrap().0, k(0x4A, 1));
-        assert_eq!(parse_path("board.battery.cal.0").unwrap().0, k(0x69, 0));
-        assert_eq!(parse_path("control.mode").unwrap().0, k(0x22, 0));
-        assert_eq!(parse_path("0x4A.1").unwrap().0, k(0x4A, 1));
-        assert_eq!(parse_path("0x22").unwrap().0, k(0x22, 0));
-        assert_eq!(parse_path("0x64.0").unwrap().0, k(0x64, 0));
-        assert_eq!(path_of(k(0x64, 0)), "motors[0].gate.dead_time");
-        assert_eq!(path_of(k(0x79, 1)), "control.sf_gains[1]");
+        assert_eq!(parse_path("motors.1.hall.a").unwrap().0, k(0x40, 1));
+        assert_eq!(parse_path("battery_sense.cal.0").unwrap().0, k(0x18, 0));
+        assert_eq!(parse_path("machine.mode").unwrap().0, k(0x20, 0));
+        assert_eq!(parse_path("0x40.1").unwrap().0, k(0x40, 1));
+        assert_eq!(parse_path("0x20").unwrap().0, k(0x20, 0));
+        assert_eq!(parse_path("0x4B.0").unwrap().0, k(0x4B, 0));
+        assert_eq!(path_of(k(0x4B, 0)), "motors[0].gate.dead_time");
+        assert_eq!(path_of(k(0x27, 1)), "machine.balance.gains[1]");
         assert_eq!(path_of(k(0x99, 0)), "0x99.0");
+    }
+
+    /// `specs/machine-settings.md` section 3.1: the node paths are grouped by function, and a
+    /// link's pins sit in its element of `links`, as a motor's fields do in `motors`.
+    #[test]
+    fn the_regrouped_node_paths_and_the_links_name_their_keys() {
+        for (path, key) in [
+            ("power.self_hold", k(0x06, 0)),
+            ("power.button", k(0x0E, 0)),
+            ("battery_sense.pin", k(0x07, 0)),
+            ("battery_sense.cal.1", k(0x18, 1)),
+            ("buzzer", k(0x08, 0)),
+            ("leds.green", k(0x09, 0)),
+            ("leds.red", k(0x0B, 0)),
+            ("pads.a", k(0x0C, 0)),
+            ("pads.b", k(0x0D, 0)),
+            ("active_high", k(0x19, 0)),
+            ("links.0.tx", k(0x0F, 0)),
+            ("links.1.rx", k(0x10, 1)),
+            ("links[1].tx", k(0x0F, 1)),
+            ("machine.battery.floor", k(0x26, 0)),
+            ("machine.turn.1", k(0x2B, 1)),
+            ("motors.1.side", k(0x50, 1)),
+        ] {
+            assert_eq!(parse_path(path), Ok((key, Vec::new())), "{path}");
+        }
+        assert_eq!(path_of(k(0x0F, 0)), "links[0].tx");
+        assert_eq!(path_of(k(0x10, 1)), "links[1].rx");
+        assert_eq!(path_of(k(0x50, 0)), "motors[0].side");
+        // A link's pin is per link, never a top-level path or a motor's.
+        assert_eq!(
+            parse_path("tx").unwrap_err().msg,
+            "tx is per link (links.<n>.tx)"
+        );
+        assert_eq!(
+            parse_path("motors.0.tx").unwrap_err().msg,
+            "unknown field motors.0.tx"
+        );
+        let (key, p) = parse_path("links.2.tx").unwrap();
+        assert_eq!(key, k(0x0F, 2));
+        assert_eq!(
+            p,
+            [Problem::forceable(
+                "tx has 2 links (--force writes links[2] anyway)"
+            )]
+        );
+        // The old paths name nothing.
+        for old in ["board.self_hold", "led.green", "control.mode", "link.tx.0"] {
+            assert!(parse_path(old).is_err(), "{old}");
+        }
+    }
+
+    /// Every object array a row sits in is one a file holds.
+    #[test]
+    fn every_object_array_row_has_its_array() {
+        let arrays: Vec<&str> = object_arrays().map(|(a, _)| a).collect();
+        assert_eq!(arrays, ["motors", "links"]);
+        for r in NAMES {
+            if let Some(a) = r.index.array() {
+                assert!(arrays.contains(&a), "{}", r.path);
+            }
+        }
     }
 
     #[test]
     fn a_path_that_names_no_key_is_refused_with_the_closest_name() {
-        let e = parse_path("control.mod").unwrap_err();
+        let e = parse_path("machine.mod").unwrap_err();
         assert_eq!(
             e.msg,
-            "unknown field control.mod (did you mean control.mode?)"
+            "unknown field machine.mod (did you mean machine.mode?)"
         );
         assert!(!e.force);
         let e = parse_path("motors.1.hall.x").unwrap_err();
@@ -606,6 +719,8 @@ mod tests {
             e.msg,
             "unknown field motors.1.hall.x (did you mean motors.1.hall.a?)"
         );
+        let e = parse_path("links.0.xt").unwrap_err();
+        assert_eq!(e.msg, "unknown field links.0.xt (did you mean links.0.tx?)");
         assert_eq!(
             parse_path("zzzzzzzz").unwrap_err().msg,
             "unknown field zzzzzzzz"
@@ -615,26 +730,26 @@ mod tests {
             "hall.a is per motor (motors.<n>.hall.a)"
         );
         assert_eq!(
-            parse_path("board.battery.cal").unwrap_err().msg,
-            "board.battery.cal has 2 indices (board.battery.cal.<index>)"
+            parse_path("battery_sense.cal").unwrap_err().msg,
+            "battery_sense.cal has 2 indices (battery_sense.cal.<index>)"
         );
     }
 
     #[test]
     fn an_index_past_the_tables_count_is_forceable() {
-        let (key, p) = parse_path("control.mode.1").unwrap();
-        assert_eq!(key, k(0x22, 1));
+        let (key, p) = parse_path("machine.mode.1").unwrap();
+        assert_eq!(key, k(0x20, 1));
         assert_eq!(
             p,
             [Problem::forceable(
-                "control.mode has one index (--force writes index 1 anyway)"
+                "machine.mode has one index (--force writes index 1 anyway)"
             )]
         );
         assert!(p[0].stops(false) && !p[0].stops(true));
-        let (_, p) = parse_path("board.battery.cal.2").unwrap();
+        let (_, p) = parse_path("battery_sense.cal.2").unwrap();
         assert_eq!(
             p[0].msg,
-            "board.battery.cal has 2 indices (--force writes index 2 anyway)"
+            "battery_sense.cal has 2 indices (--force writes index 2 anyway)"
         );
         let (_, p) = parse_path("motors.2.hall.a").unwrap();
         assert_eq!(
@@ -652,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn board_owned_is_forceable_and_read_only_always_stops() {
+    fn board_owned_is_forceable() {
         assert_eq!(
             write_checks(k(0x01, 0)),
             [Problem::forceable(
@@ -660,15 +775,15 @@ mod tests {
             )]
         );
         assert_eq!(
-            write_checks(k(0x6D, 1)),
+            write_checks(k(0x54, 1)),
             [Problem::forceable(
                 "motors[1].odometer is board-owned (--force writes it anyway)"
             )]
         );
-        let p = write_checks(k(0x03, 0));
-        assert_eq!(p, [Problem::stop("node.class is read-only")]);
-        assert!(p[0].stops(true));
-        assert!(write_checks(k(0x22, 0)).is_empty());
+        assert!(write_checks(k(0x20, 0)).is_empty());
+        // Ids 0x03 and 0x05 are ordinary fields (`specs/machine-settings.md` section 6.1).
+        assert!(write_checks(k(0x03, 0)).is_empty());
+        assert!(write_checks(k(0x05, 0)).is_empty());
     }
 
     #[test]
@@ -698,34 +813,44 @@ mod tests {
     fn every_display_kind_round_trips() {
         use serde_json::json;
         for (key, v) in [
-            (k(0x4A, 1), json!("PB5")),
-            (k(0x41, 0), json!("none")),
-            (k(0x22, 0), json!("balance")),
-            (k(0x23, 0), json!(false)),
-            (k(0x66, 0), json!(true)),
-            (k(0x68, 1), json!("x")),
-            (k(0x6C, 0), json!(["button", "pad_b"])),
-            (k(0x6C, 0), json!([])),
-            (k(0x69, 1), json!(-5)),
-            (k(0x20, 0), json!(4_000_000_000u32)),
-            (k(0x10, 0), json!("rover-left")),
-            (k(0x30, 0), json!("deadbeef")),
+            (k(0x40, 1), json!("PB5")),
+            (k(0x07, 0), json!("none")),
+            (k(0x0F, 1), json!("PB6")),
+            (k(0x20, 0), json!("balance")),
+            (k(0x50, 1), json!("right")),
+            (k(0x22, 0), json!(false)),
+            (k(0x22, 0), json!(true)),
+            (k(0x16, 1), json!("x")),
+            (k(0x19, 0), json!(["power.button", "pads.b"])),
+            (k(0x19, 0), json!(["pads.a", "pads.b"])),
+            (k(0x19, 0), json!([])),
+            (k(0x18, 1), json!(-5)),
+            (k(0x4E, 0), json!(4_000_000_000u32)),
+            (k(0x02, 0), json!("rover-left")),
         ] {
             assert_eq!(round(key, v.clone()), v, "{}", path_of(key));
         }
+        // A blob: no named field is one, so an id the table does not name with the board's type.
+        let raw = k(0x99, 0);
+        let (bytes, _) = encode(raw, Type::Blob, &json!("deadbeef")).unwrap();
+        assert_eq!(bytes, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(
+            to_json(None, Type::Blob.tag(), &bytes.unwrap()),
+            json!("deadbeef")
+        );
     }
 
     #[test]
     fn a_value_the_table_cannot_name_is_written_as_an_integer_and_round_trips() {
         use serde_json::json;
-        let mode = row_of(k(0x22, 0));
+        let mode = row_of(k(0x20, 0));
         assert_eq!(to_json(mode, Type::U8.tag(), &[7]), json!(7));
-        let rider = row_of(k(0x23, 0));
+        let rider = row_of(k(0x22, 0));
         assert_eq!(to_json(rider, Type::U8.tag(), &[2]), json!(2));
-        let pol = row_of(k(0x6C, 0));
-        assert_eq!(to_json(pol, Type::U8.tag(), &[0b1001]), json!(9));
+        let high = row_of(k(0x19, 0));
+        assert_eq!(to_json(high, Type::U8.tag(), &[0b1001]), json!(9));
         // Writing them back is the table's own check, which --force lets through.
-        for (key, v) in [(k(0x22, 0), 7), (k(0x23, 0), 2), (k(0x6C, 0), 9)] {
+        for (key, v) in [(k(0x20, 0), 7), (k(0x22, 0), 2), (k(0x19, 0), 9)] {
             let (bytes, p) = encode(key, Type::U8, &json!(v)).unwrap();
             assert_eq!(bytes, Some(vec![v as u8]));
             assert_eq!(p.len(), 1, "{}", path_of(key));
@@ -743,26 +868,30 @@ mod tests {
             e.msg
         };
         assert_eq!(
-            stop(k(0x4A, 0), json!("PC99")),
+            stop(k(0x40, 0), json!("PC99")),
             "motors[0].hall.a: a pin (PC13 or none), not \"PC99\""
         );
         assert_eq!(
-            stop(k(0x22, 0), json!("balanse")),
-            "control.mode: unknown label balanse (throttle, balance)"
+            stop(k(0x10, 0), json!("PC99")),
+            "links[0].rx: a pin (PC13 or none), not \"PC99\""
         );
         assert_eq!(
-            stop(k(0x24, 0), json!("low")),
-            "board.battery.floor: an integer, not \"low\""
+            stop(k(0x20, 0), json!("balanse")),
+            "machine.mode: unknown label balanse (throttle, balance)"
         );
         assert_eq!(
-            stop(k(0x24, 0), json!(40000)),
-            "board.battery.floor: 40000 is outside I16 (-32768..32767)"
+            stop(k(0x26, 0), json!("low")),
+            "machine.battery.floor: an integer, not \"low\""
         );
         assert_eq!(
-            stop(k(0x6C, 0), json!(["button", "pad_c"])),
-            "board.input_polarity: unknown bit \"pad_c\" (button, pad_a, pad_b)"
+            stop(k(0x26, 0), json!(40000)),
+            "machine.battery.floor: 40000 is outside I16 (-32768..32767)"
         );
-        assert_eq!(stop(k(0x10, 0), json!(5)), "device.name: a string, not 5");
+        assert_eq!(
+            stop(k(0x19, 0), json!(["power.button", "pads.c"])),
+            "active_high: unknown bit \"pads.c\" (power.button, pads.a, pads.b)"
+        );
+        assert_eq!(stop(k(0x02, 0), json!(5)), "device.name: a string, not 5");
     }
 
     /// `specs/bridge-onboarding.md` section 2.1: a value longer than the board can take in one
@@ -777,7 +906,7 @@ mod tests {
         };
         let resp = CONFIG_RESP_VALUE_MAX;
         let write = CONFIG_WRITE_VALUE_MAX;
-        let name = k(0x10, 0);
+        let name = k(0x02, 0);
         assert!(at(name, json!("n".repeat(resp))).is_ok());
         let e = at(name, json!("n".repeat(resp + 1))).unwrap_err();
         assert!(!e.force);
@@ -788,16 +917,15 @@ mod tests {
                 resp + 1
             )
         );
-        let blob = k(0x30, 0);
-        assert!(at(blob, json!("ab".repeat(resp))).is_ok());
-        let e = at(blob, json!("ab".repeat(resp + 1))).unwrap_err();
-        assert!(e.msg.contains(&format!("{} bytes", resp + 1)), "{}", e.msg);
-        // An unnamed id with the board's type takes the same limit.
+        // An unnamed id with the board's type takes the same limit, a blob's as a string's.
         let raw = k(0x99, 0);
         assert!(encode(raw, Type::Str, &json!("r".repeat(resp + 1))).is_err());
+        assert!(encode(raw, Type::Blob, &json!("ab".repeat(resp))).is_ok());
+        let e = encode(raw, Type::Blob, &json!("ab".repeat(resp + 1))).unwrap_err();
+        assert!(e.msg.contains(&format!("{} bytes", resp + 1)), "{}", e.msg);
 
         // A secret's echo carries no value: the write is its only bound.
-        let pass = k(0x12, 0);
+        let pass = k(0x04, 0);
         assert!(at(pass, json!("p".repeat(write))).is_ok());
         let long = "p".repeat(write + 1);
         let e = at(pass, json!(long)).unwrap_err();
@@ -814,7 +942,7 @@ mod tests {
     #[test]
     fn the_tables_range_is_forceable() {
         use serde_json::json;
-        let key = k(0x63, 0);
+        let key = k(0x51, 0);
         let (bytes, p) = encode(key, Type::U8, &json!(6)).unwrap();
         assert_eq!(bytes, Some(vec![6]));
         assert_eq!(
@@ -829,21 +957,22 @@ mod tests {
     #[test]
     fn null_unstores_and_command_line_text_takes_the_files_forms() {
         assert_eq!(
-            encode(k(0x22, 0), Type::U8, &Json::Null).unwrap(),
+            encode(k(0x20, 0), Type::U8, &Json::Null).unwrap(),
             (None, Vec::new())
         );
         let text = |key: Key, t: &str| from_text(row_of(key), row_of(key).unwrap().storage, t);
-        assert_eq!(text(k(0x22, 0), "balance"), Json::from("balance"));
-        assert_eq!(text(k(0x22, 0), "1"), Json::from(1));
-        assert_eq!(text(k(0x69, 1), "-5"), Json::from(-5));
-        assert_eq!(text(k(0x4A, 1), "PB5"), Json::from("PB5"));
-        assert_eq!(text(k(0x67, 0), "null"), Json::Null);
-        assert_eq!(text(k(0x23, 0), "true"), Json::Bool(true));
+        assert_eq!(text(k(0x20, 0), "balance"), Json::from("balance"));
+        assert_eq!(text(k(0x20, 0), "1"), Json::from(1));
+        assert_eq!(text(k(0x18, 1), "-5"), Json::from(-5));
+        assert_eq!(text(k(0x40, 1), "PB5"), Json::from("PB5"));
+        assert_eq!(text(k(0x0F, 0), "PA2"), Json::from("PA2"));
+        assert_eq!(text(k(0x4C, 0), "null"), Json::Null);
+        assert_eq!(text(k(0x22, 0), "true"), Json::Bool(true));
         assert_eq!(
-            text(k(0x6C, 0), "button,pad_a"),
-            serde_json::json!(["button", "pad_a"])
+            text(k(0x19, 0), "power.button,pads.a"),
+            serde_json::json!(["power.button", "pads.a"])
         );
-        assert_eq!(text(k(0x10, 0), "12"), Json::from("12"));
+        assert_eq!(text(k(0x02, 0), "12"), Json::from("12"));
         // An id the table does not name takes the board's type.
         assert_eq!(from_text(None, Type::U16, "0x10"), Json::from(16));
         assert_eq!(from_text(None, Type::Str, "7"), Json::from("7"));
@@ -854,18 +983,33 @@ mod tests {
         let t = table_json();
         let rows = t.as_array().unwrap();
         assert_eq!(rows.len(), NAMES.len());
-        let mode = rows.iter().find(|r| r["path"] == "control.mode").unwrap();
-        assert_eq!(mode["id"], 0x22);
+        let row = |path: &str| rows.iter().find(|r| r["path"] == path).unwrap();
+        let mode = row("machine.mode");
+        assert_eq!(mode["id"], 0x20);
         assert_eq!(mode["kind"], "enum");
         assert_eq!(mode["labels"]["balance"], 1);
-        let hall = rows.iter().find(|r| r["path"] == "hall.a").unwrap();
         assert_eq!(
-            (&hall["index"], &hall["count"]),
-            (&Json::from("motor"), &Json::from(2))
+            (&mode["scope"], &mode["effect"]),
+            (&Json::from("machine"), &Json::from("arm"))
         );
-        let odo = rows.iter().find(|r| r["path"] == "odometer").unwrap();
+        let hall = row("hall.a");
+        assert_eq!(
+            (&hall["index"], &hall["count"], &hall["scope"]),
+            (&Json::from("motor"), &Json::from(2), &Json::from("wheel"))
+        );
+        assert_eq!(hall["effect"], "boot");
+        let tx = row("tx");
+        assert_eq!(
+            (&tx["index"], &tx["count"], &tx["scope"]),
+            (&Json::from("link"), &Json::from(2), &Json::from("node"))
+        );
+        assert_eq!(row("machine.balance.gains")["effect"], "live");
+        assert_eq!(row("pole_pairs")["effect"], "client only");
+        let high = row("active_high");
+        assert_eq!(high["bits"]["pads.b"], 2);
+        let odo = row("odometer");
         assert_eq!(odo["board_owned"], true);
-        let align = rows.iter().find(|r| r["path"] == "align_offset").unwrap();
+        let align = row("align_offset");
         assert_eq!(align["range"], serde_json::json!([0, 5]));
     }
 }

@@ -164,12 +164,13 @@ macro_rules! impl_scalar_int {
             /// generic builder would have to make at runtime, which is what a caller pays for on
             /// the stack: materializing the registry per `lookup` cost 920 B of a 2,284 B painted
             /// stack (`specs/firmware.md`, "The stack budget").
-            pub const fn entry(self) -> crate::field::FieldEntry {
+            pub const fn entry(self, effect: crate::field::Effect) -> crate::field::FieldEntry {
                 crate::field::FieldEntry::new(
                     self.id(),
                     self.key().index,
                     $kind,
                     self.default() as u32,
+                    effect,
                 )
             }
         }
@@ -210,12 +211,13 @@ impl Scalar for bool {
 impl crate::field::Field<bool> {
     /// `bool`'s half of the const `entry` the `impl_scalar_int!` table emits for the integers; see
     /// there for why it is `const` and why it lives beside the `Scalar` impl.
-    pub const fn entry(self) -> crate::field::FieldEntry {
+    pub const fn entry(self, effect: crate::field::Effect) -> crate::field::FieldEntry {
         crate::field::FieldEntry::new(
             self.id(),
             self.key().index,
             Type::Bool,
             self.default() as u32,
+            effect,
         )
     }
 }

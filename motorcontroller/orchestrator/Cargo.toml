@@ -21,9 +21,6 @@ imu = { path = "../imu" }
 inputs = { path = "../inputs" }
 linkctl = { path = "../../shared/linkctl" }
 state = { path = "../state" }
-
-[dev-dependencies]
-# Host-test only (no bytes in the image): the battery-word tests convert through the REGISTRY's
-# `BOARD_BATTERY_CAL` defaults, so the conversion's calibration points are pinned against the field
-# that carries them rather than against a copy.
+# The machine digests (`specs/machine-settings.md` sections 4 and 5): the store computes them, and
+# its `LINKS` sizes the per-link peer state.
 store = { path = "../../shared/store" }

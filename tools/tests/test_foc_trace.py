@@ -5,7 +5,7 @@ Run: python3 tools/tests/test_foc_trace.py
 
 Covers specs/foc-torque.md section 9, "tools": the decode of CTRL_OBS words 47 to 49 (and the other
 words the sampler prints) out of `hoverboard-cli read`'s hexdump, the word map against the
-firmware's own offset pins, the 0x67 read, and the host-side frame arithmetic of `--frame`
+firmware's own offset pins, the 0x4C read, and the host-side frame arithmetic of `--frame`
 (Clarke, forward Park, the sine table and `angle_path_offset`) against motorcontroller/commutation's check
 values. stdlib only, no hardware.
 """
@@ -70,7 +70,7 @@ def block(**f):
 
 
 class FakeCli:
-    """hoverboard-cli behind a fake runner: RAM by address, and 0x67 per node."""
+    """hoverboard-cli behind a fake runner: RAM by address, and 0x4C per node."""
 
     def __init__(self, ram, cal=None):
         self.ram, self.cal, self.calls = dict(ram), dict(cal or {}), []
@@ -88,9 +88,9 @@ class FakeCli:
             node = cmd[1]
             if node in self.cal:
                 v = self.cal[node]
-                out = f"0x67.0 at 0x01 ({node}): ok {v} ({v:#06x})\n"
+                out = f"0x4C.0 at 0x01 ({node}): ok {v} ({v:#06x})\n"
             else:
-                out = f"0x67.0 at 0x01 ({node}): armed \n"
+                out = f"0x4C.0 at 0x01 ({node}): armed \n"
             return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
         return types.SimpleNamespace(returncode=2, stdout="", stderr="usage")
 
@@ -192,13 +192,13 @@ class Decode(unittest.TestCase):
         b = ft.Bridge("hb", ["--tcp", "x:1"], node="0x02", run=cli)
         self.assertEqual(ft.read_cal(b, "left"), (455, 455))
         self.assertNotIn("--node", cli.calls[-1], "config addresses the node itself")
-        self.assertEqual(cli.calls[-1][-3:], ["config", "left", "0x67.0"])
+        self.assertEqual(cli.calls[-1][-3:], ["config", "left", "0x4c.0"])
         self.assertEqual(ft.read_cal(b, "low"), (40, swdobs.CURRENT_CAL_MIN), "the boot seam's clamp")
         with self.assertRaises(SystemExit):
             ft.read_cal(b, "armed-board")
-        self.assertEqual(ft.parse_config("0x67.0 at 0x01: ok 455 (0x01c7)\n", 0x67), ("ok", 455))
-        self.assertEqual(ft.parse_config("0x67.0 at 0x01: armed \n", 0x67), ("armed", None))
-        self.assertEqual(ft.parse_config("0x20.0 at 0x01: ok 10000 (0x00002710)\n", 0x67), (None, None))
+        self.assertEqual(ft.parse_config("0x4C.0 at 0x01: ok 455 (0x01c7)\n", 0x4C), ("ok", 455))
+        self.assertEqual(ft.parse_config("0x4C.0 at 0x01: armed \n", 0x4C), ("armed", None))
+        self.assertEqual(ft.parse_config("0x4E.0 at 0x01: ok 10000 (0x00002710)\n", 0x4C), (None, None))
 
     def test_gains_text(self):
         t = ft.gains_text(GAINS, [4000, 1024, 119, 1024, 32767, 32767 * 1024])
@@ -341,7 +341,7 @@ class EndToEnd(unittest.TestCase):
         text = out.getvalue()
         self.assertIn(f"FOC_GAINS at 0x{GAINS:08x}", text)
         self.assertIn("kp_divisor 1024", text)
-        self.assertIn("motor.current_cal (0x67) on 0x01 = 455", text)
+        self.assertIn("motor.current_cal (0x4C) on 0x01 = 455", text)
         reads = [c for c in cli.calls if "read" in c]
         self.assertTrue(reads and all("--node" not in c for c in reads), "no --node, no bridge hop")
         row = text.strip().splitlines()[-1].split()

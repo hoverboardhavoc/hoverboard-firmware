@@ -150,9 +150,23 @@ fn nodes_name_config_and_esp_commands_by_node() {
     assert!(ok, "{err}");
     let rows: Vec<&str> = out.lines().collect();
     assert_eq!(rows.len(), 4, "{out}");
-    assert!(rows[1].starts_with("0x01     motor controller"), "{out}");
-    assert!(rows[2].starts_with("0x02     motor controller"), "{out}");
-    assert!(rows[3].starts_with("0x03     bridge"), "{out}");
+    assert_eq!(
+        rows[0],
+        "address  class             uid                       name"
+    );
+    // Each node's `IDENTITY`: a board's factory unique ID, the bridge's MAC and six zero bytes.
+    assert_eq!(
+        rows[1],
+        "0x01     motor controller  010101010101010101010101  Hoverboard"
+    );
+    assert_eq!(
+        rows[2],
+        "0x02     motor controller  020202020202020202020202  Hoverboard"
+    );
+    assert_eq!(
+        rows[3],
+        "0x03     bridge            00000000ab12000000000000  hb-bridge-ab12"
+    );
 
     // A name the bridge cannot advertise is refused with the rule, and the old one stays.
     let (ok, out, err) = cli(&[&tcp, "name", "0x03", "Offroad master"]);
@@ -168,7 +182,7 @@ fn nodes_name_config_and_esp_commands_by_node() {
     let (ok, out, err) = cli(&[&tcp, "name", "0x03", "rover-esp"]);
     assert!(ok, "{err}");
     assert_eq!(out.trim(), "device.name of 0x03 (hb-bridge-ab12): ok");
-    let (ok, out, err) = cli(&[&tcp, "config", "rover-esp", "0x10"]);
+    let (ok, out, err) = cli(&[&tcp, "config", "rover-esp", "0x02"]);
     assert!(ok, "{err}");
     assert_eq!(out.trim(), "rover-esp: device.name = \"rover-esp\"");
 
@@ -242,25 +256,25 @@ fn a_boards_store_as_a_file_through_the_binary() {
         "--tcp=127.0.0.1:9",
         "config",
         "rover-left",
-        "control.mod",
+        "machine.mod",
         "balance",
     ]);
     assert!(!ok);
     assert_eq!(
         err.trim(),
-        "error: unknown field control.mod (did you mean control.mode?)"
+        "error: unknown field machine.mod (did you mean machine.mode?)"
     );
     let (ok, _, err) = cli(&[
         "--tcp=127.0.0.1:9",
         "config",
         "x",
-        "control.mode.1",
+        "machine.mode.1",
         "balance",
     ]);
     assert!(!ok);
     assert_eq!(
         err.trim(),
-        "error: control.mode has one index (--force writes index 1 anyway)"
+        "error: machine.mode has one index (--force writes index 1 anyway)"
     );
     let missing = scratch("missing.json");
     let (code, _, err) = cli_code(&["--tcp=127.0.0.1:9", "diff", "x", &missing]);
@@ -319,7 +333,7 @@ fn a_boards_store_as_a_file_through_the_binary() {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || serve(listener, 14));
+    let server = std::thread::spawn(move || serve(listener, 15));
     let run = |args: &[&str]| {
         let mut a = vec![tcp.as_str()];
         a.extend_from_slice(args);
@@ -330,23 +344,25 @@ fn a_boards_store_as_a_file_through_the_binary() {
     let (code, out, err) = run(&["config", "0x01", "device.name", "rover-left"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
-        out.trim(),
+        out,
         // The line starts with the name the board had when the command found it.
-        "Hoverboard: device.name: \"Hoverboard\" (default) -> \"rover-left\""
+        "Hoverboard: device.name: \"Hoverboard\" (default) -> \"rover-left\"\n\
+         1 takes effect at the next boot\n"
     );
-    let (code, out, err) = run(&["config", "rover-left", "control.mode", "balance"]);
-    assert_eq!(code, Some(0), "{err}");
-    assert_eq!(
-        out.trim(),
-        "rover-left: control.mode: throttle (default) -> balance"
-    );
-    let (code, out, err) = run(&["config", "0x01", "0x4A.1", "PB5"]);
+    let (code, out, err) = run(&["config", "rover-left", "machine.mode", "balance"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
-        "rover-left: motors[1].hall.a: none (default) -> PB5\npin fields take effect at the next boot\n"
+        "rover-left: machine.mode: throttle (default) -> balance\n\
+         1 takes effect at the next arm\n"
     );
-    let (code, _, err) = run(&["config", "rover-lft", "control.mode", "balance"]);
+    let (code, out, err) = run(&["config", "0x01", "0x40.1", "PB5"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "rover-left: motors[1].hall.a: none (default) -> PB5\n1 takes effect at the next boot\n"
+    );
+    let (code, _, err) = run(&["config", "rover-lft", "machine.mode", "balance"]);
     assert_eq!(code, Some(1));
     assert!(
         err.contains("no node named rover-lft (nodes: rover-left, Hoverboard, hb-bridge-ab12)"),
@@ -367,7 +383,7 @@ fn a_boards_store_as_a_file_through_the_binary() {
         dumped,
         serde_json::json!({
             "device": { "name": "rover-left" },
-            "control": { "mode": "balance" },
+            "machine": { "mode": "balance" },
             "motors": [{}, { "hall": { "a": "PB5" } }],
         })
     );
@@ -376,14 +392,15 @@ fn a_boards_store_as_a_file_through_the_binary() {
     assert_eq!(out.trim(), "rover-left: 0 changed, 0 pinned, 3 unchanged");
 
     // A stray key: kept by a merge, un-stored by a replace.
-    let (code, _, err) = run(&["config", "rover-left", "control.frame", "rigid"]);
+    let (code, _, err) = run(&["config", "rover-left", "machine.frame", "rigid"]);
     assert_eq!(code, Some(0), "{err}");
     let (code, out, err) = run(&["diff", "--replace", "rover-left", &file]);
     assert_eq!(code, Some(1), "{err}");
     assert_eq!(
         out,
         "rover-left: 0 changed, 0 pinned, 3 unchanged, 1 un-stored\n\
-         rover-left: control.frame: rigid -> pivoting (default)\n"
+         rover-left: machine.frame: rigid -> pivoting (default)\n\
+         1 takes effect at the next arm\n"
     );
     // Without a terminal, replace refuses rather than asking; with --yes it un-stores.
     let (code, _, err) = run(&["replace", "rover-left", &file]);
@@ -397,7 +414,8 @@ fn a_boards_store_as_a_file_through_the_binary() {
     assert_eq!(
         out,
         "rover-left: 0 changed, 0 pinned, 3 unchanged, 1 un-stored\n\
-         rover-left: control.frame: rigid -> pivoting (default)\n"
+         rover-left: machine.frame: rigid -> pivoting (default)\n\
+         1 takes effect at the next arm\n"
     );
     let (code, out, err) = run(&["compact", "rover-left"]);
     assert_eq!(code, Some(0), "{err}");
@@ -405,21 +423,38 @@ fn a_boards_store_as_a_file_through_the_binary() {
     let (code, out, err) = run(&["diff", "--replace", "rover-left", &file]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-left: 0 changed, 0 pinned, 3 unchanged");
-    let (code, out, err) = run(&["config", "rover-left", "control.frame"]);
+    let (code, out, err) = run(&["config", "rover-left", "machine.frame"]);
     assert_eq!(code, Some(0), "{err}");
-    assert_eq!(out.trim(), "rover-left: control.frame = pivoting (default)");
+    assert_eq!(out.trim(), "rover-left: machine.frame = pivoting (default)");
 
     // apply merges: a file naming one changed key writes it and keeps the rest.
     let machine = scratch("machine.json");
-    std::fs::write(&machine, r#"{ "control": { "mode": "throttle" } }"#).unwrap();
+    std::fs::write(&machine, r#"{ "machine": { "mode": "throttle" } }"#).unwrap();
     let (code, out, err) = run(&["apply", "rover-left", &machine]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
         "rover-left: 1 changed, 0 pinned, 0 unchanged, 2 kept\n\
-         rover-left: control.mode: balance -> throttle\n\
+         rover-left: machine.mode: balance -> throttle\n\
          rover-left: kept: device.name = \"rover-left\" (stored, not in the file)\n\
-         rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n"
+         rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n\
+         1 takes effect at the next arm\n"
+    );
+    // A pin ends with where to see what the board made of it.
+    let links = scratch("links.json");
+    std::fs::write(&links, r#"{ "links": [{ "tx": "PA2", "rx": "PA3" }] }"#).unwrap();
+    let (code, out, err) = run(&["apply", "rover-left", &links]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "rover-left: 2 changed, 0 pinned, 0 unchanged, 3 kept\n\
+         rover-left: links[0].tx: none (default) -> PA2\n\
+         rover-left: links[0].rx: none (default) -> PA3\n\
+         rover-left: kept: device.name = \"rover-left\" (stored, not in the file)\n\
+         rover-left: kept: machine.mode = throttle (stored, not in the file)\n\
+         rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n\
+         2 take effect at the next boot\n\
+         check the boot report with \"status\" after the next boot\n"
     );
     server.join().unwrap();
 }
@@ -451,7 +486,8 @@ fn a_secret_through_the_binary_is_never_printed_and_diff_always_counts_it() {
         out,
         "Hoverboard: 2 changed, 0 pinned, 0 unchanged\n\
          Hoverboard: wifi.ssid: \"\" (default) -> \"bench\"\n\
-         Hoverboard: wifi.pass: (default) -> (set)\n"
+         Hoverboard: wifi.pass: (default) -> (set)\n\
+         2 take effect at the next boot\n"
     );
     assert!(!out.contains(PASS) && !err.contains(PASS), "{out}{err}");
 
@@ -460,7 +496,8 @@ fn a_secret_through_the_binary_is_never_printed_and_diff_always_counts_it() {
     assert_eq!(
         out,
         "Hoverboard: 1 changed, 0 pinned, 1 unchanged\n\
-         Hoverboard: wifi.pass: (set) -> (set)\n"
+         Hoverboard: wifi.pass: (set) -> (set)\n\
+         1 takes effect at the next boot\n"
     );
     assert!(!out.contains(PASS) && !err.contains(PASS), "{out}{err}");
 
@@ -526,20 +563,20 @@ fn an_address_needs_no_walk_and_a_name_does() {
         a.extend_from_slice(args);
         cli_code(&a)
     };
-    let (code, out, err) = run(&["config", "0x02", "control.mode"]);
+    let (code, out, err) = run(&["config", "0x02", "machine.mode"]);
     assert_eq!(code, Some(0), "{err}");
-    assert_eq!(out.trim(), "Hoverboard: control.mode = throttle (default)");
+    assert_eq!(out.trim(), "Hoverboard: machine.mode = throttle (default)");
     let (code, _, err) = run(&["config", "0x02", "device.name", "rover-right"]);
     assert_eq!(code, Some(0), "{err}");
     // The prefix is the name the read returns.
-    let (code, out, err) = run(&["config", "0x02", "control.mode"]);
+    let (code, out, err) = run(&["config", "0x02", "machine.mode"]);
     assert_eq!(code, Some(0), "{err}");
-    assert_eq!(out.trim(), "rover-right: control.mode = throttle (default)");
-    let (code, out, err) = run(&["config", "rover-right", "control.mode"]);
+    assert_eq!(out.trim(), "rover-right: machine.mode = throttle (default)");
+    let (code, out, err) = run(&["config", "rover-right", "machine.mode"]);
     assert_eq!(code, Some(0), "{err}");
-    assert_eq!(out.trim(), "rover-right: control.mode = throttle (default)");
+    assert_eq!(out.trim(), "rover-right: machine.mode = throttle (default)");
     // An address nothing answers: an error naming it, and no walk to fall back on.
-    let (code, _, err) = run(&["config", "0x05", "control.mode"]);
+    let (code, _, err) = run(&["config", "0x05", "machine.mode"]);
     assert_eq!(code, Some(1));
     assert!(
         err.contains(
@@ -639,40 +676,41 @@ fn over_a_boards_own_link_an_esp_command_finds_no_bridge() {
 }
 
 /// `status` and the `nodes` marker over a simulated machine whose master reports one entry of each
-/// reason in its `board.status` (`specs/configured-links.md` section 5) and whose slave reports
-/// none.
+/// reason in its boot report (`STATUS_READ`, `specs/configured-links.md` section 5) and whose
+/// slave reports none.
 #[test]
-fn status_reads_board_status_from_each_motor_controller() {
+fn status_reads_the_boot_report_from_each_motor_controller() {
     use board::status::Reason::*;
+    const LINK: u8 = store::LINK_TX.id();
     static ENTRIES: [u8; 28] = [
-        0x4A,
+        store::MOTOR_HALL_A.id(),
         0,
         NotAPin as u8,
         0x47, // hall: a byte that is no pin
-        0x56,
+        LINK,
         0,
         Incomplete as u8,
-        0x57, // link 0: rx unset
-        0x56,
+        store::LINK_RX.id(), // link 0: rx unset
+        LINK,
         1,
         NotRouted as u8,
         0x16, // link 1: no USART
-        0x43,
+        store::LED_GREEN.id(),
         0,
         SwdPin as u8,
-        0x0D, // led.green on SWDIO
-        0x4D,
+        0x0D, // leds.green on SWDIO
+        store::MOTOR_GATE_HI_A.id(),
         0,
         DeadTime as u8,
         10, // gate: dead time 10
-        0x48,
+        store::IMU_SCL_PIN.id(),
         0,
         NotUp as u8,
         0, // imu: no probe answer
-        0x65,
+        store::IMU_AXIS_SIGN.id(),
         0,
         ImuFrame as u8,
-        3, // imu: gyro triple refused
+        0, // imu: the sign triple refused
     ];
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
@@ -689,12 +727,12 @@ fn status_reads_board_status_from_each_motor_controller() {
         lines,
         [
             "Hoverboard: motors[0] hall: stored byte 0x47 is not a pin",
-            "Hoverboard: link[0]: incomplete, link.rx[0] is not set",
-            "Hoverboard: link[1]: no USART routes this pair on this chip",
-            "Hoverboard: led.green: PA13 is an SWD pin",
+            "Hoverboard: links[0]: incomplete, links[0].rx is not set",
+            "Hoverboard: links[1]: no USART routes this pair on this chip",
+            "Hoverboard: leds.green: PA13 is an SWD pin",
             "Hoverboard: motors[0] gate: dead time 10 is below the floor of 18",
             "Hoverboard: imu: the IMU did not answer its probe",
-            "Hoverboard: imu: the frame is not a rotation (imu.axis_sign from index 3)",
+            "Hoverboard: imu: imu.axis_sign is not a rotation",
             "Hoverboard: ok",
         ],
         "{out}"
@@ -713,6 +751,48 @@ fn status_reads_board_status_from_each_motor_controller() {
     );
     assert!(!rows[2].contains('!'), "{out}");
     server.join().unwrap();
+}
+
+/// `specs/machine-settings.md` section 6.1: the walk asks every address it found for its
+/// `IDENTITY` and keeps it with the node.
+#[test]
+fn the_walk_records_each_nodes_identity() {
+    use hoverboard_cli::nodes::{self, Identity};
+    use net::walk::{CLASS_BRIDGE, CLASS_MOTOR, MCU_ESP32C3, MCU_F1X0};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || serve(listener, 1));
+    let found = {
+        let sock = std::net::TcpStream::connect(at).unwrap();
+        let mut wire = hoverboard_cli::wire::Framed::new(Sock(sock));
+        let walked = nodes::walk(&mut wire).unwrap();
+        nodes::survey(&mut wire, &walked)
+    };
+    server.join().unwrap();
+    let board = |uid: u8| Identity {
+        class: CLASS_MOTOR,
+        mcu: MCU_F1X0,
+        fw_ver: 0x0001,
+        uid: [uid; 12],
+    };
+    let got: Vec<(u8, Option<Identity>)> = found.iter().map(|f| (f.addr, f.identity)).collect();
+    assert_eq!(
+        got,
+        [
+            (0x01, Some(board(0x01))),
+            (0x02, Some(board(0x02))),
+            (
+                0x03,
+                Some(Identity {
+                    class: CLASS_BRIDGE,
+                    mcu: MCU_ESP32C3,
+                    fw_ver: 0x0001,
+                    uid: [0, 0, 0, 0, 0xAB, 0x12, 0, 0, 0, 0, 0, 0],
+                })
+            ),
+        ]
+    );
+    assert_eq!(found[2].class(), Some(CLASS_BRIDGE));
 }
 
 #[test]

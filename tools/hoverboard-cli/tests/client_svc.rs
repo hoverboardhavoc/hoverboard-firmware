@@ -53,6 +53,7 @@ impl Esp {
                 store::Store::mount(flash).unwrap(),
                 true,
                 0x0001,
+                hoverboard_bridge_core::sim::SIM_MAC,
                 &hoverboard_bridge_core::sim::SIM_NAME,
             ),
             port: MailboxPort::new(board(family, Inject::default(), 5)),

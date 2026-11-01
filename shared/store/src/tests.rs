@@ -10,7 +10,7 @@ use std::vec::Vec;
 
 use base::error::FlashError;
 
-use crate::field::{BlobField, Field, DEVICE_NAME, MOTOR_CURRENT_LIMIT, MOTOR_METHOD, SOME_BLOB};
+use crate::field::{BlobField, Field, DEVICE_NAME, MOTOR_CURRENT_LIMIT, MOTOR_METHOD};
 #[cfg(feature = "test-fields")]
 use crate::field::{T_KEY, T_VAL};
 use crate::flash::{FailingMockFlash, Flash, MockFlash};
@@ -21,6 +21,9 @@ use crate::run;
 use crate::store::{Store, StoreError, Stored, COMPACT_CHUNK};
 
 const PS: usize = 1024;
+/// A blob handle for the typed path, which writes and reads by handle and never consults the
+/// registry, so it needs no registered field.
+const SOME_BLOB: BlobField = BlobField::new(0x30, &[]);
 const PAGE_HEADER_LEN: usize = 8;
 
 // A small region builder for the planted (host-crafted) scenarios. It mirrors the on-flash layout so
@@ -904,25 +907,6 @@ mod dynamic {
     }
 
     #[test]
-    fn a_read_only_field_is_refused_and_reads_its_default() {
-        let mut fresh = MockFlash::erased(PS);
-        Store::mount(&mut fresh).unwrap();
-        let mut f = MockFlash::erased(PS);
-        {
-            let mut s = Store::mount(&mut f).unwrap();
-            let key = crate::field::NODE_CLASS.key();
-            assert_eq!(s.get_value(key).unwrap(), (Value::U8(0x01), Stored::No));
-            // Refused whatever the value, including a wrong-typed one: read-only is checked first.
-            assert_eq!(s.set_value(key, Value::U8(0x02)), Err(DynError::ReadOnly));
-            assert_eq!(s.set_value(key, Value::U16(2)), Err(DynError::ReadOnly));
-            assert_eq!(s.erase_value(key), Err(DynError::ReadOnly));
-            assert_eq!(s.get_value(key).unwrap(), (Value::U8(0x01), Stored::No));
-        }
-        // Nothing was appended: the region is byte for byte a freshly mounted one.
-        assert_eq!(f.as_bytes(), fresh.as_bytes());
-    }
-
-    #[test]
     fn unknown_key_is_rejected_on_both_get_and_set() {
         let mut f = MockFlash::erased(PS);
         let mut s = Store::mount(&mut f).unwrap();
@@ -966,8 +950,8 @@ mod dynamic {
         };
         assert_eq!(CONTROL_SF_GAINS.id(), control::SF_GAINS_FIELD);
         assert_eq!(CONTROL_REFERENCE.id(), control::REFERENCE_FIELD);
-        assert_eq!(CONTROL_GAIN_MAX.id(), 0x7A);
-        assert_eq!(CONTROL_POS_CLAMP.id(), 0x7C);
+        assert_eq!(CONTROL_GAIN_MAX.id(), 0x28);
+        assert_eq!(CONTROL_POS_CLAMP.id(), 0x2A);
         assert_eq!(CONTROL_SF_GAINS.len(), control::config::sf::GAINS);
         assert_eq!(CONTROL_GAIN_MAX.len(), control::config::sf::GAINS);
         assert_eq!(
@@ -1081,10 +1065,7 @@ mod dynamic {
     fn the_imu_frame_fields_round_trip_into_the_staged_config() {
         use crate::field::{IMU_AXIS_ROLE, IMU_AXIS_SIGN, IMU_GYRO_BIAS};
         let read = |s: &Store<'_, MockFlash>| {
-            let mut sign = [0i32; 6];
-            for (i, v) in sign.iter_mut().enumerate() {
-                *v = s.get(IMU_AXIS_SIGN.at(i as u8));
-            }
+            let sign = [0u8, 1, 2].map(|i| s.get(IMU_AXIS_SIGN.at(i)));
             let bias = [0u8, 1, 2].map(|i| s.get(IMU_GYRO_BIAS.at(i)));
             let roles = [0u8, 1].map(|i| s.get(IMU_AXIS_ROLE.at(i)));
             imu::Config::staged(sign, bias, roles)
@@ -1096,19 +1077,19 @@ mod dynamic {
 
         let mut f = MockFlash::erased(PS);
         let mut s = Store::mount(&mut f).unwrap();
-        assert_eq!(IMU_AXIS_ROLE.id(), 0x68);
+        assert_eq!(IMU_AXIS_ROLE.id(), 0x16);
         // Nothing staged: the compiled frame, the identity roles.
         let unstaged = read(&s).unwrap();
         assert_eq!(unstaged.roles, imu::DEFAULT_ROLES);
         assert_eq!(unstaged.sign, imu::Config::default().sign);
 
         // Stage an on-edge frame: all-positive signs (a cyclic permutation needs product +1).
-        for i in 0..6 {
-            s.set_value(key(0x65, i), Value::I32(1)).unwrap();
+        for i in 0..3 {
+            s.set_value(key(0x15, i), Value::I32(1)).unwrap();
         }
-        s.set_value(key(0x61, 0), Value::I32(5)).unwrap();
-        s.set_value(key(0x68, 0), Value::U8(1)).unwrap();
-        s.set_value(key(0x68, 1), Value::U8(3)).unwrap();
+        s.set_value(key(0x14, 0), Value::I32(5)).unwrap();
+        s.set_value(key(0x16, 0), Value::U8(1)).unwrap();
+        s.set_value(key(0x16, 1), Value::U8(3)).unwrap();
         let cfg = read(&s).unwrap();
         assert_eq!(cfg.roles, [1, 3]);
         assert_eq!(cfg.sign, [1; 6]);
@@ -1125,7 +1106,7 @@ mod dynamic {
         );
 
         // A repeated role is refused, not staged.
-        s.set_value(key(0x68, 1), Value::U8(1)).unwrap();
+        s.set_value(key(0x16, 1), Value::U8(1)).unwrap();
         assert_eq!(read(&s).unwrap_err(), imu::FrameError::Roles);
     }
 
@@ -1137,7 +1118,7 @@ mod dynamic {
     #[test]
     fn the_rider_requirement_round_trips_from_the_store_into_the_control_dispatch() {
         use crate::field::CONTROL_RIDER_REQUIRED;
-        assert_eq!(CONTROL_RIDER_REQUIRED.id(), 0x23);
+        assert_eq!(CONTROL_RIDER_REQUIRED.id(), 0x22);
         let mut f = MockFlash::erased(PS);
         {
             let s = Store::mount(&mut f).unwrap();
@@ -1189,7 +1170,7 @@ mod dynamic {
     #[test]
     fn the_frame_round_trips_from_the_store_into_the_control_dispatch() {
         use crate::field::{BOARD_BATTERY_FLOOR, CONTROL_FRAME, CONTROL_RIDER_REQUIRED};
-        assert_eq!(CONTROL_FRAME.id(), 0x25);
+        assert_eq!(CONTROL_FRAME.id(), 0x21);
         let mut f = MockFlash::erased(PS);
         {
             let s = Store::mount(&mut f).unwrap();
@@ -1244,8 +1225,8 @@ mod dynamic {
     #[test]
     fn the_side_and_the_turn_round_trip_from_the_store() {
         use crate::field::{CONTROL_DRIVE_TURN, CONTROL_SIDE};
-        assert_eq!(CONTROL_SIDE.id(), 0x26);
-        assert_eq!(CONTROL_DRIVE_TURN.id(), 0x75);
+        assert_eq!(CONTROL_SIDE.id(), 0x50);
+        assert_eq!(CONTROL_DRIVE_TURN.id(), 0x2B);
         let mut f = MockFlash::erased(PS);
         {
             let s = Store::mount(&mut f).unwrap();
@@ -1293,7 +1274,7 @@ mod dynamic {
     #[test]
     fn the_battery_floor_round_trips_from_the_store_into_the_control_dispatch() {
         use crate::field::{BOARD_BATTERY_FLOOR, CONTROL_RIDER_REQUIRED};
-        assert_eq!(BOARD_BATTERY_FLOOR.id(), 0x24);
+        assert_eq!(BOARD_BATTERY_FLOOR.id(), 0x26);
         let mut f = MockFlash::erased(PS);
         {
             let s = Store::mount(&mut f).unwrap();
@@ -1794,5 +1775,135 @@ mod tombstone {
             s.erase_value(MOTOR_METHOD.key()).unwrap();
         }
         assert_eq!(f.as_bytes(), &once[..], "already a tombstone");
+    }
+}
+
+/// The digests (`specs/machine-settings.md` section 4.1 and section 9, test 2).
+mod digest {
+    use super::*;
+    use crate::field::{
+        Effect, Scope, BOARD_SELF_HOLD, CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_MODE,
+        CONTROL_SF_GAINS, CONTROL_SIDE, MOTOR_DIRECTION, MOTOR_ODOMETER, NODE_ADDRESS, REGISTRY,
+    };
+    use crate::value::Value;
+    use base::crc16::Crc16;
+
+    fn with(stage: impl FnOnce(&mut Store<MockFlash>)) -> MockFlash {
+        let mut f = MockFlash::erased(PS);
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            stage(&mut s);
+        }
+        f
+    }
+
+    fn machine(f: &mut MockFlash) -> u16 {
+        Store::mount(f).unwrap().machine_digest()
+    }
+
+    /// An empty store's machine digest is the CRC of every machine row's key, tag and DEFAULT, in
+    /// registry order: defaults are in it, so two images whose defaults differ disagree.
+    #[test]
+    fn an_empty_store_digests_the_defaults_of_every_machine_row() {
+        let mut crc = Crc16::new();
+        let mut rows = 0;
+        for r in REGISTRY
+            .iter()
+            .filter(|r| Scope::of(r.field_id) == Some(Scope::Machine))
+        {
+            let d = r.def();
+            crc.update(&[r.field_id, r.index, d.kind.tag()]);
+            let mut b = [0u8; 8];
+            let n = d.default.encode(&mut b);
+            crc.update(&b[..n]);
+            rows += 1;
+        }
+        assert_eq!(rows, 20, "the machine block's rows, every index");
+        assert_eq!(machine(&mut MockFlash::erased(PS)), crc.finish());
+    }
+
+    #[test]
+    fn it_is_deterministic_and_reads_the_effective_value() {
+        let empty = machine(&mut MockFlash::erased(PS));
+        assert_eq!(empty, machine(&mut MockFlash::erased(PS)));
+        // Storing the default is the same effective value.
+        let mut f = with(|s| s.set(CONTROL_MODE, 0).unwrap());
+        assert_eq!(machine(&mut f), empty);
+        // Log order does not matter, only the newest value of each key.
+        let mut a = with(|s| {
+            s.set(CONTROL_MODE, 1).unwrap();
+            s.set(CONTROL_FRAME, 1).unwrap();
+        });
+        let mut b = with(|s| {
+            s.set(CONTROL_FRAME, 0).unwrap();
+            s.set(CONTROL_FRAME, 1).unwrap();
+            s.set(CONTROL_MODE, 1).unwrap();
+        });
+        assert_eq!(machine(&mut a), machine(&mut b));
+        // An un-stored key reads its default again.
+        let mut c = with(|s| {
+            s.set(CONTROL_MODE, 1).unwrap();
+            s.erase_value(CONTROL_MODE.key()).unwrap();
+        });
+        assert_eq!(machine(&mut c), empty);
+    }
+
+    #[test]
+    fn any_machine_value_or_index_changes_it() {
+        let empty = machine(&mut MockFlash::erased(PS));
+        let mut seen = std::vec::Vec::new();
+        for (key, v) in [
+            (CONTROL_MODE.key(), Value::U8(1)),
+            (CONTROL_FRAME.key(), Value::U8(1)),
+            (CONTROL_SF_GAINS.at(0).key(), Value::I16(7)),
+            (CONTROL_SF_GAINS.at(3).key(), Value::I16(7)),
+            (CONTROL_DRIVE_TURN.at(1).key(), Value::I16(7)),
+        ] {
+            let d = machine(&mut with(|s| s.set_value(key, v).unwrap()));
+            assert_ne!(d, empty, "{key:?}");
+            assert!(!seen.contains(&d), "{key:?} collides");
+            seen.push(d);
+        }
+    }
+
+    #[test]
+    fn node_and_wheel_fields_do_not_change_it() {
+        let empty = machine(&mut MockFlash::erased(PS));
+        let mut f = with(|s| {
+            s.set(BOARD_SELF_HOLD, 0x20).unwrap();
+            s.set(CONTROL_SIDE, 1).unwrap();
+            s.set(MOTOR_DIRECTION.at(1), 1).unwrap();
+            s.set_str(DEVICE_NAME, "rover-left").unwrap();
+        });
+        assert_eq!(machine(&mut f), empty);
+    }
+
+    /// The effect digests cover their class and nothing else, and leave the board-owned keys out.
+    #[test]
+    fn an_effect_digest_moves_only_with_its_class() {
+        let digests = |f: &mut MockFlash| {
+            let s = Store::mount(f).unwrap();
+            (
+                s.effect_digest(Effect::Arm),
+                s.effect_digest(Effect::Boot),
+                s.effect_digest(Effect::Live),
+            )
+        };
+        let (arm, boot, live) = digests(&mut MockFlash::erased(PS));
+        let (a, b, l) = digests(&mut with(|s| s.set(CONTROL_DRIVE_TURN.at(0), 9).unwrap()));
+        assert_eq!((a != arm, b, l), (true, boot, live));
+        let (a, b, l) = digests(&mut with(|s| s.set(BOARD_SELF_HOLD, 0x20).unwrap()));
+        assert_eq!((a, b != boot, l), (arm, true, live));
+        let (a, b, l) = digests(&mut with(|s| s.set(CONTROL_SF_GAINS.at(1), 9).unwrap()));
+        assert_eq!((a, b, l != live), (arm, boot, true));
+        let (a, b, l) = digests(&mut with(|s| {
+            s.set(NODE_ADDRESS, 3).unwrap();
+            s.set(MOTOR_ODOMETER, 1234).unwrap();
+        }));
+        assert_eq!(
+            (a, b, l),
+            (arm, boot, live),
+            "board-owned keys are left out"
+        );
     }
 }
