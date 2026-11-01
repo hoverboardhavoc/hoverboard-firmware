@@ -22,6 +22,7 @@ compile_error!("hal: enable exactly one chip feature (gd32f103c8, gd32f130c8 or 
 ))]
 compile_error!("hal: more than one chip feature is enabled; enable exactly one");
 
+pub mod adc;
 pub mod addr;
 #[cfg(hal_gpio = "crl")]
 mod afio;
@@ -35,7 +36,11 @@ pub mod gpio;
 pub mod irq;
 pub mod pincap;
 pub mod reg;
+pub mod timer;
 
+#[cfg(hal_adc = "f10x")]
+pub use adc::DualAdc;
+pub use adc::{Adc, InjectedAdcController, InjectedHandle, TriggeredAdc};
 pub use addr::{AddrTable, PeriphLabel};
 pub use chip::{Chip, ClockPath, IrqLayout};
 pub use clock::{clear_reset_cause, reset_cause_flags, ClockConfig};
@@ -49,3 +54,4 @@ pub use gpio::{Floating, Input, InputGroup, Output, Pin, PullDown, PullUp, PushP
 /// the attribute itself, so an image writes `use hal::interrupt;` and `#[interrupt] fn ADC0_1()`.
 pub use irq::Interrupt as interrupt;
 pub use irq::Interrupt;
+pub use timer::{ArmGate, PwmHandle, PwmTimer};

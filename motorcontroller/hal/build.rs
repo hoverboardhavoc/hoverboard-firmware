@@ -235,6 +235,11 @@ const MODEL_CFGS: &[(&str, &[&str])] = &[
     // The F10x USART (one DATA register) and the F1x0 USART (separate RDATA/TDATA, the ISR/ICR
     // style status).
     ("hal_usart", &["f10x", "f1x0"]),
+    // The F10x ADC carries the ADC0/ADC1 sync mode (`CTL0.SYNCM`, bits 19:16, used on ADC0 only)
+    // and the second instance it pairs with; the F1x0 ADC has one instance and no SYNCM field
+    // (gd32f10x_adc.h, gd32f1x0_adc.h). Every other ADC register and bit the HAL programs is the
+    // same on both, so the regular and injected groups are one model.
+    ("hal_adc", &["f10x", "f1x0"]),
     // The vendor vector list the chip links.
     ("hal_vectors", &["f10x_md", "f10x_hd", "f1x0"]),
 ];
@@ -246,6 +251,7 @@ const CHIPS: &[ChipRow] = &[
             ("hal_gpio", "crl"),
             ("hal_clock", "f10x"),
             ("hal_usart", "f10x"),
+            ("hal_adc", "f10x"),
             ("hal_vectors", "f10x_md"),
         ],
         vectors: F10X_MD,
@@ -256,6 +262,7 @@ const CHIPS: &[ChipRow] = &[
             ("hal_gpio", "crl"),
             ("hal_clock", "f10x"),
             ("hal_usart", "f10x"),
+            ("hal_adc", "f10x"),
             ("hal_vectors", "f10x_hd"),
         ],
         vectors: F10X_HD,
@@ -266,6 +273,7 @@ const CHIPS: &[ChipRow] = &[
             ("hal_gpio", "ctl"),
             ("hal_clock", "f1x0"),
             ("hal_usart", "f1x0"),
+            ("hal_adc", "f1x0"),
             ("hal_vectors", "f1x0"),
         ],
         vectors: F1X0,
