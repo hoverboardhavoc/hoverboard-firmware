@@ -784,16 +784,24 @@ fn the_binary_flashes_the_image_a_bundle_holds_for_the_chip() {
         let limit = Duration::from_secs(60);
 
         // No terminal and no --yes: chosen and checked, then refused before anything is streamed.
-        let (ok, out, err) = cli(&[&tcp, "board", "flash", "0x01", &path], limit);
+        let (ok, out, err) = cli(&[&tcp, "board", "update", "0x01", &path], limit);
         assert!(!ok, "{out}");
         assert!(err.contains("give --yes"), "{err}");
         let line = format!(
-            "image mainboard-gd32 (mainboard) for the chip ({name} 64 KiB), from the bundle built \
-             from commit c0eb25917cd904d5d9ba9307f56cb8251cbb61dd"
+            "image mainboard-gd32 for the chip ({name} 64 KiB), from the bundle built from commit \
+             c0eb25917cd904d5d9ba9307f56cb8251cbb61dd"
         );
         assert!(out.contains(&line), "{out}");
 
-        let (ok, out, err) = cli(&[&tcp, "board", "flash", "0x01", &path, "--yes"], limit);
+        // board flash takes only an ELF: the bundle is refused, pointing at board update.
+        let (ok, _, err) = cli(&[&tcp, "board", "flash", "0x01", &path], limit);
+        assert!(!ok);
+        assert!(
+            err.contains("`board update` installs from a bundle"),
+            "{err}"
+        );
+
+        let (ok, out, err) = cli(&[&tcp, "board", "update", "0x01", &path, "--yes"], limit);
         assert!(ok, "{err}");
         assert!(err.contains("SHA-256 checked"), "{err}");
         assert!(out.starts_with(&line), "{out}");
@@ -827,12 +835,12 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
         std::thread::spawn(move || serve_machine_with(listener, vec![0xFFFF; 1024], 2, prep));
     let tcp = format!("--tcp={addr}");
     let limit = Duration::from_secs(30);
-    let (ok, _, err) = cli(&[&tcp, "board", "flash", "0x01", &path, "--yes"], limit);
+    let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &path, "--yes"], limit);
     assert!(!ok);
     assert!(err.contains("would refuse a gd32f1x0 32 KiB part"), "{err}");
     // The chip is not the image's: refused naming both.
     let other = bundle_file("bundle-64k.hbfw", &common::flashable_elf(&img), None);
-    let (ok, _, err) = cli(&[&tcp, "board", "flash", "0x01", &other, "--yes"], limit);
+    let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &other, "--yes"], limit);
     assert!(!ok);
     assert!(
         err.contains("no image in the bundle is for the chip (gd32f1x0 32 KiB)"),
@@ -854,28 +862,29 @@ fn firmware_info_prints_the_manifest_and_reads_no_board() {
     assert_eq!(
         out,
         "commit  c0eb25917cd904d5d9ba9307f56cb8251cbb61dd\nbuilt   2026-11-01T17:03:58Z\n\
-         image   mainboard-gd32 (mainboard): gd32f10x 64 KiB, gd32f1x0 64 KiB; 40000 B flashed\n"
+         image   mainboard-gd32 (board): gd32f10x 64 KiB, gd32f1x0 64 KiB; 40000 B flashed\n"
     );
     let elf_path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("info.elf");
     std::fs::write(&elf_path, &elf).unwrap();
     let (ok, _, err) = cli(&["firmware", "info", elf_path.to_str().unwrap()], limit);
     assert!(!ok && err.contains("not a firmware bundle"), "{err}");
-    // --image belongs to flash, and an ELF has no images to choose from.
+    // --image belongs to board update, and an ELF has no images to choose from.
     let (ok, _, err) = cli(&["firmware", "info", &path, "--image", "x"], limit);
     assert!(!ok && err.contains("--image"), "{err}");
     let (ok, _, err) = cli(
         &[
             "--tcp=127.0.0.1:1",
             "board",
-            "flash",
+            "update",
             "0x01",
             elf_path.to_str().unwrap(),
-            "--image",
-            "x",
         ],
         limit,
     );
-    assert!(!ok && err.contains("is an ELF"), "{err}");
+    assert!(
+        !ok && err.contains("is an ELF: `board flash` takes an ELF"),
+        "{err}"
+    );
 }
 
 #[test]

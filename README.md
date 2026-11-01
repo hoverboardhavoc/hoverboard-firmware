@@ -152,8 +152,9 @@ Configuration lives on the board, not in the build:
 
 CI builds the motor-controller images on every push to `main` and packs them into one firmware
 bundle (`firmware-<commit>.hbfw`, `specs/firmware-bundle.md`), so you can flash without a local
-toolchain. `hoverboard-cli flash <bundle>` reads the chip on the board and flashes the image built
-for it; `hoverboard-cli firmware info <bundle>` lists what the bundle holds. Only the universal
+toolchain. `hoverboard-cli board update <board> <bundle>` reads the chip on the board and flashes
+the image built for it; `hoverboard-cli board flash <board> <elf>` flashes a development ELF as it
+is; `hoverboard-cli firmware info <bundle>` lists what the bundle holds. Only the universal
 image exists so far, so the bundle holds one image, for both GD32 families at 64 KiB.
 
 - **Latest `main` build** (no login): [download `firmware-bundle.zip`](https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware-bundle.zip)

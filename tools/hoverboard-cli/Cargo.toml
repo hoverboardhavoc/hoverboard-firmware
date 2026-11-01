@@ -47,9 +47,9 @@ ctrlc = "3"
 # A board's store as a JSON file (`board dump`, `apply`, `replace`, `diff`, `board fields --json`), in the order
 # a file gives its keys and the name table gives its fields.
 serde_json = { version = "1", features = ["preserve_order"] }
-# The firmware bundle (specs/firmware-bundle.md): a zip of the image ELFs and a manifest. Stored
-# entries only, so no compression backend; the image crate's Cargo.toml table is read with toml.
-zip = { version = "9", default-features = false }
+# The firmware bundle (specs/firmware-bundle.md): a zip of the image ELFs and a manifest, deflated
+# (section 3), so the `deflate` backend; the image crate's Cargo.toml table is read with toml.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 # The flash sizes the bridge flashes (`SUPPORTED_KIB`), so a bundle match the bridge would refuse

@@ -6,8 +6,8 @@
 #   - tools/flash.sh, the flash-time guard, which refuses to program an image that fails them;
 #   - .github/workflows/ci.yml, the build-time guard on the real release ELF;
 #   - `hoverboard-cli firmware pack` (tools/hoverboard-cli/src/elf.rs, `guards_for`), which copies
-#     an image's guards into the bundle manifest, so `flash` from a bundle checks the image against
-#     them (specs/firmware-bundle.md section 3.2);
+#     an image's guards into the bundle manifest, so `board update` checks the image against them
+#     (specs/firmware-bundle.md section 3.3);
 #   - tools/tests/flash-guard-harness.sh, which builds its fabricated images FROM these names, so
 #     the harness cannot rot behind a list it does not know about.
 #

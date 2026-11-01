@@ -1,14 +1,14 @@
-//! The firmware bundle (`specs/firmware-bundle.md` section 6, host tests): the manifest, the
-//! selection against a `TargetId`, the SHA-256 check, bundle-or-ELF detection, the guards taken
-//! from the manifest, and the packer.
+//! The firmware bundle (`specs/firmware-bundle.md` section 6, host tests): the manifest and the
+//! name form, the selection against a `TargetId`, the SHA-256 check, bundle-or-ELF detection, the
+//! guards taken from the manifest, and the packer.
 
 mod common;
 
 use common::{names_of, release_guards, Fixture};
 use espsvc::{TargetId, FAMILY_F10X, FAMILY_F1X0};
 use hoverboard_cli::bundle::{
-    self, image_table, kind, pack, Bundle, BundleError, Family, Image, ImageTable, Kind, Manifest,
-    PackEntry, Role, SelectError, Target, TreeEntry,
+    self, check_name, file_kind, image_table, pack, Bundle, BundleError, Family, FileKind, Image,
+    ImageKind, ImageTable, Manifest, PackEntry, SelectError, Target, TreeEntry,
 };
 use hoverboard_cli::elf::{self, ElfError, Guards};
 use sha2::{Digest, Sha256};
@@ -61,11 +61,11 @@ fn small() -> (Guards, Vec<u8>) {
     (g, elf)
 }
 
-fn image(name: &str, role: Role, targets: &[Target], guards: &Guards, elf: &[u8]) -> Image {
+fn image(name: &str, targets: &[Target], guards: &Guards, elf: &[u8]) -> Image {
     Image {
         name: name.into(),
+        kind: ImageKind::Board,
         file: format!("{name}.elf"),
-        role,
         targets: targets.to_vec(),
         guards: guards.clone(),
         sha256: sha(elf),
@@ -92,8 +92,8 @@ fn manifest_text(edit: impl Fn(String) -> String) -> String {
   "images": [
     {
       "name": "mainboard-gd32",
+      "kind": "board",
       "file": "mainboard-gd32.elf",
-      "role": "mainboard",
       "targets": [
         { "family": "gd32f10x", "flash_kib": 64 },
         { "family": "gd32f1x0", "flash_kib": 64 }
@@ -118,7 +118,7 @@ fn the_manifest_parses() {
     let i = &m.images[0];
     assert_eq!(i.name, "mainboard-gd32");
     assert_eq!(i.file, "mainboard-gd32.elf");
-    assert_eq!(i.role, Role::Mainboard);
+    assert_eq!(i.kind, ImageKind::Board);
     assert_eq!(i.targets, vec![F10X_64, F1X0_64]);
     assert_eq!(i.guards.code_floor, 40_000);
     assert_eq!(i.guards.hot_symbols, Some(vec!["9run_shell".to_string()]));
@@ -134,8 +134,10 @@ fn the_manifest_parses() {
 fn a_malformed_manifest_is_refused() {
     let edits: &[(&str, &str)] = &[
         ("\"commit\"", "\"version\": 1, \"commit\""), // an unknown key
-        ("\"role\": \"mainboard\",", ""),             // a missing key
-        ("\"mainboard\"", "\"controller\""),          // an unknown role
+        ("\"kind\": \"board\",", ""),                 // a missing key
+        ("\"board\"", "\"controller\""),              // an unknown kind
+        ("\"mainboard-gd32\",", "\"controller-gd32\","), // a name of no role
+        ("\"mainboard-gd32\",", "\"mainboard_gd32\","), // not <role>-<chip>
         ("\"gd32f10x\"", "\"gd32f30x\""),             // an unknown family
         ("\"flash_kib\": 64 }\n", "\"flash_kib\": -1 }\n"), // not a size
         ("eaafb89d", "eaafb89"),                      // not 64 hex digits
@@ -169,32 +171,20 @@ fn a_malformed_manifest_is_refused() {
 fn a_bundle_is_told_from_an_elf_by_its_content() {
     let elf = release_elf();
     let z = bundle_of(vec![(
-        image(
-            "mainboard-gd32",
-            Role::Mainboard,
-            &[F1X0_64],
-            &release_guards(),
-            &elf,
-        ),
+        image("mainboard-gd32", &[F1X0_64], &release_guards(), &elf),
         elf.clone(),
     )]);
-    assert_eq!(kind(&z), Ok(Kind::Bundle));
-    assert_eq!(kind(&elf), Ok(Kind::Elf));
-    assert!(kind(b"\xe9\x03\x02\x20 an ESP image").is_err());
-    assert!(kind(b"").is_err());
+    assert_eq!(file_kind(&z), Ok(FileKind::Bundle));
+    assert_eq!(file_kind(&elf), Ok(FileKind::Elf));
+    assert!(file_kind(b"\xe9\x03\x02\x20 an ESP image").is_err());
+    assert!(file_kind(b"").is_err());
 }
 
 #[test]
 fn a_sha256_mismatch_is_refused_before_the_elf_is_parsed() {
     // Not an ELF at all: a parse would fail, so a refusal naming the SHA-256 came first.
     let junk = vec![0xA5u8; 64];
-    let mut img = image(
-        "mainboard-gd32",
-        Role::Mainboard,
-        &[F1X0_64],
-        &release_guards(),
-        &junk,
-    );
+    let mut img = image("mainboard-gd32", &[F1X0_64], &release_guards(), &junk);
     img.sha256 = sha(b"what the packer stored");
     let z = bundle_of(vec![(img, junk)]);
     assert_eq!(
@@ -206,7 +196,7 @@ fn a_sha256_mismatch_is_refused_before_the_elf_is_parsed() {
 #[test]
 fn a_file_the_manifest_lists_must_be_in_the_archive() {
     let elf = release_elf();
-    let img = image("a", Role::Mainboard, &[F1X0_64], &release_guards(), &elf);
+    let img = image("mainboard-a", &[F1X0_64], &release_guards(), &elf);
     let m = Manifest {
         commit: "c".into(),
         built: "b".into(),
@@ -224,7 +214,7 @@ fn a_file_the_manifest_lists_must_be_in_the_archive() {
     let z = w.finish().unwrap().into_inner();
     assert_eq!(
         Bundle::open(&z).unwrap_err(),
-        BundleError::Missing("a.elf".into())
+        BundleError::Missing("mainboard-a.elf".into())
     );
     assert!(matches!(
         Bundle::open(b"PK\x03\x04 truncated"),
@@ -242,7 +232,6 @@ fn three() -> Bundle {
         (
             image(
                 "mainboard-gd32",
-                Role::Mainboard,
                 &[F10X_64, F1X0_64],
                 &release_guards(),
                 &elf,
@@ -250,11 +239,11 @@ fn three() -> Bundle {
             elf.clone(),
         ),
         (
-            image("mainboard-f130c6", Role::Mainboard, &[f130_32], &sg, &selfm),
+            image("mainboard-gd32f130c6", &[f130_32], &sg, &selfm),
             selfm.clone(),
         ),
         (
-            image("sideboard-f130c6", Role::Sideboard, &[f130_32], &sg, &selfm),
+            image("sideboard-gd32f130c6", &[f130_32], &sg, &selfm),
             selfm,
         ),
     ]))
@@ -275,8 +264,8 @@ fn selection_takes_the_one_image_for_the_chip() {
     let line = bundle::choice_line(&b.manifest, &b.manifest.images[0], F1X0_64);
     assert_eq!(
         line,
-        "image mainboard-gd32 (mainboard) for the chip (gd32f1x0 64 KiB), from the bundle built \
-         from commit c0eb25917cd904d5d9ba9307f56cb8251cbb61dd"
+        "image mainboard-gd32 for the chip (gd32f1x0 64 KiB), from the bundle built from commit \
+         c0eb25917cd904d5d9ba9307f56cb8251cbb61dd"
     );
 }
 
@@ -290,8 +279,8 @@ fn selection_with_no_match_names_the_chip_and_every_image() {
             chip: t(Family::Gd32f10x, 128),
             images: vec![
                 ("mainboard-gd32".into(), vec![F10X_64, F1X0_64]),
-                ("mainboard-f130c6".into(), vec![t(Family::Gd32f1x0, 32)]),
-                ("sideboard-f130c6".into(), vec![t(Family::Gd32f1x0, 32)]),
+                ("mainboard-gd32f130c6".into(), vec![t(Family::Gd32f1x0, 32)]),
+                ("sideboard-gd32f130c6".into(), vec![t(Family::Gd32f1x0, 32)]),
             ],
         }
     );
@@ -308,7 +297,7 @@ fn selection_with_no_match_names_the_chip_and_every_image() {
 }
 
 #[test]
-fn several_matches_need_image_and_list_their_roles() {
+fn several_matches_need_image_and_list_them() {
     let b = three();
     let c = chip(FAMILY_F1X0, 32);
     let e = b.select(&c, None).unwrap_err();
@@ -316,34 +305,28 @@ fn several_matches_need_image_and_list_their_roles() {
         e,
         SelectError::Several {
             chip: t(Family::Gd32f1x0, 32),
-            images: vec![
-                ("mainboard-f130c6".into(), Role::Mainboard),
-                ("sideboard-f130c6".into(), Role::Sideboard),
-            ],
+            images: vec!["mainboard-gd32f130c6".into(), "sideboard-gd32f130c6".into(),],
         }
     );
-    assert!(
-        e.to_string().contains("sideboard-f130c6 (sideboard)"),
-        "{e}"
-    );
+    assert!(e.to_string().contains("\n  sideboard-gd32f130c6"), "{e}");
 }
 
 #[test]
 fn image_cannot_override_the_match() {
     let b = three();
     assert_eq!(
-        b.select(&chip(FAMILY_F1X0, 64), Some("sideboard-f130c6"))
+        b.select(&chip(FAMILY_F1X0, 64), Some("sideboard-gd32f130c6"))
             .unwrap_err(),
         SelectError::NotForChip {
-            name: "sideboard-f130c6".into(),
+            name: "sideboard-gd32f130c6".into(),
             chip: F1X0_64,
             targets: vec![t(Family::Gd32f1x0, 32)],
         }
     );
     assert_eq!(
-        b.select(&chip(FAMILY_F1X0, 64), Some("mainboard-f103"))
+        b.select(&chip(FAMILY_F1X0, 64), Some("mainboard-gd32f103c8"))
             .unwrap_err(),
-        SelectError::NotInBundle("mainboard-f103".into())
+        SelectError::NotInBundle("mainboard-gd32f103c8".into())
     );
 }
 
@@ -352,12 +335,12 @@ fn a_match_the_bridge_would_refuse_is_refused_naming_the_part() {
     let b = three();
     // --image resolves the several matches; the 32 KiB part is still one the bridge refuses.
     let e = b
-        .select(&chip(FAMILY_F1X0, 32), Some("mainboard-f130c6"))
+        .select(&chip(FAMILY_F1X0, 32), Some("mainboard-gd32f130c6"))
         .unwrap_err();
     assert_eq!(
         e,
         SelectError::BridgeRefuses {
-            name: "mainboard-f130c6".into(),
+            name: "mainboard-gd32f130c6".into(),
             chip: t(Family::Gd32f1x0, 32),
         }
     );
@@ -386,7 +369,7 @@ fn the_guards_come_from_the_manifest() {
     let (sg, _) = small();
     let elf = b.elf(main).to_vec();
     let swapped = Bundle::open(&bundle_of(vec![(
-        image("mainboard-gd32", Role::Mainboard, &[F1X0_64], &sg, &elf),
+        image("mainboard-gd32", &[F1X0_64], &sg, &elf),
         elf.clone(),
     )]))
     .unwrap();
@@ -402,17 +385,31 @@ fn the_universal_image_table_is_in_its_cargo_toml() {
     assert_eq!(
         tbl,
         ImageTable {
-            role: Role::Mainboard,
+            kind: ImageKind::Board,
             features: vec![],
             targets: vec![F10X_64, F1X0_64],
         }
     );
-    assert!(image_table(FIRMWARE_TOML, "mainboard-f103")
+    assert!(image_table(FIRMWARE_TOML, "mainboard-gd32f103c8")
         .unwrap_err()
-        .contains("no [package.metadata.hoverboard-image.mainboard-f103]"));
-    let bad = "[package.metadata.hoverboard-image.x]\nrole = \"mainboard\"\nfeatures = []\n\
+        .contains("no [package.metadata.hoverboard-image.mainboard-gd32f103c8]"));
+    let bad = "[package.metadata.hoverboard-image.x]\nkind = \"board\"\nfeatures = []\n\
                targets = [{ family = \"gd32f10x\", flash_kib = 64, ram_kib = 20 }]\n";
     assert!(image_table(bad, "x").is_err());
+    // The name's chip is checked against the table's features (section 3.2).
+    let table = |name: &str, features: &str| {
+        format!(
+            "[package.metadata.hoverboard-image.{name}]\nkind = \"board\"\nfeatures = \
+             {features}\ntargets = [{{ family = \"gd32f1x0\", flash_kib = 64 }}]\n"
+        )
+    };
+    let ok = table("mainboard-gd32f130c8", r#"["gd32f130c8"]"#);
+    assert!(image_table(&ok, "mainboard-gd32f130c8").is_ok());
+    let wrong = table("mainboard-gd32f103c8", r#"["gd32f130c8"]"#);
+    let e = image_table(&wrong, "mainboard-gd32f103c8").unwrap_err();
+    assert!(e.contains("one chip feature"), "{e}");
+    let none = table("mainboard-gd32f130c8", "[]");
+    assert!(image_table(&none, "mainboard-gd32f130c8").is_err());
 }
 
 #[test]
@@ -442,8 +439,8 @@ fn the_packer_round_trips() {
             built: "2026-11-01T17:03:58Z".into(),
             images: vec![Image {
                 name: "mainboard-gd32".into(),
+                kind: ImageKind::Board,
                 file: "mainboard-gd32.elf".into(),
-                role: Role::Mainboard,
                 targets: vec![F10X_64, F1X0_64],
                 guards: g,
                 sha256: sha(&stored),
@@ -458,7 +455,7 @@ fn the_packer_round_trips() {
     assert!(info.starts_with("commit  c0eb2591"), "{info}");
     assert!(
         info.contains(
-            "image   mainboard-gd32 (mainboard): gd32f10x 64 KiB, gd32f1x0 64 KiB; 40000 B flashed"
+            "image   mainboard-gd32 (board): gd32f10x 64 KiB, gd32f1x0 64 KiB; 40000 B flashed"
         ),
         "{info}"
     );
@@ -510,11 +507,60 @@ fn a_pack_argument_names_crate_image_and_elf() {
         }
     );
     // A drive letter's colon stays in the crate directory.
-    let e = TreeEntry::parse(r"C:\fw\firmware:mainboard-f130=C:\fw\out").unwrap();
+    let e = TreeEntry::parse(r"C:\fw\firmware:mainboard-gd32f130c8=C:\fw\out").unwrap();
     assert_eq!(e.crate_dir, std::path::PathBuf::from(r"C:\fw\firmware"));
-    assert_eq!(e.name, "mainboard-f130");
+    assert_eq!(e.name, "mainboard-gd32f130c8");
     assert!(TreeEntry::parse("motorcontroller/firmware=x").is_err());
     assert!(TreeEntry::parse("dir:Main=x").is_err());
+}
+
+#[test]
+fn image_names_are_role_then_chip() {
+    for ok in [
+        "mainboard-gd32f103c8",
+        "mainboard-gd32f130c8",
+        "sideboard-gd32f130c6",
+        "mainboard-gd32",
+    ] {
+        assert_eq!(check_name(ok, None), Ok(()), "{ok}");
+    }
+    for bad in [
+        "gd32f103c8-mainboard",
+        "mainboard",
+        "mainboard-",
+        "controller-gd32f103c8",
+        "mainboard-GD32F103C8",
+        "mainboard-gd32f103c8-x",
+    ] {
+        assert!(check_name(bad, None).is_err(), "{bad}");
+    }
+    // Against the table: the one chip feature, or none for the universal image.
+    let f = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(check_name("mainboard-gd32f103c8", Some(&f(&["gd32f103c8"]))).is_ok());
+    assert!(check_name("mainboard-gd32f103c8", Some(&f(&["gd32f130c8"]))).is_err());
+    assert!(check_name("mainboard-gd32f103c8", Some(&f(&[]))).is_err());
+    assert!(check_name("mainboard-gd32", Some(&f(&[]))).is_ok());
+    assert!(check_name("mainboard-gd32", Some(&f(&["gd32f103c8"]))).is_err());
+}
+
+#[test]
+fn the_bundle_is_deflated() {
+    let elf = release_elf();
+    let z = bundle_of(vec![(
+        image("mainboard-gd32", &[F1X0_64], &release_guards(), &elf),
+        elf.clone(),
+    )]);
+    let mut a = zip::ZipArchive::new(std::io::Cursor::new(&z)).unwrap();
+    for i in 0..a.len() {
+        let f = a.by_index(i).unwrap();
+        assert_eq!(
+            f.compression(),
+            zip::CompressionMethod::Deflated,
+            "{:?}",
+            f.name()
+        );
+    }
+    assert!(Bundle::open(&z).is_ok());
 }
 
 #[test]

@@ -79,14 +79,20 @@ pub enum Swd {
         /// The bytes.
         data: Vec<u8>,
     },
-    /// The flash job, from the firmware bundle or the ELF at `file` (`specs/firmware-bundle.md`
-    /// section 4).
+    /// `board flash`: the ELF at `file`, a development build, flashed as it is
+    /// (`specs/firmware-bundle.md` section 4.1, last paragraph).
     Flash {
-        /// A bundle or an ELF, told apart by its first bytes.
+        /// An ELF; a bundle is refused (it takes `board update`).
         file: String,
-        /// `--image`: the image to take when several in a bundle match the chip.
+    },
+    /// `board update`: the image a firmware bundle has for the board's chip
+    /// (`specs/firmware-bundle.md` section 4.1).
+    Update {
+        /// A bundle; an ELF is refused (it takes `board flash`).
+        bundle: String,
+        /// `--image`: the image to take when several in the bundle match the chip.
         image: Option<String>,
-        /// `--yes`: flash a bundle's image without asking.
+        /// `--yes`: flash without asking.
         yes: bool,
     },
 }
@@ -280,7 +286,7 @@ pub const USAGE: &str =
   board apply <board> <file>... [--force] | replace <board> <file>... [--yes] [--force]
   board diff [--replace] <board> <file>... [--force] | status [<board>...] | compact <board>
   board fields --json | erase <board> [--yes] | clear-protection <board>
-  board flash <board> <bundle|elf> [--image NAME] [--yes]
+  board update <board> <bundle> [--image NAME] [--yes] | flash <board> <elf>
   board disarm|halt|resume|reset|reset-halt <board> | target-id <board>
   board read <board> <addr> <len> [--hz N] | write <board> <addr> <hex>
   machine nodes | get <path> | set <path> <value> [--force] | dump <file> [--from <board>]
@@ -645,12 +651,18 @@ fn node_command(
                 yes: o.has("--yes"),
             })
         }
-        ("flash", [t, file]) if board => {
+        ("flash", [t, file]) if board => swd(
+            t,
+            Swd::Flash {
+                file: file.to_string(),
+            },
+        ),
+        ("update", [t, bundle]) if board => {
             ok(&["--image", "--yes"])?;
             Ok(Command::Swd {
                 target: target(t),
-                op: Swd::Flash {
-                    file: file.to_string(),
+                op: Swd::Update {
+                    bundle: bundle.to_string(),
                     image: o.image.map(str::to_string),
                     yes: o.has("--yes"),
                 },
@@ -834,11 +846,7 @@ mod tests {
             (
                 "flash",
                 "board flash rover-left fw.elf",
-                swd(Swd::Flash {
-                    file: s("fw.elf"),
-                    image: None,
-                    yes: false,
-                }),
+                swd(Swd::Flash { file: s("fw.elf") }),
             ),
             (
                 "clear-protection",
@@ -1048,7 +1056,7 @@ mod tests {
             "bridge compact 0x03",
             "bridge flash 0x03 fw.elf",
             "board info 0x01",
-            "board update 0x01 b.bin",
+            "board update 0x01 b.hbfw --dirty",
             "bridge update 0x03 b.bin --yes",
             "machine nodes --yes",
             "scan --yes",
@@ -1064,28 +1072,42 @@ mod tests {
     }
 
     #[test]
-    fn board_flash_takes_a_bundle_or_an_elf_and_firmware_reads_bundles() {
-        let flash = |image: Option<&str>, yes| {
+    fn board_update_takes_a_bundle_board_flash_an_elf_and_firmware_reads_bundles() {
+        let update = |image: Option<&str>, yes| {
             Ok(Command::Swd {
                 target: s("offroad-master"),
-                op: Swd::Flash {
-                    file: s("firmware-adab056.hbfw"),
+                op: Swd::Update {
+                    bundle: s("firmware-adab056.hbfw"),
                     image: image.map(s),
                     yes,
                 },
             })
         };
-        let line = "board flash offroad-master firmware-adab056.hbfw";
-        assert_eq!(cmd(line), flash(None, false));
-        assert_eq!(cmd(&format!("{line} --yes")), flash(None, true));
+        let line = "board update offroad-master firmware-adab056.hbfw";
+        assert_eq!(cmd(line), update(None, false));
+        assert_eq!(cmd(&format!("{line} --yes")), update(None, true));
         assert_eq!(
             cmd(&format!("{line} --image mainboard-gd32 --yes")),
-            flash(Some("mainboard-gd32"), true)
+            update(Some("mainboard-gd32"), true)
         );
         assert_eq!(
             cmd(&format!("{line} --image=mainboard-gd32")),
-            flash(Some("mainboard-gd32"), false)
+            update(Some("mainboard-gd32"), false)
         );
+        assert_eq!(
+            cmd("board flash offroad-master fw.elf"),
+            Ok(Command::Swd {
+                target: s("offroad-master"),
+                op: Swd::Flash { file: s("fw.elf") },
+            })
+        );
+        // board flash takes no bundle options.
+        for line in [
+            "board flash offroad-master fw.elf --yes",
+            "board flash offroad-master fw.elf --image mainboard-gd32",
+        ] {
+            assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
+        }
         assert_eq!(
             cmd("firmware info b.hbfw"),
             Ok(Command::FirmwareInfo {

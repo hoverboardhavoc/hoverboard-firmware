@@ -1,16 +1,18 @@
 //! The firmware bundle (`specs/firmware-bundle.md`): every motor-controller image a build makes, in
-//! one zip archive (`.hbfw`) with a `manifest.json`, so `flash` reads the chip on the board and
-//! flashes the image built for it.
+//! one zip archive (`.hbfw`) with a `manifest.json`, so `board update` reads the chip on the board
+//! and flashes the image built for it.
 //!
-//! - [`kind`] tells a bundle from an ELF by the first bytes, not the extension.
+//! - [`file_kind`] tells a bundle from an ELF by the first bytes, not the extension.
 //! - [`Bundle::open`] reads the archive and the manifest and checks each ELF's SHA-256 before
 //!   anything parses it.
 //! - [`Bundle::select`] picks the image whose target equals the family and flash size `TARGET_ID`
 //!   reports, takes `--image` among several, and refuses a match the bridge would refuse
-//!   (`SUPPORTED_KIB`, section 3.3).
+//!   (`SUPPORTED_KIB`, section 3.4).
 //! - [`Bundle::prepare`] runs the image's guards from the manifest and converts it to the binary.
 //! - [`pack`] builds a bundle from ELFs and the facts [`image_table`] and [`elf::guards_for`] read,
-//!   refusing an ELF the flash would refuse; [`pack_tree`] reads those from a checkout.
+//!   refusing an ELF `board update` would refuse; [`pack_tree`] reads those from a checkout.
+//! - [`check_name`] holds the `<role>-<chip>` name form (section 3.2): on a manifest's names, and
+//!   against an image's own table when it is packed.
 
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -56,21 +58,66 @@ impl Family {
     }
 }
 
-/// What an image does. Shown to the user, never matched: the chip cannot report it.
+/// What an image is installed as (section 3.1, `images[].kind`). Board images are the ones a bundle
+/// carries so far; the bridge kinds join with the bridge images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Role {
-    Mainboard,
-    Sideboard,
+pub enum ImageKind {
+    /// Flashed over SWD by `board update`.
+    Board,
 }
 
-impl Role {
+impl ImageKind {
     pub fn name(self) -> &'static str {
         match self {
-            Role::Mainboard => "mainboard",
-            Role::Sideboard => "sideboard",
+            ImageKind::Board => "board",
         }
     }
+}
+
+/// The roles a board image's name may start with (section 3.2): what the board is, which the chip
+/// cannot report.
+const ROLES: [&str; 2] = ["mainboard", "sideboard"];
+
+/// The universal image's name, the one board image without a chip in it (section 3.2), until
+/// `hal.md` step 2 retires it.
+pub const UNIVERSAL: &str = "mainboard-gd32";
+
+/// Check `name` against the `<role>-<chip>` form (section 3.2). With
+/// `features` (the image's own table, when it is packed), the chip must be one of them, so the table
+/// stays the one owner of the chip; the universal image is the exception and carries none.
+pub fn check_name(name: &str, features: Option<&[String]>) -> Result<(), String> {
+    let bad = || {
+        format!(
+            "image name {name} is not <role>-<chip> (role {}; chip a hal chip feature, \
+             lower-case letters and digits)",
+            ROLES.join(" or ")
+        )
+    };
+    let (role, chip) = name.split_once('-').ok_or_else(bad)?;
+    if !ROLES.contains(&role)
+        || chip.is_empty()
+        || !chip
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return Err(bad());
+    }
+    if let Some(features) = features {
+        let is_chip = |f: &&String| f.starts_with("gd32") || f.starts_with("mm32");
+        let chips: Vec<&String> = features.iter().filter(is_chip).collect();
+        let ok = if name == UNIVERSAL {
+            chips.is_empty()
+        } else {
+            chips.len() == 1 && chips[0] == chip
+        };
+        if !ok {
+            return Err(format!(
+                "image name {name} names the chip {chip}, but its table builds it with the                  features {features:?}: the chip in the name is the one chip feature there"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A chip an image runs on. A chip matches when both fields equal what `TARGET_ID` reports.
@@ -99,8 +146,8 @@ fn targets_text(t: &[Target]) -> String {
 #[serde(deny_unknown_fields)]
 pub struct Image {
     pub name: String,
+    pub kind: ImageKind,
     pub file: String,
-    pub role: Role,
     pub targets: Vec<Target>,
     pub guards: Guards,
     pub sha256: String,
@@ -116,8 +163,8 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Parse and check a manifest: at least one image, unique names and files, every image with a
-    /// target and a SHA-256 of 64 hex digits.
+    /// Parse and check a manifest: at least one image, unique names of the `<role>-<chip>` form
+    /// and unique files, every image with a target and a SHA-256 of 64 hex digits.
     pub fn parse(text: &str) -> Result<Manifest, BundleError> {
         let m: Manifest =
             serde_json::from_str(text).map_err(|e| BundleError::Manifest(e.to_string()))?;
@@ -126,6 +173,9 @@ impl Manifest {
             return bad("no images".into());
         }
         for (i, img) in m.images.iter().enumerate() {
+            if let Err(e) = check_name(&img.name, None) {
+                return bad(e);
+            }
             if m.images[..i].iter().any(|o| o.name == img.name) {
                 return bad(format!("image name {} given twice", img.name));
             }
@@ -143,9 +193,9 @@ impl Manifest {
     }
 }
 
-/// What a file given to `flash` is, by its first bytes.
+/// What a file given to `board flash` or `board update` is, by its first bytes (section 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
+pub enum FileKind {
     /// A zip archive: a firmware bundle.
     Bundle,
     /// An ELF.
@@ -153,11 +203,11 @@ pub enum Kind {
 }
 
 /// Tell a bundle (the zip local-header signature) from an ELF (its magic).
-pub fn kind(bytes: &[u8]) -> Result<Kind, String> {
+pub fn file_kind(bytes: &[u8]) -> Result<FileKind, String> {
     if bytes.starts_with(b"PK\x03\x04") {
-        Ok(Kind::Bundle)
+        Ok(FileKind::Bundle)
     } else if bytes.starts_with(b"\x7fELF") {
-        Ok(Kind::Elf)
+        Ok(FileKind::Elf)
     } else {
         Err("neither a firmware bundle (a zip archive) nor an ELF".into())
     }
@@ -202,11 +252,8 @@ pub enum SelectError {
         chip: Target,
         images: Vec<(String, Vec<Target>)>,
     },
-    /// Several images match and `--image` named none; each, with its role.
-    Several {
-        chip: Target,
-        images: Vec<(String, Role)>,
-    },
+    /// Several images match and `--image` named none; each by name (which says its role).
+    Several { chip: Target, images: Vec<String> },
     /// `--image` names no image in the bundle.
     NotInBundle(String),
     /// `--image` names an image that does not match the chip.
@@ -244,8 +291,8 @@ impl std::fmt::Display for SelectError {
                     "REFUSED: {} images are for the chip ({chip}); name one with --image:",
                     images.len()
                 )?;
-                for (n, r) in images {
-                    write!(f, "\n  {n} ({})", r.name())?;
+                for n in images {
+                    write!(f, "\n  {n}")?;
                 }
                 Ok(())
             }
@@ -362,7 +409,7 @@ impl Bundle {
                     _ => {
                         return Err(SelectError::Several {
                             chip,
-                            images: m.iter().map(|i| (i.name.clone(), i.role)).collect(),
+                            images: m.iter().map(|i| i.name.clone()).collect(),
                         })
                     }
                 }
@@ -384,7 +431,7 @@ impl Bundle {
         elf::to_bin(elf)
     }
 
-    /// What `firmware info` prints: the commit, the build time, and per image its name, role,
+    /// What `firmware info` prints: the commit, the build time, and per image its name, kind,
     /// targets and the size of the binary it flashes.
     pub fn describe(&self) -> String {
         let m = &self.manifest;
@@ -397,7 +444,7 @@ impl Bundle {
             s.push_str(&format!(
                 "image   {} ({}): {}; {size}\n",
                 img.name,
-                img.role.name(),
+                img.kind.name(),
                 targets_text(&img.targets)
             ));
         }
@@ -405,13 +452,11 @@ impl Bundle {
     }
 }
 
-/// The line `flash` prints for the image it chose.
+/// The line `board update` prints for the image it chose.
 pub fn choice_line(m: &Manifest, img: &Image, chip: Target) -> String {
     format!(
-        "image {} ({}) for the chip ({chip}), from the bundle built from commit {}",
-        img.name,
-        img.role.name(),
-        m.commit
+        "image {} for the chip ({chip}), from the bundle built from commit {}",
+        img.name, m.commit
     )
 }
 
@@ -419,13 +464,13 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Write a bundle: the manifest, then each image's ELF (`elfs[i]` for `manifest.images[i]`), as
-/// stored entries. [`pack`] is what checks them; this writes what it is given.
+/// Write a bundle: the manifest, then each image's ELF (`elfs[i]` for `manifest.images[i]`),
+/// deflated (section 3). [`pack`] is what checks them; this writes what it is given.
 pub fn write(manifest: &Manifest, elfs: &[&[u8]]) -> Vec<u8> {
     assert_eq!(manifest.images.len(), elfs.len());
     let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let opts = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
+        .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o644);
     let text = serde_json::to_string_pretty(manifest).expect("a manifest serialises");
     w.start_file(MANIFEST, opts).expect("in-memory zip");
@@ -443,14 +488,15 @@ pub fn write(manifest: &Manifest, elfs: &[&[u8]]) -> Vec<u8> {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageTable {
-    pub role: Role,
+    pub kind: ImageKind,
     /// The cargo features that build the image. The build reads them; the bundle does not carry
     /// them.
     pub features: Vec<String>,
     pub targets: Vec<Target>,
 }
 
-/// The table `cargo_toml` (a `Cargo.toml`'s text) gives `name`.
+/// The table `cargo_toml` (a `Cargo.toml`'s text) gives `name`, with the name's form checked
+/// against it (section 3.2).
 pub fn image_table(cargo_toml: &str, name: &str) -> Result<ImageTable, String> {
     let doc: toml::Table = toml::from_str(cargo_toml).map_err(|e| format!("Cargo.toml: {e}"))?;
     let v = doc
@@ -468,6 +514,7 @@ pub fn image_table(cargo_toml: &str, name: &str) -> Result<ImageTable, String> {
             "[package.metadata.hoverboard-image.{name}] has no targets"
         ));
     }
+    check_name(name, Some(&t.features))?;
     Ok(t)
 }
 
@@ -501,10 +548,11 @@ pub fn pack(entries: &[PackEntry], commit: &str, built: &str) -> Result<Vec<u8>,
             ));
         }
         elf::check(&stripped, &e.guards).map_err(err)?;
+        check_name(e.name, Some(&e.table.features)).map_err(|x| format!("{}: {x}", e.name))?;
         images.push(Image {
             name: e.name.to_string(),
+            kind: e.table.kind,
             file: format!("{}.elf", e.name),
-            role: e.table.role,
             targets: e.table.targets.clone(),
             guards: e.guards.clone(),
             sha256: hex(&Sha256::digest(&stripped)),

@@ -38,14 +38,15 @@
 //! `dump`, `apply`, `replace` and `diff` a machine file, whose `boards` entries go to the board
 //! reporting each `uid`; `watch` and `drive` attach as an L3 guest.
 //!
-//! `board flash` takes a firmware bundle or an ELF, told apart by the file's first bytes
-//! (`specs/firmware-bundle.md` section 4). From a bundle it checks each ELF's SHA-256, reads the
-//! board's `TARGET_ID`, and takes the image whose target equals the chip's family and flash size;
-//! with several, `--image` names one of them, and it cannot name one that does not match. A match
-//! the bridge would refuse (a part that is not 64 KiB) is refused before anything is streamed. It
-//! prints the choice, runs that image's guards from the manifest and asks, unless `--yes`; without
-//! a terminal it refuses unless `--yes` is given. An ELF given directly gets the `wfi` scan and the
-//! layout check only: it does not say which chip it is for or which guards apply.
+//! `board update` takes a firmware bundle and `board flash` an ELF; each refuses the other's file,
+//! told apart by its first bytes (`specs/firmware-bundle.md` section 4). From a bundle,
+//! `board update` checks each ELF's SHA-256, reads the board's `TARGET_ID`, and takes the image
+//! whose target equals the chip's family and flash size; with several, `--image` names one of them,
+//! and it cannot name one that does not match. A match the bridge would refuse (a part that is not
+//! 64 KiB, section 3.4) is refused before anything is streamed. It prints the choice, runs that
+//! image's guards from the manifest and asks, unless `--yes`; without a terminal it refuses unless
+//! `--yes` is given. `board flash`'s ELF gets the `wfi` scan and the layout check only: it does not
+//! say which chip it is for or which guards apply.
 //!
 //! `firmware info` prints a bundle's manifest and reads no board. `firmware pack` builds one: each
 //! entry's role and targets from its crate's `[package.metadata.hoverboard-image.<name>]`, its
@@ -68,7 +69,7 @@ use espsvc::{Ctrl, FAMILY_F1X0};
 use net::pdu::NO_ADDRESS;
 use net::walk::{Controller, CLASS_BRIDGE};
 
-use hoverboard_cli::bundle::{self, Bundle, Kind, TreeEntry};
+use hoverboard_cli::bundle::{self, Bundle, FileKind, TreeEntry};
 use hoverboard_cli::cli::{self, Command, Link, Mode, Noun, Swd};
 use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::config::{self, Board};
@@ -898,7 +899,8 @@ fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
 fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
     // Read the file before the link, so a refused image or a damaged bundle costs no connection.
     let file = match op {
-        Swd::Flash { file, image, .. } => Some(read_flash_file(file, image.is_some())?),
+        Swd::Flash { file } => Some(FlashFile::Bin(read_elf(file)?)),
+        Swd::Update { bundle, .. } => Some(FlashFile::Bundle(read_bundle(bundle)?)),
         _ => None,
     };
     let purpose = if *op == Swd::Ctrl(Ctrl::Halt) {
@@ -959,12 +961,16 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
             .map_err(e)?;
         }
         Swd::Write { addr, data } => c.write(*addr, data).map_err(e)?,
-        Swd::Flash { image, yes, .. } => {
+        Swd::Flash { .. } | Swd::Update { .. } => {
+            let (want, yes) = match op {
+                Swd::Update { image, yes, .. } => (image.as_deref(), *yes),
+                _ => (None, false),
+            };
             let image = match file.expect("read above") {
                 FlashFile::Bin(bin) => bin,
                 FlashFile::Bundle(b) => {
                     let id = c.target_id().map_err(e)?;
-                    let (img, chip) = b.select(&id, image.as_deref()).map_err(|e| e.to_string())?;
+                    let (img, chip) = b.select(&id, want).map_err(|e| e.to_string())?;
                     println!("{}", bundle::choice_line(&b.manifest, img, chip));
                     let bin = b.prepare(img).map_err(|e| e.to_string())?;
                     eprintln!("{}: no wfi, its guards and the layout checked", img.name);
@@ -1014,49 +1020,61 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
     Ok(())
 }
 
-/// What `board flash` was given, read before the link is opened.
+/// What `board flash` or `board update` was given, read before the link is opened.
 enum FlashFile {
-    /// An ELF given directly, converted.
+    /// `board flash`'s ELF, converted.
     Bin(Vec<u8>),
-    /// A bundle, opened and checked; the image is chosen once `TARGET_ID` is read.
+    /// `board update`'s bundle, opened and checked; the image is chosen once `TARGET_ID` is read.
     Bundle(Bundle),
 }
 
-/// Read `board flash`'s file: a bundle opened and SHA-256 checked, or an ELF with the `wfi` scan
-/// and the layout check. `image` is whether `--image` was given, which an ELF refuses.
-fn read_flash_file(path: &str, image: bool) -> Result<FlashFile, String> {
+/// `board flash`'s file: an ELF, with the `wfi` scan and the layout check only
+/// (`specs/firmware-bundle.md` section 4.1, last paragraph). A bundle is refused and pointed at
+/// `board update`; anything else is checked as an ELF and refused by its magic.
+fn read_elf(path: &str) -> Result<Vec<u8>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    match bundle::kind(&bytes).map_err(|e| format!("{path}: {e}"))? {
-        Kind::Bundle => {
-            let b = Bundle::open(&bytes).map_err(|e| e.to_string())?;
-            eprintln!(
-                "bundle built from commit {} at {}, {} image(s), SHA-256 checked",
-                b.manifest.commit,
-                b.manifest.built,
-                b.manifest.images.len()
-            );
-            Ok(FlashFile::Bundle(b))
-        }
-        Kind::Elf => {
-            if image {
-                return Err(format!(
-                    "{path} is an ELF; --image chooses an image in a bundle"
-                ));
-            }
-            elf::check_wfi(&bytes).map_err(|e| e.to_string())?;
-            let bin = elf::to_bin(&bytes).map_err(|e| e.to_string())?;
-            eprintln!(
-                "ELF given directly: no wfi, layout checked; the image guards run on a bundle"
-            );
-            Ok(FlashFile::Bin(bin))
-        }
+    if bundle::file_kind(&bytes) == Ok(FileKind::Bundle) {
+        return Err(format!(
+            "{path} is a firmware bundle: `board update` installs from a bundle, `board flash` \
+             takes an ELF"
+        ));
     }
+    if bundle::file_kind(&bytes) != Ok(FileKind::Elf) {
+        return Err(format!("{path}: not an ELF"));
+    }
+    elf::check_wfi(&bytes).map_err(|e| e.to_string())?;
+    let bin = elf::to_bin(&bytes).map_err(|e| e.to_string())?;
+    eprintln!("ELF given directly: no wfi, layout checked; the image guards run on a bundle");
+    Ok(bin)
+}
+
+/// `board update`'s file: a bundle, opened and SHA-256 checked. An ELF is refused and pointed at
+/// `board flash`.
+fn read_bundle(path: &str) -> Result<Bundle, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    match bundle::file_kind(&bytes) {
+        Ok(FileKind::Bundle) => {}
+        Ok(FileKind::Elf) => {
+            return Err(format!(
+                "{path} is an ELF: `board flash` takes an ELF, `board update` a firmware bundle"
+            ))
+        }
+        Err(e) => return Err(format!("{path}: {e}")),
+    }
+    let b = Bundle::open(&bytes).map_err(|e| e.to_string())?;
+    eprintln!(
+        "bundle built from commit {} at {}, {} image(s), SHA-256 checked",
+        b.manifest.commit,
+        b.manifest.built,
+        b.manifest.images.len()
+    );
+    Ok(b)
 }
 
 /// Read and open a bundle, refusing a file that is not one.
 fn open_bundle(path: &str) -> Result<Bundle, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    if bundle::kind(&bytes) != Ok(Kind::Bundle) {
+    if bundle::file_kind(&bytes) != Ok(FileKind::Bundle) {
         return Err(format!("{path}: not a firmware bundle (a zip archive)"));
     }
     Bundle::open(&bytes).map_err(|e| e.to_string())
