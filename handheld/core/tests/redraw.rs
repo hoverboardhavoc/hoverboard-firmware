@@ -21,7 +21,8 @@ use embedded_graphics::primitives::Rectangle;
 
 use handheld_core::layout::{HEIGHT, WIDTH};
 use handheld_core::model::{
-    ArmBand, Body, Corner, Dial, Dot, Lower, Pack, PhaseBar, Ride, SpeedShow, Top, View,
+    ArmBand, Body, Corner, Dial, Dot, Lower, Overlay, Pack, PhaseBar, Ride, SpeedShow, Statement,
+    Tone, Top, Turn, View,
 };
 use handheld_core::readings::attitude::Attitude;
 
@@ -256,34 +257,173 @@ fn ride() -> View {
     }
 }
 
-#[test]
-fn a_full_redraw_and_a_widget_change() {
-    let mut bus = Bus::new();
-    let mut cache = panel::Cache::default();
-    let v = ride();
+/// Draw `v` (with `overlay`) as the view task does, counting the frame.
+fn frame(
+    bus: &mut Bus,
+    strip: &mut [Rgb565],
+    cache: &mut panel::Cache,
+    v: &View,
+    o: Option<Overlay>,
+) {
     bus.frame();
-    panel::draw(&mut bus, &v, None, &mut cache);
-    let full = bus.report("full redraw of the Ride view");
-    println!("{full}");
+    let f = panel::Frame {
+        view: v,
+        debug: None,
+        overlay: o,
+    };
+    panel::frame(bus, strip, &f, cache);
+}
 
-    // The speed changes: only the dial redraws.
-    let mut v2 = v.clone();
-    if let Body::Ride(r) = &mut v2.body {
+fn speed(v: &mut View, t: &str) {
+    if let Body::Ride(r) = &mut v.body {
         r.dial.speed = SpeedShow::Value {
-            text: s("12.4"),
+            text: s(t),
             reverse: false,
         };
     }
-    bus.frame();
-    panel::draw(&mut bus, &v2, None, &mut cache);
+}
+
+#[test]
+fn a_full_redraw_and_a_widget_change() {
+    let mut bus = Bus::new();
+    let mut strip = vec![Rgb565::BLACK; panel::STRIP_LEN];
+    let mut cache = panel::Cache::default();
+    let v = ride();
+    frame(&mut bus, &mut strip, &mut cache, &v, None);
+    println!("{}", bus.report("full redraw of the Ride view"));
+    // Every pixel once, in one window per strip.
+    assert_eq!(bus.rewritten(), 0);
+    assert_eq!(bus.transient(), 0);
+    assert_eq!(
+        bus.windows,
+        (HEIGHT as u64).div_ceil(panel::STRIP_ROWS as u64)
+    );
+    let full = bus.shown.clone();
+
+    // The speed changes: only the speed's box inside the ring.
+    let mut v2 = v.clone();
+    speed(&mut v2, "12.4");
+    frame(&mut bus, &mut strip, &mut cache, &v2, None);
     println!("{}", bus.report("the speed changes"));
+    assert_eq!(bus.transient(), 0, "nothing shows a cleared state");
+    assert_eq!(bus.windows, 1);
 
     // The pack line changes.
     let mut v3 = v2.clone();
     if let Body::Ride(r) = &mut v3.body {
         r.pack.text = s("38.9 V  71 %");
     }
-    bus.frame();
-    panel::draw(&mut bus, &v3, None, &mut cache);
+    frame(&mut bus, &mut strip, &mut cache, &v3, None);
     println!("{}", bus.report("the pack line changes"));
+    assert_eq!(bus.transient(), 0);
+    assert_eq!(bus.windows, 1);
+
+    // Nothing changes: nothing is sent.
+    frame(&mut bus, &mut strip, &mut cache, &v3, None);
+    assert_eq!(bus.windows, 0);
+
+    // Back to the first view: the panel shows exactly what a full redraw of it shows.
+    frame(&mut bus, &mut strip, &mut cache, &v, None);
+    assert!(
+        bus.shown == full,
+        "incremental frames end where a full redraw does"
+    );
+}
+
+/// An overlay at `y0` / `yf`, BOUND or (with `turn`) DIFFERENTIAL.
+fn overlay(y0: i32, yf: i32, turn: Option<(i32, i32)>) -> Overlay {
+    Overlay {
+        y0,
+        yf,
+        live: true,
+        percent: 30,
+        turn: turn.map(|(x0, xf)| Turn {
+            x0,
+            xf,
+            percent: 12,
+        }),
+    }
+}
+
+#[test]
+fn the_overlay_moves_and_leaves_the_panel_as_it_was() {
+    let mut bus = Bus::new();
+    let mut strip = vec![Rgb565::BLACK; panel::STRIP_LEN];
+    let mut cache = panel::Cache::default();
+    let mut v = ride();
+    v.armed = true;
+    if let Body::Ride(r) = &mut v.body {
+        r.lower = Lower::Bars {
+            phase: [None, None],
+            band: ArmBand::Armed,
+        };
+    }
+    frame(&mut bus, &mut strip, &mut cache, &v, None);
+    let clean = bus.shown.clone();
+    for turn in [None, Some((120, 150))] {
+        frame(
+            &mut bus,
+            &mut strip,
+            &mut cache,
+            &v,
+            Some(overlay(200, 200, turn)),
+        );
+        assert_eq!(bus.transient(), 0);
+        frame(
+            &mut bus,
+            &mut strip,
+            &mut cache,
+            &v,
+            Some(overlay(200, 160, turn)),
+        );
+        println!(
+            "{}",
+            bus.report(if turn.is_some() {
+                "the thumb moves 40 px (DIFFERENTIAL)"
+            } else {
+                "the thumb moves 40 px"
+            })
+        );
+        assert_eq!(bus.transient(), 0, "the overlay never flickers");
+        // The speed changes under the overlay: the overlay is drawn into the same strip.
+        let mut v2 = v.clone();
+        speed(&mut v2, "9.9");
+        frame(
+            &mut bus,
+            &mut strip,
+            &mut cache,
+            &v2,
+            Some(overlay(200, 100, turn)),
+        );
+        assert_eq!(bus.transient(), 0);
+        // The touch ends: the panel is as it was before the overlay.
+        frame(&mut bus, &mut strip, &mut cache, &v, None);
+        assert!(bus.shown == clean, "the overlay leaves nothing behind");
+    }
+}
+
+#[test]
+fn the_read_counter_redraws_its_own_columns() {
+    let mut bus = Bus::new();
+    let mut strip = vec![Rgb565::BLACK; panel::STRIP_LEN];
+    let mut cache = panel::Cache::default();
+    let mut v = ride();
+    let line = |t: &str| {
+        Some(Statement {
+            text: s(t),
+            tone: Tone::Muted,
+        })
+    };
+    v.line = line("Reading settings 3/22\u{2026}");
+    frame(&mut bus, &mut strip, &mut cache, &v, None);
+    v.line = line("Reading settings 4/22\u{2026}");
+    frame(&mut bus, &mut strip, &mut cache, &v, None);
+    assert_eq!(bus.windows, 1);
+    let written = bus.written.iter().filter(|w| !w.is_empty()).count();
+    assert_eq!(
+        written,
+        8 * 22,
+        "one 8 px column of the 22-row statement line"
+    );
+    assert_eq!(bus.transient(), 0);
 }

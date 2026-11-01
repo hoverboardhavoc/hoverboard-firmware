@@ -12,6 +12,8 @@
 // The test-pattern build stops after the pattern and leaves the rest of the boot unused.
 #![cfg_attr(feature = "test-pattern", allow(unused, unreachable_code))]
 
+extern crate alloc;
+
 mod link;
 mod panel;
 #[cfg(feature = "test-pattern")]
@@ -246,6 +248,9 @@ async fn main(spawner: Spawner) {
         Timer::after(Duration::from_secs(3600)).await;
         let _ = (&bl, &panel, &led);
     }
+    // The view's strip (section 5.1), from the heap: 40 panel rows.
+    #[cfg(not(feature = "test-pattern"))]
+    let strip = alloc::vec![panel::color::BG; panel::STRIP_LEN].into_boxed_slice();
     #[cfg(not(feature = "test-pattern"))]
     esp_rtos::start_second_core(
         p.CPU_CTRL,
@@ -253,7 +258,7 @@ async fn main(spawner: Spawner) {
         VIEW_STACK.init(Stack::new()),
         move || {
             VIEW_EXECUTOR.init(Executor::new()).run(|s| {
-                s.must_spawn(view(panel));
+                s.must_spawn(view(panel, strip));
                 s.must_spawn(logger());
             });
         },
@@ -402,11 +407,13 @@ fn log_view(v: &handheld_core::model::View, debug: &(heapless::String<40>, heapl
     );
 }
 
-/// The view: at most 25 redraws a second, each drawing only what changed.
+/// The view: at most 25 frames a second, each painting only what changed (section 5.1).
 #[embassy_executor::task]
-async fn view(mut panel: Panel) {
+async fn view(
+    mut panel: Panel,
+    mut strip: alloc::boxed::Box<[embedded_graphics::pixelcolor::Rgb565]>,
+) {
     let mut cache = panel::Cache::default();
-    let mut drawn_overlay: Option<handheld_core::model::Overlay> = None;
     let mut ticker = Ticker::every(Duration::from_millis(40));
     let mut logged = 0u32;
     let mut slow_logged = 0u32;
@@ -421,27 +428,23 @@ async fn view(mut panel: Panel) {
         }
         let started = Instant::now();
         let dbg = cfg!(debug_assertions) || cfg!(feature = "debug-line");
-        let d = dbg.then_some((debug.0.as_str(), debug.1.as_str()));
-        if drawn_overlay != overlay {
-            if let Some(old) = drawn_overlay {
-                for (y0, y1) in panel::overlay_bands(&old) {
-                    panel::redraw_band(&mut panel, &v, d, y0, y1);
-                }
-            }
-            drawn_overlay = overlay;
-        }
-        panel::draw(&mut panel, &v, d, &mut cache);
-        if let Some(o) = &overlay {
-            panel::draw_overlay(&mut panel, o);
-        }
-        // A frame's drawing longer than the 40 ms period, at most a line a second. Drawing is
-        // synchronous over the blocking SPI (mipidsi's `draw_iter` sets a window per pixel); on the
-        // executor the link shared, the link waited for it (`arm-hold-1130.log`: releases handed
-        // over 100 to 745 ms late during armed drags).
-        let took = started.elapsed().as_millis();
-        if took > 40 && now.wrapping_sub(slow_logged) >= 1000 {
+        let frame = panel::Frame {
+            view: &v,
+            debug: dbg.then_some((debug.0.as_str(), debug.1.as_str())),
+            overlay,
+        };
+        let painted = panel::frame(&mut panel, &mut strip, &frame, &mut cache);
+        // Every full redraw (a screen change), and any other frame longer than the 40 ms period at
+        // most once a second: the redraw time on the device (section 5.1).
+        let took = started.elapsed().as_micros();
+        if painted.full {
+            println!("view: full redraw {} us", took);
+        } else if took > 40_000 && now.wrapping_sub(slow_logged) >= 1000 {
             slow_logged = now;
-            println!("view: frame took {} ms", took);
+            println!(
+                "view: frame of {} rectangles took {} us",
+                painted.rects, took
+            );
         }
     }
 }

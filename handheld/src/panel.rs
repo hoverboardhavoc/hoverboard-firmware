@@ -1,5 +1,10 @@
-//! Drawing the Ride view on the ILI9341 (`specs/handheld-remote.md` section 5): no framebuffer;
-//! each widget keeps the state it last drew and redraws its own rectangle when that changes.
+//! Drawing the Ride view on the ILI9341 (`specs/handheld-remote.md` section 5.1): no framebuffer.
+//! Each widget keeps the state it last drew; a frame finds the rectangles whose content changed
+//! and paints each one through a RAM strip: the strip is filled with `Bg`, every element that
+//! meets it is drawn into it (the widgets, the armed frame, the throttle overlay), and the strip
+//! goes to the panel as one address window. So a changed widget is overwritten once with its new
+//! pixels, never cleared first, and the panel's address window is set once per strip, not per
+//! pixel or per glyph.
 
 use core::fmt::Write;
 
@@ -11,7 +16,7 @@ use embedded_graphics::primitives::{
     Arc, Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle,
 };
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
-use heapless::String;
+use heapless::{String, Vec};
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use u8g2_fonts::{fonts, FontRenderer};
 
@@ -48,11 +53,117 @@ pub mod color {
 
 use color::*;
 
+/// Rows of the full panel width the strip holds: a full redraw is eight strips.
+pub const STRIP_ROWS: usize = 40;
+/// The strip's size in pixels; the binary allocates it once.
+pub const STRIP_LEN: usize = layout::WIDTH as usize * STRIP_ROWS;
+
 fn er(r: Rect) -> Rectangle {
     Rectangle::new(
         Point::new(r.x0, r.y0),
         Size::new(r.width() as u32, r.height() as u32),
     )
+}
+
+/// A rectangle of the panel held in RAM: whatever is drawn into it outside its area is dropped.
+pub struct Strip<'a> {
+    buf: &'a mut [Rgb565],
+    area: Rect,
+}
+
+impl Strip<'_> {
+    fn index(&self, p: Point) -> Option<usize> {
+        let a = &self.area;
+        (p.x >= a.x0 && p.x < a.x1 && p.y >= a.y0 && p.y < a.y1)
+            .then(|| ((p.y - a.y0) * a.width() + (p.x - a.x0)) as usize)
+    }
+
+    /// Whether `r` shares a pixel with the strip.
+    fn meets(&self, r: Rect) -> bool {
+        self.area.overlaps(&r)
+    }
+}
+
+impl Dimensions for Strip<'_> {
+    fn bounding_box(&self) -> Rectangle {
+        er(self.area)
+    }
+}
+
+impl DrawTarget for Strip<'_> {
+    type Color = Rgb565;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I: IntoIterator<Item = Pixel<Rgb565>>>(
+        &mut self,
+        pixels: I,
+    ) -> Result<(), Self::Error> {
+        for Pixel(p, c) in pixels {
+            if let Some(i) = self.index(p) {
+                self.buf[i] = c;
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_contiguous<I: IntoIterator<Item = Rgb565>>(
+        &mut self,
+        area: &Rectangle,
+        colors: I,
+    ) -> Result<(), Self::Error> {
+        if area.intersection(&er(self.area)).is_zero_sized() {
+            return Ok(());
+        }
+        for (p, c) in area.points().zip(colors) {
+            if let Some(i) = self.index(p) {
+                self.buf[i] = c;
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_solid(&mut self, area: &Rectangle, color: Rgb565) -> Result<(), Self::Error> {
+        let i = area.intersection(&er(self.area));
+        if i.is_zero_sized() {
+            return Ok(());
+        }
+        let w = self.area.width() as usize;
+        let x0 = (i.top_left.x - self.area.x0) as usize;
+        let n = i.size.width as usize;
+        for y in i.top_left.y..i.top_left.y + i.size.height as i32 {
+            let row = (y - self.area.y0) as usize * w;
+            self.buf[row + x0..row + x0 + n].fill(color);
+        }
+        Ok(())
+    }
+}
+
+/// Paint `rect` on the panel: strip by strip, each filled with `Bg`, drawn by `scene`, and sent as
+/// one address window.
+fn paint<D: DrawTarget<Color = Rgb565>>(
+    panel: &mut D,
+    buf: &mut [Rgb565],
+    rect: Rect,
+    scene: &impl Fn(&mut Strip),
+) {
+    let Some(rect) = rect.on_panel_part() else {
+        return;
+    };
+    let w = rect.width() as usize;
+    let rows = (buf.len() / w).max(1) as i32;
+    let mut y = rect.y0;
+    while y < rect.y1 {
+        let band = Rect::new(rect.x0, y, rect.x1, (y + rows).min(rect.y1));
+        let n = w * band.height() as usize;
+        let mut s = Strip {
+            buf: &mut buf[..n],
+            area: band,
+        };
+        s.buf.fill(BG);
+        scene(&mut s);
+        let _ = panel.fill_contiguous(&er(band), s.buf.iter().copied());
+        y = band.y1;
+    }
 }
 
 fn style(font: &'static MonoFont<'static>, fg: Rgb565) -> MonoTextStyle<'static, Rgb565> {
@@ -79,7 +190,7 @@ pub fn text<D: DrawTarget<Color = Rgb565>>(
 }
 
 pub fn fill<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: Rect, c: Rgb565) {
-    let _ = er(r).into_styled(PrimitiveStyle::with_fill(c)).draw(d);
+    let _ = d.fill_solid(&er(r), c);
 }
 
 /// The caution glyph (3.10): a small filled triangle with a dark bar, `size` px tall.
@@ -96,22 +207,6 @@ fn caution_glyph<D: DrawTarget<Color = Rgb565>>(d: &mut D, at: Point, size: i32,
     )
     .into_styled(PrimitiveStyle::with_stroke(BG, 1))
     .draw(d);
-}
-
-/// What each widget last drew.
-#[derive(Default)]
-pub struct Cache {
-    top: Drawn<u64>,
-    body_kind: Drawn<u8>,
-    card: Drawn<u64>,
-    dial: Drawn<u64>,
-    corners: [Drawn<u64>; 2],
-    pack: Drawn<u64>,
-    lower: Drawn<u64>,
-    /// The arm band as last drawn, while the phase bars show.
-    band: Option<ArmBand>,
-    line: Drawn<u64>,
-    armed: Drawn<bool>,
 }
 
 /// A cheap hash of a state's `Debug` form: the widgets' states are small, and this keeps the
@@ -131,57 +226,304 @@ fn hash<T: core::fmt::Debug>(t: &T) -> u64 {
     h.0
 }
 
-/// Draw what changed in `v`. `debug` is the debug line's two rows, drawn where the statement
-/// line is empty.
-pub fn draw<D: DrawTarget<Color = Rgb565>>(
-    d: &mut D,
-    v: &View,
-    debug: Option<(&str, &str)>,
-    c: &mut Cache,
-) {
-    if c.top.update(hash(&v.top)) {
-        draw_top(d, &v.top);
+/// One frame to show: the view, the debug line's rows (drawn where the statement line is empty),
+/// and the throttle overlay.
+pub struct Frame<'a> {
+    pub view: &'a View,
+    pub debug: Option<(&'a str, &'a str)>,
+    pub overlay: Option<Overlay>,
+}
+
+/// What the panel shows, as last painted.
+#[derive(Default)]
+pub struct Cache {
+    /// Which screen: 0 a card, 1 the Ride view. `None` before the first frame.
+    screen: Drawn<u8>,
+    top: Drawn<u64>,
+    card: Drawn<u64>,
+    ring: Drawn<(u8, bool)>,
+    speed: Drawn<u64>,
+    corners: [Drawn<u64>; 2],
+    pack: Drawn<u64>,
+    /// 0 the phase bars and the band, 1 the lamp grid.
+    lower: Drawn<u8>,
+    phase: [Drawn<u64>; 2],
+    band: Option<ArmBand>,
+    grid: Drawn<u64>,
+    /// The statement line as drawn: its text and tone, or the debug rows' hash.
+    line: Option<LineDrawn>,
+    armed: Drawn<bool>,
+    overlay: Option<Overlay>,
+}
+
+#[derive(Clone, PartialEq)]
+enum LineDrawn {
+    Statement(String<64>, Tone),
+    Other(u64),
+}
+
+/// The rectangles a frame paints.
+type Dirty = Vec<Rect, 24>;
+
+fn dirty(d: &mut Dirty, r: Rect) {
+    if d.push(r).is_err() {
+        // More changes than slots: paint the whole panel in the last one.
+        let last = d.len() - 1;
+        d[last] = Rect::new(0, 0, layout::WIDTH, layout::HEIGHT);
     }
-    let kind = match v.body {
+}
+
+/// What one frame cost.
+pub struct Painted {
+    /// The whole panel was painted (a screen change).
+    pub full: bool,
+    /// Rectangles painted.
+    pub rects: usize,
+}
+
+/// Paint what changed since the last frame (section 5.1). `buf` is the strip's memory, at least
+/// one panel row.
+pub fn frame<D: DrawTarget<Color = Rgb565>>(
+    panel: &mut D,
+    buf: &mut [Rgb565],
+    f: &Frame,
+    c: &mut Cache,
+) -> Painted {
+    let v = f.view;
+    let mut d = Dirty::new();
+    let screen = match v.body {
         Body::Card(_) => 0,
         Body::Ride(_) => 1,
     };
-    if c.body_kind.update(kind) {
-        fill(d, layout::CARD_AREA, BG);
-        c.card.invalidate();
-        c.dial.invalidate();
-        c.corners = Default::default();
-        c.pack.invalidate();
-        c.lower.invalidate();
+    let full = c.screen.update(screen);
+    if full {
+        *c = Cache {
+            screen: c.screen,
+            ..Cache::default()
+        };
+    }
+    if c.top.update(hash(&v.top)) {
+        dirty(&mut d, Widget::TopStrip.rect());
     }
     match &v.body {
         Body::Card(card) => {
             if c.card.update(hash(card)) {
-                draw_card(d, card);
+                dirty(&mut d, layout::CARD_AREA);
             }
         }
-        Body::Ride(r) => draw_ride(d, r, c),
+        Body::Ride(r) => ride_dirty(&mut d, r, c),
     }
-    let line = (&v.line, debug);
-    if c.line.update(hash(&line)) {
-        draw_line(d, v.line.as_ref(), debug);
+    line_dirty(&mut d, v, f.debug, c);
+    if c.armed.update(v.armed) {
+        for r in FRAME_EDGES {
+            dirty(&mut d, r);
+        }
     }
-    if c.armed.update(v.armed) || v.armed {
-        let col = if v.armed { PRIMARY } else { BG };
-        for r in [
-            Rect::new(0, 0, 240, 2),
-            Rect::new(0, 318, 240, 320),
-            Rect::new(0, 0, 2, 320),
-            Rect::new(238, 0, 240, 320),
-        ] {
-            fill(d, r, col);
+    if c.overlay != f.overlay {
+        overlay_dirty(&mut d, c.overlay.as_ref(), f.overlay.as_ref());
+        c.overlay = f.overlay;
+    }
+    let scene = |s: &mut Strip| draw_scene(s, f);
+    if full {
+        paint(
+            panel,
+            buf,
+            Rect::new(0, 0, layout::WIDTH, layout::HEIGHT),
+            &scene,
+        );
+    } else {
+        for r in d.iter() {
+            paint(panel, buf, *r, &scene);
+        }
+    }
+    Painted {
+        full,
+        rects: if full { 1 } else { d.len() },
+    }
+}
+
+fn ride_dirty(d: &mut Dirty, r: &Ride, c: &mut Cache) {
+    if c.ring.update((r.dial.lit, r.dial.caution)) {
+        dirty(d, Widget::Dial.rect());
+        c.speed.update(hash(&r.dial.speed));
+    } else if c.speed.update(hash(&r.dial.speed)) {
+        dirty(d, layout::SPEED_BOX);
+    }
+    for (i, w) in [Widget::AttitudeLeft, Widget::AttitudeRight]
+        .iter()
+        .enumerate()
+    {
+        if c.corners[i].update(hash(&r.corners[i])) {
+            dirty(d, w.rect());
+        }
+    }
+    if c.pack.update(hash(&r.pack)) {
+        dirty(d, Widget::PackLine.rect());
+    }
+    match &r.lower {
+        Lower::Bars { phase, band } => {
+            if c.lower.update(0) {
+                dirty(d, layout::LAMP_GRID);
+                c.phase = Default::default();
+                c.phase[0].update(hash(&phase[0]));
+                c.phase[1].update(hash(&phase[1]));
+                c.band = Some(*band);
+                c.grid.invalidate();
+                return;
+            }
+            for (i, w) in [Widget::PhaseLeft, Widget::PhaseRight].iter().enumerate() {
+                if c.phase[i].update(hash(&phase[i])) {
+                    dirty(d, w.rect());
+                }
+            }
+            if c.band != Some(*band) {
+                dirty(d, band_change(c.band, *band));
+                c.band = Some(*band);
+            }
+        }
+        Lower::Grid(cells) => {
+            let first = c.lower.update(1);
+            if c.grid.update(hash(cells)) || first {
+                dirty(d, layout::LAMP_GRID);
+            }
+            c.band = None;
         }
     }
 }
 
+/// The statement line's change: the columns of the characters that changed when a statement's
+/// text changes in place (the read counter), the whole line otherwise.
+fn line_dirty(d: &mut Dirty, v: &View, debug: Option<(&str, &str)>, c: &mut Cache) {
+    let next = match &v.line {
+        Some(s) => LineDrawn::Statement(ellipsised(s), s.tone),
+        None => LineDrawn::Other(hash(&debug)),
+    };
+    if c.line.as_ref() == Some(&next) {
+        return;
+    }
+    let r = Widget::Statement.rect();
+    let cols = match (&c.line, &next) {
+        (Some(LineDrawn::Statement(a, ta)), LineDrawn::Statement(b, tb)) if ta == tb => {
+            layout::text_diff(a, b).map(|(i, j)| {
+                let x = line_text_x(*tb);
+                Rect::new(x + 8 * i as i32, r.y0, (x + 8 * j as i32).min(r.x1), r.y1)
+            })
+        }
+        _ => Some(r),
+    };
+    if let Some(cols) = cols {
+        dirty(d, cols);
+    }
+    c.line = Some(next);
+}
+
+/// The armed frame's four edges (section 5.3).
+const FRAME_EDGES: [Rect; 4] = [
+    Rect::new(0, 0, 240, 2),
+    Rect::new(0, 318, 240, 320),
+    Rect::new(0, 0, 2, 320),
+    Rect::new(238, 0, 240, 320),
+];
+
+/// The rectangles an overlay covers: its zero line, its thumb bar with the figures, and in
+/// DIFFERENTIAL the turn zero line.
+fn overlay_rects(o: &Overlay) -> [Option<Rect>; 3] {
+    [
+        Some(layout::zero_rect(o.y0)),
+        Some(layout::thumb_rect(o.yf)),
+        o.turn.map(|t| layout::turn_rect(t.x0)),
+    ]
+}
+
+/// The overlay moved from `old` to `new`: paint what either covers that changed. A thumb that
+/// moved a little is one rectangle over both places.
+fn overlay_dirty(d: &mut Dirty, old: Option<&Overlay>, new: Option<&Overlay>) {
+    let a = old.map(overlay_rects).unwrap_or_default();
+    let b = new.map(overlay_rects).unwrap_or_default();
+    // The thumb's content (its colour, the figures, the mark) is in the thumb rectangle, so any
+    // change of the overlay repaints it in both places.
+    for i in 0..3 {
+        match (a[i], b[i]) {
+            (Some(x), Some(y)) if x == y && i != 1 => {}
+            (Some(x), Some(y)) if x.overlaps(&y) || x.y1 == y.y0 || y.y1 == x.y0 => {
+                dirty(d, x.union(&y))
+            }
+            (x, y) => {
+                for r in [x, y].into_iter().flatten() {
+                    dirty(d, r);
+                }
+            }
+        }
+    }
+}
+
+/// The band's change from `prev` to `next`: a hold's fill that grew paints only the columns it
+/// gained (section 5.3); anything else paints the band.
+fn band_change(prev: Option<ArmBand>, next: ArmBand) -> Rect {
+    let r = Widget::ArmBand.rect();
+    match (prev.and_then(hold_ms), hold_ms(next)) {
+        (Some(a), Some(b)) if b >= a => Rect::new(fill_edge(a), r.y0, fill_edge(b), r.y1),
+        _ => r,
+    }
+}
+
+/// Draw everything that meets the strip, back to front: the widgets that meet it
+/// (`layout::meeting`), or the card in their place, then the armed frame, then the overlay.
+fn draw_scene(s: &mut Strip, f: &Frame) {
+    let v = f.view;
+    let ride = match &v.body {
+        Body::Ride(r) => Some(r),
+        Body::Card(card) => {
+            if s.meets(layout::CARD) {
+                draw_card(s, card);
+            }
+            None
+        }
+    };
+    let mut grid_drawn = false;
+    for w in layout::meeting(s.area) {
+        let Some(r) = ride else {
+            match w {
+                Widget::TopStrip => draw_top(s, &v.top),
+                Widget::Statement => draw_line(s, v.line.as_ref(), f.debug),
+                _ => {}
+            }
+            continue;
+        };
+        match (w, &r.lower) {
+            (Widget::TopStrip, _) => draw_top(s, &v.top),
+            (Widget::Statement, _) => draw_line(s, v.line.as_ref(), f.debug),
+            (Widget::Dial, _) => draw_dial(s, &r.dial),
+            (Widget::AttitudeLeft, _) => draw_corner(s, w.rect(), r.corners[0].as_ref()),
+            (Widget::AttitudeRight, _) => draw_corner(s, w.rect(), r.corners[1].as_ref()),
+            (Widget::PackLine, _) => draw_pack(s, &r.pack),
+            (Widget::PhaseLeft, Lower::Bars { phase, .. }) => {
+                draw_phase(s, w.rect(), phase[0].as_ref())
+            }
+            (Widget::PhaseRight, Lower::Bars { phase, .. }) => {
+                draw_phase(s, w.rect(), phase[1].as_ref())
+            }
+            (Widget::ArmBand, Lower::Bars { band, .. }) => draw_band(s, *band),
+            // The lamp grid takes the phase bars' and the band's place, drawn once.
+            (Widget::PhaseLeft | Widget::PhaseRight | Widget::ArmBand, Lower::Grid(cells)) => {
+                if !grid_drawn {
+                    grid_drawn = true;
+                    draw_grid(s, cells);
+                }
+            }
+        }
+    }
+    if v.armed {
+        for r in FRAME_EDGES {
+            fill(s, r, PRIMARY);
+        }
+    }
+    if let Some(o) = &f.overlay {
+        draw_overlay(s, o);
+    }
+}
+
 fn draw_top<D: DrawTarget<Color = Rgb565>>(d: &mut D, t: &Top) {
-    let r = Widget::TopStrip.rect();
-    fill(d, r, BG);
     let mut x = 6;
     for dot in t.dots.iter().flatten() {
         draw_dot(d, dot, &mut x);
@@ -227,10 +569,28 @@ fn draw_dot<D: DrawTarget<Color = Rgb565>>(d: &mut D, dot: &Dot, x: &mut i32) {
     *x += 12 + 6 * dot.label.len() as i32 + 10;
 }
 
+/// Centred text on the card's `BgCode`.
+fn card_text<D: DrawTarget<Color = Rgb565>>(
+    d: &mut D,
+    s: &str,
+    y: i32,
+    font: &'static MonoFont<'static>,
+    fg: Rgb565,
+) {
+    let st = MonoTextStyleBuilder::new()
+        .font(font)
+        .text_color(fg)
+        .background_color(BG_CODE)
+        .build();
+    let ts = TextStyleBuilder::new()
+        .alignment(Alignment::Center)
+        .baseline(Baseline::Top)
+        .build();
+    let _ = Text::with_text_style(s, Point::new(120, y), st, ts).draw(d);
+}
+
 fn draw_card<D: DrawTarget<Color = Rgb565>>(d: &mut D, card: &Card) {
-    fill(d, layout::CARD_AREA, BG);
-    let r = layout::CARD;
-    let _ = RoundedRectangle::with_equal_corners(er(r), Size::new(12, 12))
+    let _ = RoundedRectangle::with_equal_corners(er(layout::CARD), Size::new(12, 12))
         .into_styled(
             PrimitiveStyleBuilder::new()
                 .fill_color(BG_CODE)
@@ -239,30 +599,18 @@ fn draw_card<D: DrawTarget<Color = Rgb565>>(d: &mut D, card: &Card) {
                 .build(),
         )
         .draw(d);
-    let mid = Point::new(120, 140);
-    let card_text = |d: &mut D, s: &str, y: i32, font, fg| {
-        let st = MonoTextStyleBuilder::new()
-            .font(font)
-            .text_color(fg)
-            .background_color(BG_CODE)
-            .build();
-        let ts = TextStyleBuilder::new()
-            .alignment(Alignment::Center)
-            .baseline(Baseline::Top)
-            .build();
-        let _ = Text::with_text_style(s, Point::new(120, y), st, ts).draw(d);
-    };
+    let mid = 140;
     match card {
-        Card::NoBridge => card_text(d, "No bridge set.", mid.y, &FONT_8X13, FG),
+        Card::NoBridge => card_text(d, "No bridge set.", mid, &FONT_8X13, FG),
         Card::Connecting(a) => {
-            card_text(d, "Connecting to", mid.y - 10, &FONT_8X13, FG);
+            card_text(d, "Connecting to", mid - 10, &FONT_8X13, FG);
             let mut s: String<24> = String::new();
             let _ = write!(
                 s,
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\u{2026}",
                 a[0], a[1], a[2], a[3], a[4], a[5]
             );
-            card_text(d, &s, mid.y + 8, &FONT_8X13, FG_MUTED);
+            card_text(d, &s, mid + 8, &FONT_8X13, FG_MUTED);
         }
         Card::MotorOff => {
             power_glyph(d, Point::new(120, 100));
@@ -288,72 +636,34 @@ fn power_glyph<D: DrawTarget<Color = Rgb565>>(d: &mut D, centre: Point) {
         .draw(d);
 }
 
-fn draw_ride<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: &Ride, c: &mut Cache) {
-    if c.dial.update(hash(&r.dial)) {
-        draw_dial(d, &r.dial);
-    }
-    for (i, w) in [Widget::AttitudeLeft, Widget::AttitudeRight]
-        .iter()
-        .enumerate()
-    {
-        if c.corners[i].update(hash(&r.corners[i])) {
-            draw_corner(d, w.rect(), r.corners[i].as_ref());
-        }
-    }
-    if c.pack.update(hash(&r.pack)) {
-        draw_pack(d, &r.pack);
-    }
-    // The band is cached apart from the phase bars, so a hold's progress redraws only the band.
-    let (key, band) = match &r.lower {
-        Lower::Bars { phase, band } => (hash(&(0u8, phase)), Some(*band)),
-        Lower::Grid(cells) => (hash(&(1u8, cells)), None),
-    };
-    if c.lower.update(key) {
-        fill(d, layout::LAMP_GRID, BG);
-        match &r.lower {
-            Lower::Bars { phase, band } => {
-                draw_phase(d, Widget::PhaseLeft.rect(), phase[0].as_ref());
-                draw_phase(d, Widget::PhaseRight.rect(), phase[1].as_ref());
-                draw_band(d, *band);
+/// The battery ring, pixel by pixel over the part of its box in the strip (the segment geometry is
+/// `layout::ring_segment`), then the speed.
+fn draw_dial(s: &mut Strip, dial: &Dial) {
+    let lit = if dial.caution { CAUTION } else { PRIMARY };
+    let (cx, cy) = layout::RING_CENTRE;
+    let outer = layout::RING_RADIUS + layout::RING_STROKE / 2;
+    let ring = Rect::new(cx - outer, cy - outer, cx + outer + 1, cy + outer + 1);
+    let a = s.area;
+    let (x0, x1) = (ring.x0.max(a.x0), ring.x1.min(a.x1));
+    let (y0, y1) = (ring.y0.max(a.y0), ring.y1.min(a.y1));
+    let w = a.width();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if let Some(seg) = layout::ring_segment(x - cx, y - cy) {
+                let col = if seg < dial.lit { lit } else { BG_CODE };
+                s.buf[((y - a.y0) * w + (x - a.x0)) as usize] = col;
             }
-            Lower::Grid(cells) => draw_grid(d, cells),
         }
-        c.band = band;
-    } else if let Some(b) = band {
-        if c.band != Some(b) {
-            update_band(d, c.band, b);
-            c.band = Some(b);
-        }
+    }
+    if s.meets(layout::SPEED_BOX) {
+        draw_speed(s, &dial.speed);
     }
 }
 
-fn draw_dial<D: DrawTarget<Color = Rgb565>>(d: &mut D, dial: &Dial) {
-    fill(d, Widget::Dial.rect(), BG);
-    let (cx, cy) = layout::RING_CENTRE;
-    let diameter = (2 * layout::RING_RADIUS) as u32;
-    for i in 0..10u8 {
-        let start = 150.0 + 24.0 * i as f32 + 1.2;
-        let col = if i < dial.lit {
-            if dial.caution {
-                CAUTION
-            } else {
-                PRIMARY
-            }
-        } else {
-            BG_CODE
-        };
-        let _ = Arc::with_center(
-            Point::new(cx, cy),
-            diameter,
-            Angle::from_degrees(start),
-            Angle::from_degrees(24.0 - 2.4),
-        )
-        .into_styled(PrimitiveStyle::with_stroke(col, layout::RING_STROKE as u32))
-        .draw(d);
-    }
+fn draw_speed<D: DrawTarget<Color = Rgb565>>(d: &mut D, speed: &SpeedShow) {
     let (sx, sy) = layout::SPEED_CENTRE;
     let big = FontRenderer::new::<fonts::u8g2_font_logisoso38_tn>();
-    let (figure, faint) = match &dial.speed {
+    let (figure, faint) = match speed {
         SpeedShow::Value { text, .. } => (text.as_str(), false),
         _ => ("--", true),
     };
@@ -368,7 +678,7 @@ fn draw_dial<D: DrawTarget<Color = Rgb565>>(d: &mut D, dial: &Dial) {
         },
         d,
     );
-    match &dial.speed {
+    match speed {
         SpeedShow::Silent => text(
             d,
             "no board reporting",
@@ -409,7 +719,6 @@ fn draw_dial<D: DrawTarget<Color = Rgb565>>(d: &mut D, dial: &Dial) {
 }
 
 fn draw_corner<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: Rect, c: Option<&Corner>) {
-    fill(d, r, BG);
     let Some(c) = c else {
         return;
     };
@@ -490,7 +799,6 @@ fn horizon<D: DrawTarget<Color = Rgb565>>(d: &mut D, c: Point, radius: i32, pitc
 
 fn draw_pack<D: DrawTarget<Color = Rgb565>>(d: &mut D, p: &Pack) {
     let r = Widget::PackLine.rect();
-    fill(d, r, BG);
     let col = if p.caution {
         CAUTION
     } else if p.muted {
@@ -509,7 +817,6 @@ fn draw_pack<D: DrawTarget<Color = Rgb565>>(d: &mut D, p: &Pack) {
 }
 
 fn draw_phase<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: Rect, b: Option<&PhaseBar>) {
-    fill(d, r, BG);
     let Some(b) = b else {
         return;
     };
@@ -530,17 +837,17 @@ fn draw_phase<D: DrawTarget<Color = Rgb565>>(d: &mut D, r: Rect, b: Option<&Phas
         Alignment::Right,
     );
     let track = Rect::new(r.x0, r.y0 + 20, r.x1, r.y0 + 24);
-    fill(d, track, BG_CODE);
-    if let Some(f) = b.fill {
-        let w = (track.width() * f as i32) / 1000;
-        if w > 0 {
-            fill(
-                d,
-                Rect::new(track.x0, track.y0, track.x0 + w, track.y1),
-                PRIMARY,
-            );
-        }
-    }
+    let w = b.fill.map_or(0, |f| (track.width() * f as i32) / 1000);
+    fill(
+        d,
+        Rect::new(track.x0, track.y0, track.x0 + w, track.y1),
+        PRIMARY,
+    );
+    fill(
+        d,
+        Rect::new(track.x0 + w, track.y0, track.x1, track.y1),
+        BG_CODE,
+    );
 }
 
 /// One look of the arm band: its fill, outline and outline width, the label and the line under it
@@ -678,17 +985,6 @@ fn draw_band<D: DrawTarget<Color = Rgb565>>(d: &mut D, b: ArmBand) {
     }
 }
 
-/// Go from the band as drawn, `prev`, to `next`: a hold's fill that grew draws only the columns it
-/// gained (section 5.3); anything else redraws the band.
-fn update_band<D: DrawTarget<Color = Rgb565>>(d: &mut D, prev: Option<ArmBand>, next: ArmBand) {
-    match (prev.and_then(hold_ms), hold_ms(next)) {
-        (Some(a), Some(b)) if b >= a => {
-            draw_look_cols(d, &HOLD_FILLED, fill_edge(a), fill_edge(b));
-        }
-        _ => draw_band(d, next),
-    }
-}
-
 fn draw_grid<D: DrawTarget<Color = Rgb565>>(d: &mut D, cells: &[LampCell]) {
     for (i, cell) in cells.iter().enumerate() {
         let (row, col) = handheld_core::lamps::grid_cell(i);
@@ -743,13 +1039,38 @@ fn draw_grid<D: DrawTarget<Color = Rgb565>>(d: &mut D, cells: &[LampCell]) {
     }
 }
 
+/// Where the statement's text starts: after the glyph for a caution or warning line.
+fn line_text_x(tone: Tone) -> i32 {
+    let x = Widget::Statement.rect().x0;
+    if matches!(tone, Tone::Caution | Tone::Warning) {
+        x + 14
+    } else {
+        x
+    }
+}
+
+/// The statement as drawn: one line, ellipsised at the width.
+fn ellipsised(s: &Statement) -> String<64> {
+    let r = Widget::Statement.rect();
+    let max = ((r.x1 - line_text_x(s.tone)) / 8) as usize;
+    let mut t: String<64> = String::new();
+    if s.text.chars().count() > max {
+        for ch in s.text.chars().take(max.saturating_sub(1)) {
+            let _ = t.push(ch);
+        }
+        let _ = t.push('\u{2026}');
+    } else {
+        let _ = t.push_str(&s.text);
+    }
+    t
+}
+
 fn draw_line<D: DrawTarget<Color = Rgb565>>(
     d: &mut D,
     s: Option<&Statement>,
     debug: Option<(&str, &str)>,
 ) {
     let r = Widget::Statement.rect();
-    fill(d, r, BG);
     match (s, debug) {
         (Some(s), _) => {
             let col = match s.tone {
@@ -758,26 +1079,13 @@ fn draw_line<D: DrawTarget<Color = Rgb565>>(
                 Tone::Caution => CAUTION,
                 Tone::Warning => WARNING,
             };
-            let mut x = r.x0;
             if matches!(s.tone, Tone::Caution | Tone::Warning) {
-                caution_glyph(d, Point::new(x, r.y0 + 6), 10, col);
-                x += 14;
-            }
-            // One line, ellipsised at the width.
-            let max = ((r.x1 - x) / 8) as usize;
-            let mut t: String<64> = String::new();
-            if s.text.chars().count() > max {
-                for ch in s.text.chars().take(max.saturating_sub(1)) {
-                    let _ = t.push(ch);
-                }
-                let _ = t.push('\u{2026}');
-            } else {
-                let _ = t.push_str(&s.text);
+                caution_glyph(d, Point::new(r.x0, r.y0 + 6), 10, col);
             }
             text(
                 d,
-                &t,
-                Point::new(x, r.y0 + 5),
+                &ellipsised(s),
+                Point::new(line_text_x(s.tone), r.y0 + 5),
                 &FONT_8X13,
                 col,
                 Alignment::Left,
@@ -805,62 +1113,14 @@ fn draw_line<D: DrawTarget<Color = Rgb565>>(
     }
 }
 
-/// The rows the overlay covers: the zero line, and the thumb with its percent above it.
-pub fn overlay_bands(o: &Overlay) -> [(i32, i32); 2] {
-    let zero = layout::band(o.y0, layout::ZERO_H);
-    let (t0, t1) = layout::band(o.yf, layout::THUMB_H);
-    [zero, ((t0 - 15).max(0), t1)]
-}
-
-/// Redraw every widget that meets rows `y0..y1`, clipped to them: the overlay left those rows
-/// (section 5.7).
-pub fn redraw_band<D: DrawTarget<Color = Rgb565>>(
-    d: &mut D,
-    v: &View,
-    debug: Option<(&str, &str)>,
-    y0: i32,
-    y1: i32,
-) {
-    let band = er(Rect::new(0, y0, layout::WIDTH, y1));
-    let mut c = d.clipped(&band);
-    fill(&mut c, Rect::new(0, y0, layout::WIDTH, y1), BG);
-    for w in layout::meeting(y0, y1) {
-        match (w, &v.body) {
-            (Widget::TopStrip, _) => draw_top(&mut c, &v.top),
-            (Widget::Statement, _) => draw_line(&mut c, v.line.as_ref(), debug),
-            (_, Body::Card(_)) => {}
-            (Widget::Dial, Body::Ride(r)) => draw_dial(&mut c, &r.dial),
-            (Widget::AttitudeLeft, Body::Ride(r)) => {
-                draw_corner(&mut c, w.rect(), r.corners[0].as_ref())
-            }
-            (Widget::AttitudeRight, Body::Ride(r)) => {
-                draw_corner(&mut c, w.rect(), r.corners[1].as_ref())
-            }
-            (Widget::PackLine, Body::Ride(r)) => draw_pack(&mut c, &r.pack),
-            (Widget::PhaseLeft | Widget::PhaseRight | Widget::ArmBand, Body::Ride(r)) => {
-                match &r.lower {
-                    Lower::Bars { phase, band } => match w {
-                        Widget::PhaseLeft => draw_phase(&mut c, w.rect(), phase[0].as_ref()),
-                        Widget::PhaseRight => draw_phase(&mut c, w.rect(), phase[1].as_ref()),
-                        _ => draw_band(&mut c, *band),
-                    },
-                    Lower::Grid(cells) => draw_grid(&mut c, cells),
-                }
-            }
-        }
+/// The overlay (section 5.7), over everything: the zero line at `y0`; in DIFFERENTIAL the turn
+/// zero line at `x0`; the thumb bar at `yf`, with the `xf` mark across it in DIFFERENTIAL; and
+/// the figures above its right end.
+fn draw_overlay<D: DrawTarget<Color = Rgb565>>(d: &mut D, o: &Overlay) {
+    fill(d, layout::zero_rect(o.y0), FG_MUTED);
+    if let Some(t) = o.turn {
+        fill(d, layout::turn_rect(t.x0), FG_MUTED);
     }
-    if let Body::Card(card) = &v.body {
-        if layout::CARD_AREA.meets_rows(y0, y1) {
-            draw_card(&mut c, card);
-        }
-    }
-}
-
-/// The overlay, drawn last: the zero line at `y0`, the thumb bar at `yf` and the demand as a
-/// signed percent beside its right end.
-pub fn draw_overlay<D: DrawTarget<Color = Rgb565>>(d: &mut D, o: &Overlay) {
-    let (z0, z1) = layout::band(o.y0, layout::ZERO_H);
-    fill(d, Rect::new(0, z0, layout::WIDTH, z1), FG_MUTED);
     let (t0, t1) = layout::band(o.yf, layout::THUMB_H);
     let col = if o.live { PRIMARY } else { FG_MUTED };
     let _ = RoundedRectangle::with_equal_corners(
@@ -869,11 +1129,18 @@ pub fn draw_overlay<D: DrawTarget<Color = Rgb565>>(d: &mut D, o: &Overlay) {
     )
     .into_styled(PrimitiveStyle::with_fill(col))
     .draw(d);
-    let mut s: String<8> = String::new();
-    let _ = write!(s, "{:+}%", o.percent);
+    if let Some(t) = o.turn {
+        let x =
+            t.xf.clamp(layout::MARK_W / 2, layout::WIDTH - layout::MARK_W / 2);
+        fill(
+            d,
+            Rect::new(x - layout::MARK_W / 2, t0, x + layout::MARK_W / 2, t1),
+            FG,
+        );
+    }
     text(
         d,
-        &s,
+        &o.text(),
         Point::new(layout::WIDTH - 4, (t0 - 14).max(0)),
         &FONT_8X13,
         FG,

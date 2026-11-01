@@ -1,6 +1,7 @@
 //! The Ride view's layout as data (`specs/handheld-remote.md` section 5.2): each widget's fixed
 //! rectangle on the 240 x 320 portrait panel, the redraw rule (a widget redraws only when the
-//! state it draws from changes), and the rows the throttle overlay vacates (section 5.7).
+//! state it draws from changes), the ring's segments, and the rectangles the throttle overlay
+//! covers and vacates (section 5.7).
 
 /// Panel width, pixels (portrait).
 pub const WIDTH: i32 = 240;
@@ -34,9 +35,25 @@ impl Rect {
         self.x0 < o.x1 && o.x0 < self.x1 && self.y0 < o.y1 && o.y0 < self.y1
     }
 
-    /// Whether the rows `y0..y1` cross this rectangle.
-    pub const fn meets_rows(&self, y0: i32, y1: i32) -> bool {
-        self.y0 < y1 && y0 < self.y1
+    /// The smallest rectangle holding both.
+    pub fn union(&self, o: &Rect) -> Rect {
+        Rect::new(
+            self.x0.min(o.x0),
+            self.y0.min(o.y0),
+            self.x1.max(o.x1),
+            self.y1.max(o.y1),
+        )
+    }
+
+    /// The part on the panel; `None` when nothing is.
+    pub fn on_panel_part(&self) -> Option<Rect> {
+        let r = Rect::new(
+            self.x0.max(0),
+            self.y0.max(0),
+            self.x1.min(WIDTH),
+            self.y1.min(HEIGHT),
+        );
+        (r.x0 < r.x1 && r.y0 < r.y1).then_some(r)
     }
 
     /// Whether it lies on the panel.
@@ -85,6 +102,40 @@ pub const RING_RADIUS: i32 = 76;
 pub const RING_STROKE: i32 = 10;
 /// The speed's centre inside the ring.
 pub const SPEED_CENTRE: (i32, i32) = (120, 100);
+/// The speed's own rectangle inside the ring: the figure, "km/h" and "R". A change of speed alone
+/// redraws this and not the ring.
+pub const SPEED_BOX: Rect = Rect::new(72, 72, 168, 142);
+/// The ring's segments: ten over 240 degrees from 150 degrees (clockwise, y down, 0 at three
+/// o'clock), each 24 degrees less [`RING_GAP_DEG`] at each end.
+pub const RING_SEGMENTS: u8 = 10;
+pub const RING_START_DEG: f32 = 150.0;
+pub const RING_STEP_DEG: f32 = 24.0;
+pub const RING_GAP_DEG: f32 = 1.2;
+
+/// The ring segment a pixel at `(dx, dy)` from [`RING_CENTRE`] belongs to, or `None` for a pixel
+/// off the stroke, in a gap, or in the opening at the bottom.
+pub fn ring_segment(dx: i32, dy: i32) -> Option<u8> {
+    let d2 = dx * dx + dy * dy;
+    let inner = RING_RADIUS - RING_STROKE / 2;
+    let outer = RING_RADIUS + RING_STROKE / 2;
+    if d2 < inner * inner || d2 >= outer * outer {
+        return None;
+    }
+    let deg = libm::atan2f(dy as f32, dx as f32).to_degrees();
+    // `deg` is in -180..=180, so one turn added brings it to 0..360.
+    let mut rel = deg - RING_START_DEG;
+    if rel < 0.0 {
+        rel += 360.0;
+    }
+    let seg = (rel / RING_STEP_DEG) as u8;
+    if seg >= RING_SEGMENTS {
+        return None;
+    }
+    let within = rel - f32::from(seg) * RING_STEP_DEG;
+    (RING_GAP_DEG..=RING_STEP_DEG - RING_GAP_DEG)
+        .contains(&within)
+        .then_some(seg)
+}
 
 impl Widget {
     /// The widget's rectangle.
@@ -123,6 +174,56 @@ pub const fn lamp_cell(col: i32, row: i32) -> Rect {
 pub const THUMB_H: i32 = 10;
 /// The zero line's height, pixels.
 pub const ZERO_H: i32 = 2;
+/// The rows above the thumb bar its percent text takes.
+pub const THUMB_TEXT_H: i32 = 15;
+/// DIFFERENTIAL's turn zero line: its width, and its rows (from under the top strip to the top
+/// of the arm zone).
+pub const TURN_W: i32 = 2;
+pub const TURN_Y: (i32, i32) = (20, crate::arm::ARM_ZONE_Y);
+/// The width of the `xf` mark across the thumb bar.
+pub const MARK_W: i32 = 4;
+
+/// The zero line at `y0`, full width.
+pub fn zero_rect(y0: i32) -> Rect {
+    let (a, b) = band(y0, ZERO_H);
+    Rect::new(0, a, WIDTH, b)
+}
+
+/// The thumb bar at `yf` with its percent text above it, full width.
+pub fn thumb_rect(yf: i32) -> Rect {
+    let (a, b) = band(yf, THUMB_H);
+    Rect::new(0, (a - THUMB_TEXT_H).max(0), WIDTH, b)
+}
+
+/// DIFFERENTIAL's turn zero line at `x0`.
+pub fn turn_rect(x0: i32) -> Rect {
+    let x = x0.clamp(0, WIDTH - TURN_W);
+    Rect::new(x, TURN_Y.0, x + TURN_W, TURN_Y.1)
+}
+
+/// The character span, `[first, end)`, over which two lines of monospace text differ, or `None`
+/// when they are the same: the statement line redraws those columns alone (section 5.5, "the
+/// counter's text alone redrawn").
+pub fn text_diff(a: &str, b: &str) -> Option<(usize, usize)> {
+    let (na, nb) = (a.chars().count(), b.chars().count());
+    let first = a.chars().zip(b.chars()).position(|(x, y)| x != y);
+    match first {
+        None if na == nb => None,
+        None => Some((na.min(nb), na.max(nb))),
+        Some(f) if na != nb => Some((f, na.max(nb))),
+        Some(f) => {
+            // Equal lengths: the last differing column, counted from the end.
+            let from_end = a
+                .chars()
+                .rev()
+                .zip(b.chars().rev())
+                .position(|(x, y)| x != y)
+                .unwrap_or(0);
+            let end = na - from_end;
+            Some((f, end))
+        }
+    }
+}
 
 /// The rows a bar of height `h` centred on row `y` covers, clamped to the panel.
 pub const fn band(y: i32, h: i32) -> (i32, i32) {
@@ -132,12 +233,10 @@ pub const fn band(y: i32, h: i32) -> (i32, i32) {
     (a, b)
 }
 
-/// The widgets whose rectangles meet the rows `y0..y1`, which redraw clipped to them when the
-/// overlay leaves those rows.
-pub fn meeting(y0: i32, y1: i32) -> impl Iterator<Item = Widget> {
-    WIDGETS
-        .into_iter()
-        .filter(move |w| w.rect().meets_rows(y0, y1))
+/// The widgets whose rectangles meet `r`: the ones a paint of `r` draws (section 5.7: what the
+/// overlay vacates is painted by every widget that meets it).
+pub fn meeting(r: Rect) -> impl Iterator<Item = Widget> {
+    WIDGETS.into_iter().filter(move |w| w.rect().overlaps(&r))
 }
 
 /// A widget's redraw rule: it keeps the state it last drew, and redraws when the new state
@@ -216,21 +315,85 @@ mod tests {
     }
 
     #[test]
+    fn the_speed_box_lies_inside_the_ring_and_inside_the_dial() {
+        let d = Widget::Dial.rect();
+        assert!(SPEED_BOX.x0 >= d.x0 && SPEED_BOX.x1 <= d.x1);
+        assert!(SPEED_BOX.y0 >= d.y0 && SPEED_BOX.y1 <= d.y1);
+        let inner = RING_RADIUS - RING_STROKE / 2;
+        for (x, y) in [
+            (SPEED_BOX.x0, SPEED_BOX.y0),
+            (SPEED_BOX.x1, SPEED_BOX.y0),
+            (SPEED_BOX.x0, SPEED_BOX.y1),
+            (SPEED_BOX.x1, SPEED_BOX.y1),
+        ] {
+            let (dx, dy) = (x - RING_CENTRE.0, y - RING_CENTRE.1);
+            assert!(dx * dx + dy * dy < inner * inner, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn the_ring_segments_run_clockwise_from_150_degrees_with_gaps_and_an_opening() {
+        let at = |deg: f32, r: f32| {
+            let a = deg.to_radians();
+            ring_segment(
+                libm::roundf(r * libm::cosf(a)) as i32,
+                libm::roundf(r * libm::sinf(a)) as i32,
+            )
+        };
+        let r = RING_RADIUS as f32;
+        for i in 0..10 {
+            let mid = 150.0 + 24.0 * i as f32 + 12.0;
+            assert_eq!(at(mid, r), Some(i), "segment {i}");
+        }
+        assert_eq!(at(150.0, r), None, "the gap at the start");
+        assert_eq!(at(270.0, r), None, "the gap between 4 and 5, at the top");
+        assert_eq!(at(90.0, r), None, "the opening, facing down");
+        assert_eq!(at(162.0, r - 6.0), None, "inside the stroke");
+        assert_eq!(at(162.0, r + 6.0), None, "outside the stroke");
+        assert_eq!(at(162.0, r - 4.0), Some(0));
+        assert_eq!(at(162.0, r + 4.0), Some(0));
+    }
+
+    #[test]
+    fn the_overlay_rectangles() {
+        assert_eq!(zero_rect(100), Rect::new(0, 99, 240, 101));
+        assert_eq!(thumb_rect(100), Rect::new(0, 80, 240, 105));
+        assert_eq!(thumb_rect(5), Rect::new(0, 0, 240, 10));
+        assert_eq!(turn_rect(120), Rect::new(120, 20, 122, 250));
+        assert_eq!(turn_rect(239), Rect::new(238, 20, 240, 250));
+        assert!(thumb_rect(318).on_panel());
+    }
+
+    #[test]
+    fn the_text_diff_is_the_changed_columns() {
+        assert_eq!(text_diff("Reading 3/22", "Reading 3/22"), None);
+        assert_eq!(text_diff("Reading 3/22", "Reading 4/22"), Some((8, 9)));
+        assert_eq!(text_diff("Reading 9/22", "Reading 10/22"), Some((8, 13)));
+        assert_eq!(text_diff("abc", "abcde"), Some((3, 5)));
+        assert_eq!(text_diff("abcde", "abc"), Some((3, 5)));
+        assert_eq!(text_diff("x1y2z", "x3y4z"), Some((1, 4)));
+    }
+
+    #[test]
     fn the_overlays_vacated_band_names_exactly_the_widgets_it_meets() {
         let (y0, y1) = band(230, THUMB_H);
         assert_eq!((y0, y1), (225, 235));
-        let w: Vec<Widget> = meeting(y0, y1).collect();
+        let rows = |y0, y1| Rect::new(0, y0, WIDTH, y1);
+        let w: Vec<Widget> = meeting(rows(y0, y1)).collect();
         assert_eq!(w, [Widget::PhaseLeft, Widget::PhaseRight]);
-        let w: Vec<Widget> = meeting(145, 155).collect();
+        let w: Vec<Widget> = meeting(rows(145, 155)).collect();
         assert_eq!(
             w,
             [Widget::Dial, Widget::AttitudeLeft, Widget::AttitudeRight]
         );
-        let w: Vec<Widget> = meeting(249, 253).collect();
+        let w: Vec<Widget> = meeting(rows(249, 253)).collect();
         assert!(
             w.is_empty(),
             "the gap between the phase bars and the arm band"
         );
+        // A turn zero line meets every widget in its columns between the strip and the band.
+        let w: Vec<Widget> = meeting(turn_rect(30)).collect();
+        assert_eq!(w, [Widget::AttitudeLeft, Widget::PhaseLeft]);
         assert_eq!(band(2, THUMB_H), (0, 7));
         assert_eq!(band(318, THUMB_H), (313, 320));
     }

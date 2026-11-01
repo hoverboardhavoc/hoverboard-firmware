@@ -98,6 +98,33 @@ pub struct Turn {
     pub percent: i8,
 }
 
+impl Overlay {
+    /// The figures beside the thumb bar: the demand as a signed percent ("+30%"), or in
+    /// DIFFERENTIAL the demand and the turn with letters for their signs, F forward and B back,
+    /// R right and L left ("F 30 %  R 12 %"); a zero carries no letter ("0 %").
+    pub fn text(&self) -> String<24> {
+        let mut s = String::new();
+        let lettered = |s: &mut String<24>, v: i8, pos: char, neg: char| {
+            let _ = match v.signum() {
+                1 => write!(s, "{pos} {v} %"),
+                -1 => write!(s, "{neg} {} %", -i16::from(v)),
+                _ => write!(s, "0 %"),
+            };
+        };
+        match self.turn {
+            None => {
+                let _ = write!(s, "{:+}%", self.percent);
+            }
+            Some(t) => {
+                lettered(&mut s, self.percent, 'F', 'B');
+                let _ = s.push_str("  ");
+                lettered(&mut s, t.percent, 'R', 'L');
+            }
+        }
+        s
+    }
+}
+
 impl Model {
     /// A model for the pinned `bridge` (`None`: no bridge set).
     pub fn new(bridge: Option<[u8; 6]>) -> Model {
@@ -1398,5 +1425,25 @@ mod tests {
                 .value
         };
         assert!(sent(3) > sent(2), "{} {}", sent(2), sent(3));
+    }
+
+    #[test]
+    fn the_overlay_text() {
+        let o = |percent, turn: Option<i8>| Overlay {
+            y0: 0,
+            yf: 0,
+            live: true,
+            percent,
+            turn: turn.map(|p| Turn {
+                x0: 0,
+                xf: 0,
+                percent: p,
+            }),
+        };
+        assert_eq!(o(30, None).text(), "+30%");
+        assert_eq!(o(-100, None).text(), "-100%");
+        assert_eq!(o(30, Some(12)).text(), "F 30 %  R 12 %");
+        assert_eq!(o(-100, Some(-100)).text(), "B 100 %  L 100 %");
+        assert_eq!(o(0, Some(0)).text(), "0 %  0 %");
     }
 }
