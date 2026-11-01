@@ -11,9 +11,11 @@
 //!
 //! Switching cortex-m-rt's default off is done with its `device` feature, and Cargo unifies
 //! features across the **one shared cortex-m-rt build** for the whole workspace. So the choice is
-//! not per-binary: the moment `device` is on, *every* thumbv7m binary here (dummy-test, store-test,
-//! l2-uart-bench, ble-loopback-test, wdg-bench, imu-bench, firmware) loses the default table and
-//! must get one from somewhere. This crate is that somewhere -- one table, one length, one owner,
+//! not per-binary: the moment `device` is on, *every* thumbv7m binary here (l2-uart-bench,
+//! ble-loopback-test, wdg-bench, imu-bench, the universal firmware image) loses the default table and
+//! must get one from somewhere. (The per-chip images and the dummy and store test images take their
+//! chip's table from the `hal` crate instead; this crate goes with the universal image,
+//! specs/hal.md section 9, step 2.) This crate is that somewhere -- one table, one length, one owner,
 //! depended on by all of them, rather than a copy per binary or a release-only feature that would
 //! make the built image differ from the `cargo build` image.
 //!
