@@ -192,7 +192,7 @@ async fn main(spawner: Spawner) {
     let platform = EspPlatform::new(FlashStorage::new(p.FLASH), table);
     let build = build(khz);
     let fw_ver = u16::from_be_bytes([build.version[0], build.version[1]]);
-    let node = NODE.init(Node::new(store, mounted, fw_ver, default));
+    let node = NODE.init(Node::new(store, mounted, fw_ver, mac, default));
     let svc = SERVICE.init(Service::new(
         build,
         IMAGE.take(),

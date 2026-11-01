@@ -42,8 +42,7 @@ internal fun writeFailureText(state: WriteState): Int = when (state) {
 private fun frameText(r: Orientation.Refusal): Int = when (r) {
     Orientation.Refusal.NOT_A_SIGN -> R.string.setup_notice_not_a_sign
     Orientation.Refusal.ROLES -> R.string.setup_notice_roles
-    Orientation.Refusal.ACCEL_MIRRORED -> R.string.setup_notice_accel_mirrored
-    Orientation.Refusal.GYRO_MIRRORED -> R.string.setup_notice_gyro_mirrored
+    Orientation.Refusal.MIRRORED -> R.string.setup_notice_mirrored
 }
 
 private fun refusalText(r: CfgRefusal): Int = when (r) {
@@ -54,7 +53,6 @@ private fun refusalText(r: CfgRefusal): Int = when (r) {
     CfgRefusal.STORE_ERR -> R.string.setup_write_refused_store
     CfgRefusal.NO_SPACE -> R.string.setup_write_refused_no_space
     CfgRefusal.COMMIT_FAILED -> R.string.setup_write_refused_commit
-    CfgRefusal.READ_ONLY -> R.string.setup_write_refused_read_only
     CfgRefusal.SECRET -> R.string.setup_write_refused_secret
 }
 

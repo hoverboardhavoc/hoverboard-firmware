@@ -31,8 +31,9 @@ use linkctl::OP_CYCLIC_STATE;
 use net::pdu::{Pdu, NO_ADDRESS};
 pub use net::walk::BRIDGE_NAME_MAX;
 use net::walk::{
-    bridge_name_usable, bridge_value_usable, Emits, Responder, CLASS_BRIDGE, MAX_PORTS,
-    MCU_ESP32C3, PORT_BLE, PORT_SWD, PORT_UART, WIFI_PASS_MAX, WIFI_SSID_MAX,
+    bridge_name_usable, bridge_value_usable, Emits, Identity as NodeIdentity, Responder,
+    CLASS_BRIDGE, MAX_PORTS, MCU_ESP32C3, PORT_BLE, PORT_SWD, PORT_UART, UID_LEN, WIFI_PASS_MAX,
+    WIFI_SSID_MAX,
 };
 use store::{
     Flash, Store, StrField, Type, Value, DEVICE_NAME, WIFI_PASS, WIFI_SSID, WIFI_TX_POWER,
@@ -73,6 +74,18 @@ pub const fn default_name(mac: [u8; 6]) -> [u8; 14] {
         i += 1;
     }
     buf
+}
+
+/// The bridge's factory unique ID in `IDENTITY` (`specs/machine-settings.md` section 6.1): its
+/// 6-byte eFuse MAC followed by six zero bytes.
+pub const fn uid(mac: [u8; 6]) -> [u8; UID_LEN] {
+    let mut uid = [0u8; UID_LEN];
+    let mut i = 0;
+    while i < 6 {
+        uid[i] = mac[i];
+        i += 1;
+    }
+    uid
 }
 
 /// The name BLE advertises and mDNS answers for, copied into `buf`; returns its length: the
@@ -253,16 +266,23 @@ pub struct Node<'f, F: Flash> {
 impl<'f, F: Flash> Node<'f, F> {
     /// The node over its `store`, with the address the store holds. `store_mounted` says whether
     /// the store is the bridge's own (`false`: it did not mount and the firmware gave the node an
-    /// empty one, so the bridge runs unassigned and `ESP_INFO` says so). `fw_ver` is what
-    /// `NODE_HELLO` reports; `default_name` is what a read of an unstored `device.name` answers
-    /// ([`default_name`]).
+    /// empty one, so the bridge runs unassigned and `ESP_INFO` says so). `fw_ver` and the eFuse
+    /// `mac` are what `IDENTITY` reports ([`uid`]); `default_name` is what a read of an unstored
+    /// `device.name` answers ([`default_name`]).
     pub fn new(
         store: Store<'f, F>,
         store_mounted: bool,
         fw_ver: u16,
+        mac: [u8; 6],
         default_name: &'static [u8],
     ) -> Self {
-        let mut resp = Responder::new(N_PORTS, PORT_KINDS, MCU_ESP32C3, CLASS_BRIDGE, fw_ver);
+        let identity = NodeIdentity {
+            class: CLASS_BRIDGE,
+            mcu: MCU_ESP32C3,
+            fw_ver,
+            uid: uid(mac),
+        };
+        let mut resp = Responder::new(N_PORTS, PORT_KINDS, identity);
         resp.set_default_name(default_name);
         resp.restore_addr(&store);
         Node {

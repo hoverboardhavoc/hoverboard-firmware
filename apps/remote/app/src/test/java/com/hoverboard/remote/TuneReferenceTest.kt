@@ -106,7 +106,8 @@ class TuneReferenceTest {
         rig.model.save()
         runCurrent()
 
-        assertEquals(listOf(board to speedSlew), rig.transport.writes.map { it.first to it.second })
+        val tuned = rig.transport.writes.filter { it.first == board }
+        assertEquals(listOf(board to speedSlew), tuned.map { it.first to it.second })
         assertEquals(60, rig.state.gains.flash[speedSlew])
         assertFalse(rig.state.gains.unsaved(speedSlew))
     }

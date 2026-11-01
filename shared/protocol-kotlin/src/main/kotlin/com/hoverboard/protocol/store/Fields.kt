@@ -3,69 +3,104 @@ package com.hoverboard.protocol.store
 import com.hoverboard.protocol.board.PIN_ABSENT
 
 /**
- * One registered store field as the firmware declares it: its permanent `field_id`, its storage
- * [type] and its typed [default] (what a board that never staged the field reads). A mirror of one
- * `Field<T>` / `StrField` handle in `shared/store/src/field.rs`, which is the single source of truth
- * for all three facts; `RustSourceDriftTest` pins every entry of [Fields.ALL] against it.
- *
- * How many indices a field has is NOT here: the Rust handle does not carry it (an indexed field is a
- * plain `Field<T>` whose index range lives in its doc comment and its consumer), so a client that
- * names an index takes it from the field's own documentation.
- *
- * [readOnly] mirrors a registry row marked `.read_only()`: the firmware's own fact, never stored, and
- * a `CONFIG_WRITE` of it is refused with [com.hoverboard.protocol.l3.Walk.CFG_READ_ONLY].
+ * What a field describes (`specs/machine-settings.md` section 2): the block its id sits in. A mirror
+ * of `Scope` in `shared/store/src/field.rs`, whose block bounds `RustSourceDriftTest` pins.
  */
-data class FieldDef(val id: Int, val type: Type, val default: Value, val readOnly: Boolean = false) {
+enum class Scope {
+    /** This circuit board or bridge and what is wired to it (`0x01..=0x1F`). Never compared across boards. */
+    NODE,
+
+    /** The vehicle as a whole (`0x20..=0x3F`): a copy on every motor controller, and the copies must match. */
+    MACHINE,
+
+    /** One motor and its wheel (`0x40..=0x7F`), `Key.index` = the motor. */
+    WHEEL,
+    ;
+
+    companion object {
+        /**
+         * The scope of [fieldId], or null for an id outside the three blocks (the store-test fields
+         * at `0xFD`/`0xFE`). The mirror of `Scope::of`.
+         */
+        fun of(fieldId: Int): Scope? = when (fieldId) {
+            in 0x01..0x1F -> NODE
+            in 0x20..0x3F -> MACHINE
+            in 0x40..0x7F -> WHEEL
+            else -> null
+        }
+    }
+}
+
+/**
+ * When a written value takes effect on a board (`specs/machine-settings.md` section 5): a mirror of
+ * `Effect` in `shared/store/src/field.rs`, an attribute of every registry row, which
+ * `RustSourceDriftTest` pins field by field.
+ */
+enum class Effect {
+    /** Applied as it is written: the tune lane's fields. */
+    LIVE,
+
+    /** Read at boot and again at every arm (`firmware::arm::ARM_ROW`). */
+    ARM,
+
+    /** Read once at boot. */
+    BOOT,
+
+    /** No firmware consumer: a client's fact, stored on the board. */
+    CLIENT,
+}
+
+/**
+ * One registered store field as the firmware declares it: its permanent `field_id`, its storage
+ * [type], its typed [default] (what a board that never staged the field reads) and its [effect]. A
+ * mirror of one `Field<T>` / `StrField` handle and of its registry row
+ * (`shared/store/src/field.rs` (`Field`, `StrField`, `REGISTRY`)), the single source of truth for all four facts; `RustSourceDriftTest` pins every entry of
+ * [Fields.ALL] against them. A wheel field is one of these too, its index the motor.
+ */
+data class FieldDef(val id: Int, val type: Type, val default: Value, val effect: Effect) {
     init {
         require(default.kind() == type) { "default ${default.kind()} does not match type $type" }
     }
+
+    /** What this field describes ([Scope.of] its id). */
+    val scope: Scope? get() = Scope.of(id)
 
     /** The [Key] naming instance [index] of this field (a singleton uses 0). */
     fun key(index: Int = 0) = Key(id, index)
 }
 
 /**
- * One registered INDEXED store field whose indices default differently: a mirror of one
- * `IndexedField<T, N>` handle in `shared/store/src/field.rs`, carrying the id, the storage [type]
- * and one default per index ([defaults], so its size is the field's `N`). `RustSourceDriftTest` pins
- * every entry of [Fields.INDEXED] against it.
+ * One registered INDEXED store field: a mirror of one `IndexedField<T, N>` handle in
+ * `shared/store/src/field.rs`, carrying the id, the storage [type], one default per index
+ * ([defaults], so its size is the field's `N`) and the [effect] its registry rows state.
+ * `RustSourceDriftTest` pins every entry of [Fields.INDEXED] against it.
  */
-data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value>) {
+data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value>, val effect: Effect) {
     init {
         require(defaults.all { it.kind() == type }) { "a default of $defaults does not match type $type" }
     }
 
+    /** How many indices the field has (the handle's `N`). */
+    val size: Int get() = defaults.size
+
+    /** What this field describes ([Scope.of] its id). */
+    val scope: Scope? get() = Scope.of(id)
+
     /** Instance [index] as a plain field with that index's default (the mirror of `IndexedField::at`). */
-    fun at(index: Int): FieldDef = FieldDef(id, type, defaults[index])
+    fun at(index: Int): FieldDef = FieldDef(id, type, defaults[index], effect)
 }
 
 /**
- * The registered store fields a settings client edits or displays (`specs/remote-ui.md` section 3.4),
- * mirrored from `shared/store/src/field.rs`, plus the value vocabularies the firmware gives the
- * byte-valued ones.
+ * The registered store fields (`shared/store/src/field.rs`, `REGISTRY`), plus the value vocabularies the
+ * firmware gives the byte-valued ones. The ids sit in the blocks of `specs/machine-settings.md`
+ * section 3: node `0x01..=0x19`, machine `0x20..=0x2B`, wheel `0x40..=0x54`.
  *
- * Not every registered field is here: `SOME_BLOB` and the test fields belong to nobody. The live
- * tune lane's keys, ranges and ramp are in [Gains]. A field is added when a client exercises it,
- * which is why the board-layout block (0x40-0x55 plus the per-motor facts) is here now: the layout
- * editor reads and writes it (`specs/remote-ui.md` section 3.5, [com.hoverboard.protocol.board.Layout]).
+ * Every registered field is here but the store-test fields. The live tune lane's keys, ranges and
+ * ramp are in [Gains].
  */
 object Fields {
     /** The board's persistent L3 node address (walk-owned; displayed, never edited). */
-    val NODE_ADDRESS = FieldDef(0x01, Type.U8, Value.U8(0))
-
-    /**
-     * What a node is (`specs/l3.md`, "Node class"): `0x01` = motor controller, `0x02` = bridge.
-     * Read-only; a board running this firmware reads `0x01`.
-     */
-    val NODE_CLASS = FieldDef(0x03, Type.U8, Value.U8(0x01), readOnly = true)
-
-    /**
-     * What went wrong at the board's last bring-up (`specs/configured-links.md` section 5): the
-     * status record's entries as bytes, four per entry, decoded by
-     * [com.hoverboard.protocol.board.BoardStatus]. Read-only and answered by the node, never stored;
-     * empty means everything configured came up.
-     */
-    val BOARD_STATUS = FieldDef(0x05, Type.Blob, Value.Bytes(ByteArray(0)), readOnly = true)
+    val NODE_ADDRESS = FieldDef(0x01, Type.U8, Value.U8(0), Effect.BOOT)
 
     /** How many inter-board links a board can have (`shared/store/src/field.rs`, `LINKS`). */
     const val LINKS = 2
@@ -75,67 +110,71 @@ object Fields {
      * 2): a link exists when both its pins are set. Unset by default, so a board with nothing
      * stored brings up no UART.
      */
-    val LINK_TX = IndexedFieldDef(0x56, Type.U8, List(LINKS) { Value.U8(PIN_ABSENT) })
+    val LINK_TX = IndexedFieldDef(0x0F, Type.U8, List(LINKS) { Value.U8(PIN_ABSENT) }, Effect.BOOT)
 
     /** Each inter-board link's receive pin, index = the link (see [LINK_TX]). */
-    val LINK_RX = IndexedFieldDef(0x57, Type.U8, List(LINKS) { Value.U8(PIN_ABSENT) })
+    val LINK_RX = IndexedFieldDef(0x10, Type.U8, List(LINKS) { Value.U8(PIN_ABSENT) }, Effect.BOOT)
 
     /** The advertised device name. */
-    val DEVICE_NAME = FieldDef(0x10, Type.Str, Value.Str("Hoverboard"))
+    val DEVICE_NAME = FieldDef(0x02, Type.Str, Value.Str("Hoverboard"), Effect.BOOT)
 
     /**
      * The Wi-Fi network a bridge joins (`specs/bridge-onboarding.md` section 2.1). Mirrored for the
      * drift gate; the app reads neither Wi-Fi field.
      */
-    val WIFI_SSID = FieldDef(0x11, Type.Str, Value.Str(""))
+    val WIFI_SSID = FieldDef(0x03, Type.Str, Value.Str(""), Effect.BOOT)
 
     /** The Wi-Fi password: a secret, never read back ([com.hoverboard.protocol.l3.Walk.CFG_SECRET]). */
-    val WIFI_PASS = FieldDef(0x12, Type.Str, Value.Str(""))
+    val WIFI_PASS = FieldDef(0x04, Type.Str, Value.Str(""), Effect.BOOT)
 
     /**
      * A bridge's Wi-Fi transmit power cap, quarter-dBm, 8 to 84; default 34 (8 dBm on the C3)
      * (`specs/bridge-onboarding.md` section 2.4). Mirrored for the drift gate; the app does not
      * read it.
      */
-    val WIFI_TX_POWER = FieldDef(0x13, Type.U8, Value.U8(34))
+    val WIFI_TX_POWER = FieldDef(0x05, Type.U8, Value.U8(34), Effect.BOOT)
 
     /** The motor current limit, milliamps. The firmware converts it against the board's own counts per amp at bring-up, then clamps the COUNT into the window the comparison admits (see [CURRENT_LIMIT_MA]). */
-    val MOTOR_CURRENT_LIMIT = FieldDef(0x20, Type.U32, Value.U32(10_000))
+    val MOTOR_CURRENT_LIMIT = FieldDef(0x4E, Type.U32, Value.U32(10_000), Effect.ARM)
 
-    /** The requested commutation method ([MotorMethod]). */
-    val MOTOR_METHOD = FieldDef(0x21, Type.U8, Value.U8(0))
+    /**
+     * The requested commutation method ([MotorMethod]), one for the machine
+     * (`specs/machine-settings.md` section 3.2): the balance law needs both boards on one method.
+     */
+    val MOTOR_METHOD = FieldDef(0x23, Type.U8, Value.U8(0), Effect.ARM)
 
     /** The runtime control mode ([ControlMode]). */
-    val CONTROL_MODE = FieldDef(0x22, Type.U8, Value.U8(0))
+    val CONTROL_MODE = FieldDef(0x20, Type.U8, Value.U8(0), Effect.ARM)
 
     /**
      * Whether balance mode requires a rider ([RiderRequired]); the firmware reads any nonzero byte
      * as required (`specs/control.md` (i)).
      */
-    val CONTROL_RIDER_REQUIRED = FieldDef(0x23, Type.U8, Value.U8(1))
+    val CONTROL_RIDER_REQUIRED = FieldDef(0x22, Type.U8, Value.U8(1), Effect.ARM)
 
     /**
      * The low-battery floor, centivolts: a balance engage is refused while the effective battery
      * word is below it, never a disengage (`specs/sensing-and-safety.md`, the battery floor). `<= 0` = no floor; no
      * clamp beyond the type.
      */
-    val BOARD_BATTERY_FLOOR = FieldDef(0x24, Type.I16, Value.I16(2400))
+    val BOARD_BATTERY_FLOOR = FieldDef(0x26, Type.I16, Value.I16(2400), Effect.ARM)
 
     /**
      * The machine's frame ([ControlFrame]): pivoting platforms, or one rigid body balanced from the
-     * one board that has an IMU (`specs/rover-one-imu.md`, the one-IMU rover). Written the SAME to both boards of a
-     * machine; a Balance board resolves it with its IMU fact into leader or follower.
+     * one board that has an IMU (`specs/rover-one-imu.md`, the one-IMU rover). A machine field, the
+     * same on every motor controller; a Balance board resolves it with its IMU fact into leader or
+     * follower.
      */
-    val CONTROL_FRAME = FieldDef(0x25, Type.U8, Value.U8(0))
+    val CONTROL_FRAME = FieldDef(0x21, Type.U8, Value.U8(0), Effect.ARM)
 
     /**
-     * Which wheel of a rigid machine this board drives ([ControlSide]), the owner of the firmware
-     * control block's `role_right` word (`specs/rover-one-imu.md` section 5). Written to BOTH
-     * boards with DIFFERENT values, 1 on the right wheel's board; only the leader's copy reaches
-     * the steering split, and the follower's is written because the side is that board's own fact
-     * and the roles follow which board carries the IMU. Unknown bytes read as [ControlSide.LEFT].
+     * Which side of the machine a wheel is on ([ControlSide]), per motor: `Key.index` is the motor
+     * (`specs/machine-settings.md` section 3.3), and a board drives motor 0. The owner of the
+     * firmware control block's `role_right` word (`specs/rover-one-imu.md` section 5): the leader
+     * reads its own motor's side and the peer's through the opposite one. Unknown bytes read as
+     * [ControlSide.LEFT].
      */
-    val CONTROL_SIDE = FieldDef(0x26, Type.U8, Value.U8(0))
+    val CONTROL_SIDE = FieldDef(0x50, Type.U8, Value.U8(0), Effect.ARM)
 
     /**
      * The board-layout pin block (`specs/board-model.md`, "The field vocabulary"): one `u8` per
@@ -150,48 +189,48 @@ object Fields {
      * act; the IMU pair has no safe fleet default at all, because one family's I2C bus is the
      * other's BLE USART.
      */
-    val BOARD_SELF_HOLD = FieldDef(0x40, Type.U8, Value.U8(0x1C))
+    val BOARD_SELF_HOLD = FieldDef(0x06, Type.U8, Value.U8(0x1C), Effect.BOOT)
 
     /** Battery sense. ABSENT by default: the pin is fleet-uniform but the SENSE is master-only. */
-    val BOARD_BATTERY_PIN = FieldDef(0x41, Type.U8, Value.U8(PIN_ABSENT))
-    val BOARD_BUZZER = FieldDef(0x42, Type.U8, Value.U8(0x19))
-    val LED_GREEN = FieldDef(0x43, Type.U8, Value.U8(0x13))
-    val LED_ORANGE = FieldDef(0x44, Type.U8, Value.U8(0x0F))
-    val LED_RED = FieldDef(0x45, Type.U8, Value.U8(0x14))
+    val BOARD_BATTERY_PIN = FieldDef(0x07, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val BOARD_BUZZER = FieldDef(0x08, Type.U8, Value.U8(0x19), Effect.CLIENT)
+    val LED_GREEN = FieldDef(0x09, Type.U8, Value.U8(0x13), Effect.CLIENT)
+    val LED_ORANGE = FieldDef(0x0A, Type.U8, Value.U8(0x0F), Effect.CLIENT)
+    val LED_RED = FieldDef(0x0B, Type.U8, Value.U8(0x14), Effect.CLIENT)
     /**
      * The foot pads. ABSENT by default, for [BOARD_BATTERY_PIN]'s reason one step further on: the pins are
      * fleet-uniform (PA11 / PC15) but the PADS are not, and no board in this fleet has pad hardware
      * fitted. A defaulted pin leaves a floating line that the active-high debouncer reads as a foot,
      * which selects the RUN gain set and holds an engagement.
      */
-    val PAD_A = FieldDef(0x46, Type.U8, Value.U8(PIN_ABSENT))
-    val PAD_B = FieldDef(0x47, Type.U8, Value.U8(PIN_ABSENT))
+    val PAD_A = FieldDef(0x0C, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val PAD_B = FieldDef(0x0D, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
 
     /** The IMU bus pins; no safe fleet default exists, so both are ABSENT until staged. */
-    val IMU_SCL_PIN = FieldDef(0x48, Type.U8, Value.U8(PIN_ABSENT))
-    val IMU_SDA_PIN = FieldDef(0x49, Type.U8, Value.U8(PIN_ABSENT))
+    val IMU_SCL_PIN = FieldDef(0x11, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val IMU_SDA_PIN = FieldDef(0x12, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
 
     /** The shared front-end's hall inputs, per motor via `Key.index`. Configured, never defaulted. */
-    val MOTOR_HALL_A = FieldDef(0x4A, Type.U8, Value.U8(PIN_ABSENT))
-    val MOTOR_HALL_B = FieldDef(0x4B, Type.U8, Value.U8(PIN_ABSENT))
-    val MOTOR_HALL_C = FieldDef(0x4C, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_HALL_A = FieldDef(0x40, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val MOTOR_HALL_B = FieldDef(0x41, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val MOTOR_HALL_C = FieldDef(0x42, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
 
     /** The advanced timer's high-side set, per motor. */
-    val MOTOR_GATE_HI_A = FieldDef(0x4D, Type.U8, Value.U8(PIN_ABSENT))
-    val MOTOR_GATE_HI_B = FieldDef(0x4E, Type.U8, Value.U8(PIN_ABSENT))
-    val MOTOR_GATE_HI_C = FieldDef(0x4F, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_GATE_HI_A = FieldDef(0x43, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val MOTOR_GATE_HI_B = FieldDef(0x44, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val MOTOR_GATE_HI_C = FieldDef(0x45, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
 
     /** The complementary low-side set, per motor. */
-    val MOTOR_GATE_LO_A = FieldDef(0x50, Type.U8, Value.U8(PIN_ABSENT))
-    val MOTOR_GATE_LO_B = FieldDef(0x51, Type.U8, Value.U8(PIN_ABSENT))
-    val MOTOR_GATE_LO_C = FieldDef(0x52, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_GATE_LO_A = FieldDef(0x46, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val MOTOR_GATE_LO_B = FieldDef(0x47, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val MOTOR_GATE_LO_C = FieldDef(0x48, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
 
     /** The power-button sense; no fleet default is pinned yet, so unset until configured. */
-    val BOARD_BUTTON = FieldDef(0x53, Type.U8, Value.U8(PIN_ABSENT))
+    val BOARD_BUTTON = FieldDef(0x0E, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
 
     /** The two phase-current sense pins, per motor: the injected ADC group's ranks, in order. */
-    val MOTOR_PHASE_A = FieldDef(0x54, Type.U8, Value.U8(PIN_ABSENT))
-    val MOTOR_PHASE_B = FieldDef(0x55, Type.U8, Value.U8(PIN_ABSENT))
+    val MOTOR_PHASE_A = FieldDef(0x49, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
+    val MOTOR_PHASE_B = FieldDef(0x4A, Type.U8, Value.U8(PIN_ABSENT), Effect.BOOT)
 
     /**
      * What the pack IS: the number of cells in series (`shared/store/src/field.rs`,
@@ -205,14 +244,14 @@ object Fields {
      * constant of its own. 0 is a client with nothing to turn a voltage into, which says so
      * instead of drawing a gauge at an assumed pack.
      */
-    val BOARD_BATTERY_CELLS = FieldDef(0x6A, Type.U8, Value.U8(0))
+    val BOARD_BATTERY_CELLS = FieldDef(0x24, Type.U8, Value.U8(0), Effect.CLIENT)
 
     /**
      * What kind of cell the pack is (`shared/store/src/field.rs`, `BOARD_BATTERY_CHEMISTRY`), in
      * [BatteryChemistry]'s vocabulary; default [BatteryChemistry.LI_ION]. Written the same to both
      * boards, the [BOARD_BATTERY_CELLS] rule, and not read by the firmware.
      */
-    val BOARD_BATTERY_CHEMISTRY = FieldDef(0x7F, Type.U8, Value.U8(0))
+    val BOARD_BATTERY_CHEMISTRY = FieldDef(0x25, Type.U8, Value.U8(0), Effect.CLIENT)
 
     /**
      * Which electrical level means ASSERTED on the board's three discrete input lines
@@ -225,36 +264,29 @@ object Fields {
      * button idles high through a pull-up and a press pulls it down, the pads read high with a
      * foot on. No fleet board is known to differ, so a board with no record behaves as before.
      */
-    val BOARD_INPUT_POLARITY = FieldDef(0x6C, Type.U8, Value.U8(0b110))
+    val BOARD_INPUT_POLARITY = FieldDef(0x19, Type.U8, Value.U8(0b110), Effect.BOOT)
 
     /** The IMU model index ([ImuModel]). */
-    val IMU_MODEL = FieldDef(0x60, Type.U8, Value.U8(0))
+    val IMU_MODEL = FieldDef(0x13, Type.U8, Value.U8(0), Effect.BOOT)
 
     /** Per-axis zero-rate gyro bias, raw counts, indices 0/1/2 = x/y/z. */
-    val IMU_GYRO_BIAS = FieldDef(0x61, Type.I32, Value.I32(0))
+    val IMU_GYRO_BIAS = IndexedFieldDef(0x14, Type.I32, List(3) { Value.I32(0) }, Effect.BOOT)
 
     /** Per-motor drive direction: 0 = forward, nonzero = reverse. */
-    val MOTOR_DIRECTION = FieldDef(0x62, Type.U8, Value.U8(0))
+    val MOTOR_DIRECTION = FieldDef(0x4F, Type.U8, Value.U8(0), Effect.ARM)
 
     /** Per-motor six-step align offset, a sector rotation 0..5 (taken mod 6 by the decoder). */
-    val MOTOR_ALIGN_OFFSET = FieldDef(0x63, Type.U8, Value.U8(0))
+    val MOTOR_ALIGN_OFFSET = FieldDef(0x51, Type.U8, Value.U8(0), Effect.ARM)
 
     /** Per-motor dead time, raw DTG; 0 = unset. */
-    val MOTOR_DEAD_TIME = FieldDef(0x64, Type.U8, Value.U8(0))
-
-    /**
-     * Per-motor phase-current sense DECLARATION: 0 = none. The capability half of the
-     * phase-current group: nonzero brings up [MOTOR_PHASE_A] / [MOTOR_PHASE_B], and a declaration
-     * with either pin unset is recorded in `board.status` as incomplete.
-     */
-    val MOTOR_CURRENT_SENSE = FieldDef(0x66, Type.U8, Value.U8(0))
+    val MOTOR_DEAD_TIME = FieldDef(0x4B, Type.U8, Value.U8(0), Effect.BOOT)
 
     /**
      * Per-motor current-sense calibration, counts per amp: what a `motor_current` count MEANS,
-     * beside [MOTOR_CURRENT_SENSE], which says where it is sensed. A property of the shunt and
+     * beside [MOTOR_PHASE_A] / [MOTOR_PHASE_B], which say where it is sensed. A property of the shunt and
      * amplifier chain fitted, so per-board data rather than a crate constant.
      */
-    val MOTOR_CURRENT_CAL = FieldDef(0x67, Type.U16, Value.U16(455))
+    val MOTOR_CURRENT_CAL = FieldDef(0x4C, Type.U16, Value.U16(455), Effect.ARM)
 
     /**
      * Per-motor POLE-PAIR count: how many ELECTRICAL revolutions the rotor turns per mechanical
@@ -276,9 +308,9 @@ object Fields {
      * distance, and nothing on a phone can tell one from a right one.
      *
      * No firmware consumer either: nothing in the image converts anything to metres, so the store
-     * is the fact's home and a client reads it over `CONFIG_READ`. Not in [ARM_TIME].
+     * is the fact's home and a client reads it over `CONFIG_READ` ([Effect.CLIENT]).
      */
-    val MOTOR_POLE_PAIRS = FieldDef(0x6E, Type.U8, Value.U8(0))
+    val MOTOR_POLE_PAIRS = FieldDef(0x52, Type.U8, Value.U8(0), Effect.CLIENT)
 
     /**
      * Per-motor phase-current NOISE FLOOR, stock current counts: the MINIMUM soft limit the board's
@@ -295,7 +327,7 @@ object Fields {
      * app: the value comes from a disarmed bench measurement (gate 1 of `tools/climit-session.py`
      * reports the rest-noise maximum), which is the diagnostic that belongs beside the write.
      */
-    val MOTOR_NOISE_FLOOR = FieldDef(0x6B, Type.U16, Value.U16(2_100))
+    val MOTOR_NOISE_FLOOR = FieldDef(0x4D, Type.U16, Value.U16(2_100), Effect.BOOT)
 
     /**
      * Per-motor LIFETIME TRAVEL, in absolute hall edges (`shared/store/src/field.rs`,
@@ -314,7 +346,7 @@ object Fields {
      * either be overwritten by that pass or silently falsify a machine's recorded travel, and
      * there is no reading an operator could take that makes one correct.
      */
-    val MOTOR_ODOMETER = FieldDef(0x6D, Type.U32, Value.U32(0))
+    val MOTOR_ODOMETER = FieldDef(0x54, Type.U32, Value.U32(0), Effect.BOOT)
 
     /**
      * This wheel's ROLLING diameter, millimetres (`shared/store/src/field.rs`,
@@ -328,33 +360,34 @@ object Fields {
      *
      * **No client offers an editor for it**, for [MOTOR_POLE_PAIRS]' reason: it is measured on the
      * machine and written at a bench with the host config tool, and a mistyped wheel scales every
-     * distance the client prints with nothing to show it happened. No firmware consumer, and not
-     * in [ARM_TIME].
+     * distance the client prints with nothing to show it happened. No firmware consumer
+     * ([Effect.CLIENT]).
      */
-    val WHEEL_DIAMETER_MM = FieldDef(0x6F, Type.U16, Value.U16(0))
+    val WHEEL_DIAMETER_MM = FieldDef(0x53, Type.U16, Value.U16(0), Effect.CLIENT)
 
     /**
-     * Per-axis IMU sign map, indices 0..5 = `ax, ay, az, gx, gy, gz`; 0 = unset (that index falls
-     * back to the reference map). See [com.hoverboard.protocol.imu.Orientation].
+     * Per-axis IMU sign map, indices 0..2 = `x, y, z`, applied to the accelerometer and the gyro
+     * alike (`specs/machine-settings.md` section 3.1); 0 = unset (that index falls back to the
+     * reference map). See [com.hoverboard.protocol.imu.Orientation].
      */
-    val IMU_AXIS_SIGN = FieldDef(0x65, Type.I32, Value.I32(0))
+    val IMU_AXIS_SIGN = IndexedFieldDef(0x15, Type.I32, List(3) { Value.I32(0) }, Effect.ARM)
 
     /**
      * The IMU axis roles, indices 0 = UP, 1 = PITCH_RATE: which chip axis plays each body role
      * (`1 = X`, `2 = Y`, `3 = Z`); 0 = unset (that index falls back to the compiled role). Half of
      * one frame with [IMU_AXIS_SIGN]. See [com.hoverboard.protocol.imu.Orientation].
      */
-    val IMU_AXIS_ROLE = FieldDef(0x68, Type.U8, Value.U8(0))
+    val IMU_AXIS_ROLE = IndexedFieldDef(0x16, Type.U8, List(2) { Value.U8(0) }, Effect.ARM)
 
     /** Per-board attitude level trim, centidegrees, indices 0 = pitch, 1 = roll. */
-    val ATTITUDE_LEVEL_TRIM = FieldDef(0x70, Type.I16, Value.I16(0))
+    val ATTITUDE_LEVEL_TRIM = IndexedFieldDef(0x17, Type.I16, List(2) { Value.I16(0) }, Effect.BOOT)
 
     /**
      * The battery-sense calibration, indices 0 = slope (microvolts of rail per 12-bit count) and
      * 1 = offset (centivolts): `centivolts = raw12 * slope / 10_000 + offset`. The firmware clamps
      * each at boot ([VBATT_SLOPE], [VBATT_OFFSET]).
      */
-    val BOARD_BATTERY_CAL = IndexedFieldDef(0x69, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)))
+    val BOARD_BATTERY_CAL = IndexedFieldDef(0x18, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)), Effect.BOOT)
 
     /**
      * The rigid frame's turn input bound and rate (`shared/store/src/field.rs`,
@@ -367,33 +400,26 @@ object Fields {
      * yaw impulse that reaches the pitch loop through the frame.
      *
      * An arm-time parameter rather than a live-tune one (the tune lane carries [CONTROL_SF_GAINS]
-     * and [CONTROL_REFERENCE] only), so a write takes effect at the next arm ([ARM_TIME]). Both
+     * and [CONTROL_REFERENCE] only), so a write takes effect at the next arm ([Effect.ARM]). Both
      * indices are clamped by the firmware seam (`motorcontroller/control/src/drive.rs`, `DriveTurn`), since
      * the store validates type and nothing else: [TURN_MAX] and [TURN_SLEW] mirror that clamp.
      */
-    val CONTROL_DRIVE_TURN = IndexedFieldDef(0x75, Type.I16, listOf(Value.I16(0), Value.I16(24)))
-
-    /**
-     * How the remote app drives the machine ([MachineDriveMode]; `specs/remote-ui.md` 3.2): written
-     * with the same value to every motor controller of a machine. The firmware stores it and never
-     * reads it, so it is in no boot seam and not in [ARM_TIME]; the app is its only consumer.
-     */
-    val MACHINE_DRIVE_MODE = FieldDef(0x78, Type.U8, Value.U8(0))
+    val CONTROL_DRIVE_TURN = IndexedFieldDef(0x2B, Type.I16, listOf(Value.I16(0), Value.I16(24)), Effect.ARM)
 
     /**
      * The state-feedback balance law's four gains (`shared/store/src/field.rs`, `CONTROL_SF_GAINS`;
      * `specs/state-feedback.md` sections 2 and 6), indices [Gains.GP] / [Gains.GR] / [Gains.GX] /
      * [Gains.GV]. Default zero, the inert board: a zero word in balance mode. ON the live tune lane
-     * ([Gains]), so NOT in [ARM_TIME]; bounded by [CONTROL_GAIN_MAX].
+     * ([Gains], [Effect.LIVE]); bounded by [CONTROL_GAIN_MAX].
      */
-    val CONTROL_SF_GAINS = IndexedFieldDef(0x79, Type.I16, Gains.DEFAULT.map { Value.I16(it) })
+    val CONTROL_SF_GAINS = IndexedFieldDef(0x27, Type.I16, Gains.DEFAULT.map { Value.I16(it) }, Effect.LIVE)
 
     /**
      * The gains' inclusive upper bounds, indexed like [CONTROL_SF_GAINS]
-     * (`shared/store/src/field.rs`, `CONTROL_GAIN_MAX`). Re-read at every arm ([ARM_TIME]).
+     * (`shared/store/src/field.rs`, `CONTROL_GAIN_MAX`). Re-read at every arm ([Effect.ARM]).
      * Defaults [Gains.DEFAULT_MAX].
      */
-    val CONTROL_GAIN_MAX = IndexedFieldDef(0x7A, Type.I16, Gains.DEFAULT_MAX.map { Value.I16(it) })
+    val CONTROL_GAIN_MAX = IndexedFieldDef(0x28, Type.I16, Gains.DEFAULT_MAX.map { Value.I16(it) }, Effect.ARM)
 
     /**
      * The stick reference (`shared/store/src/field.rs`, `CONTROL_REFERENCE`;
@@ -402,23 +428,20 @@ object Fields {
      * (1/4096 count per tick). ON the live tune lane, against compiled bounds
      * ([Gains.REFERENCE_MINIMA], [Gains.REFERENCE_MAXIMA]).
      */
-    val CONTROL_REFERENCE =
-        IndexedFieldDef(0x7B, Type.I16, Gains.REFERENCE_DEFAULT.map { Value.I16(it) })
+    val CONTROL_REFERENCE = IndexedFieldDef(0x29, Type.I16, Gains.REFERENCE_DEFAULT.map { Value.I16(it) }, Effect.LIVE)
 
     /**
      * The law's position clamp, hall edges (`shared/store/src/field.rs`, `CONTROL_POS_CLAMP`;
      * `specs/state-feedback.md` section 4): a machine pushed further than this comes back exactly
      * this far. Default 45 (0.26 m on the rover); 0 disables the position term. An arm-time
-     * parameter ([ARM_TIME]); the firmware seam (`control::sf::pos_clamp`) clamps it into
+     * parameter ([Effect.ARM]); the firmware seam (`control::sf::pos_clamp`) clamps it into
      * [POS_CLAMP], since the store validates type and nothing else.
      */
-    val CONTROL_POS_CLAMP = FieldDef(0x7C, Type.I16, Value.I16(45))
+    val CONTROL_POS_CLAMP = FieldDef(0x2A, Type.I16, Value.I16(45), Effect.ARM)
 
     /** Every field above by its Rust handle name: the set the drift gate pins. */
     val ALL: Map<String, FieldDef> = mapOf(
         "NODE_ADDRESS" to NODE_ADDRESS,
-        "BOARD_STATUS" to BOARD_STATUS,
-        "NODE_CLASS" to NODE_CLASS,
         "DEVICE_NAME" to DEVICE_NAME,
         "WIFI_SSID" to WIFI_SSID,
         "WIFI_PASS" to WIFI_PASS,
@@ -453,23 +476,17 @@ object Fields {
         "MOTOR_PHASE_A" to MOTOR_PHASE_A,
         "MOTOR_PHASE_B" to MOTOR_PHASE_B,
         "IMU_MODEL" to IMU_MODEL,
-        "IMU_GYRO_BIAS" to IMU_GYRO_BIAS,
         "MOTOR_DIRECTION" to MOTOR_DIRECTION,
         "MOTOR_ALIGN_OFFSET" to MOTOR_ALIGN_OFFSET,
         "MOTOR_DEAD_TIME" to MOTOR_DEAD_TIME,
-        "MOTOR_CURRENT_SENSE" to MOTOR_CURRENT_SENSE,
         "MOTOR_CURRENT_CAL" to MOTOR_CURRENT_CAL,
         "MOTOR_POLE_PAIRS" to MOTOR_POLE_PAIRS,
         "MOTOR_NOISE_FLOOR" to MOTOR_NOISE_FLOOR,
         "MOTOR_ODOMETER" to MOTOR_ODOMETER,
         "WHEEL_DIAMETER_MM" to WHEEL_DIAMETER_MM,
-        "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
-        "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
-        "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
         "BOARD_BATTERY_CELLS" to BOARD_BATTERY_CELLS,
         "BOARD_BATTERY_CHEMISTRY" to BOARD_BATTERY_CHEMISTRY,
         "BOARD_INPUT_POLARITY" to BOARD_INPUT_POLARITY,
-        "MACHINE_DRIVE_MODE" to MACHINE_DRIVE_MODE,
         "CONTROL_POS_CLAMP" to CONTROL_POS_CLAMP,
     )
 
@@ -482,40 +499,10 @@ object Fields {
         "CONTROL_REFERENCE" to CONTROL_REFERENCE,
         "LINK_TX" to LINK_TX,
         "LINK_RX" to LINK_RX,
-    )
-
-    /**
-     * The field ids the firmware re-reads every time a board ARMS, so a value written while
-     * disarmed runs from the next arm with no restart (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`;
-     * `specs/integration.md`, "When a stored value takes effect: the arm-time re-read"). Every
-     * other registered field is read once, during boot.
-     *
-     * **It is mirrored here, and pinned, because a client that states the class gets it wrong
-     * otherwise.** The class is a firmware fact with no presence on the wire, so nothing a client
-     * reads from a board reveals it, and it has gone stale twice in the remote app: `control.mode`
-     * and then `motor.direction` / `motor.align_offset` moved into the row while the screen went
-     * on telling the owner to power-cycle. `RustSourceDriftTest` compares this set against the row
-     * itself, so a field that moves between the two classes fails there rather than at the bench.
-     *
-     * Ids and not keys: the row names `IMU_AXIS_SIGN` index by index, but no field has one index
-     * in the row and another outside it.
-     */
-    val ARM_TIME: Set<Int> = setOf(
-        MOTOR_CURRENT_LIMIT.id,
-        MOTOR_METHOD.id,
-        CONTROL_MODE.id,
-        CONTROL_RIDER_REQUIRED.id,
-        BOARD_BATTERY_FLOOR.id,
-        CONTROL_FRAME.id,
-        CONTROL_SIDE.id,
-        MOTOR_DIRECTION.id,
-        MOTOR_ALIGN_OFFSET.id,
-        MOTOR_CURRENT_CAL.id,
-        IMU_AXIS_SIGN.id,
-        IMU_AXIS_ROLE.id,
-        CONTROL_GAIN_MAX.id,
-        CONTROL_DRIVE_TURN.id,
-        CONTROL_POS_CLAMP.id,
+        "IMU_GYRO_BIAS" to IMU_GYRO_BIAS,
+        "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
+        "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
+        "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
     )
 
     /**
@@ -593,23 +580,6 @@ object Fields {
     object ControlMode {
         const val THROTTLE = 0
         const val BALANCE = 1
-    }
-
-    /** [NODE_CLASS]'s vocabulary (`specs/l3.md`, "Node class"). */
-    object NodeClass {
-        const val MOTOR_CONTROLLER = 0x01
-        const val BRIDGE = 0x02
-    }
-
-    /**
-     * [MACHINE_DRIVE_MODE]'s vocabulary, written down in the field's own doc comment in
-     * `shared/store/src/field.rs` (the firmware has no enum for it, since it never reads the field).
-     */
-    object MachineDriveMode {
-        const val SINGLE = 0
-        const val BOUND = 1
-        const val DIFFERENTIAL = 2
-        const val RIGID = 3
     }
 
     /**

@@ -108,6 +108,7 @@ class BleWalkEngine(
     private val link = Link(transport)
     private val controller = Controller()
     private val configInbox = ArrayDeque<ByteArray>()
+    private val nodeInbox = ArrayDeque<ByteArray>()
     private val inbound = ArrayDeque<ByteArray>()
 
     /**
@@ -184,7 +185,7 @@ class BleWalkEngine(
 
     /**
      * The next received packet the walk did not consume (not a probe of our own port, not a
-     * `CONFIG_RESP`, and not the reply that satisfied an outstanding request), or null. Frames the
+     * `CONFIG_RESP`, `IDENTITY` or `STATUS`, and not the reply that satisfied an outstanding request), or null. Frames the
      * engine has no opinion about, such as a board's `CYCLIC_STATE` emissions, surface here.
      */
     fun takeInbound(): ByteArray? = inbound.removeFirstOrNull()
@@ -211,6 +212,12 @@ class BleWalkEngine(
                 Pdu.decodeOrNull(frame)?.known() == Opcode.ConfigResp -> {
                     configInbox.addLast(frame)
                     if (answersPendingConfig(frame)) clearPending()
+                }
+                // An `IDENTITY` or `STATUS`: captured the same way, and it disarms the retransmit
+                // only when it answers the outstanding `IDENTIFY` / `STATUS_READ` from its node.
+                Pdu.decodeOrNull(frame)?.known().let { it == Opcode.Identity || it == Opcode.Status } -> {
+                    nodeInbox.addLast(frame)
+                    if (answersPendingNode(frame)) clearPending()
                 }
                 else -> {
                     // Disarm the retransmit only if this frame actually SATISFIED the outstanding
@@ -310,6 +317,31 @@ class BleWalkEngine(
             resp.fieldId == (req.payload[0].toInt() and 0xFF) &&
             resp.index == (req.payload[1].toInt() and 0xFF)
     }
+
+    /**
+     * Does the `IDENTITY` / `STATUS` in [frame] answer the outstanding request? Only the reply its
+     * request names (`IDENTITY` for `IDENTIFY`, `STATUS` for `STATUS_READ`), from the node that
+     * request was addressed to.
+     */
+    private fun answersPendingNode(frame: ByteArray): Boolean {
+        val req = pending?.let { Pdu.decodeOrNull(it) } ?: return false
+        val pdu = Pdu.decodeOrNull(frame) ?: return false
+        val pair = when (req.known()) {
+            Opcode.Identify -> Opcode.Identity
+            Opcode.StatusRead -> Opcode.Status
+            else -> return false
+        }
+        return pdu.known() == pair && pdu.src == req.dst
+    }
+
+    /** Send an `IDENTIFY` to [dst]; the `IDENTITY` arrives via [takeNodeReply]. */
+    fun sendIdentify(dst: Int) = sendRequest(controller.buildIdentify(dst))
+
+    /** Send a `STATUS_READ` to [dst]; the `STATUS` arrives via [takeNodeReply]. */
+    fun sendStatusRead(dst: Int) = sendRequest(controller.buildStatusRead(dst))
+
+    /** The next captured `IDENTITY` or `STATUS` PDU bytes, or null if none has arrived. */
+    fun takeNodeReply(): ByteArray? = nodeInbox.removeFirstOrNull()
 
     /** Send a `CONFIG_WRITE` to [dst] (routed by the board mesh); the reply arrives via [takeConfigResp]. */
     fun sendConfigWrite(dst: Int, key: Key, value: Value) =

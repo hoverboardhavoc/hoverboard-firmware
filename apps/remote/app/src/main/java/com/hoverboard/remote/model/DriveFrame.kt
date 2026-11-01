@@ -1,32 +1,30 @@
 package com.hoverboard.remote.model
 
-import com.hoverboard.protocol.store.Fields
-
 /**
  * How the joystick's demand is turned into what each motor controller is told
- * (`specs/remote-ui.md` 3.2). A setting of the MACHINE, stored as `machine.drive_mode`
- * ([Fields.MACHINE_DRIVE_MODE]) on every motor controller, and never a choice made on the phone:
- * the mode the app drives in is [DriveInForce], which reads the stored copies.
- *
- * [byte] is the stored value, [Fields.MachineDriveMode]'s vocabulary.
+ * (`specs/remote-ui.md` 3.2). DERIVED, never stored (`specs/machine-settings.md` section 7): RIGID
+ * is `machine.mode` balance with `machine.frame` rigid; SINGLE is a machine of one motor controller;
+ * with two or more and not rigid, BOUND or DIFFERENTIAL by whether the pad's turn axis is used,
+ * which is an app setting on the Ride screen ([com.hoverboard.remote.ble.LinkSettings.turnAxis]).
+ * The mode the app drives in is [DriveInForce], which derives it.
  */
-enum class DriveMode(val byte: Int) {
-    /** The demand to the motor controller selected in the Tune/Setup selector, and nothing else. */
-    SINGLE(Fields.MachineDriveMode.SINGLE),
+enum class DriveMode {
+    /** The demand to the one motor controller of a one-board machine. */
+    SINGLE,
 
     /**
      * The SAME demand to both motor controllers, each addressed directly. This is "bind the two
      * wheels", and in pivoting balance mode it is the mapping `specs/control.md` (h) sets: the same
      * value to both boards with steer 0.
      */
-    BOUND(Fields.MachineDriveMode.BOUND),
+    BOUND,
 
     /**
      * A demand PER WHEEL, mixed in the app from the joystick's two axes ([DriveMix]) and sent to
-     * each board at its own address. Which board is the right wheel is that board's own
-     * `control.side`, so the mode needs exactly one board to say it is.
+     * each board at its own address. Which board is the right wheel is its motor's own `side`, so
+     * the mode needs exactly one board to say it is.
      */
-    DIFFERENTIAL(Fields.MachineDriveMode.DIFFERENTIAL),
+    DIFFERENTIAL,
 
     /**
      * One machine, one command: the joystick's two axes go to the rigid frame's LEADER as the lean
@@ -41,7 +39,7 @@ enum class DriveMode(val byte: Int) {
      * Both boards are addressed because both run their own mode machine and need their own arm
      * level; only the leader is driven.
      */
-    RIGID(Fields.MachineDriveMode.RIGID),
+    RIGID,
     ;
 
     /** Whether the mode drives every motor controller found, and so needs exactly two of them. */
@@ -58,10 +56,6 @@ enum class DriveMode(val byte: Int) {
             DIFFERENTIAL, RIGID -> true
         }
 
-    companion object {
-        /** The mode a stored byte names, or null for a byte outside the vocabulary. */
-        fun of(byte: Int): DriveMode? = entries.firstOrNull { it.byte == byte }
-    }
 }
 
 /**
@@ -139,7 +133,7 @@ data class DriveFrame(val commands: Map<Int, RiderCommand>, val driven: Set<Int>
                 DriveMode.DIFFERENTIAL -> {
                     val wheels = DriveMix.of(command.demand, steer)
                     // The arm level is the command's and goes to both; each wheel's demand goes to
-                    // the board whose own `control.side` says it is that wheel.
+                    // the board whose own motor's `side` says it is that wheel.
                     DriveFrame(
                         targets.boards.associateWith { board ->
                             command.withDemand(if (board == targets.right) wheels.right else wheels.left)

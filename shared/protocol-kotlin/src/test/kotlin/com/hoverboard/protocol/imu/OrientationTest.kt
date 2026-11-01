@@ -33,32 +33,20 @@ class OrientationTest {
 
     @Test
     fun anUnsetIndexRunsTheReferenceAndASetOneRunsAsStaged() {
-        assertEquals(Orientation.REFERENCE, Orientation.effective(List(6) { 0 }))
-        assertEquals(
-            listOf(1, 1, -1, -1, -1, -1),
-            Orientation.effective(listOf(1, 0, 0, 0, -1, 0)),
-        )
+        assertEquals(Orientation.REFERENCE, Orientation.effective(List(3) { 0 }))
+        assertEquals(listOf(1, 1, -1), Orientation.effective(listOf(1, 0, 0)))
     }
 
     @Test
     fun aMirroredFrameIsRefusedAfterTheUnsetRuleNotBefore() {
         // Negating only the up axis: the classic wrong fix for a board that reads upside down.
-        assertEquals(Refusal.ACCEL_MIRRORED, Orientation.check(listOf(-1, 1, 1, -1, 1, -1), UNSET))
-        assertEquals(Refusal.GYRO_MIRRORED, Orientation.check(listOf(-1, 1, -1, -1, 1, 1), UNSET))
+        assertEquals(Refusal.MIRRORED, Orientation.check(listOf(-1, 1, 1), UNSET))
         // One staged index against an otherwise-unset map: the reference fills the rest, and
         // flipping one sign of a rotation always mirrors it.
-        assertEquals(Refusal.ACCEL_MIRRORED, Orientation.check(listOf(1, 0, 0, 0, 0, 0), UNSET))
+        assertEquals(Refusal.MIRRORED, Orientation.check(listOf(1, 0, 0), UNSET))
         // An all-unset map is the reference, which is legal.
-        assertNull(Orientation.check(List(6) { 0 }, UNSET))
-        assertEquals(Refusal.NOT_A_SIGN, Orientation.check(listOf(2, 1, 1, 1, 1, 1), UNSET))
-    }
-
-    @Test
-    fun twoDifferentRotationsOnTheTwoVectorsAreLegalButAreNoPose() {
-        // The accel as the reference, the gyro as a half turn about Z: each triple is a rotation.
-        val mixed = listOf(-1, 1, -1, -1, -1, 1)
-        assertNull(Orientation.check(mixed, UNSET))
-        assertNull(Orientation.poseOf(UNSET, mixed))
+        assertNull(Orientation.check(List(3) { 0 }, UNSET))
+        assertEquals(Refusal.NOT_A_SIGN, Orientation.check(listOf(2, 1, 1), UNSET))
     }
 
     @Test
@@ -72,7 +60,7 @@ class OrientationTest {
         for ((pose, frame) in Orientation.POSES.zip(frames)) {
             assertNull(Orientation.frameError(frame.signs, frame.roles), "$pose stages $frame")
             assertNull(Orientation.check(frame.signs, frame.roles), "$pose stages $frame")
-            assertEquals(frame.signs.subList(0, 3), frame.signs.subList(3, 6), "$pose: accel and gyro alike")
+            assertEquals(Orientation.INDICES, frame.signs.size, "$pose: one triple for the accel and the gyro")
             assertEquals(pose, Orientation.poseOf(frame.roles, frame.signs), "$pose reads back")
         }
     }
@@ -88,7 +76,7 @@ class OrientationTest {
     fun theStockPoseIsTheFamilyYaw() {
         val stock = Pose(Face.COMPONENT_UP, Heading.STOCK_FORWARD)
         assertEquals(stock, Orientation.STOCK_POSE)
-        val yaw = listOf(-1, -1, 1, -1, -1, 1)
+        val yaw = listOf(-1, -1, 1)
         assertEquals(Orientation.Frame(listOf(3, 2), yaw), Orientation.frameOf(stock))
         assertEquals(stock, Orientation.poseOf(listOf(3, 2), yaw))
         // Unset roles resolve to the compiled ones, so a flat pose staged over them reads back.
@@ -101,13 +89,13 @@ class OrientationTest {
      */
     @Test
     fun unsetSignsAreNoPoseAndTheFallbackIsComponentSideDown() {
-        assertNull(Orientation.poseOf(UNSET, List(6) { 0 }))
-        assertNull(Orientation.poseOf(UNSET, listOf(-1, -1, 1, -1, -1, 0)))
+        assertNull(Orientation.poseOf(UNSET, List(3) { 0 }))
+        assertNull(Orientation.poseOf(UNSET, listOf(-1, -1, 0)))
         assertEquals(Pose(Face.COMPONENT_DOWN, Heading.STOCK_FORWARD), Orientation.fallbackPose)
-        assertTrue(Orientation.runsFallback(UNSET, List(6) { 0 }))
-        assertTrue(Orientation.runsFallback(listOf(3, 2), List(6) { 0 }))
-        assertFalse(Orientation.runsFallback(listOf(1, 3), List(6) { 0 }))
-        assertFalse(Orientation.runsFallback(UNSET, listOf(-1, -1, 1, -1, -1, 0)))
+        assertTrue(Orientation.runsFallback(UNSET, List(3) { 0 }))
+        assertTrue(Orientation.runsFallback(listOf(3, 2), List(3) { 0 }))
+        assertFalse(Orientation.runsFallback(listOf(1, 3), List(3) { 0 }))
+        assertFalse(Orientation.runsFallback(UNSET, listOf(-1, -1, 0)))
     }
 
     /**
@@ -155,7 +143,7 @@ class OrientationTest {
             val f = Orientation.frameOf(pose)
             val r = Orientation.boardToBody(pose)
             val composed = r.map { row -> row.mapIndexed { j, v -> v * ref[j] } }
-            assertEquals(composed, frameMatrix(f.roles, f.signs.subList(0, 3)), "$pose")
+            assertEquals(composed, frameMatrix(f.roles, f.signs), "$pose")
         }
     }
 
@@ -197,20 +185,19 @@ class OrientationTest {
     }
 
     @Test
-    fun theBoardRefusesTheRolesThenTheAccelThenTheGyro() {
+    fun theBoardRefusesTheRolesThenTheTriple() {
         val unset = listOf(0, 0)
-        assertNull(Orientation.frameError(List(6) { 0 }, unset), "nothing staged is the stock frame")
+        assertNull(Orientation.frameError(List(3) { 0 }, unset), "nothing staged is the stock frame")
         assertEquals(Orientation.DEFAULT_ROLES, Orientation.effectiveRoles(unset))
         assertEquals(listOf(1, 2), Orientation.effectiveRoles(listOf(1, 0)))
         // UP = X with PITCH_RATE unset (Y) is a transposition, so the reference half-turn about Y
-        // (product +1) is now a reflection on both triples, and the accel is named first.
-        assertEquals(FrameError.ACCEL, Orientation.frameError(List(6) { 0 }, listOf(1, 0)))
-        assertNull(Orientation.frameError(listOf(1, 1, -1, -1, 1, 1), listOf(1, 0)))
-        assertEquals(FrameError.GYRO, Orientation.frameError(listOf(1, 1, -1, -1, 1, -1), listOf(1, 0)))
+        // (product +1) is now a reflection.
+        assertEquals(FrameError.ACCEL, Orientation.frameError(List(3) { 0 }, listOf(1, 0)))
+        assertNull(Orientation.frameError(listOf(1, 1, -1), listOf(1, 0)))
         // A staged role equal to the other one's fallback names one chip axis twice, which is
-        // refused before either triple is looked at.
-        assertEquals(FrameError.ROLES, Orientation.frameError(listOf(1, 1, 1, 1, 1, 1), listOf(2, 0)))
-        assertEquals(FrameError.ROLES, Orientation.frameError(List(6) { 0 }, listOf(4, 0)))
+        // refused before the triple is looked at.
+        assertEquals(FrameError.ROLES, Orientation.frameError(listOf(1, 1, 1), listOf(2, 0)))
+        assertEquals(FrameError.ROLES, Orientation.frameError(List(3) { 0 }, listOf(4, 0)))
     }
 
     /**
@@ -221,17 +208,17 @@ class OrientationTest {
     @Test
     fun theClientCheckReadsTheSignsThroughTheStoredRoles() {
         // The reference half-turn about Y is legal flat and a reflection under the transposition
-        // UP = X, PITCH_RATE = Y, on both triples, accel named first.
+        // UP = X, PITCH_RATE = Y.
         assertNull(Orientation.check(Orientation.REFERENCE, UNSET))
-        assertEquals(Refusal.ACCEL_MIRRORED, Orientation.check(Orientation.REFERENCE, listOf(1, 2)))
+        assertEquals(Refusal.MIRRORED, Orientation.check(Orientation.REFERENCE, listOf(1, 2)))
         // UP = X, PITCH_RATE = Z is a 3-cycle (FORWARD = Y): parity +1, so a product +1 triple holds.
-        assertNull(Orientation.check(listOf(-1, 1, -1, -1, 1, -1), listOf(1, 3)))
-        assertEquals(Refusal.GYRO_MIRRORED, Orientation.check(listOf(-1, 1, -1, -1, 1, 1), listOf(1, 3)))
-        assertEquals(Refusal.ROLES, Orientation.check(List(6) { 0 }, listOf(3, 3)))
-        assertEquals(Refusal.ROLES, Orientation.check(List(6) { 0 }, listOf(0, 3)))
-        assertEquals(Refusal.ROLES, Orientation.check(List(6) { 0 }, listOf(4, 2)))
+        assertNull(Orientation.check(listOf(-1, 1, -1), listOf(1, 3)))
+        assertEquals(Refusal.MIRRORED, Orientation.check(listOf(-1, 1, 1), listOf(1, 3)))
+        assertEquals(Refusal.ROLES, Orientation.check(List(3) { 0 }, listOf(3, 3)))
+        assertEquals(Refusal.ROLES, Orientation.check(List(3) { 0 }, listOf(0, 3)))
+        assertEquals(Refusal.ROLES, Orientation.check(List(3) { 0 }, listOf(4, 2)))
         // A bad sign is named before the roles are looked at.
-        assertEquals(Refusal.NOT_A_SIGN, Orientation.check(listOf(2, 1, 1, 1, 1, 1), listOf(3, 3)))
+        assertEquals(Refusal.NOT_A_SIGN, Orientation.check(listOf(2, 1, 1), listOf(3, 3)))
     }
 
     private companion object {

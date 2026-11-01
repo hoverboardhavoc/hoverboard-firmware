@@ -5,7 +5,7 @@ import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.model.TakesEffect
+import com.hoverboard.protocol.store.Effect
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -63,11 +63,11 @@ class SetupFieldsTest {
     }
 
     /**
-     * The takes-effect classification, which no row declares: [SetupField.takesEffect] reads
-     * [com.hoverboard.protocol.store.Fields.ARM_TIME], the mirror `RustSourceDriftTest` pins
-     * against the firmware's own arm row (`motorcontroller/firmware/src/arm.rs`, `read_arm_values`, and
-     * `specs/integration.md`, the arm-time re-read table). Every other row is boot-read, whether
-     * it configures a peripheral or is a value the boot path owns.
+     * The takes-effect classification, which no row declares: [SetupField.takesEffect] reads the
+     * registry's effect ([com.hoverboard.protocol.store.FieldDef.effect]), the mirror
+     * `RustSourceDriftTest` pins against `REGISTRY` and the firmware's own arm row
+     * (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`). Every other row is boot-read, whether it
+     * configures a peripheral or is a value the boot path owns, or a client's fact.
      *
      * This names both sets so that a field moving between them is a failure HERE as well as in the
      * drift gate: the gate watches the Kotlin mirror against the Rust, and this watches what the
@@ -77,7 +77,7 @@ class SetupFieldsTest {
      */
     @Test
     fun theArmTimeRowIsExactlyTheFieldsTheBoardReReadsWhenItArms() {
-        val armTime = SetupFields.ALL.filter { it.takesEffect == TakesEffect.NEXT_ARM }.map { it.key }.toSet()
+        val armTime = SetupFields.ALL.filter { it.takesEffect == Effect.ARM }.map { it.key }.toSet()
         val expected = listOf(
             SetupFields.MOTOR_METHOD,
             SetupFields.MOTOR_CURRENT_LIMIT,
@@ -91,7 +91,7 @@ class SetupFieldsTest {
         ).map { it.key } + (SetupFields.AXIS_SIGN + SetupFields.AXIS_ROLE + SetupFields.GAIN_MAX).map { it.key }
         assertEquals(expected.toSet(), armTime)
 
-        val boot = SetupFields.ALL.filter { it.takesEffect == TakesEffect.RESTART }.map { it.key }.toSet()
+        val boot = SetupFields.ALL.filter { it.takesEffect == Effect.BOOT }.map { it.key }.toSet()
         val restartNamed = listOf(
             SetupFields.DEVICE_NAME,
             SetupFields.MOTOR_DEAD_TIME,
@@ -99,12 +99,11 @@ class SetupFieldsTest {
         ).map { it.key } + (SetupFields.LEVEL_TRIM + SetupFields.GYRO_BIAS + SetupFields.VBATT_CAL).map { it.key }
         assertEquals(restartNamed.toSet(), boot)
 
-        // The third class, which is not a firmware read class at all: the board stores the pack and
-        // the drive mode for the app and never acts on either, so there is no board-side event to
-        // wait for.
-        val appOnly = SetupFields.ALL.filter { it.takesEffect == TakesEffect.APP_ONLY }.map { it.key }.toSet()
+        // The third class, which is not a firmware read class at all: the board stores the pack for
+        // the app and never acts on it, so there is no board-side event to wait for.
+        val appOnly = SetupFields.ALL.filter { it.takesEffect == Effect.CLIENT }.map { it.key }.toSet()
         assertEquals(
-            setOf(SetupFields.PACK_CELLS.key, SetupFields.BATTERY_CHEMISTRY.key, SetupFields.DRIVE_MODE.key),
+            setOf(SetupFields.PACK_CELLS.key, SetupFields.BATTERY_CHEMISTRY.key),
             appOnly,
         )
     }

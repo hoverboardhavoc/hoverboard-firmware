@@ -18,7 +18,8 @@ use crate::mailbox::MailboxPort;
 use crate::node::Node;
 use crate::router::{Port, Router, NOTIFY_MAX};
 use crate::sim::{
-    board, Family, Firmware, Gd32, Inject, Machine, RamFlash, SimPins, SimPlatform, SIM_NAME,
+    board, Family, Firmware, Gd32, Inject, Machine, RamFlash, SimPins, SimPlatform, SIM_MAC,
+    SIM_NAME,
 };
 use crate::svc::{Build, ImageBuffer, Service};
 use crate::swd::{Counters, Swd, SwdError, XferError};
@@ -878,7 +879,13 @@ fn stream(packets: &[Vec<u8>]) -> Vec<u8> {
 /// The bridge's node over a fresh store: unassigned, as a new bridge boots.
 fn esp_node() -> Node<'static, RamFlash> {
     let flash = std::boxed::Box::leak(std::boxed::Box::new(RamFlash::erased(4096)));
-    Node::new(store::Store::mount(flash).unwrap(), true, 0x0001, &SIM_NAME)
+    Node::new(
+        store::Store::mount(flash).unwrap(),
+        true,
+        0x0001,
+        SIM_MAC,
+        &SIM_NAME,
+    )
 }
 
 fn service() -> Service<'static, SimPlatform> {
@@ -1896,25 +1903,27 @@ fn a_console_controller_walks_the_esp_and_both_boards_and_the_esp_ends_at_0x03()
         assert_eq!(found, [0x01, 0x02, 0x03]);
         assert_eq!(m.guests[0].ctrl.gateway_addr(), Some(0x03));
 
-        // `node.class`: 2 from the bridge, 1 from each board; a write of it is refused by the bridge.
-        for (addr, class) in [(0x03, net::walk::CLASS_BRIDGE), (0x01, 1), (0x02, 1)] {
-            let r = m.config_read(addr, store::NODE_CLASS.key());
-            assert_eq!(
-                r[2..],
-                [net::walk::CFG_OK, store::Type::U8.tag(), class],
-                "{addr:#04x}"
-            );
+        // `IDENTITY`: the bridge's class and its MAC followed by six zero bytes, each board's
+        // class (`specs/machine-settings.md` section 6.1).
+        for (addr, class, uid) in [
+            (0x03, net::walk::CLASS_BRIDGE, crate::node::uid(SIM_MAC)),
+            (0x01, net::walk::CLASS_MOTOR, [0x01; net::walk::UID_LEN]),
+            (0x02, net::walk::CLASS_MOTOR, [0x02; net::walk::UID_LEN]),
+        ] {
+            let r = m.ask(0, Opcode::Identify.to_u8(), addr, &[]);
+            let p = Pdu::decode(&r[0]).unwrap();
+            assert_eq!(p.known(), Some(Opcode::Identity), "{addr:#04x}");
+            let id = net::walk::Identity::decode(p.payload).unwrap();
+            assert_eq!((id.class, id.uid), (class, uid), "{addr:#04x}");
         }
-        let w = m.ask(
-            0,
-            Opcode::ConfigWrite.to_u8(),
-            0x03,
-            &[store::NODE_CLASS.id(), 0, store::Type::U8.tag(), 1],
-        );
         assert_eq!(
-            Pdu::decode(&w[0]).unwrap().payload[2],
-            net::walk::CFG_READ_ONLY
+            crate::node::uid(SIM_MAC),
+            [0, 0, 0, 0, 0xAB, 0x12, 0, 0, 0, 0, 0, 0]
         );
+        // `STATUS` from the bridge is empty.
+        let r = m.ask(0, Opcode::StatusRead.to_u8(), 0x03, &[]);
+        let p = Pdu::decode(&r[0]).unwrap();
+        assert_eq!((p.known(), p.payload), (Some(Opcode::Status), &[][..]));
 
         // The bridge answers the master's probe of its mailbox port: the master reports it there.
         let ports = m.ask(0, Opcode::ProbePorts.to_u8(), 0x01, &[]);
@@ -1935,6 +1944,7 @@ fn a_console_controller_walks_the_esp_and_both_boards_and_the_esp_ends_at_0x03()
         store::Store::mount(&mut flash).unwrap(),
         true,
         0x0001,
+        SIM_MAC,
         &SIM_NAME,
     );
     assert_eq!(node.addr(), 0x03);
@@ -1992,7 +2002,7 @@ fn guests_on_ble_and_on_the_console_hold_different_addresses_and_both_hear_the_b
         1,
         Opcode::ConfigRead.to_u8(),
         0x02,
-        &[store::NODE_CLASS.id(), 0],
+        &[store::DEVICE_NAME.id(), 0],
     );
     assert_eq!(Pdu::decode(&r[0]).unwrap().dst, ble);
     assert!(m.guests[0].inbox.is_empty() && m.guests[2].inbox.is_empty());
@@ -2101,6 +2111,7 @@ fn the_esp_keeps_its_name_and_address_in_its_store_and_reports_a_store_that_did_
         store::Store::mount(&mut empty).unwrap(),
         false,
         0x0001,
+        SIM_MAC,
         &SIM_NAME,
     );
     let mut svc = service();
@@ -3120,7 +3131,7 @@ fn the_esp_answers_a_default_read_un_stores_its_name_and_compacts() {
     {
         let mut m = Rig::new(&mut flash);
         m.walk(0);
-        // `link.tx` is not stored on the bridge: a successful read of the default (unset).
+        // `links[0].tx` is not stored on the bridge: a successful read of the default (unset).
         let r = m.config_read(0x03, store::LINK_TX.at(0).key());
         assert_eq!(
             r[2..],

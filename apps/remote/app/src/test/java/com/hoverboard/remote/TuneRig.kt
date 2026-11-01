@@ -1,5 +1,6 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
@@ -63,7 +64,7 @@ internal class TuneRig(scope: TestScope) {
     fun attach(board: Int?, vararg others: Int?) {
         val nodes = if (board == null) emptyList() else (listOf(board) + others.filterNotNull()).distinct().sorted()
         selection.value = TuneSelection(
-            motors = nodes.map { NodeInfo(it, Fields.NodeClass.MOTOR_CONTROLLER, "Hoverboard") },
+            motors = nodes.map { NodeInfo(it, Walk.CLASS_MOTOR, "Hoverboard") },
             selected = board,
         )
         transport.setAttachedBoard(board, *others)

@@ -18,8 +18,9 @@
 //!   payload shorter than the committed prefix is rejected; the delivery class is best-effort /
 //!   latest-wins, so the caller drops the PDU and no error propagates ([`decode`] returns
 //!   `None`).
-//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 32 bytes: the
-//!   sixteen committed bytes, the appended [`CyclicObs`] block and the trailing `wheel_rate`). Any other length is a
+//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 34 bytes: the
+//!   sixteen committed bytes, the appended [`CyclicObs`] block, the `wheel_rate` and the `machine`
+//!   digest). Any other length is a
 //!   protocol error. It once accepted eleven bytes with the block absent, for a peer on an image
 //!   from before the block; nothing in this project owes an older image compatibility until a
 //!   version is released, and boards and phones are updated together (owner policy, 2026-10-10).
@@ -163,7 +164,8 @@ fn rd_i32(b: &[u8], off: usize) -> i32 {
     rd_u32(b, off) as i32
 }
 
-// --- CYCLIC_STATE (32 B: 16 B committed + a 12 B appended block + the i32 wheel_rate) ----------
+// --- CYCLIC_STATE (34 B: 16 B committed + a 12 B appended block + the i32 wheel_rate + the u16
+// machine digest) --------------------------------------------------------------------------------
 
 /// The part a board reports in [`CyclicObs::chip`]: what `detect_chip` identified at boot
 /// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 23). A controller needs it to
@@ -345,7 +347,8 @@ pub struct CyclicState {
     /// power request, which are not faults and which that constant excludes by construction.
     pub fault: u16,
     /// Flag bits: [`Self::FLAG_RIDER`] (bit0), [`Self::FLAG_LEADER`] (bit1),
-    /// [`Self::FLAG_FOLLOWER`] (bit2), [`Self::FLAG_LOCKDOWN`] (bit7).
+    /// [`Self::FLAG_FOLLOWER`] (bit2), [`Self::FLAG_REARM`] (bit3), [`Self::FLAG_REBOOT`] (bit4),
+    /// [`Self::FLAG_PEER_SILENT`] (bit5), [`Self::FLAG_LOCKDOWN`] (bit7).
     pub flags: u8,
     /// The torque this board commands its peer to apply, on the same +-28500 stock-native scale
     /// as every other demand in the system (`specs/rover-one-imu.md` section 4). **0 unless this
@@ -371,6 +374,11 @@ pub struct CyclicState {
     /// reversal. Consumer: the remote app's speed readout; the peer decodes it and nothing on it
     /// reads it.
     pub wheel_rate: i32,
+    /// This board's **machine digest** at offset 32 (`specs/machine-settings.md` section 4.1): a
+    /// CRC-16 over the effective values of every machine field (`store::Store::machine_digest`).
+    /// Consumer: the peer's arm gate, which refuses to arm while a configured link's peer reports
+    /// a different one (`EV_MACHINE`); and a client, which tells the copies apart by it.
+    pub machine: u16,
 }
 
 impl CyclicState {
@@ -382,10 +390,14 @@ impl CyclicState {
     /// The offset of [`Self::wheel_rate`], the word after the [`CyclicObs`] block.
     pub const WHEEL_RATE_OFF: usize = Self::LEN + CyclicObs::LEN;
 
+    /// The offset of [`Self::machine`], after [`Self::wheel_rate`].
+    pub const MACHINE_OFF: usize = Self::WHEEL_RATE_OFF + 4;
+
     /// The ONE on-wire length of a `CYCLIC_STATE` payload: the committed words, the appended
-    /// [`CyclicObs`] block and the `i32` [`Self::wheel_rate`]. [`Self::encode`] writes exactly this, [`Self::decode`] accepts
-    /// exactly this, and a buffer handed to either has to be this long.
-    pub const ENCODED_LEN: usize = 32;
+    /// [`CyclicObs`] block, the `i32` [`Self::wheel_rate`] and the `u16` [`Self::machine`].
+    /// [`Self::encode`] writes exactly this, [`Self::decode`] accepts exactly this, and a buffer
+    /// handed to either has to be this long.
+    pub const ENCODED_LEN: usize = 34;
 
     /// `flags` bit0: rider present. Peer consumer: rider mirror (profile select).
     pub const FLAG_RIDER: u8 = 1 << 0;
@@ -401,6 +413,27 @@ impl CyclicState {
     /// until a fresh peer cyclic carries this bit, so a pair whose frames disagree does not
     /// balance on one wheel (`specs/rover-one-imu.md` section 6, "A pair that disagrees").
     pub const FLAG_FOLLOWER: u8 = 1 << 2;
+
+    /// `flags` bit3: an arm-effect field was written since this board last armed, so it does not
+    /// yet run what it stores (`specs/machine-settings.md` section 5). Cleared when it arms or
+    /// boots. Consumer: a client, which says "takes effect at the next arm".
+    pub const FLAG_REARM: u8 = 1 << 3;
+
+    /// `flags` bit4: a boot-effect field was written since this board booted (`specs/machine-settings.md`
+    /// section 5). Cleared when it boots. Consumer: a client, which says "restart the board".
+    pub const FLAG_REBOOT: u8 = 1 << 4;
+
+    /// `flags` bit5: a configured link has heard no `CYCLIC_STATE` since this board booted
+    /// (`specs/board-route.md` section 4), the first of [`Self::FAULT_MACHINE`]'s two causes. With
+    /// `FAULT_MACHINE` set and this bit clear, a peer's digest differs. Consumer: a client, which
+    /// says which (`hoverboard-cli machine nodes`, the app's MACHINE lamp).
+    pub const FLAG_PEER_SILENT: u8 = 1 << 5;
+
+    /// `fault` bit13, `EV_MACHINE`: the board refuses to arm because a configured link's peer was
+    /// not heard or reports another [`Self::machine`] digest (`specs/machine-settings.md` section
+    /// 4.2); [`Self::FLAG_PEER_SILENT`] says which. It blocks arming and nothing else. Consumer: a
+    /// client, which marks the board (`hoverboard-cli machine nodes`).
+    pub const FAULT_MACHINE: u16 = 1 << 13;
 
     /// `flags` bit7: lockdown, the stock master-shutdown semantic. The receiver treats it as a
     /// gating fault into the engagement machine (sub-state forced to 0, torque setpoint 0) for
@@ -422,6 +455,26 @@ impl CyclicState {
         self.flags & Self::FLAG_FOLLOWER != 0
     }
 
+    /// Re-arm flag (bit3): an arm-effect field is written and not yet running.
+    pub const fn rearm(&self) -> bool {
+        self.flags & Self::FLAG_REARM != 0
+    }
+
+    /// Reboot flag (bit4): a boot-effect field is written and not yet running.
+    pub const fn reboot(&self) -> bool {
+        self.flags & Self::FLAG_REBOOT != 0
+    }
+
+    /// Peer-silent flag (bit5): a configured link has heard nothing since boot.
+    pub const fn peer_silent(&self) -> bool {
+        self.flags & Self::FLAG_PEER_SILENT != 0
+    }
+
+    /// The machine fault (`fault` bit13): the board refuses to arm until its peers agree.
+    pub const fn machine_mismatch(&self) -> bool {
+        self.fault & Self::FAULT_MACHINE != 0
+    }
+
     /// Lockdown flag (bit7): lockdown -> immediate disengage on the receiver.
     pub const fn lockdown(&self) -> bool {
         self.flags & Self::FLAG_LOCKDOWN != 0
@@ -441,8 +494,9 @@ impl CyclicState {
         out[12..14].copy_from_slice(&self.peer_demand.to_le_bytes());
         out[14..16].copy_from_slice(&self.wheel_pos.to_le_bytes());
         self.obs.encode(&mut out[Self::LEN..]);
-        out[Self::WHEEL_RATE_OFF..Self::ENCODED_LEN]
+        out[Self::WHEEL_RATE_OFF..Self::MACHINE_OFF]
             .copy_from_slice(&self.wheel_rate.to_le_bytes());
+        out[Self::MACHINE_OFF..Self::ENCODED_LEN].copy_from_slice(&self.machine.to_le_bytes());
         Self::ENCODED_LEN
     }
 
@@ -450,7 +504,7 @@ impl CyclicState {
     /// [`DecodeError::WrongLen`]**, short or long.
     ///
     /// The exception to the crate's committed-prefix rule, and the module doc carries the whole
-    /// argument: a sender in this tree writes thirty-two bytes, L2 never delivers a truncated
+    /// argument: a sender in this tree writes thirty-four bytes, L2 never delivers a truncated
     /// frame, and no older image is owed compatibility, so every other length is a peer that is
     /// not speaking this protocol.
     pub fn decode(b: &[u8]) -> Result<CyclicState, DecodeError> {
@@ -469,13 +523,14 @@ impl CyclicState {
             wheel_pos: rd_i16(b, 14),
             obs: CyclicObs::decode(&b[Self::LEN..]),
             wheel_rate: rd_i32(b, Self::WHEEL_RATE_OFF),
+            machine: rd_u16(b, Self::MACHINE_OFF),
         })
     }
 }
 
-// The emitted length is the prefix plus the block plus the i32 rate, held by the compiler rather
-// than by whoever edits either number next.
-const _: () = assert!(CyclicState::ENCODED_LEN == CyclicState::LEN + CyclicObs::LEN + 4);
+// The emitted length is the prefix plus the block plus the i32 rate plus the u16 digest, held by
+// the compiler rather than by whoever edits either number next.
+const _: () = assert!(CyclicState::ENCODED_LEN == CyclicState::LEN + CyclicObs::LEN + 4 + 2);
 
 // --- DRIVE_CMD (5 B): a controller's drive reference -------------------------------------------
 
@@ -659,15 +714,17 @@ mod tests {
 
     /// The appended block's length and the `CYCLIC_STATE` payload's one on-wire length, against
     /// the committed words it is built from: 16 is where the block starts, 28 is where
-    /// `wheel_rate` starts, 32 is what the wire carries and what a decoder requires.
+    /// `wheel_rate` starts, 32 is where `machine` starts, 34 is what the wire carries and what a
+    /// decoder requires.
     #[test]
     fn appended_block_lengths_pinned() {
         assert_eq!(CyclicObs::LEN, 12, "i16 + i16 + u16 + u8 + u8 + u32");
         assert_eq!(CyclicState::WHEEL_RATE_OFF, 28);
-        assert_eq!(CyclicState::ENCODED_LEN, 32);
+        assert_eq!(CyclicState::MACHINE_OFF, 32);
+        assert_eq!(CyclicState::ENCODED_LEN, 34);
         assert_eq!(
             CyclicState::ENCODED_LEN,
-            CyclicState::LEN + CyclicObs::LEN + 4
+            CyclicState::LEN + CyclicObs::LEN + 4 + 2
         );
     }
 
@@ -693,6 +750,7 @@ mod tests {
                 odometer: 0x0A0B_0C0D,
             },
             wheel_rate: -0x0102_0304, // 0xFEFDFCFC
+            machine: 0xBEEF,          // LE EF BE
         }
     }
 
@@ -720,6 +778,7 @@ mod tests {
                 0x02, // chip: F130C8
                 0x0D, 0x0C, 0x0B, 0x0A, // odometer 0x0A0B0C0D
                 0xFC, 0xFC, 0xFD, 0xFE, // wheel_rate -0x01020304, from offset 28
+                0xEF, 0xBE, // machine 0xBEEF, from offset 32
             ]
         );
     }
@@ -951,14 +1010,35 @@ mod tests {
         assert!(!c.leader());
         assert!(!c.follower());
         assert!(c.lockdown());
+        c.flags = CyclicState::FLAG_REARM;
+        assert!(c.rearm() && !c.reboot() && !c.follower());
+        c.flags = CyclicState::FLAG_REBOOT;
+        assert!(!c.rearm() && c.reboot() && !c.lockdown());
+        assert!(!c.peer_silent());
+        c.flags = CyclicState::FLAG_PEER_SILENT;
+        assert!(c.peer_silent() && !c.reboot() && !c.lockdown());
+        assert_eq!(
+            (
+                CyclicState::FLAG_REARM,
+                CyclicState::FLAG_REBOOT,
+                CyclicState::FLAG_PEER_SILENT
+            ),
+            (0x08, 0x10, 0x20)
+        );
         // Foreign bits do not bleed into the defined flags.
         c.flags = !(CyclicState::FLAG_RIDER
             | CyclicState::FLAG_LEADER
             | CyclicState::FLAG_FOLLOWER
+            | CyclicState::FLAG_REARM
+            | CyclicState::FLAG_REBOOT
+            | CyclicState::FLAG_PEER_SILENT
             | CyclicState::FLAG_LOCKDOWN);
         assert!(!c.rider_present());
         assert!(!c.leader());
         assert!(!c.follower());
+        assert!(!c.rearm());
+        assert!(!c.reboot());
+        assert!(!c.peer_silent());
         assert!(!c.lockdown());
     }
 

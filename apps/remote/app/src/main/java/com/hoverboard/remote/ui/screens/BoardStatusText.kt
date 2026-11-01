@@ -17,15 +17,15 @@ import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.ui.theme.CautionText
 import com.hoverboard.remote.ui.theme.WarningText
 
-/** Test tag on the [index]th `board.status` line of the motor controller at [address]. */
+/** Test tag on the [index]th boot status record line of the motor controller at [address]. */
 fun statusEntryTag(address: Int, index: Int): String = "status_entry_${boardHex(address)}_$index"
 
 /**
  * What the board at [address]'s last boot configured and could not bring up: one warning line per
- * `board.status` entry, read at connect (`specs/configured-links.md` section 5). Nothing while the
- * list is empty. While the board's live word carries CONFIG ([CyclicState.EV_CONFIG]) and the list
- * says nothing (unread, or read before a restart), one line says so. A boot fact, so it is shown
- * whether or not the board is reporting.
+ * boot status record entry, read at connect with `STATUS_READ` (`specs/configured-links.md`
+ * section 5). Nothing while the list is empty. While the board's live word carries CONFIG
+ * ([CyclicState.EV_CONFIG]) and the list says nothing (unread, or read before a restart), one line
+ * says so. A boot fact, so it is shown whether or not the board is reporting.
  */
 @Composable
 internal fun ConfigLines(state: UiState, address: Int, telemetry: TelemetryUi?) {
@@ -39,8 +39,8 @@ internal fun ConfigLines(state: UiState, address: Int, telemetry: TelemetryUi?) 
 }
 
 /**
- * One `board.status` entry in words (`specs/configured-links.md` section 5): the function it names
- * and why it did not come up, the way `hoverboard-cli status` prints it, e.g. "motors[0] gate: dead
+ * One boot status record entry in words (`specs/configured-links.md` section 5): the function it names
+ * and why it did not come up, the way `hoverboard-cli board status` prints it, e.g. "motors[0] gate: dead
  * time 10 is below the floor of 18".
  */
 @Composable
@@ -91,4 +91,4 @@ private fun statusReason(entry: BoardStatus.Entry): String = when (entry.reason)
 /** A packed pin byte as its name, or the byte in hex when it names no pin. */
 private fun pinName(raw: Int): String = (Pin.parse(raw) as? Parsed.Valid)?.pin?.name ?: hex(raw)
 
-private fun hex(b: Int): String = "0x%02X".format(b)
+internal fun hex(b: Int): String = "0x%02X".format(b)

@@ -1,13 +1,12 @@
 package com.hoverboard.protocol.board
 
 import com.hoverboard.protocol.store.Fields
-import com.hoverboard.protocol.store.Value
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 
 /**
- * The `board.status` decode, against the record's encoding (`StatusRecord` in
+ * The `STATUS` decode, against the record's encoding (`StatusRecord` in
  * `motorcontroller/board/src/status.rs`) and the crate's own vectors for it
  * (`motorcontroller/board/src/tests.rs` (entries_encode_as_four_bytes_each_in_record_order,
  * a_trailing_partial_entry_is_ignored)).
@@ -19,16 +18,15 @@ class BoardStatusTest {
     @Test
     fun anEmptyValueIsABoardWhoseFunctionsAllCameUp() {
         assertEquals(emptyList<BoardStatus.Entry>(), BoardStatus.decode(ByteArray(0)))
-        assertEquals(emptyList<BoardStatus.Entry>(), BoardStatus.decode(Fields.BOARD_STATUS.default))
     }
 
     @Test
     fun entriesDecodeFourBytesEachInRecordOrder() {
         val entries = BoardStatus.decode(
             bytes(
-                0x56, 1, 3, 0x16, // link[1]: not routed, PB6
-                0x4D, 0, 5, 10, // motors[0] gate: dead time 10
-                0x48, 0, 6, 0, // IMU: did not answer its probe
+                0x0F, 1, 3, 0x16, // links[1]: not routed, PB6
+                0x43, 0, 5, 10, // motors[0] gate: dead time 10
+                0x11, 0, 6, 0, // IMU: did not answer its probe
             ),
         )
         assertEquals(
@@ -47,7 +45,7 @@ class BoardStatusTest {
 
     @Test
     fun aTrailingPartialEntryIsIgnored() {
-        val entries = BoardStatus.decode(bytes(0x41, 0, 1, 0x40, 0x4A, 0))
+        val entries = BoardStatus.decode(bytes(0x07, 0, 1, 0x40, 0x4A, 0))
         assertEquals(listOf(BoardStatus.Entry(Fields.BOARD_BATTERY_PIN.id, 0, 1, 0x40)), entries)
     }
 
@@ -56,12 +54,6 @@ class BoardStatusTest {
         val e = BoardStatus.decode(bytes(0xFE, 0x80, 0xFF, 0xC8)).single()
         assertEquals(BoardStatus.Entry(0xFE, 0x80, 0xFF, 0xC8), e)
         assertNull(e.reason, "a byte no reason has")
-    }
-
-    @Test
-    fun aValueThatIsNotABlobDecodesToNothing() {
-        assertNull(BoardStatus.decode(Value.U8(0)))
-        assertEquals(1, BoardStatus.decode(Value.Bytes(bytes(0x40, 0, 4, 0x0D)))?.size)
     }
 
     @Test
@@ -75,8 +67,9 @@ class BoardStatusTest {
     @Test
     fun aNamePrintsItsIndexTheWayTheCliDoes() {
         assertEquals("motors[1].hall.c", BoardStatus.NAMES.getValue(Fields.MOTOR_HALL_C.id).at(1))
-        assertEquals("link.rx[0]", BoardStatus.NAMES.getValue(Fields.LINK_RX.id).at(0))
-        assertEquals("pad.a", BoardStatus.NAMES.getValue(Fields.PAD_A.id).at(0))
+        assertEquals("links[0].rx", BoardStatus.NAMES.getValue(Fields.LINK_RX.id).at(0))
+        assertEquals("pads.a", BoardStatus.NAMES.getValue(Fields.PAD_A.id).at(0))
+        assertEquals("imu.axis_sign[2]", BoardStatus.NAMES.getValue(Fields.IMU_AXIS_SIGN.id).at(2))
     }
 
     @Test
