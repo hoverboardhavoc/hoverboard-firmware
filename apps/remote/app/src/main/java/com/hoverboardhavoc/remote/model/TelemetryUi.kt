@@ -274,7 +274,7 @@ enum class BoardMode {
 }
 
 /**
- * One named fault bit of `CYCLIC_STATE.fault`, in bit order (`motorcontroller/orchestrator/src/events.rs`,
+ * One named fault bit of `CYCLIC_STATE.fault`, in bit order (`shared/linkctl/src/lib.rs`,
  * `FAULT_A_BITS` and the bits beside it): comms loss, the tilt cutout, IMU loss, motor 0's latch,
  * motor 1's latch (fault B) and the four motor-side causes.
  */

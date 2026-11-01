@@ -41,6 +41,62 @@
 
 #![no_std]
 
+// --- The `fault` word's bits (`CyclicState::fault`) ---------------------------------------------
+//
+// One bit per gating producer of the board's mode machine, as `orchestrator::events::Levels`
+// sets them (`motorcontroller/orchestrator/src/events.rs` explains each producer and its
+// counter). They live here because they are the meaning of a `linkctl` field: the GD32 firmware
+// takes them from here, and so do the controllers that read the word (the handheld remote's arm
+// rules and lamps, `specs/handheld-remote.md` section 4.7; the Kotlin mirror pins them by drift
+// test against this file).
+
+/// `comms_loss`: peer staleness past [`CYCLIC_TIMEOUT_TICKS`] (Fault A).
+pub const EV_COMMS_LOSS: u16 = 1 << 0;
+/// The board is latched STOPPED (Fault A). One producer: the run-time tilt cutout
+/// (`specs/control.md` (l)).
+pub const EV_STOP_ALL: u16 = 1 << 1;
+/// `imu_loss`: consecutive failed reads on a configured IMU (Fault A).
+pub const EV_IMU_LOSS: u16 = 1 << 2;
+/// Motor 0's fault latch (Fault A).
+pub const EV_LATCH_A: u16 = 1 << 4;
+/// Motor 1's fault latch (the sole Fault B input).
+pub const EV_LATCH_B: u16 = 1 << 5;
+/// `mode_fault`: the control dispatch demoted the requested mode at the validation seam.
+pub const EV_MODE_FAULT: u16 = 1 << 6;
+/// The power-request level (button OR the remote mirror). Its FALL drives RUN -> SHUTDOWN.
+pub const EV_POWER_REQUEST: u16 = 1 << 7;
+/// Motor-side cause: hall dwell (`motor::FAULT_HALL` in the motor FAULT word) (Fault A).
+pub const EV_MOTOR_HALL: u16 = 1 << 8;
+/// Motor-side cause: the current-sense calibration was refused at init (`motor::FAULT_INIT_CAL`)
+/// (Fault A).
+pub const EV_MOTOR_CAL: u16 = 1 << 9;
+/// Motor-side cause: period-liveness loss (`motor::PeriodHealth`) (Fault A).
+pub const EV_MOTOR_PERIOD: u16 = 1 << 10;
+/// Motor-side cause: an arm attempt aborted before MOE and is held (Fault A).
+pub const EV_MOTOR_ARM: u16 = 1 << 11;
+/// The board's configuration did not all come up: its boot status record has an entry
+/// (`specs/configured-links.md` section 5, `STATUS_READ` for the detail). Set for the whole run.
+/// Not in [`FAULT_A_BITS`], so it gates nothing: an absent LED does not stop a board arming, and
+/// an absent motor is already an unconfigured one. It is on the wire so every fault display shows
+/// a configuration problem live.
+pub const EV_CONFIG: u16 = 1 << 12;
+/// The boards of the machine do not agree (`specs/machine-settings.md` section 4.2): a configured
+/// link has heard no peer since boot, or its peer reports another [`CyclicState::machine`] digest;
+/// [`CyclicState::FLAG_PEER_SILENT`] says which. Not in [`FAULT_A_BITS`] or [`ARM_BLOCKING_BITS`]:
+/// it blocks arming (the mode machine's OFF-inhibit) and does nothing else, so it never disengages
+/// a running machine. Consumer: a client, which marks the board (`hoverboard-cli machine nodes`).
+pub const EV_MACHINE: u16 = 1 << 13;
+/// The four motor-side causes: the set `motor::motor_fault_level` returns.
+pub const EV_MOTOR_BITS: u16 = EV_MOTOR_HALL | EV_MOTOR_CAL | EV_MOTOR_PERIOD | EV_MOTOR_ARM;
+/// The Fault A group: the producers whose level the mode machine folds into Fault A
+/// (`specs/sensing-and-safety.md`). [`EV_MODE_FAULT`] and [`EV_POWER_REQUEST`] are in the level
+/// mask and are not faults, which this constant states by leaving them out.
+pub const FAULT_A_BITS: u16 =
+    EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_LATCH_A | EV_MOTOR_BITS;
+/// Fault A and Fault B, what holds a board in OFF: a board whose `fault` word carries one of
+/// these refuses to arm (`specs/link-control.md`, the `fault` bit table).
+pub const ARM_BLOCKING_BITS: u16 = FAULT_A_BITS | EV_LATCH_B;
+
 // --- Opcode allocation (the reserved control block 0x10..0x2F) ---------------------------------
 
 /// `CYCLIC_STATE` opcode: board <-> board on the inter-board UART (every 2nd control run, 125 Hz)
@@ -322,7 +378,7 @@ pub struct CyclicState {
     /// clear. A level, not a code: the mode machine's SHUTDOWN is one pass long while this frame
     /// goes out every second pass, so a code naming one fault could be missed entirely, and what
     /// a peer needs to know is whether this board is healthy right now. The fault-A group is
-    /// `fault & orchestrator::events::FAULT_A_BITS`; the mask also carries the mode fault and the
+    /// `fault & FAULT_A_BITS`; the mask also carries the mode fault and the
     /// power request, which are not faults and which that constant excludes by construction.
     pub fault: u16,
     /// Flag bits: [`Self::FLAG_RIDER`] (bit0), [`Self::FLAG_LEADER`] (bit1),
@@ -411,16 +467,10 @@ impl CyclicState {
     pub const FLAG_REBOOT: u8 = 1 << 4;
 
     /// `flags` bit5: a configured link has heard no `CYCLIC_STATE` since this board booted
-    /// (`specs/board-route.md` section 4), the first of [`Self::FAULT_MACHINE`]'s two causes. With
-    /// `FAULT_MACHINE` set and this bit clear, a peer's digest differs. Consumer: a client, which
+    /// (`specs/board-route.md` section 4), the first of [`EV_MACHINE`]'s two causes. With
+    /// `EV_MACHINE` set and this bit clear, a peer's digest differs. Consumer: a client, which
     /// says which (`hoverboard-cli machine nodes`, the app's MACHINE lamp).
     pub const FLAG_PEER_SILENT: u8 = 1 << 5;
-
-    /// `fault` bit13, `EV_MACHINE`: the board refuses to arm because a configured link's peer was
-    /// not heard or reports another [`Self::machine`] digest (`specs/machine-settings.md` section
-    /// 4.2); [`Self::FLAG_PEER_SILENT`] says which. It blocks arming and nothing else. Consumer: a
-    /// client, which marks the board (`hoverboard-cli machine nodes`).
-    pub const FAULT_MACHINE: u16 = 1 << 13;
 
     /// `flags` bit7: lockdown, the stock master-shutdown semantic. The receiver treats it as a
     /// gating fault into the engagement machine (sub-state forced to 0, torque setpoint 0) for
@@ -457,9 +507,10 @@ impl CyclicState {
         self.flags & Self::FLAG_PEER_SILENT != 0
     }
 
-    /// The machine fault (`fault` bit13): the board refuses to arm until its peers agree.
+    /// The machine fault ([`EV_MACHINE`], `fault` bit13): the board refuses to arm until its peers
+    /// agree.
     pub const fn machine_mismatch(&self) -> bool {
-        self.fault & Self::FAULT_MACHINE != 0
+        self.fault & EV_MACHINE != 0
     }
 
     /// Lockdown flag (bit7): lockdown -> immediate disengage on the receiver.

@@ -881,7 +881,7 @@ mod tests {
         assert!(marks(Some(CLASS_MOTOR), Some(&frame(0, 0)), 0).is_empty());
         assert_eq!(marks(Some(CLASS_MOTOR), None, 0), ["silent"]);
         let s = frame(
-            CyclicState::FAULT_MACHINE,
+            linkctl::EV_MACHINE,
             CyclicState::FLAG_REARM | CyclicState::FLAG_REBOOT,
         );
         assert_eq!(
@@ -894,7 +894,7 @@ mod tests {
             ]
         );
         // The cause comes from the flag, not from the digests.
-        let unheard = frame(CyclicState::FAULT_MACHINE, CyclicState::FLAG_PEER_SILENT);
+        let unheard = frame(linkctl::EV_MACHINE, CyclicState::FLAG_PEER_SILENT);
         assert_eq!(
             marks(Some(CLASS_MOTOR), Some(&unheard), 0),
             ["a link peer not heard"]

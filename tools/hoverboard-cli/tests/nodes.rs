@@ -1182,10 +1182,10 @@ fn machine_nodes_marks_each_board_from_its_frames() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
     let beat = vec![
-        cyclic(0x01, C::FAULT_MACHINE, C::FLAG_REARM, 0x1234),
+        cyclic(0x01, linkctl::EV_MACHINE, C::FLAG_REARM, 0x1234),
         cyclic(
             0x02,
-            C::FAULT_MACHINE,
+            linkctl::EV_MACHINE,
             C::FLAG_REBOOT | C::FLAG_PEER_SILENT,
             0x5678,
         ),

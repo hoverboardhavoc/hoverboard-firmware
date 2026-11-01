@@ -412,7 +412,7 @@ class WireDriftTest {
      * `CyclicState::FLAG_LEADER` / `CyclicState::FLAG_FOLLOWER` / `CyclicState::FLAG_LOCKDOWN`,
      * `Inputs::BUTTON_POWER` /
      * `Inputs::RIDER_PRESENT`; and the
-     * fault-A group of the cyclic fault mask, `motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`.
+     * fault-A group of the cyclic fault mask and the bits beside it, `shared/linkctl/src/lib.rs`, `FAULT_A_BITS`.
      */
     @Test
     fun flagAndActionBitsMatchTheFirmware() {
@@ -422,11 +422,11 @@ class WireDriftTest {
         assertEquals(0x08, CyclicState.FLAG_REARM, "shared/linkctl/src/lib.rs, CyclicState::FLAG_REARM")
         assertEquals(0x10, CyclicState.FLAG_REBOOT, "shared/linkctl/src/lib.rs, CyclicState::FLAG_REBOOT")
         assertEquals(0x20, CyclicState.FLAG_PEER_SILENT, "shared/linkctl/src/lib.rs, CyclicState::FLAG_PEER_SILENT")
-        assertEquals(0x0F17, CyclicState.FAULT_A_BITS, "motorcontroller/orchestrator/src/events.rs, FAULT_A_BITS")
+        assertEquals(0x0F17, CyclicState.FAULT_A_BITS, "shared/linkctl/src/lib.rs, FAULT_A_BITS")
         // FAULT_A_BITS | EV_LATCH_B: Fault A and Fault B, what holds a board in OFF.
-        assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS, "motorcontroller/orchestrator/src/events.rs, EV_LATCH_B")
+        assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS, "shared/linkctl/src/lib.rs, ARM_BLOCKING_BITS")
 
-        val ev = "motorcontroller/orchestrator/src/events.rs"
+        val ev = "shared/linkctl/src/lib.rs"
         assertEquals(0x001, CyclicState.EV_COMMS_LOSS, "$ev, EV_COMMS_LOSS")
         assertEquals(0x002, CyclicState.EV_STOP_ALL, "$ev, EV_STOP_ALL")
         assertEquals(0x004, CyclicState.EV_IMU_LOSS, "$ev, EV_IMU_LOSS")
