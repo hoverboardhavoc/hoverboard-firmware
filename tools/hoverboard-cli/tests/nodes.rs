@@ -768,11 +768,16 @@ fn erase_store_prints_what_a_dump_leaves_out_refuses_without_a_terminal_and_eras
         "{err}"
     );
 
-    // By the bridge's name too; with --yes it erases and waits for the mailbox.
+    // By the bridge's name too; with --yes it erases, waits for the mailbox, and gives the board
+    // its old address back through the bridge's mailbox port.
     let (code, out, err) = run(&["--node", "hb-bridge-ab12", "erase-store", "--yes"]);
     assert_eq!(code, Some(0), "{out}{err}");
     assert_eq!(lines(&out)[2], restore, "{out}");
-    assert_eq!(out.lines().last(), Some("erased"), "{out}");
+    assert_eq!(
+        lines(&out)[4..],
+        ["erased", "node.address 1 restored"],
+        "{out}"
+    );
 
     // A motor controller is not a bridge.
     let (code, _, err) = run(&["--node", "0x02", "erase-store", "--yes"]);
@@ -788,6 +793,9 @@ fn erase_store_prints_what_a_dump_leaves_out_refuses_without_a_terminal_and_eras
         "{:02x?}",
         after.ops
     );
+    // The erasing connection's last request is the ASSIGN that restores the address.
+    let assign = net::pdu::Opcode::Assign.to_u8();
+    assert_eq!(after.ops[3].last(), Some(&assign), "{:02x?}", after.ops[3]);
     assert!(
         after.store_pages.iter().all(|&h| h == 0xFFFF),
         "the master's store pages are erased"

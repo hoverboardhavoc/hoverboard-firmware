@@ -63,8 +63,12 @@
 //! `specs/hoverboard-bridge.md`, "Erasing the store"). It walks to find that board (the bridge's one
 //! walked neighbour), prints what a `dump` leaves out and the erase loses (`node.address`, each
 //! motor's `odometer`, with the `config` line that writes a stored odometer back), asks, and prints
-//! `erased` once the bridge reports success and its mailbox is up again. Without a terminal it
-//! refuses unless `--yes` is given.
+//! `erased` once the bridge reports success and its mailbox is up again. It then gives the board
+//! its old `node.address` back with a directed `ASSIGN` out the bridge's mailbox port, as the walk
+//! assigns a frontier node, and prints `node.address <n> restored`; a board whose address was not
+//! read or was unset is left unassigned, and an `ASSIGN` with no `ASSIGN_ACK` fails the command
+//! with the `config` line that restores the address by hand. Without a terminal it refuses unless
+//! `--yes` is given.
 //!
 //! `install-esp` makes a SuperMini a bridge over its own USB port (`specs/bridge-onboarding.md`
 //! section 3): it asks before erasing a bridge that answers there, writes the merged 4 MB install
@@ -777,8 +781,8 @@ fn esp_client(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
 }
 
 /// `erase-store`: walk, find the board behind the bridge (`node` names the bridge, or the one on
-/// the link), print what the erase loses that a `dump` leaves out, ask, send `STORE_ERASE`, and wait
-/// for the board's mailbox.
+/// the link), print what the erase loses that a `dump` leaves out, ask, send `STORE_ERASE`, wait
+/// for the board's mailbox, and give the board its old address back out the bridge's mailbox port.
 fn erase_store(via: &Via, node: Option<&str>, yes: bool) -> Result<(), String> {
     let mut wire = Framed::new(via.open()?);
     let walked = nodes::walk(&mut wire)?;
@@ -812,6 +816,9 @@ fn erase_store(via: &Via, node: Option<&str>, yes: bool) -> Result<(), String> {
         .find(|f| f.class == Some(CLASS_MOTOR))
         .ok_or_else(|| format!("the walk found no board behind {}", label(b)))?;
     let name = node_name(board);
+    let mailbox = walked
+        .port_of_kind(bridge, net::walk::PORT_SWD)
+        .ok_or_else(|| format!("{} reported no mailbox port", label(b)))?;
     let mut on = Board {
         wire: &mut wire,
         src,
@@ -844,6 +851,8 @@ fn erase_store(via: &Via, node: Option<&str>, yes: bool) -> Result<(), String> {
         ));
     }
     println!("erased");
+    let line = erase::restore(c.wire(), src, bridge, mailbox, &name, &reads)?;
+    println!("{line}");
     Ok(())
 }
 
