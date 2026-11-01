@@ -2,8 +2,10 @@
 //! pinned bridge with the filter accept list, find the link pair by UUID, subscribe, and run the
 //! L2 stream between the notifications, the model and writes to `rx`.
 
+use core::sync::atomic::Ordering;
 use embassy_futures::join::join;
-use embassy_futures::select::{select, Either};
+
+use embassy_futures::select::{select, select3, Either3};
 use embassy_time::{Duration, Instant, Timer};
 use esp_println::println;
 use trouble_host::prelude::*;
@@ -11,7 +13,7 @@ use trouble_host::prelude::*;
 use handheld_core::session::Sends;
 use handheld_core::wire::Wire;
 
-use crate::{now_ms, with};
+use crate::{now_ms, with, PUMP, RELEASE_AT};
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 3;
@@ -142,9 +144,10 @@ async fn session<C: Controller>(
         let mut tick = Instant::now();
         let (mut rx_n, mut tx_n, mut since) = (0u16, 0u16, now_ms());
         loop {
-            match select(listener.next(), Timer::at(tick + STEP)).await {
-                Either::First(n) => wire.feed(n.as_ref()),
-                Either::Second(_) => tick = Instant::now(),
+            match select3(listener.next(), Timer::at(tick + STEP), PUMP.wait()).await {
+                Either3::First(n) => wire.feed(n.as_ref()),
+                Either3::Second(_) => tick = Instant::now(),
+                Either3::Third(_) => {}
             }
             let now = now_ms();
             let mut sends = Sends::new();
@@ -157,6 +160,16 @@ async fn session<C: Controller>(
                 wire.send(s);
                 tx_n = tx_n.saturating_add(1);
             }
+            // The pump's frames, latest wins: the outbox holds one of each kind per board until
+            // the stream before it has gone to the BLE host.
+            let (frames, release_at) = with(|m| {
+                let f = m.session.src().map(|src| m.outbox.take(src));
+                (f, RELEASE_AT.swap(0, Ordering::Relaxed))
+            });
+            for f in frames.iter().flatten() {
+                wire.send(f);
+                tx_n = tx_n.saturating_add(1);
+            }
             while wire.pending() > 0 {
                 let n = wire.take(&mut chunk[..chunk_max]);
                 if client
@@ -167,6 +180,13 @@ async fn session<C: Controller>(
                     println!("handheld: write failed");
                     return;
                 }
+            }
+            if release_at != 0 {
+                let us = (Instant::now().as_micros() as u32).wrapping_sub(release_at);
+                println!(
+                    "handheld: release handed to the BLE host {} us after the Up sample",
+                    us
+                );
             }
             if now.wrapping_sub(since) >= 1000 {
                 with(|m| {

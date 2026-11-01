@@ -75,6 +75,17 @@ pub struct Model {
     pub rx_rate: u16,
     pub tx_rate: u16,
     pub heap_free: u32,
+    last_cmd: Command,
+    released: bool,
+}
+
+/// The throttle overlay's state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Overlay {
+    pub y0: i32,
+    pub yf: i32,
+    pub live: bool,
+    pub percent: i8,
 }
 
 impl Model {
@@ -107,6 +118,8 @@ impl Model {
             rx_rate: 0,
             tx_rate: 0,
             heap_free: 0,
+            last_cmd: Command::default(),
+            released: false,
         }
     }
 
@@ -311,7 +324,42 @@ impl Model {
             self.drive().unwrap_or_default()
         };
         let cmd = self.command();
-        self.pump.poll(now, cmd, &targets, &mut self.outbox)
+        let release = (self.last_cmd.armed && !cmd.armed)
+            || (self.last_cmd.armed && self.last_cmd.demand != 0 && cmd.demand == 0);
+        self.last_cmd = cmd;
+        let sent = self.pump.poll(now, cmd, &targets, &mut self.outbox);
+        if sent && release {
+            self.released = true;
+        }
+        sent
+    }
+
+    /// Whether the last tick that went out was a release send, and clear it (the binary logs the
+    /// time from the first Up sample to the frames handed to the BLE host, section 7.2 check 6).
+    pub fn take_release(&mut self) -> bool {
+        core::mem::take(&mut self.released)
+    }
+
+    /// The throttle overlay (section 5.7): while armed and the touch is `Down` or `Lifting`, the
+    /// zero line at `y0` and the thumb at `yf`, in pixels, `live` in `Down`, and the demand as a
+    /// signed percent.
+    pub fn overlay(&self) -> Option<Overlay> {
+        if !self.arm.armed() {
+            return None;
+        }
+        let ((y0, yf), live) = self.touch.overlay?;
+        let demand = if live {
+            i32::from(throttle::demand(y0, yf))
+        } else {
+            0
+        };
+        Some(Overlay {
+            y0: y0 / crate::touch::SUB,
+            yf: yf / crate::touch::SUB,
+            live,
+            percent: ((demand * 100 + demand.signum() * throttle::FULL_SCALE / 2)
+                / throttle::FULL_SCALE) as i8,
+        })
     }
 
     /// The state of every widget at `now`.
@@ -1078,11 +1126,29 @@ mod tests {
         assert_eq!(m.command().demand, 32767);
         assert!(m.run_pump(now + 50));
         assert_eq!(m.outbox.drive[0].1.value, 32767);
-        // A release goes out at once.
+        m.touch.overlay = Some(((200 * SUB, 80 * SUB), true));
+        assert_eq!(
+            m.overlay(),
+            Some(Overlay {
+                y0: 200,
+                yf: 80,
+                live: true,
+                percent: 100
+            })
+        );
+        assert!(!m.take_release());
+        // A release goes out at once, and is reported as one.
         m.outbox = Outbox::default();
         m.touch.drive = None;
+        m.touch.overlay = Some(((200 * SUB, 80 * SUB), false));
         assert!(m.run_pump(now + 60));
         assert_eq!(m.outbox.drive[0].1.value, 0);
+        assert!(m.take_release());
+        assert_eq!(
+            m.overlay().unwrap().percent,
+            0,
+            "a lifting touch demands zero"
+        );
     }
 
     #[test]

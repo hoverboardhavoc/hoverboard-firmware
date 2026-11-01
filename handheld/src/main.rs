@@ -12,10 +12,12 @@ mod panel;
 mod xpt2046;
 
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_backtrace as _;
@@ -41,6 +43,7 @@ use mipidsi::options::{ColorOrder, Orientation};
 use static_cell::StaticCell;
 use trouble_host::prelude::ExternalController;
 
+use handheld_core::arm::Button;
 use handheld_core::model::{Model, TouchDebug};
 use handheld_core::touch::{median_spread, Lift, Touch, PERIOD_MS};
 
@@ -81,6 +84,28 @@ type Panel = mipidsi::Display<
 >;
 
 static PANEL_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
+static PWM_TIMER: StaticCell<esp_hal::ledc::timer::Timer<'static, LowSpeed>> = StaticCell::new();
+
+/// Wakes the link when the pump has put frames in the outbox.
+pub static PUMP: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// When the sample that released the throttle was taken (µs, low 32 bits; 0 for none): the link
+/// logs the time to the frames it hands the BLE host (section 7.2 check 6).
+pub static RELEASE_AT: AtomicU32 = AtomicU32::new(0);
+
+/// The RGB LED's red and green, by PWM, active low.
+pub struct Led {
+    red: channel::Channel<'static, LowSpeed>,
+    green: channel::Channel<'static, LowSpeed>,
+}
+
+impl Led {
+    /// Orange while armed (red full, green about a third, section 5.3), off otherwise.
+    fn set(&mut self, armed: bool) {
+        let (r, g) = if armed { (0, 67) } else { (100, 100) };
+        let _ = self.red.set_duty(r);
+        let _ = self.green.set_duty(g);
+    }
+}
 static SAMPLER: StaticCell<InterruptExecutor<1>> = StaticCell::new();
 
 #[esp_rtos::main]
@@ -99,9 +124,7 @@ async fn main(spawner: Spawner) {
 
     MODEL.lock(|m| m.replace(Some(Model::new(BRIDGE))));
 
-    // The RGB LED is active low: off.
-    let _red = Output::new(p.GPIO4, Level::High, OutputConfig::default());
-    let _green = Output::new(p.GPIO16, Level::High, OutputConfig::default());
+    // The RGB LED is active low; blue stays off, red and green are PWM below.
     let _blue = Output::new(p.GPIO17, Level::High, OutputConfig::default());
 
     // The radio before the backlight (section 2.2).
@@ -158,21 +181,30 @@ async fn main(spawner: Spawner) {
     // The backlight by PWM on IO21.
     let mut ledc = Ledc::new(p.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
-    let mut bl_timer = ledc.timer::<LowSpeed>(timer::Number::Timer0);
-    bl_timer
-        .configure(timer::config::Config {
-            duty: timer::config::Duty::Duty8Bit,
-            clock_source: timer::LSClockSource::APBClk,
-            frequency: Rate::from_khz(20),
-        })
-        .unwrap();
-    let mut bl = ledc.channel(channel::Number::Channel0, p.GPIO21);
-    bl.configure(channel::config::Config {
-        timer: &bl_timer,
-        duty_pct: BACKLIGHT_PCT,
-        drive_mode: esp_hal::gpio::DriveMode::PushPull,
+    let pwm = PWM_TIMER.init(ledc.timer::<LowSpeed>(timer::Number::Timer0));
+    pwm.configure(timer::config::Config {
+        duty: timer::config::Duty::Duty8Bit,
+        clock_source: timer::LSClockSource::APBClk,
+        frequency: Rate::from_khz(20),
     })
     .unwrap();
+    let pwm: &'static _ = pwm;
+    let channel = |n, pin: esp_hal::gpio::AnyPin<'static>, duty_pct: u8| {
+        let mut c = ledc.channel(n, pin);
+        c.configure(channel::config::Config {
+            timer: pwm,
+            duty_pct,
+            drive_mode: esp_hal::gpio::DriveMode::PushPull,
+        })
+        .unwrap();
+        c
+    };
+    let bl = channel(channel::Number::Channel0, p.GPIO21.into(), BACKLIGHT_PCT);
+    // Active low: 100 percent duty is off.
+    let led = Led {
+        red: channel(channel::Number::Channel1, p.GPIO4.into(), 100),
+        green: channel(channel::Number::Channel2, p.GPIO16.into(), 100),
+    };
     println!("handheld: display up, backlight {} %", BACKLIGHT_PCT);
 
     // The touch controller: SPI3 through the GPIO matrix, mode 0, 1 MHz; PENIRQ on IO36.
@@ -190,10 +222,15 @@ async fn main(spawner: Spawner) {
     let irq = Input::new(p.GPIO36, InputConfig::default().with_pull(Pull::None));
     let touch = xpt2046::Xpt2046::new(tspi, tcs, irq);
 
-    let sampler = SAMPLER.init(InterruptExecutor::new(sw.software_interrupt1));
-    sampler.start(Priority::Priority1).must_spawn(sample(touch));
+    // BOOT (IO0): R2 pulls it up; pressed is low.
+    let boot = Input::new(p.GPIO0, InputConfig::default().with_pull(Pull::None));
 
-    spawner.must_spawn(view(panel));
+    let sampler = SAMPLER.init(InterruptExecutor::new(sw.software_interrupt1));
+    sampler
+        .start(Priority::Priority1)
+        .must_spawn(sample(touch, boot));
+
+    spawner.must_spawn(view(panel, led));
     if let Some(c) = connector {
         let controller: ExternalController<_, 20> = ExternalController::new(c);
         link::run(controller, BRIDGE.unwrap_or([0; 6])).await;
@@ -213,14 +250,16 @@ type TouchDev = xpt2046::Xpt2046<
 /// The touch sampler: every 2 ms on a timer, PENIRQ then the conversions, classified and
 /// stepped through the lift machine; what it means goes to the model.
 #[embassy_executor::task]
-async fn sample(mut dev: TouchDev) {
+async fn sample(mut dev: TouchDev, boot: Input<'static>) {
     let mut touch = Touch::default();
+    let mut button = Button::default();
     let mut ticker = Ticker::every(Duration::from_millis(PERIOD_MS as u64));
     let mut count = 0u16;
     let mut since = now_ms();
     let mut rate = 0u16;
     loop {
         ticker.next().await;
+        let at = Instant::now();
         let r = dev.read();
         let now = now_ms();
         touch.sample(&r, now);
@@ -245,10 +284,27 @@ async fn sample(mut dev: TouchDev) {
             rate,
         };
         let v = touch.view(now);
-        with(|m| {
+        let edge = button.poll(boot.is_low(), now);
+        let fault = button.fault();
+        let sent = with(|m| {
             m.touch = v;
             m.touch_debug = debug;
+            if let Some(e) = edge {
+                m.on_button(e);
+            }
+            if m.button_fault && !fault {
+                m.button_released();
+            }
+            let sent = m.run_pump(now);
+            // Under the lock, with the frames it stamps: the link takes both together.
+            if m.take_release() {
+                RELEASE_AT.store((at.as_micros() as u32).max(1), Ordering::Relaxed);
+            }
+            sent
         });
+        if sent {
+            PUMP.signal(());
+        }
     }
 }
 
@@ -302,14 +358,16 @@ fn log_view(v: &handheld_core::model::View, debug: &(heapless::String<40>, heapl
 
 /// The view: at most 25 redraws a second, each drawing only what changed.
 #[embassy_executor::task]
-async fn view(mut panel: Panel) {
+async fn view(mut panel: Panel, mut led: Led) {
     let mut cache = panel::Cache::default();
+    let mut drawn_overlay: Option<handheld_core::model::Overlay> = None;
+    let mut led_armed = false;
     let mut ticker = Ticker::every(Duration::from_millis(40));
     let mut logged = 0u32;
     loop {
         ticker.next().await;
         let now = now_ms();
-        let (v, debug) = with(|m| (m.view(now), m.debug_lines()));
+        let (v, debug, overlay) = with(|m| (m.view(now), m.debug_lines(), m.overlay()));
         // A line of what the screen shows every 5 s, for the serial log (section 6.4).
         if now.wrapping_sub(logged) >= 5000 {
             logged = now;
@@ -317,6 +375,21 @@ async fn view(mut panel: Panel) {
         }
         let dbg = cfg!(debug_assertions) || cfg!(feature = "debug-line");
         let d = dbg.then_some((debug.0.as_str(), debug.1.as_str()));
+        if drawn_overlay != overlay {
+            if let Some(old) = drawn_overlay {
+                for (y0, y1) in panel::overlay_bands(&old) {
+                    panel::redraw_band(&mut panel, &v, d, y0, y1);
+                }
+            }
+            drawn_overlay = overlay;
+        }
         panel::draw(&mut panel, &v, d, &mut cache);
+        if let Some(o) = &overlay {
+            panel::draw_overlay(&mut panel, o);
+        }
+        if led_armed != v.armed {
+            led_armed = v.armed;
+            led.set(v.armed);
+        }
     }
 }

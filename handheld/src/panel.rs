@@ -17,8 +17,8 @@ use u8g2_fonts::{fonts, FontRenderer};
 
 use handheld_core::layout::{self, Drawn, Rect, Widget};
 use handheld_core::model::{
-    ArmBand, Body, Card, Corner, Dial, Dot, LampCell, Lower, Pack, PhaseBar, Ride, SpeedShow,
-    Statement, Tone, Top, View,
+    ArmBand, Body, Card, Corner, Dial, Dot, LampCell, Lower, Overlay, Pack, PhaseBar, Ride,
+    SpeedShow, Statement, Tone, Top, View,
 };
 use handheld_core::readings::attitude::Attitude;
 
@@ -725,5 +725,81 @@ pub fn test_pattern<D: DrawTarget<Color = Rgb565>>(d: &mut D) {
         &FONT_8X13,
         NEON,
         Alignment::Center,
+    );
+}
+
+/// The rows the overlay covers: the zero line, and the thumb with its percent above it.
+pub fn overlay_bands(o: &Overlay) -> [(i32, i32); 2] {
+    let zero = layout::band(o.y0, layout::ZERO_H);
+    let (t0, t1) = layout::band(o.yf, layout::THUMB_H);
+    [zero, ((t0 - 15).max(0), t1)]
+}
+
+/// Redraw every widget that meets rows `y0..y1`, clipped to them: the overlay left those rows
+/// (section 5.7).
+pub fn redraw_band<D: DrawTarget<Color = Rgb565>>(
+    d: &mut D,
+    v: &View,
+    debug: Option<(&str, &str)>,
+    y0: i32,
+    y1: i32,
+) {
+    let band = er(Rect::new(0, y0, layout::WIDTH, y1));
+    let mut c = d.clipped(&band);
+    fill(&mut c, Rect::new(0, y0, layout::WIDTH, y1), BG);
+    for w in layout::meeting(y0, y1) {
+        match (w, &v.body) {
+            (Widget::TopStrip, _) => draw_top(&mut c, &v.top),
+            (Widget::Statement, _) => draw_line(&mut c, v.line.as_ref(), debug),
+            (_, Body::Card(_)) => {}
+            (Widget::Dial, Body::Ride(r)) => draw_dial(&mut c, &r.dial),
+            (Widget::AttitudeLeft, Body::Ride(r)) => {
+                draw_corner(&mut c, w.rect(), r.corners[0].as_ref())
+            }
+            (Widget::AttitudeRight, Body::Ride(r)) => {
+                draw_corner(&mut c, w.rect(), r.corners[1].as_ref())
+            }
+            (Widget::PackLine, Body::Ride(r)) => draw_pack(&mut c, &r.pack),
+            (Widget::PhaseLeft | Widget::PhaseRight | Widget::ArmBand, Body::Ride(r)) => {
+                match &r.lower {
+                    Lower::Bars { phase, band } => match w {
+                        Widget::PhaseLeft => draw_phase(&mut c, w.rect(), phase[0].as_ref()),
+                        Widget::PhaseRight => draw_phase(&mut c, w.rect(), phase[1].as_ref()),
+                        _ => draw_band(&mut c, *band),
+                    },
+                    Lower::Grid(cells) => draw_grid(&mut c, cells),
+                }
+            }
+        }
+    }
+    if let Body::Card(card) = &v.body {
+        if layout::CARD_AREA.meets_rows(y0, y1) {
+            draw_card(&mut c, card);
+        }
+    }
+}
+
+/// The overlay, drawn last: the zero line at `y0`, the thumb bar at `yf` and the demand as a
+/// signed percent beside its right end.
+pub fn draw_overlay<D: DrawTarget<Color = Rgb565>>(d: &mut D, o: &Overlay) {
+    let (z0, z1) = layout::band(o.y0, layout::ZERO_H);
+    fill(d, Rect::new(0, z0, layout::WIDTH, z1), FG_MUTED);
+    let (t0, t1) = layout::band(o.yf, layout::THUMB_H);
+    let col = if o.live { PRIMARY } else { FG_MUTED };
+    let _ = RoundedRectangle::with_equal_corners(
+        er(Rect::new(2, t0, layout::WIDTH - 2, t1)),
+        Size::new(5, 5),
+    )
+    .into_styled(PrimitiveStyle::with_fill(col))
+    .draw(d);
+    let mut s: String<8> = String::new();
+    let _ = write!(s, "{:+}%", o.percent);
+    text(
+        d,
+        &s,
+        Point::new(layout::WIDTH - 4, (t0 - 14).max(0)),
+        &FONT_8X13,
+        FG,
+        Alignment::Right,
     );
 }
