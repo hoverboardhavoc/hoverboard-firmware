@@ -3,10 +3,13 @@
 # defines:  -DGD32F10X_MD -DUSE_STDPERIPH_DRIVER
 # compiler: arm-none-eabi-gcc (Arm GNU Toolchain 15.2.Rel1 (Build arm-15.86)) 15.2.1 20251203
 # cflags:   -Os -mcpu=cortex-m3 -mthumb -std=gnu11 -ffreestanding -fno-common -ffunction-sections -fdata-sections -Wall -Wno-unused-function
+W4 <ADC0_BASE>+0x00 0xFFFFFFFD     # STAT
 R4 <ADC0_BASE>+0x34 0x00000000     # RSQ2
 W4 <ADC0_BASE>+0x34 0x00000011     # RSQ2
 R4 <ADC0_BASE>+0x0C 0x00000000     # SAMPT0
 W4 <ADC0_BASE>+0x0C 0x00E00000     # SAMPT0
+R4 <ADC0_BASE>+0x08 0x00000000     # CTL1
+W4 <ADC0_BASE>+0x08 0x00000000     # CTL1
 R4 <ADC0_BASE>+0x08 0x00000000     # CTL1
 W4 <ADC0_BASE>+0x08 0x00400000     # CTL1
 R4 <ADC0_BASE>+0x00 0x00000000     # STAT
