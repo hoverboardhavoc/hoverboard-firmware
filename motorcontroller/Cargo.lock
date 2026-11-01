@@ -249,6 +249,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hal-bench"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "embedded-hal 1.0.0",
+ "embedded-io",
+ "hal",
+ "heapless",
+ "panic-halt",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

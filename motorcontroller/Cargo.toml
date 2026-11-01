@@ -12,6 +12,7 @@ members = [
     "dummy-test",
     "firmware",
     "hal",
+    "hal-bench",
     "imu",
     "imu-bench",
     "inputs",
@@ -27,7 +28,7 @@ members = [
 
 # What a bare `cargo build`, `cargo clippy` or `cargo test` here covers: every member but the ones
 # that need a chip feature. `hal` refuses to build without exactly one (specs/hal.md, section 3.2),
-# so it and the two test images on it (`dummy-test`, `store-test`) are built with
+# so it and the images on it (`dummy-test`, `store-test`, the `hal-bench` validators) are built with
 # `-p <crate> --features <chip>` (CI's per-chip steps, tools/host-test.sh, tools/emulator-runner),
 # never by the workspace sweep. The
 # per-chip firmware images are the `firmware` crate with a chip feature (`cargo image-f103`,

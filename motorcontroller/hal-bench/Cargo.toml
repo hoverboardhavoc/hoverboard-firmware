@@ -1,0 +1,33 @@
+[package]
+name = "hal-bench"
+version = "0.1.0"
+license.workspace = true
+edition = "2021"
+description = "The hal crate's bench validators (specs/hal.md section 8.4), one image per validator per chip: probe, fmc, serial, coldpath, motor-verify. Each writes a result block (`HB_RESULT`, magic last) that the host reads over SWD through the board's bridge; tools/hal-bench.py decodes it. Busy-spin, never `wfi`; nothing sets MOE."
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1"
+embedded-io = "0.6"
+embedded-hal = "1.0"
+heapless = "0.8"
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+hal = { path = "../hal" }
+
+# One per chip (specs/hal.md section 3.2); none is the default, so the workspace sweep skips this
+# crate (`default-members`).
+[features]
+gd32f103c8 = ["hal/gd32f103c8"]
+gd32f130c8 = ["hal/gd32f130c8"]
+gd32f103rc = ["hal/gd32f103rc"]
+# The IMU on I2C1 PB10/PB11 (the offroad pair) instead of I2C0 PB6/PB7 (the rover pair), for
+# `coldpath`.
+imu-i2c1 = []
+# `serial`: this board is side A whatever its chip, for a pair of two GD32F130s (the offroad pair).
+serial-side-a = []
+
+[[bin]]
+name = "motor-verify"
+path = "src/bin/motor_verify.rs"

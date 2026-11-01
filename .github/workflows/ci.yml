@@ -180,14 +180,14 @@ jobs:
         working-directory: hoverboard-firmware/motorcontroller
         run: cargo clippy --target thumbv7m-none-eabi -- -D warnings
 
-      # `--exclude hal --exclude dummy-test --exclude store-test`: they build for exactly one chip
+      # `--exclude hal --exclude hal-bench --exclude dummy-test --exclude store-test`: they build for exactly one chip
       # (specs/hal.md section 3.2) and are linted per chip in the next step; `--workspace` would
       # build them with none.
       - name: clippy (motorcontroller, host-test surface, all targets)
         working-directory: hoverboard-firmware/motorcontroller
         run: >
           cargo clippy
-          --workspace --exclude hal --exclude dummy-test --exclude store-test --all-targets
+          --workspace --exclude hal --exclude hal-bench --exclude dummy-test --exclude store-test --all-targets
           --target ${{ env.HOST_TARGET }}
           -F store/test-fields
           -- -D warnings
@@ -203,6 +203,7 @@ jobs:
             cargo clippy -p hal --features "$chip" --all-targets --target ${{ env.HOST_TARGET }} -- -D warnings
             cargo clippy -p dummy-test --features "$chip" --target thumbv7m-none-eabi -- -D warnings
             cargo clippy -p store-test --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+            cargo clippy -p hal-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
           done
           for chip in gd32f103c8 gd32f130c8; do
             cargo clippy -p firmware --features "$chip" --target thumbv7m-none-eabi -- -D warnings
