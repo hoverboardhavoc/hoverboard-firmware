@@ -37,12 +37,12 @@ data class RideSlots(val left: RideSlot?, val right: RideSlot?) {
 }
 
 /**
- * The slots for [motorControllers] (ascending addresses), each board's stored `control.side` from
+ * The slots for [motorControllers] (ascending addresses), each board's stored motor 0 `side` from
  * [side] (null while unread; [Fields.ControlSide.RIGHT] is the right wheel and every other byte the
  * left, as the firmware reads it):
  *
  * - two boards whose sides read one left and one right: by side, labelled "L" and "R";
- * - one board: on the side its `control.side` names and labelled by it, or while that is unread
+ * - one board: on the side its motor's `side` names and labelled by it, or while that is unread
  *   the left slot, labelled with its address;
  * - anything else (a side unread, both sides the same, more than two boards): the two lowest
  *   addresses, left then right, labelled with their addresses.

@@ -10,7 +10,7 @@ import com.hoverboard.protocol.linkctl.ChipTag
  * probe measured (`shared/linkctl/src/lib.rs`, `ChipTag`), and [forTag] turns that tag into the
  * part, or into nothing when the tag names no part this table holds. What a part can ROUTE to a
  * function is not here: the firmware asks the HAL at boot and reports what it could not bring up
- * in `board.status` ([BoardStatus]).
+ * in the boot status record (`STATUS_READ`, [BoardStatus]).
  */
 enum class ChipFamily(val label: String) {
     /** The bench F103 master and the 6-FET split boards: GD32F103C8, LQFP48. */

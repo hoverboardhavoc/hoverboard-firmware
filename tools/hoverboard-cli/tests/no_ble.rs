@@ -9,9 +9,9 @@ use std::process::Command;
 #[test]
 fn without_ble_the_ble_link_and_scan_are_refused_naming_the_feature() {
     for args in [
-        &["--device", "hb-bridge-ab12", "info"][..],
-        &["info"],
-        &["nodes"],
+        &["--device", "hb-bridge-ab12", "bridge", "info", "0x03"][..],
+        &["bridge", "info", "0x03"],
+        &["machine", "nodes"],
         &["scan"],
     ] {
         let o = Command::new(env!("CARGO_BIN_EXE_hoverboard-cli"))

@@ -1,4 +1,4 @@
-//! `erase-store` (`specs/hoverboard-bridge.md`, "Erasing the store"): what the erase loses that a
+//! `board erase` (`specs/hoverboard-bridge.md`, "Erasing the store"): what the erase loses that a
 //! `dump` leaves out, printed before the question, the question's guard, and the board's old
 //! address given back after the erase. The board is the one behind the bridge; `main.rs` finds it
 //! with the walk, reads it, asks, sends `STORE_ERASE`, waits for the mailbox and restores the
@@ -17,8 +17,8 @@ use crate::wire::Wire;
 pub const MAILBOX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The lines printed before the question: each board-owned key the board answered
-/// (`node.address`, each motor's `odometer`), and under each stored odometer the `config` line
-/// that writes it back. `name` is how the lines and the `config` line name the board: its
+/// (`node.address`, each motor's `odometer`), and under each stored odometer the `board set`
+/// line that writes it back. `name` is how the lines and the `board set` line name the board: its
 /// `device.name`, which a board file restores, or its address.
 pub fn lines(name: &str, reads: &Reads) -> Vec<String> {
     let mut out = Vec::new();
@@ -30,7 +30,7 @@ pub fn lines(name: &str, reads: &Reads) -> Vec<String> {
         }
         if let Some(Value::U32(n)) = r.value() {
             out.push(format!(
-                "  write it back with: hoverboard-cli config {name} motors.{}.odometer {n} --force",
+                "  write it back with: hoverboard-cli board set {name} motors.{}.odometer {n} --force",
                 key.index
             ));
         }
@@ -39,17 +39,17 @@ pub fn lines(name: &str, reads: &Reads) -> Vec<String> {
 }
 
 /// The guard before the erase: asked about, unless `yes`; refused without a `terminal` on stdin
-/// unless `yes`, as `replace` and `install-esp` refuse.
+/// unless `yes`, as `replace` and `bridge install` refuse.
 pub fn guard(name: &str, yes: bool, terminal: bool) -> Guard {
     if yes {
         Guard::Proceed
     } else if !terminal {
         Guard::Refuse(format!(
-            "{name}: erase-store erases every stored setting; give --yes to do it without a terminal"
+            "{name}: board erase erases every stored setting; give --yes to do it without a terminal"
         ))
     } else {
         Guard::Ask(format!(
-            "Take a dump first (hoverboard-cli dump {name} <file>): nothing brings the settings \
+            "Take a dump first (hoverboard-cli board dump {name} <file>): nothing brings the settings \
              back. Erase every stored setting on {name}?"
         ))
     }
@@ -90,8 +90,8 @@ pub fn restore<W: Wire>(
     };
     Err(format!(
         "{name}: the store is erased, but its address was not restored ({why}); restore it with \
-         hoverboard-cli config <node> node.address {n} --force and a reset, <node> being the \
-         address hoverboard-cli nodes gives the board"
+         hoverboard-cli board set <board> node.address {n} --force and a reset, <board> being \
+         the address hoverboard-cli machine nodes gives the board"
     ))
 }
 
@@ -137,7 +137,7 @@ mod tests {
             [
                 addr.as_str(),
                 "rover-master: motors[0].odometer = 123456",
-                "  write it back with: hoverboard-cli config rover-master motors.0.odometer \
+                "  write it back with: hoverboard-cli board set rover-master motors.0.odometer \
                  123456 --force",
                 "rover-master: motors[1].odometer = 0 (default)",
             ]
@@ -154,7 +154,7 @@ mod tests {
     fn the_erase_asks_on_a_terminal_and_without_one_needs_yes() {
         match guard("rover-master", false, true) {
             Guard::Ask(q) => {
-                assert!(q.contains("hoverboard-cli dump rover-master"), "{q}");
+                assert!(q.contains("hoverboard-cli board dump rover-master"), "{q}");
                 assert!(
                     q.ends_with("Erase every stored setting on rover-master?"),
                     "{q}"
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn no_assign_ack_fails_saying_the_store_is_erased_and_how_to_restore_the_address() {
         let hand =
-            "restore it with hoverboard-cli config <node> node.address 1 --force and a reset";
+            "restore it with hoverboard-cli board set <board> node.address 1 --force and a reset";
         let mut w = Bridge::new(None);
         let e = restore(&mut w, 0x88, 0x03, 1, "rover-master", &reads()).unwrap_err();
         assert!(e.starts_with("rover-master: the store is erased"), "{e}");

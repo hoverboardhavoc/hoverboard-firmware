@@ -60,7 +60,7 @@ const val LAYOUT_PART_UNKNOWN_TAG = "layout_part_unknown"
  * screen offers no whole-layout presets.
  *
  * Nothing judges the layout here. After the power-cycle the board brings up what it can from these
- * fields and lists what it could not in `board.status`, which Setup's machine status shows
+ * fields and lists what it could not in its boot status record, which Setup's machine status shows
  * (`specs/configured-links.md` sections 3 and 5).
  */
 @Composable

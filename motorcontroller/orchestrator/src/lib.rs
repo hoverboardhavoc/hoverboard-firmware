@@ -34,7 +34,8 @@
 //!   `INPUTS_TIMEOUT_TICKS`.
 //! - [`LinkInbox`]: the latest-wins words the firmware loop's delivered-PDU hand-back routes in
 //!   (`linkctl::Payload`), plus the supervision state: the cyclic/drive/mirror age counters, the
-//!   `comms_loss` level (never-seen-a-peer exempt: single-board operation is legitimate).
+//!   `comms_loss` level (never asserted before a peer has been seen; a configured link's unheard
+//!   peer blocks the arm through `EV_MACHINE` instead, [`machine`]).
 //!   Every aged family de-asserts on staleness,
 //!   the remote `INPUTS` mirror included: a controller holds a level by STAYING PRESENT (any
 //!   `INPUTS` or `DRIVE_CMD` from the node that stated it, [`LinkInbox::refreshes_mirror`]), so
@@ -54,6 +55,7 @@ extern crate std;
 pub mod battery;
 pub mod dispatch;
 pub mod events;
+pub mod machine;
 
 use base::fixed::Fix;
 use control::helpers::q_to_int_d2iz;
@@ -71,9 +73,10 @@ pub use dispatch::{
 };
 pub use events::{
     counted, COUNTED_MOTOR, EV_COMMS_LOSS, EV_CONFIG, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B,
-    EV_MODE_FAULT, EV_MOTOR_ARM, EV_MOTOR_BITS, EV_MOTOR_CAL, EV_MOTOR_HALL, EV_MOTOR_PERIOD,
-    EV_POWER_REQUEST, EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
+    EV_MACHINE, EV_MODE_FAULT, EV_MOTOR_ARM, EV_MOTOR_BITS, EV_MOTOR_CAL, EV_MOTOR_HALL,
+    EV_MOTOR_PERIOD, EV_POWER_REQUEST, EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
 };
+pub use machine::{Digests, Machine, N_LINKS};
 
 /// The per-motor breadth of the orchestrator state: the control block's dual-motor shape
 /// (`specs/control.md` (e); one MOE gate + one fault latch per advanced timer). Single-motor
@@ -408,8 +411,9 @@ impl LinkInbox {
 
     /// The peer-staleness level (`specs/link-control.md`, "Supervision"): asserted while the age
     /// of the last accepted cyclic exceeds [`CYCLIC_TIMEOUT_TICKS`]. Level-sensitive (fresh
-    /// cyclic clears it); never asserted before the first cyclic (single-board operation is
-    /// legitimate).
+    /// cyclic clears it); never asserted before the first cyclic. A board whose link is configured
+    /// does not arm before it has heard its peer all the same: that is `EV_MACHINE`'s
+    /// ([`machine::Machine::disagrees`]), which blocks the arm without being a fault.
     pub fn comms_loss(&self) -> bool {
         self.peer.is_some() && self.cyclic_age > CYCLIC_TIMEOUT_TICKS
     }
@@ -760,6 +764,9 @@ pub struct OrchestratorState {
     /// The per-boot identity this board publishes ([`BoardIdentity`]): fixed at construction, so
     /// the firmware reads the boot counter and the detected part ONCE rather than every tick.
     pub identity: BoardIdentity,
+    /// The machine digest this board publishes, its configured links' peers, and what it runs
+    /// against what it stores (`specs/machine-settings.md` sections 4 and 5).
+    pub machine: Machine,
 }
 
 /// The last completed 64-period current window, as the period ISR published it
@@ -837,6 +844,7 @@ impl OrchestratorState {
         rider_required_byte: u8,
         battery_floor: i16,
         identity: BoardIdentity,
+        machine: Machine,
     ) -> Self {
         let (ctl, block) = new_ctl(
             control_mode_byte,
@@ -893,6 +901,7 @@ impl OrchestratorState {
             phase: PhaseWindow::default(),
             odometer: 0,
             identity,
+            machine,
         }
     }
 
@@ -1370,8 +1379,11 @@ pub fn control_task(
         // folds into `fault_a` on `EV_COMMS_LOSS`'s bit and is the one level NOT published on
         // this board's own wire byte below.
         peer_down: dispatch::peer_down_level(state),
-        // A boot fact: some configured function did not come up (`board.status`).
+        // A boot fact: some configured function did not come up (the boot status record).
         config: state.identity.config_fault,
+        // The boards do not agree on the machine, or a configured link's peer is unheard: an
+        // arm inhibit and nothing else (`specs/machine-settings.md` section 4.2).
+        machine: state.machine.disagrees(),
     };
     state.events.tick(levels.mask());
     state.own_levels = levels.own_mask();
@@ -1379,10 +1391,10 @@ pub fn control_task(
         power_request: levels.power_request,
         fault_a: levels.fault_a(),
         fault_b: levels.fault_b(),
-        // The OFF-inhibit producer, live at last (`specs/motor-integration.md`, slice 5): the
-        // wheel-motion level the firmware derived from the period ISR's SPEED word. Pre-motor it
-        // was a hardcoded `false` for want of wheel speed.
-        off_inhibit: state.motor_moving,
+        // The OFF-inhibit producers: the wheel-motion level the firmware derived from the period
+        // ISR's SPEED word (`specs/motor-integration.md`, slice 5), and `EV_MACHINE`, which blocks
+        // arming and, being no fault, never ends a run (`specs/machine-settings.md` section 4.2).
+        off_inhibit: state.motor_moving || levels.machine,
     };
     let outcome = state.mode.tick(&mode_inputs);
 

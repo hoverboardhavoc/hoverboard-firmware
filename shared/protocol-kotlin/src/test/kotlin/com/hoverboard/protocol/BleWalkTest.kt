@@ -8,6 +8,7 @@ import com.hoverboard.protocol.l3.BlePipeSource
 import com.hoverboard.protocol.l3.BleWalkDriver
 import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.ConfigResp
+import com.hoverboard.protocol.l3.Identity
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Retransmit
@@ -16,6 +17,7 @@ import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_INPUTS
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.channels.Channel
@@ -45,8 +47,8 @@ import org.junit.jupiter.api.Test
  */
 class BleWalkTest {
 
-    /** `store::MOTOR_CURRENT_LIMIT` (field 0x20, singleton index 0). */
-    private val motorCurrentLimit = Key(0x20, 0)
+    /** `store::MOTOR_CURRENT_LIMIT`, motor 0. */
+    private val motorCurrentLimit = Fields.MOTOR_CURRENT_LIMIT.key()
 
     @Test
     fun masterSlavePairDiscoveredOverTheBleAdapter() {
@@ -206,7 +208,7 @@ class BleWalkTest {
         val link = Link(t)
         engine.pump() // sends NODE_HELLO
         assertNotNull(engine.takeOutgoing())
-        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())).encode())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0x80.toByte())).encode())
         engine.onReceive(t.drainOutgoing()!!)
         engine.pump() // takes the hello, sends PROBE_PORTS(0x01)
         val probe = Pdu.decode(decodeStream(engine.takeOutgoing()!!).single())
@@ -268,7 +270,7 @@ class BleWalkTest {
         // CONFIG request.
         engine.pump()
         assertNotNull(engine.takeOutgoing())
-        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())).encode())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0x80.toByte())).encode())
         engine.onReceive(t.drainOutgoing()!!)
         engine.pump()
         assertTrue(engine.attached)
@@ -277,7 +279,7 @@ class BleWalkTest {
         assertNotNull(engine.takeOutgoing())
         val ok = Walk.CFG_OK.toByte()
         // Right key, wrong board (0x01 answering a request to 0x02)...
-        link.send(Pdu.of(Opcode.ConfigResp, 0x01, engine.guestAddr, byteArrayOf(0x20, 0x00, ok)).encode())
+        link.send(Pdu.of(Opcode.ConfigResp, 0x01, engine.guestAddr, byteArrayOf(motorCurrentLimit.fieldId.toByte(), 0x00, ok)).encode())
         // ...and right board, wrong key (node_address).
         link.send(Pdu.of(Opcode.ConfigResp, 0x02, engine.guestAddr, byteArrayOf(0x01, 0x00, ok)).encode())
         engine.onReceive(t.drainOutgoing()!!)
@@ -289,11 +291,57 @@ class BleWalkTest {
         assertEquals(Retransmit.SENT, engine.serviceRetransmit(), "a stray CONFIG_RESP disarmed the CONFIG request")
 
         // The matching response does disarm it.
-        link.send(Pdu.of(Opcode.ConfigResp, 0x02, engine.guestAddr, byteArrayOf(0x20, 0x00, ok)).encode())
+        link.send(Pdu.of(Opcode.ConfigResp, 0x02, engine.guestAddr, byteArrayOf(motorCurrentLimit.fieldId.toByte(), 0x00, ok)).encode())
         engine.onReceive(t.drainOutgoing()!!)
         engine.pump()
         now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
         assertEquals(Retransmit.IDLE, engine.serviceRetransmit(), "the answering CONFIG_RESP left the retransmit armed")
+    }
+
+    /**
+     * An `IDENTITY` disarms the outstanding `IDENTIFY`'s retransmit only when it comes from the node
+     * the request was addressed to; a `STATUS` or another node's `IDENTITY` is captured and leaves
+     * it armed (`specs/machine-settings.md` section 6.1, the replies routed like a `CONFIG_RESP`).
+     */
+    @Test
+    fun onlyTheAddressedNodesIdentityDisarmsTheIdentify() {
+        var now = 0L
+        val engine = BleWalkEngine(nowMs = { now })
+        val t = BleStreamTransport()
+        val link = Link(t)
+        engine.pump()
+        assertNotNull(engine.takeOutgoing())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0x80.toByte())).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+        assertTrue(engine.attached)
+
+        engine.sendIdentify(0x02)
+        assertEquals(Opcode.Identify, Pdu.decodeOrNull(drainPdus(engine).last())?.known())
+        val identity = Identity(Walk.CLASS_MOTOR, Walk.MCU_F1X0, 1, ByteArray(Identity.UID_LEN)).encode()
+        link.send(Pdu.of(Opcode.Identity, 0x01, engine.guestAddr, identity).encode())
+        link.send(Pdu.of(Opcode.Status, 0x02, engine.guestAddr, ByteArray(0)).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+        assertNotNull(engine.takeNodeReply())
+        assertNotNull(engine.takeNodeReply())
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.SENT, engine.serviceRetransmit(), "a stray reply disarmed the IDENTIFY")
+
+        link.send(Pdu.of(Opcode.Identity, 0x02, engine.guestAddr, identity).encode())
+        engine.onReceive(t.drainOutgoing()!!)
+        engine.pump()
+        assertEquals(Opcode.Identity, Pdu.decodeOrNull(engine.takeNodeReply()!!)?.known())
+        now += BleWalkEngine.DEFAULT_REPLY_TIMEOUT_MS
+        assertEquals(Retransmit.IDLE, engine.serviceRetransmit(), "the answering IDENTITY left the retransmit armed")
+    }
+
+    /** Every PDU the engine has queued on its stream, decoded off a fresh receiving transport. */
+    private fun drainPdus(engine: BleWalkEngine): List<ByteArray> {
+        val rx = BleStreamTransport()
+        val link = Link(rx)
+        rx.onReceive(engine.takeOutgoing()!!)
+        return generateSequence { link.pollRecv() }.toList()
     }
 
     @Test
@@ -307,7 +355,7 @@ class BleWalkTest {
         val link = Link(t)
         engine.pump()
         assertNotNull(engine.takeOutgoing())
-        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x80.toByte())).encode())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0x80.toByte())).encode())
         engine.onReceive(t.drainOutgoing()!!)
         engine.pump()
         assertTrue(engine.attached)
@@ -519,7 +567,7 @@ class BleWalkTest {
         val link = Link(t)
         engine.pump() // NODE_HELLO
         assertNotNull(engine.takeOutgoing())
-        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0, 0, 0, 0x81.toByte())).encode())
+        link.send(Pdu.of(Opcode.NodeHello, 0x01, 0x80, byteArrayOf(0x01, Walk.PROTO_VER.toByte(), 0x81.toByte())).encode())
         engine.onReceive(t.drainOutgoing()!!)
         engine.pump() // adopts 0x01, sends PROBE_PORTS to it
         assertTrue(engine.attached)

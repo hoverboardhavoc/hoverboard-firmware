@@ -24,6 +24,23 @@ pub trait Wire {
     fn window(&self) -> usize;
 }
 
+/// A wire lent out: an exchange that borrows the wire (an SWD route's `TARGET_ID` through a
+/// [`crate::client::Client`]) and hands it back.
+impl<T: Wire + ?Sized> Wire for &mut T {
+    fn send(&mut self, pdu: &[u8]) {
+        (**self).send(pdu)
+    }
+    fn send_all(&mut self, pdus: &[Vec<u8>]) {
+        (**self).send_all(pdus)
+    }
+    fn recv(&mut self, timeout: Duration) -> Option<Vec<u8>> {
+        (**self).recv(timeout)
+    }
+    fn window(&self) -> usize {
+        (**self).window()
+    }
+}
+
 /// A link that moves bytes.
 pub trait ByteLink {
     /// Write bytes (the link splits them as it must).

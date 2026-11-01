@@ -39,7 +39,7 @@ hal = ["dep:hal"]
 
 # The reserved store-test fields (T_KEY/T_BLOB), their value consts, the scenario ids, and the
 # `run`/`run_var` scenario dispatch. OFF by default so a production build's field set is exactly the
-# genuine tunables (DEVICE_NAME, MOTOR_CURRENT_LIMIT, MOTOR_METHOD, SOME_BLOB). Enabled by the
+# genuine tunables. Enabled by the
 # `store-test` firmware, the emulator-runner store scenarios, and the store's own host tests
 # (`cargo test -p store --features test-fields`; CI passes `-F store/test-fields`).
 test-fields = []

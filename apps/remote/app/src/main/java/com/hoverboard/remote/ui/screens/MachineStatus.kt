@@ -139,6 +139,7 @@ private fun MachineLines(state: UiState) {
             ),
         )
     }
+    if (state.machineDisagrees) MachineDifferences(state)
     when (state.riderWaiver) {
         RiderWaiver.WAIVED -> CautionText(stringResource(R.string.arm_rider_waived))
         RiderWaiver.POSSIBLY -> CautionText(stringResource(R.string.arm_rider_maybe_waived))
@@ -181,6 +182,7 @@ private fun BoardRow(state: UiState, address: Int, label: String) {
     val small = MaterialTheme.typography.bodySmall
     ConfigLines(state, address, telemetry)
     if (telemetry == null || !telemetry.hasState) return
+    RunLines(address, telemetry)
     if (telemetry.riderPresent) {
         Text(stringResource(R.string.status_rider), style = small, color = Primary)
     } else {

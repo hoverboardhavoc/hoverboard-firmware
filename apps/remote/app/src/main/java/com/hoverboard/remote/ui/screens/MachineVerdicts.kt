@@ -8,15 +8,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import com.hoverboard.remote.FramePair
-import com.hoverboard.remote.ModePair
 import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupState
 import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.machine
-import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.model.driveModeLabel
 import com.hoverboard.remote.ui.theme.CautionText
 import com.hoverboard.remote.ui.theme.FgMuted
 
@@ -24,8 +21,8 @@ import com.hoverboard.remote.ui.theme.FgMuted
 const val MACHINE_BADGE_TAG = "setup_machine_badge"
 
 /**
- * What the machine reads as, in the owner's words: the drive mode, frame and side verdicts of
- * `specs/remote-ui.md` 3.2 and 3.7a, the disagreement badge of 3.7, and the board labels they use.
+ * What the machine reads as, in the owner's words: the frame and side verdicts of
+ * `specs/remote-ui.md` 3.7a, the disagreement badge of 3.7, and the board labels they use.
  *
  * Apart from [MachineSection] because the section is the controls and this is what they say; the
  * raw ADVANCED rows of This board use these without the section.
@@ -48,20 +45,6 @@ internal fun frameVerdict(state: SetupState, pair: FramePair): String = when (pa
     is FramePair.Differ -> eachBoard(state, pair.rigid.mapValues { (_, rigid) -> stringResource(frameLabel(rigid)) })
 }
 
-/** The drive mode as the machine stores it, naming each board's value when they differ. */
-@Composable
-internal fun modeVerdict(state: SetupState, pair: ModePair): String = when (pair) {
-    ModePair.Unknown -> stringResource(R.string.setup_machine_mode_unknown)
-    is ModePair.Agree -> stringResource(R.string.setup_machine_frame_agree, modeName(pair.byte))
-    is ModePair.Differ -> eachBoard(state, pair.bytes.mapValues { (_, byte) -> modeName(byte) })
-}
-
-/** A stored drive-mode byte as the screen names it, or the byte itself when it is no known mode. */
-@Composable
-internal fun modeName(byte: Int): String =
-    DriveMode.of(byte)?.let { stringResource(driveModeLabel(it)) }
-        ?: stringResource(R.string.setup_machine_mode_raw, byte)
-
 /** "<board>: <value>." for every board, in address order. */
 @Composable
 private fun eachBoard(state: SetupState, values: Map<Int, String>): String =
@@ -83,7 +66,7 @@ internal fun boardLabel(state: SetupState, address: Int): String =
     state.nodeAt(address)?.let { nodeLabel(it) } ?: boardHex(address)
 
 /**
- * The machine verdict under one of the three raw ADVANCED rows (`specs/remote-ui.md` 3.7a): a raw
+ * The machine verdict under one of the two raw ADVANCED rows (`specs/remote-ui.md` 3.7a): a raw
  * edit that breaks the machine is said so where it was made, not only up in the Machine section.
  * Nothing for any other row.
  */
@@ -95,10 +78,6 @@ internal fun MachineRowVerdict(field: SetupField, state: SetupState) {
         SetupFields.CONTROL_FRAME -> {
             Text(frameVerdict(state, pair.frame), style = small, color = FgMuted)
             if (pair.frame is FramePair.Differ) Badge()
-        }
-        SetupFields.DRIVE_MODE -> {
-            Text(modeVerdict(state, pair.mode), style = small, color = FgMuted)
-            if (pair.mode is ModePair.Differ) Badge()
         }
         SetupFields.CONTROL_SIDE -> {
             Text(sideVerdict(state, pair.side), style = small, color = FgMuted)

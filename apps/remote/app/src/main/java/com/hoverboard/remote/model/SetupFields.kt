@@ -4,10 +4,13 @@ import androidx.annotation.StringRes
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
+import com.hoverboard.protocol.l3.Walk
+import com.hoverboard.protocol.store.Effect
 import com.hoverboard.protocol.store.FieldDef
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Scope
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.R
@@ -20,52 +23,6 @@ enum class SetupGroup(@StringRes val title: Int) {
     CALIBRATION(R.string.setup_group_calibration),
     TUNING(R.string.setup_group_tuning),
 }
-
-/**
- * When a value the board already stores starts being used (`specs/integration.md`, "When a stored
- * value takes effect: the arm-time re-read"), which is what a Setup row has to tell the operator.
- *
- * Two cases, where that decision names three groups. The arm path re-reads exactly one row of
- * fields (`motorcontroller/firmware/src/arm.rs`, `read_arm_values`); everything else is derived once in the
- * boot sequence, whether it configures a peripheral (the pins, the timer, `motor.dead_time`) or is
- * a value the boot path simply owns (`attitude.level_trim`, `board.battery.cal`, `imu.gyro_bias`,
- * `imu.model`, `link.tx`). Those two groups differ in why they wait for a boot, not in what
- * the operator has to do about it, so the screen asks one question and gets two answers.
- *
- * Which of those two a row is in is NOT declared here: [SetupField.takesEffect] reads it off
- * [Fields.ARM_TIME], the drift-pinned mirror of the firmware's own arm row. A list retyped beside
- * the rows went stale twice. [APP_ONLY] is the exception and says why.
- */
-enum class TakesEffect {
-    /** Re-read in the arm path, so a value written while disarmed runs from the next ARM. */
-    NEXT_ARM,
-
-    /** Derived once at boot, so a value written now runs from the board's next RESTART. */
-    RESTART,
-
-    /**
-     * Nothing on the board reads it, so there is no board-side event to wait for: the app uses it
-     * as soon as the write is verified. The store carries facts about the machine as well as
-     * settings the firmware acts on, and `board.battery.cells` is the first of the former with a row.
-     */
-    APP_ONLY,
-}
-
-/**
- * When a value written to the field [fieldId] starts being used: re-read in the arm path, so it
- * runs from the next ARM, or derived once at boot, so it runs from the next RESTART.
- *
- * Read off [Fields.ARM_TIME], the mirror `RustSourceDriftTest` pins against the firmware's own arm
- * row, rather than declared per row: this is a firmware fact and not a screen decision, and a
- * hand-set flag went stale twice, telling the owner to power-cycle for a value the board had
- * already picked up (`specs/integration.md`, "When a stored value takes effect: the arm-time
- * re-read").
- *
- * Two screens state it, so it has one home: every Setup row ([SetupField.takesEffect]) and the
- * Tune screen's four drive bounds, which are written to flash and have the same question to answer.
- */
-fun takesEffectOf(fieldId: Int): TakesEffect =
-    if (fieldId in Fields.ARM_TIME) TakesEffect.NEXT_ARM else TakesEffect.RESTART
 
 /** One choice a byte-valued field offers: the byte, and what to call it. */
 data class Choice(val value: Int, @StringRes val label: Int)
@@ -122,9 +79,6 @@ sealed interface Editor {
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
  * @param showDefault whether the row shows its field's default beside the stored value (a bound
  *   whose stock value is the reference point an edit departs from).
- * @param appOnly whether the firmware reads this field at all. Declared per row and not read off a
- *   mirror, unlike the arm-or-boot split below, because "no consumer on the board" is not a class
- *   the firmware's own tables name: the field's Rust documentation states it and nothing else can.
  */
 data class SetupField(
     val def: FieldDef,
@@ -136,22 +90,22 @@ data class SetupField(
     val noteArgs: List<Any> = emptyList(),
     val advanced: Boolean = false,
     val showDefault: Boolean = false,
-    val appOnly: Boolean = false,
 ) {
     val key: Key get() = def.key(index)
 
     /**
-     * When the board starts using a value written here, which the row states ([TakesEffect]), or
-     * null for a row nothing writes ([Editor.ReadOnly]) and which therefore has no edit to place in
-     * time. [takesEffectOf] is where it is decided, so the screen and the firmware cannot disagree
-     * about a field.
+     * When the board starts using a value written here (`specs/machine-settings.md` section 5), which
+     * the row states, or null for a row nothing writes ([Editor.ReadOnly]) and which therefore has no
+     * edit to place in time. It is the registry's own attribute ([FieldDef.effect], drift-pinned), so
+     * the screen and the firmware cannot disagree about a field.
      */
-    val takesEffect: TakesEffect?
-        get() = when {
-            editor == Editor.ReadOnly -> null
-            appOnly -> TakesEffect.APP_ONLY
-            else -> takesEffectOf(def.id)
-        }
+    val takesEffect: Effect? get() = if (editor == Editor.ReadOnly) null else def.effect
+
+    /**
+     * Whether this is a MACHINE field (`specs/machine-settings.md` section 2): one value for the
+     * vehicle, held as a copy on every motor controller, read once and written to every one.
+     */
+    val machine: Boolean get() = def.scope == Scope.MACHINE
 
     /**
      * Whether this row takes [value]: the field's own type, inside the editor's range, and short
@@ -238,8 +192,8 @@ private const val U32_MAX = 0xFFFF_FFFFL
 
 /**
  * The Setup screen's rows (`specs/remote-ui.md` sections 3.4 and 3.6a, minus the pin block of 3.5):
- * the hint table over the drift-pinned field mirror. Motor rows edit motor index 0 only; index 1 is
- * unconsumed by the firmware and hidden, as are `SOME_BLOB` and the test fields.
+ * the hint table over the drift-pinned field mirror. Wheel rows edit motor index 0 only; index 1 is
+ * unconsumed by the firmware and hidden, as are the test fields.
  */
 object SetupFields {
     /**
@@ -258,14 +212,6 @@ object SetupFields {
     val DEVICE_NAME = SetupField(
         Fields.DEVICE_NAME, 0, R.string.setup_field_device_name, SetupGroup.IDENTITY, Editor.Generic,
         note = R.string.setup_note_device_name,
-    )
-    /**
-     * `node.class` (`specs/l3.md`, "Node class"): what the node is. Read-only on every node, a
-     * bridge's included: the value is the node's own firmware's.
-     */
-    val NODE_CLASS = SetupField(
-        Fields.NODE_CLASS, 0, R.string.setup_field_node_class, SetupGroup.IDENTITY, Editor.ReadOnly,
-        note = R.string.setup_note_node_class,
     )
     val NODE_ADDRESS = SetupField(
         Fields.NODE_ADDRESS, 0, R.string.setup_field_node_address, SetupGroup.IDENTITY, Editor.ReadOnly,
@@ -296,14 +242,12 @@ object SetupFields {
      * voltage into a state of charge ([batteryReading]), and the one place the pack is stated.
      * Offered over [Fields.BATTERY_CELLS], with 0 as the unset value the field defaults to.
      *
-     * Read on BOTH boards with the ride facts, like [MACHINE], because the Ride screen's gauge
-     * needs it whether or not Setup is ever opened, and written to both: one pack feeds both
-     * boards.
+     * A machine field: read with the ride facts, because the Ride screen's gauge needs it whether
+     * or not Setup is ever opened, and written to every motor controller: one pack feeds them all.
      */
     val PACK_CELLS = SetupField(
         Fields.BOARD_BATTERY_CELLS, 0, R.string.setup_field_pack_cells, SetupGroup.DRIVE,
         Editor.Range(Fields.BATTERY_CELLS, unset = 0L), note = R.string.setup_note_pack_cells,
-        appOnly = true,
     )
 
     /**
@@ -321,7 +265,6 @@ object SetupFields {
             ),
         ),
         note = R.string.setup_note_battery_chemistry,
-        appOnly = true,
     )
 
     /**
@@ -381,21 +324,10 @@ object SetupFields {
     )
 
     /**
-     * `machine.drive_mode`, how the app drives this machine (`specs/remote-ui.md` 3.2). Nothing on the
-     * board reads it ([SetupField.appOnly]). The Machine section's chips are the primary control,
-     * because the value belongs to the machine and goes to every motor controller; this is the raw
-     * row behind ADVANCED, as for [CONTROL_FRAME].
-     */
-    val DRIVE_MODE = SetupField(
-        Fields.MACHINE_DRIVE_MODE, 0, R.string.setup_field_drive_mode, SetupGroup.DRIVE,
-        Editor.Chips(DriveMode.entries.map { Choice(it.byte, driveModeLabel(it)) }),
-        note = R.string.setup_note_drive_mode, advanced = true, appOnly = true,
-    )
-
-    /**
-     * `control.side`, which wheel of a rigid machine this board drives (`specs/remote-ui.md` 3.7a).
-     * The raw row, like [CONTROL_FRAME]: the Machine section's Right wheel picker is the control
-     * that cannot express a pair with two right wheels, and this one can.
+     * `side` of motor 0, the wheel this board drives (`specs/remote-ui.md` 3.7a; a wheel field,
+     * `Key.index` = the motor, `specs/machine-settings.md` section 3.3). The raw row, like
+     * [CONTROL_FRAME]: the Machine section's Right wheel picker is the control that cannot express a
+     * pair with two right wheels, and this one can.
      */
     val CONTROL_SIDE = SetupField(
         Fields.CONTROL_SIDE, 0, R.string.setup_field_control_side, SetupGroup.DRIVE,
@@ -424,7 +356,7 @@ object SetupFields {
         R.string.setup_field_trim_roll,
     ).mapIndexed { i, label ->
         SetupField(
-            Fields.ATTITUDE_LEVEL_TRIM, i, label, SetupGroup.IMU, Editor.Generic, advanced = true,
+            Fields.ATTITUDE_LEVEL_TRIM.at(i), i, label, SetupGroup.IMU, Editor.Generic, advanced = true,
         )
     }
 
@@ -435,14 +367,15 @@ object SetupFields {
         R.string.setup_field_gyro_bias_z,
     ).mapIndexed { i, label ->
         SetupField(
-            Fields.IMU_GYRO_BIAS, i, label, SetupGroup.IMU, Editor.Generic, advanced = true,
+            Fields.IMU_GYRO_BIAS.at(i), i, label, SetupGroup.IMU, Editor.Generic, advanced = true,
         )
     }
 
     /**
-     * `IMU_AXIS_SIGN` indices 0..5 = `ax, ay, az, gx, gy, gz`, each -1, 0 (unset) or +1. Displayed
-     * behind ADVANCED, written only by the orientation pose picker, which writes all six with the
-     * roles as one checked frame ([Orientation.check]).
+     * `IMU_AXIS_SIGN` indices 0..2 = `x, y, z`, applied to the accelerometer and the gyro alike
+     * (`specs/machine-settings.md` section 3.1), each -1, 0 (unset) or +1. Displayed behind
+     * ADVANCED, written only by the orientation pose picker, which writes all three with the roles
+     * as one checked frame ([Orientation.check]).
      *
      * [Editor.Flow] rather than a per-index editor because the screen writes on edit
      * (`specs/remote-ui.md` 3.6a) and there is no basket to compose a frame in: flipping ONE sign of
@@ -451,15 +384,12 @@ object SetupFields {
      * across its fields, which is the layout editor's shape rather than the rest of Setup's.
      */
     val AXIS_SIGN: List<SetupField> = listOf(
-        R.string.setup_field_sign_ax,
-        R.string.setup_field_sign_ay,
-        R.string.setup_field_sign_az,
-        R.string.setup_field_sign_gx,
-        R.string.setup_field_sign_gy,
-        R.string.setup_field_sign_gz,
-    ).also { check(it.size == Orientation.INDICES) }.mapIndexed { i, label ->
+        R.string.setup_field_sign_x,
+        R.string.setup_field_sign_y,
+        R.string.setup_field_sign_z,
+    ).also { check(it.size == Orientation.INDICES && it.size == Fields.IMU_AXIS_SIGN.size) }.mapIndexed { i, label ->
         SetupField(
-            Fields.IMU_AXIS_SIGN, i, label, SetupGroup.IMU, Editor.Flow(-1L..1L),
+            Fields.IMU_AXIS_SIGN.at(i), i, label, SetupGroup.IMU, Editor.Flow(-1L..1L),
             note = if (i == 0) R.string.setup_note_axis_sign else null, advanced = true,
         )
     }
@@ -476,7 +406,7 @@ object SetupFields {
         R.string.setup_field_role_pitch,
     ).mapIndexed { i, label ->
         SetupField(
-            Fields.IMU_AXIS_ROLE, i, label, SetupGroup.IMU, Editor.Flow(0L..ROLE_MAX),
+            Fields.IMU_AXIS_ROLE.at(i), i, label, SetupGroup.IMU, Editor.Flow(0L..ROLE_MAX),
             note = if (i == 0) R.string.setup_note_axis_role else null, advanced = true,
         )
     }
@@ -547,41 +477,36 @@ object SetupFields {
         Editor.Range(Fields.POS_CLAMP), note = R.string.tune_bound_pos_clamp_note, showDefault = true,
     )
 
-    /** The rows that together are one IMU frame: the six signs and the two roles. */
+    /** The rows that together are one IMU frame: the three signs and the two roles. */
     val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
 
     /**
-     * The rows the Machine section owns (`specs/remote-ui.md` 3.2 and 3.7a). Read on every motor
-     * controller once per attached session with the ride facts ([MOTOR_FACTS]), because the arm
-     * control and the drive state what they come to; their raw rows above are the per-board escape
-     * hatch.
+     * The rows the Machine section owns (`specs/remote-ui.md` 3.7a): the frame and the right wheel.
+     * Read with the ride facts ([MOTOR_FACTS]), because the arm control and the drive state what
+     * they come to; their raw rows above are the per-board escape hatch.
      */
-    val MACHINE: List<SetupField> = listOf(DRIVE_MODE, CONTROL_FRAME, CONTROL_SIDE)
+    val MACHINE: List<SetupField> = listOf(CONTROL_FRAME, CONTROL_SIDE)
 
     /**
-     * The rows the attach-time ride-facts read takes from EVERY motor controller: [MACHINE]'s three,
-     * the pack's cell count and chemistry, the rider requirement, and what the Ride screen's
+     * The rows the attach-time ride-facts read takes from the motor controllers: [MACHINE]'s two,
+     * the control mode the drive mode is derived from (`specs/machine-settings.md` section 7), the
+     * pack's cell count and chemistry, the rider requirement, and what the Ride screen's
      * instruments read beside the telemetry (`specs/remote-ui.md` 3.1): the low-battery floor the
      * ring turns caution at, the IMU model that decides the attitude corner and the TILT and IMU
      * lamps, and the current limit a phase bar is full at. Each is a fact a screen states before
-     * Setup has ever been opened, so every copy is read and a machine that disagrees is visible.
+     * Setup has ever been opened. A machine field among them is read once and stands for every
+     * motor controller ([SetupField.machine]); the rest are read from each.
      */
     val MOTOR_FACTS: List<SetupField> =
-        MACHINE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED + BATTERY_FLOOR + IMU_MODEL + MOTOR_CURRENT_LIMIT
+        MACHINE + CONTROL_MODE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED + BATTERY_FLOOR + IMU_MODEL +
+            MOTOR_CURRENT_LIMIT
 
 
     /**
-     * The rows the attach-time read takes from EVERY node, before anything else: what each node is
-     * and what it is called (`specs/remote-ui.md` section 2). Nothing is read from a node as a motor
-     * controller until its class says it is one.
+     * A bridge's rows (`specs/hoverboard-bridge.md`, "The bridge as a node"): its name. Also what a
+     * node whose `IDENTITY` is not yet read shows, since that key is every node's.
      */
-    val IDENTITY: List<SetupField> = listOf(NODE_CLASS, DEVICE_NAME)
-
-    /**
-     * A bridge's rows (`specs/hoverboard-bridge.md`, "The bridge as a node"): its class, its name and its link
-     * set. Also what a node whose class is not yet read shows, since those keys are every node's.
-     */
-    val BRIDGE: List<SetupField> = listOf(DEVICE_NAME, NODE_CLASS)
+    val BRIDGE: List<SetupField> = listOf(DEVICE_NAME)
 
     /**
      * The three drive bounds, in screen order: the turn limit and its rate, then the position clamp
@@ -596,9 +521,9 @@ object SetupFields {
 
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(
-        DEVICE_NAME, NODE_CLASS, NODE_ADDRESS,
+        DEVICE_NAME, NODE_ADDRESS,
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_CHEMISTRY, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
-        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, DRIVE_MODE, CONTROL_FRAME, CONTROL_SIDE,
+        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
         IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
@@ -616,7 +541,7 @@ object SetupFields {
      * and [BRIDGE]'s for a bridge or a node whose class is not read yet.
      */
     fun rowsFor(nodeClass: Int?): List<SetupField> =
-        if (nodeClass == Fields.NodeClass.MOTOR_CONTROLLER) ALL else BRIDGE
+        if (nodeClass == Walk.CLASS_MOTOR) ALL else BRIDGE
 
     /** `MOTOR_DIRECTION`'s bytes: 0 = forward, and the firmware reads any nonzero byte as reverse. */
     const val DIRECTION_FORWARD = 0
@@ -628,13 +553,4 @@ object SetupFields {
     /** The largest axis role, chip Z (`1 = X`, `2 = Y`, `3 = Z`). */
     const val ROLE_MAX = 3L
 
-}
-
-/** The label a drive mode goes by, on the Machine chips, the raw row and the Ride strip. */
-@StringRes
-fun driveModeLabel(mode: DriveMode): Int = when (mode) {
-    DriveMode.SINGLE -> R.string.drive_mode_single
-    DriveMode.BOUND -> R.string.drive_mode_bound
-    DriveMode.DIFFERENTIAL -> R.string.drive_mode_differential
-    DriveMode.RIGID -> R.string.drive_mode_rigid
 }

@@ -1,21 +1,21 @@
-//! `board.status` in words (`specs/configured-links.md` section 5): what a board's bring-up left
-//! absent, and why, one line per entry of its boot status record. The record's layout and its
-//! reason codes are the firmware's (`motorcontroller/board/src/status.rs`); the field names are the
-//! name table's.
+//! The boot report in words (`specs/configured-links.md` section 5): what a board's bring-up left
+//! absent, and why, one line per entry of its boot status record, as `STATUS_READ` answers it
+//! (`specs/machine-settings.md` section 6.1). The record's layout and its reason codes are the
+//! firmware's (`motorcontroller/board/src/status.rs`); the field names are the name table's.
 
 use board::status::{decode, Entry, Reason};
 use board::DEAD_TIME_MIN_DTG;
-use store::{Key, Value};
+use store::Key;
 
 use crate::names::{path_of, pin_name};
 
-/// The function an entry names, as a line starts with it: `link[1]`, `motors[0] gate`, `imu`, or
+/// The function an entry names, as a line starts with it: `links[1]`, `motors[0] gate`, `imu`, or
 /// the field's path.
 fn function(e: &Entry) -> String {
     let id = e.field;
     let m = e.index;
     match id {
-        _ if id == store::LINK_TX.id() => format!("link[{m}]"),
+        _ if id == store::LINK_TX.id() => format!("links[{m}]"),
         _ if id == store::MOTOR_GATE_HI_A.id() => format!("motors[{m}] gate"),
         _ if id == store::MOTOR_HALL_A.id() => format!("motors[{m}] hall"),
         _ if id == store::MOTOR_PHASE_A.id() => format!("motors[{m}] current sense"),
@@ -72,16 +72,15 @@ fn reason(e: &Entry) -> String {
         Some(Reason::ImuFrame) if e.field == store::IMU_AXIS_ROLE.id() => {
             "the axis roles are not two distinct axes".into()
         }
-        Some(Reason::ImuFrame) => format!(
-            "the frame is not a rotation (imu.axis_sign from index {})",
-            e.detail
-        ),
+        // One sign triple serves the accelerometer and the gyro, so the detail (the refused
+        // triple's first index) is always 0 and names nothing.
+        Some(Reason::ImuFrame) => "imu.axis_sign is not a rotation".into(),
         None => format!("reason {} (detail {:#04x})", e.reason, e.detail),
     }
 }
 
-/// One line per entry of a `board.status` value, each starting with `name`, or `<name>: ok` when
-/// there is none. `link_pins(i)` answers link `i`'s stored (TX, RX) pins, which a link's line
+/// One line per entry of a `STATUS` reply, each starting with `name`, or `<name>: ok` when there
+/// is none. `link_pins(i)` answers link `i`'s stored (TX, RX) pins, which a link's line
 /// names.
 pub fn lines(name: &str, value: &[u8], link_pins: impl Fn(u8) -> Option<(u8, u8)>) -> Vec<String> {
     let entries: Vec<Entry> = decode(value).collect();
@@ -105,18 +104,9 @@ pub fn lines(name: &str, value: &[u8], link_pins: impl Fn(u8) -> Option<(u8, u8)
         .collect()
 }
 
-/// The entries of a `board.status` read, or `None` when the answer is not one.
-pub fn entries_of(v: Option<Value<'_>>) -> Option<Vec<u8>> {
-    match v {
-        Some(Value::Bytes(b)) => Some(b.to_vec()),
-        _ => None,
-    }
-}
-
-/// The line `apply` and `replace` end with when a written field is a pin: a pin field is read
-/// only at boot, and what the board made of it is in `board.status`.
-pub const PIN_HINT: &str =
-    "pin fields take effect at the next boot; check with \"status\" after it";
+/// The line `apply` and `replace` end with when a changed field is a pin: what the board's
+/// bring-up made of it at the next boot is in the boot report.
+pub const PIN_HINT: &str = "check the boot report with \"board status\" after the next boot";
 
 #[cfg(test)]
 mod tests {
@@ -141,7 +131,7 @@ mod tests {
         let gate = store::MOTOR_GATE_HI_A.id();
         assert_eq!(
             line(link, 1, Reason::NotRouted, 0x16),
-            "rover-left: link[1] (PB6/PB7): no USART routes this pair on this chip"
+            "rover-left: links[1] (PB6/PB7): no USART routes this pair on this chip"
         );
         assert_eq!(
             line(gate, 0, Reason::DeadTime, 10),
@@ -153,27 +143,27 @@ mod tests {
         );
         assert_eq!(
             line(link, 0, Reason::Incomplete, store::LINK_RX.id()),
-            "rover-left: link[0]: incomplete, link.rx[0] is not set"
+            "rover-left: links[0]: incomplete, links[0].rx is not set"
         );
         assert_eq!(
             line(store::BOARD_BATTERY_PIN.id(), 0, Reason::NotRouted, 0x1C),
-            "rover-left: board.battery.pin: PB12 has no ADC channel on this chip"
+            "rover-left: battery_sense.pin: PB12 has no ADC channel on this chip"
         );
         assert_eq!(
             line(store::LED_GREEN.id(), 0, Reason::SwdPin, 0x0D),
-            "rover-left: led.green: PA13 is an SWD pin"
+            "rover-left: leds.green: PA13 is an SWD pin"
         );
         assert_eq!(
             line(link, 1, Reason::NotUp, 10),
-            "rover-left: link[1] (PB6/PB7): did not come up (HAL error 10)"
+            "rover-left: links[1] (PB6/PB7): did not come up (HAL error 10)"
         );
         assert_eq!(
             line(store::IMU_SCL_PIN.id(), 0, Reason::NotUp, 0),
             "rover-left: imu: the IMU did not answer its probe"
         );
         assert_eq!(
-            line(store::IMU_AXIS_SIGN.id(), 0, Reason::ImuFrame, 3),
-            "rover-left: imu: the frame is not a rotation (imu.axis_sign from index 3)"
+            line(store::IMU_AXIS_SIGN.id(), 0, Reason::ImuFrame, 0),
+            "rover-left: imu: imu.axis_sign is not a rotation"
         );
         assert_eq!(
             line(gate, 0, Reason::NotRouted, 0x08),

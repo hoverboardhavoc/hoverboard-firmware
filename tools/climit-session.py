@@ -90,24 +90,24 @@ PWM_PERIOD = 2250
 # only was at one assumed scale.
 #
 # NEITHER END IS THIS TOOL'S NUMBER, and the floor is not even the firmware's. Both board facts the
-# window is built from are read at stand-up: the scale is swdobs.CURRENT_CAL_FIELD (0x67) and the
-# FLOOR is swdobs.NOISE_FLOOR_FIELD (0x6B), which this tool used to carry a copy of (2,100 counts,
+# window is built from are read at stand-up: the scale is swdobs.CURRENT_CAL_FIELD (0x4C) and the
+# FLOOR is swdobs.NOISE_FLOOR_FIELD (0x4D), which this tool used to carry a copy of (2,100 counts,
 # one board's rest noise from one session, against five reads that day spanning 1,444 to 2,097). So
 # the real window is the board's at both ends: at 455 counts per amp the ceiling is 36.0 A (20.5 A
 # at 800, 20.0 A at the top of the calibration seam) and the floor is what that chain measures,
-# 4.6 A at 0x6B's registered default.
-MAX_LIMIT_COUNTS = 16_383     # motorcontroller/firmware/src/motor.rs: i16::MAX // 2, and the top of 0x6B's
+# 4.6 A at 0x4D's registered default.
+MAX_LIMIT_COUNTS = 16_383     # motorcontroller/firmware/src/motor.rs: i16::MAX // 2, and the top of 0x4D's
                               # own plausibility band (swdobs.NOISE_FLOOR_MAX)
-# shared/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x20, u32 mA, default 10_000).
-LIMIT_FIELD = 0x20
+# shared/store/src/field.rs, MOTOR_CURRENT_LIMIT (0x4E, u32 mA, default 10_000).
+LIMIT_FIELD = 0x4E
 
 # --------------------------------------------------------------------------------------------------
 # Session parameters (specs/current-limit-session.md, "Parameters", "The flow").
 # --------------------------------------------------------------------------------------------------
 SESSION_LIMIT_MIN_MA = 2000   # the floor on --limit-ma, in MILLIAMPS. It cannot be stated as a
                               # count value: what a milliamp buys in counts is the board's own
-                              # scale (0x67), and the firmware then floors the result at the board's
-                              # own noise floor (0x6B). So this bounds what the session ASKS for,
+                              # scale (0x4C), and the firmware then floors the result at the board's
+                              # own noise floor (0x4D). So this bounds what the session ASKS for,
                               # and the count floor is what holds the trip clear of the rest noise
 SESSION_LIMIT_MAX_MA = 5000   # the bench PSU rule: limit plus 1 A, never above 6 A
 CAL_LIMIT_MA = 15_000         # what gate 3 wants stored: high enough that no ladder step can chop
@@ -123,19 +123,19 @@ PSU_HEADROOM_X = 1.5          # the declared limit must clear the predicted link
 BENCH_PAIR_OHMS = 0.605       # two phases in series, from two duty points, 2026-10-09 (0.605/0.609)
 BENCH_LINK_V = 25.0
 # The labelled limit may still be optimistic, even now the board carries its own counts per amp
-# (0x67): that default is an UPPER bound, not a fit (the 2026-10-09 two-point slopes within a
+# (0x4C): that default is an UPPER bound, not a fit (the 2026-10-09 two-point slopes within a
 # session disagreed, 81 and 306 counts per amp, which is noise domination). A TRUE scale below the
 # coded one means a label buys more real current than it says, so the PSU prediction keeps a factor
 # on it. 2.0 is the same factor the provisional 800 earned against a measured ~455.
 CPA_PESSIMISM = 2.0
 PSU_RULE_TOL_A = 0.1          # the typed PSU limit may differ from the target by a knob's width
 CAL_MIN_PSU_A = 3.0           # the braking fallback's calibration wants at least 3 A on the PSU
-CPA_LO, CPA_HI = 0.7, 1.4     # CONFIRMED band around the board's staged 0x67
+CPA_LO, CPA_HI = 0.7, 1.4     # CONFIRMED band around the board's staged 0x4C
 CAL_SIGNAL_FACTOR = 2.0       # the calibration window's mean peak must clear this many rest floors
                               # before the ratio is anything but an UPPER BOUND (2026-10-09: a 29%
                               # rise in current moved `peak` by 4%)
 FLOOR_FACTOR = 1.5            # "peak within 1.5x of gate 1's max"
-FLOOR_HEADROOM_X = 2.0        # gate 1 calls a staged 0x6B above this many times the measured rest
+FLOOR_HEADROOM_X = 2.0        # gate 1 calls a staged 0x4D above this many times the measured rest
                               # peak more headroom than the chain needs: it is a minimum enforceable
                               # current raised for nothing. 2.0 because the soak's own gross ceiling
                               # (SOAK_GROSS_FACTOR) treats 2x the floor as the fault threshold, so a
@@ -148,7 +148,7 @@ SOAK_GROSS_FACTOR = 2.0       # the soak's per-sample ceiling: a gross fault, no
                               # 2x the floor still clears the worst quiet sample measured
                               # 2026-10-09 (2112 counts against a 2097 floor, so 4194)
 # With gate 1 skipped there is no MEASURED rest floor, so the gates that judge against one fall back
-# to the floor the board itself carries (0x6B, read at stand-up). That is the firmware's own number
+# to the floor the board itself carries (0x4D, read at stand-up). That is the firmware's own number
 # for this chain rather than a tool constant, and it is the right fallback for the same reason it is
 # the right floor: the board is where the measurement was recorded.
 G4_PEAK_LO, G4_PEAK_HI = 0.8, 1.5
@@ -217,8 +217,8 @@ def limit_counts(ma, staged_cpa, staged_floor):
     """motorcontroller/firmware/src/motor.rs, limit_counts: ma * clamp(cal, 100, 819) / 1000, clamped into
     clamp_noise_floor(floor)..MAX_LIMIT_COUNTS.
 
-    `staged_cpa` is the board's own counts per amp (0x67) and `staged_floor` its own sense-chain
-    noise floor (0x6B), both read at stand-up, so this is the firmware's boot-seam arithmetic
+    `staged_cpa` is the board's own counts per amp (0x4C) and `staged_floor` its own sense-chain
+    noise floor (0x4D), both read at stand-up, so this is the firmware's boot-seam arithmetic
     against the firmware's own numbers and not against any of this tool's. The floor moves with the
     board and the ceiling never does, which is what keeps the hard trip twice the limit at every
     floor a board can stage."""
@@ -239,9 +239,9 @@ def check_limit_arg(limit_ma):
     """None when --limit-ma is usable, else the reason it is refused."""
     if limit_ma < SESSION_LIMIT_MIN_MA:
         return (f"--limit-ma {limit_ma} is below {SESSION_LIMIT_MIN_MA}: the hard trip is 2x the limit "
-                f"in COUNTS, and the counts a milliamp buys are the board's own scale (0x67), so a "
+                f"in COUNTS, and the counts a milliamp buys are the board's own scale (0x4C), so a "
                 f"value this low asks for a trip inside the sense chain's noise whatever that scale "
-                f"is (the firmware floors the limit at that board's own measured noise floor, 0x6B)")
+                f"is (the firmware floors the limit at that board's own measured noise floor, 0x4D)")
     if limit_ma > SESSION_LIMIT_MAX_MA:
         return (f"--limit-ma {limit_ma} is above {SESSION_LIMIT_MAX_MA}: it needs a PSU limit of "
                 f"{psu_target_a(limit_ma):g} A (clearing the {link_at_chop_a(limit_ma):.2f} A the link "
@@ -376,7 +376,7 @@ def _mean(xs):
 
 def floor_max(gate1, staged_floor):
     """The rest-noise peak gate 2 and the still soaks are judged against: gate 1's own measurement
-    when it ran, else the floor the board carries (0x6B, clamped as the firmware clamps it).
+    when it ran, else the floor the board carries (0x4D, clamped as the firmware clamps it).
 
     The fallback is the board's number rather than a tool constant for the same reason the floor is
     a field at all: one chain's rest noise is not another's, and the five reads of 2026-10-09 spanned
@@ -423,7 +423,7 @@ def standup_problems(s):
 
 
 def gate1_verdict(samples, staged_cpa, staged_floor):
-    """The rest-noise measurement, and the ONE place the board's staged noise floor (0x6B) is held
+    """The rest-noise measurement, and the ONE place the board's staged noise floor (0x4D) is held
     up against it.
 
     The comparison is the diagnostic the floor's whole hazard needs: the floor is a MINIMUM on the
@@ -445,7 +445,7 @@ def gate1_verdict(samples, staged_cpa, staged_floor):
     ok = chopped == 0 and trips == 0
     r["verdict"] = "INFO" if ok else "FAIL"
     if r["peak_max"] >= floor:
-        read = (f"AT OR UNDER the measured peak: this chain will chop on its own noise, and 0x6B "
+        read = (f"AT OR UNDER the measured peak: this chain will chop on its own noise, and 0x4D "
                 f"wants raising above {r['peak_max']}")
     elif floor > FLOOR_HEADROOM_X * r["peak_max"]:
         read = (f"over {FLOOR_HEADROOM_X:g}x the measured peak: the minimum enforceable current is "
@@ -458,7 +458,7 @@ def gate1_verdict(samples, staged_cpa, staged_floor):
         f"({r['peak_max'] / staged_cpa:.2f} A equivalent at this board's {staged_cpa} counts/A), "
         f"n={r['n']}",
         f"chopped max {chopped} (must be 0), trips {trips} (must be 0)",
-        f"staged noise floor (0x6B) {floor} counts, {read}",
+        f"staged noise floor (0x4D) {floor} counts, {read}",
     ]
     return r
 
@@ -674,9 +674,9 @@ def calibration(samples, psu_a, clamp_a, staged_cpa, quiescent_a=0.0, *, floor_c
     per amp against a provisional 800 on 2026-10-09, with a mean peak barely above the gate-1 noise
     floor, which is the signature of an inflated reference current rather than a wrong scale.
 
-    `staged_cpa` is what the board currently carries in 0x67, which is what the measurement is
+    `staged_cpa` is what the board currently carries in 0x4C, which is what the measurement is
     judged against: this gate confirms or corrects THAT board's scale, and a correction is staged
-    back into 0x67 rather than edited into a source file.
+    back into 0x4C rather than edited into a source file.
 
     `floor_counts` (gate 1's rest-floor maximum) and `ladder_peaks` (each ladder step's mean peak)
     are what decide whether the measurement can carry a verdict at all: see `cal_signal_weak`. When
@@ -724,7 +724,7 @@ def calibration(samples, psu_a, clamp_a, staged_cpa, quiescent_a=0.0, *, floor_c
             r["verdict"] = "CORRECTION"
             r["proposed"] = int(round(cpa))
             r["recommendation"] = (f"measured {cpa:.0f} counts per amp, outside {lo:.0f}..{hi:.0f}: "
-                                   f"propose motor.current_cal (0x67) = {r['proposed']} on THIS board "
+                                   f"propose motor.current_cal (0x4C) = {r['proposed']} on THIS board "
                                    f"(swd-mailbox-config <endpoint> --dst attached "
                                    f"0x{CURRENT_CAL_FIELD:02x}={r['proposed']}, then a power-cycle). "
                                    "NOT staged: the owner stages it after reading this record.")
@@ -854,15 +854,15 @@ def render_record(rec):
                f"{link_at_chop_a(p['limit_ma']):.2f} A the link carries at the chop; never above "
                f"{PSU_CAP_A:g} A) |")
     prev = rec.get("prev_limit_ma")
-    out.append(f"| staged limit before the session (0x20) | {'not read' if prev is None else f'{prev} mA'} |")
+    out.append(f"| staged limit before the session (0x4E) | {'not read' if prev is None else f'{prev} mA'} |")
     raw = rec.get("cal_raw")
     eff = rec["staged_cpa"]
-    out.append(f"| counts per amp (0x67), read off the board | "
+    out.append(f"| counts per amp (0x4C), read off the board | "
                f"{'not read' if raw is None else f'{raw}'}"
                f"{'' if raw is None or raw == eff else f', boot-seam clamped to {eff}'} |")
     f_raw = rec.get("floor_raw")
     f_eff = rec["staged_floor"]
-    out.append(f"| noise floor (0x6B), read off the board | "
+    out.append(f"| noise floor (0x4D), read off the board | "
                f"{'not read' if f_raw is None else f'{f_raw} counts'}"
                f"{'' if f_raw is None or f_raw == f_eff else f', boot-seam clamped to {f_eff}'}"
                f" (no limit is enforced below it) |")
@@ -914,7 +914,7 @@ class EvidenceCsv:
         self.comment(f"{TOOL_VERSION} evidence; specs/current-limit-session.md")
         self.comment(f"columns: {CSV_COLUMNS}")
         self.comment("units: peak in stock current counts (16 per 12-bit ADC LSB; the board's own "
-                     "counts per amp is read from 0x67 at stand-up and commented below); duties of "
+                     "counts per amp is read from 0x4C at stand-up and commented below); duties of "
                      f"{PWM_PERIOD}; ctrl_obs = the {CTRL_OBS_WORDS} CTRL_OBS words in hex, word 0 first")
 
     def comment(self, text):
@@ -1185,7 +1185,7 @@ class SimBoard:
         self.boot = 0
         self.store_limit = 10_000
         self.boot_limit = 10_000
-        # The simulated board's own 0x67, which its peaks are generated against, and its own 0x6B,
+        # The simulated board's own 0x4C, which its peaks are generated against, and its own 0x4D,
         # which floors the limit it chops at: a real board's scale and floor are both read off it,
         # so the fake has to carry both. The floor is BOOT-read in the firmware, so the simulated
         # board latches it at power-on exactly as it latches the limit.
@@ -1259,15 +1259,15 @@ class SimBoard:
                 return Result(0, dst + f"1 CONFIG op(s) on node 0x{self.node:02x}\n"
                               f"  CONFIG_READ {key}:0 -> CFG_OK value U16({getattr(self, attr)})\n"
                               "PASS: 1 CONFIG op(s) answered CFG_OK")
-        m = re.search(r"0x20=(\d+)", cmd)
+        m = re.search(r"0x4E=(\d+)", cmd, re.IGNORECASE)
         if m:
             self.store_limit = int(m.group(1))
             return Result(0, dst + f"1 CONFIG op(s) on node 0x{self.node:02x}\n"
-                          f"  CONFIG_WRITE 0x20:0 = {m.group(1)} (U32) -> CFG_OK\n"
-                          f"  CONFIG_READ  0x20:0 -> CFG_OK value U32({self.store_limit})  (write -> read matches)\n"
+                          f"  CONFIG_WRITE 0x4E:0 = {m.group(1)} (U32) -> CFG_OK\n"
+                          f"  CONFIG_READ  0x4E:0 -> CFG_OK value U32({self.store_limit})  (write -> read matches)\n"
                           "PASS: 1 CONFIG op(s) answered CFG_OK")
         return Result(0, dst + f"1 CONFIG op(s) on node 0x{self.node:02x}\n"
-                      f"  CONFIG_READ 0x20:0 -> CFG_OK value U32({self.store_limit})\n"
+                      f"  CONFIG_READ 0x4E:0 -> CFG_OK value U32({self.store_limit})\n"
                       "PASS: 1 CONFIG op(s) answered CFG_OK")
 
     def spawn(self, argv, tag):
@@ -1541,7 +1541,7 @@ class Session:
             "elf": args.elf, "head": "not read", "csv": "", "outcome": "not finished",
             "gates": [], "typed": [], "teardown": [], "final": [], "calibration": None,
             "psu_declared": None, "prev_limit_ma": None,
-            # The board's counts per amp (0x67) and its sense-chain noise floor (0x6B), both read
+            # The board's counts per amp (0x4C) and its sense-chain noise floor (0x4D), both read
             # at stand-up: `staged_cpa` / `staged_floor` are what the firmware converts against (the
             # boot-seam clamps applied), `cal_raw` / `floor_raw` what is stored.
             "staged_cpa": CURRENT_CAL_DEFAULT, "cal_raw": None,
@@ -1550,7 +1550,7 @@ class Session:
                       if args.brake_fallback else "locked (strap, or both hands on the tyre)"),
         }
         self.locked = not args.brake_fallback
-        # Until stand-up reads 0x67 and 0x6B off the board, the registered defaults are all a
+        # Until stand-up reads 0x4C and 0x4D off the board, the registered defaults are all a
         # report can say; every gate runs after those reads.
         self.staged_cpa = CURRENT_CAL_DEFAULT
         self.cal_raw = None
@@ -1718,9 +1718,9 @@ class Session:
         return r
 
     def read_cal(self):
-        """The board's counts per amp (`motor.current_cal`, 0x67, motor 0), read off the board and
+        """The board's counts per amp (`motor.current_cal`, 0x4C, motor 0), read off the board and
         not carried as a tool constant: every amp this session reports is `counts / this`
-        (specs/motor-integration.md, "The current-sense calibration"). An unreadable 0x67 is an
+        (specs/motor-integration.md, "The current-sense calibration"). An unreadable 0x4C is an
         abort, because a session that reports amps against a guess is worse than no session."""
         try:
             raw, eff = read_current_cal(self.sh.run, ENDPOINT, config_bin=self.bin("swd-mailbox-config"))
@@ -1729,16 +1729,16 @@ class Session:
         self.cal_raw, self.staged_cpa = raw, eff
         self.rec["cal_raw"], self.rec["staged_cpa"] = raw, eff
         clamped = "" if raw == eff else f" (the boot seam clamps it to {eff})"
-        self.say(f"   counts per amp now (0x67): {raw}{clamped}; every amp below is counts / {eff}")
-        self.csv.comment(f"motor.current_cal (0x67) = {raw} counts per amp, effective {eff}")
+        self.say(f"   counts per amp now (0x4C): {raw}{clamped}; every amp below is counts / {eff}")
+        self.csv.comment(f"motor.current_cal (0x4C) = {raw} counts per amp, effective {eff}")
         return raw, eff
 
     def read_floor(self):
-        """The board's phase-current noise floor (`motor.noise_floor`, 0x6B, motor 0), read off the
+        """The board's phase-current noise floor (`motor.noise_floor`, 0x4D, motor 0), read off the
         board and not carried as a tool constant: it is the MINIMUM soft limit this chain can be
         held to, so every limit this session reports is floored at it, and gate 1 below measures the
-        rest noise that number is supposed to be. An unreadable 0x6B is an abort for the same reason
-        an unreadable 0x67 is: the floor is half of what the limit arithmetic means.
+        rest noise that number is supposed to be. An unreadable 0x4D is an abort for the same reason
+        an unreadable 0x4C is: the floor is half of what the limit arithmetic means.
 
         The diagnostic the field exists for is printed here and read in gate 1: a floor far above
         the measured rest peak is a minimum enforceable current raised for nothing, and a floor
@@ -1752,9 +1752,9 @@ class Session:
         clamped = "" if raw == eff else f" (the boot seam clamps it to {eff})"
         unstaged = " (the registry default: this board has no record of its own)" \
             if raw == NOISE_FLOOR_DEFAULT else ""
-        self.say(f"   noise floor now (0x6B): {raw} counts{clamped}{unstaged}; no limit is enforced "
+        self.say(f"   noise floor now (0x4D): {raw} counts{clamped}{unstaged}; no limit is enforced "
                  f"below it, {eff / self.staged_cpa:.2f} A at this board's scale")
-        self.csv.comment(f"motor.noise_floor (0x6B) = {raw} counts, effective {eff}")
+        self.csv.comment(f"motor.noise_floor (0x4D) = {raw} counts, effective {eff}")
         return raw, eff
 
     def config_read_limit(self):
@@ -1762,7 +1762,7 @@ class Session:
         node = self.check_node(r.stdout, "swd-mailbox-config")
         status, value = parse_config_read(r.stdout, LIMIT_FIELD)
         if status != "CFG_OK" or value is None:
-            raise SessionAbort(f"reading 0x20 failed (status {status}): {r.stdout.strip()[-200:]}")
+            raise SessionAbort(f"reading 0x4E failed (status {status}): {r.stdout.strip()[-200:]}")
         return node, value
 
     def start_owner(self, buttons):
@@ -1960,7 +1960,7 @@ class Session:
 
         node, prev = self.config_read_limit()
         self.rec["prev_limit_ma"] = prev
-        self.say(f"   staged limit now (0x20): {prev} mA (gate 3 runs at this limit)")
+        self.say(f"   staged limit now (0x4E): {prev} mA (gate 3 runs at this limit)")
         self.read_cal()
         self.read_floor()
         if self.locked and 3 not in (self.a.skip_gate or []) and prev < LADDER_EST_HI_A * 1000:
@@ -1973,7 +1973,7 @@ class Session:
             raise SessionAbort(f"the operator did not confirm attached node 0x{node:02x}")
         self.node = node
         if self.restore_wanted is not None and self.ask_yes(
-                f"0x20 holds {self.restore_wanted} mA, left by an earlier session, and it will chop the "
+                f"0x4E holds {self.restore_wanted} mA, left by an earlier session, and it will chop the "
                 f"calibration. Raise it to {CAL_LIMIT_MA} mA for gate 3 (write plus a rail power-cycle)?"):
             self.stage_limit(CAL_LIMIT_MA, name="Restore the limit for gate 3")
         self.rec["node_txt"] = f"0x{node:02x} (operator confirmed)"
@@ -2229,7 +2229,7 @@ class Session:
         r = self.run_tool("swd-mailbox-config", *self.mailbox_args(f"0x{LIMIT_FIELD:02x}={ma}"))
         self.check_node(r.stdout, "swd-mailbox-config")
         if not config_write_ok(r.stdout, LIMIT_FIELD):
-            raise SessionAbort(f"staging 0x20={ma} failed: {r.stdout.strip()[-200:]}")
+            raise SessionAbort(f"staging 0x4E={ma} failed: {r.stdout.strip()[-200:]}")
         self.limit_written = True
         self.say("   power-cycling the rail so the boot reads the new limit")
         if self.reader is not None:
@@ -2245,10 +2245,10 @@ class Session:
         self.disarmed_read("post-stage disarmed read")
         _, back = self.config_read_limit()
         if back != ma:
-            raise SessionAbort(f"0x20 reads back {back} after the power cycle, not {ma}")
-        self.say(f"   0x20 reads back {back} mA after the power cycle")
+            raise SessionAbort(f"0x4E reads back {back} after the power cycle, not {ma}")
+        self.say(f"   0x4E reads back {back} mA after the power cycle")
         self.rec["gates"].append({"name": name, "verdict": "DONE", "lines": [
-            f"0x20 = {ma} mA written, read back, power-cycled, read back {back} mA",
+            f"0x4E = {ma} mA written, read back, power-cycled, read back {back} mA",
             f"limit {lc} counts ({ma} mA * {self.staged_cpa} / 1000, clamped into this board's "
             f"{clamp_noise_floor(self.staged_floor)}..{MAX_LIMIT_COUNTS}), hard trip "
             f"{hard_trip_counts(lc)} counts (2x)",
@@ -2554,11 +2554,11 @@ class Session:
         prev = self.rec.get("prev_limit_ma")
         if staged is not None:
             self.rec["final"].append(
-                f"limit left staged at {staged} mA (0x20); the tool does not restore it. The previous value "
-                f"was {prev} mA: restore by hand with swd-mailbox-config 0x20={prev} if wanted")
+                f"limit left staged at {staged} mA (0x4E); the tool does not restore it. The previous value "
+                f"was {prev} mA: restore by hand with swd-mailbox-config 0x4E={prev} if wanted")
         else:
             prev_txt = f"{prev} mA" if prev is not None else "not read"
-            self.rec["final"].append(f"0x20 not changed by this run ({prev_txt})")
+            self.rec["final"].append(f"0x4E not changed by this run ({prev_txt})")
 
     # ---- the record -----------------------------------------------------------------------------
     def flush_record(self):

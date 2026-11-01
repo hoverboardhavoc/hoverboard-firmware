@@ -52,8 +52,17 @@ class TuneRequestOrderTest {
         rig.model.save()
         runCurrent()
         val save = rig.transport.requests.drop(from)
-        assertEquals(listOf(gp, gr, gp, gr, gp, gr).map { board to it }, save)
-        assertEquals(listOf(gp, gr).map { board to it }, rig.transport.writes.map { it.first to it.second })
+        // Each gain to every motor controller (a machine field), the tuned board first; then the tuned
+        // board's flash and staged copies.
+        val other = 0x02
+        assertEquals(
+            listOf(board to gp, other to gp, board to gr, other to gr) + listOf(gp, gr, gp, gr).map { board to it },
+            save,
+        )
+        assertEquals(
+            listOf(board to gp, other to gp, board to gr, other to gr),
+            rig.transport.writes.map { it.first to it.second },
+        )
         noRepeats(save)
         assertFalse(rig.state.gains.unsaved(gp) || rig.state.gains.unsaved(gr))
     }

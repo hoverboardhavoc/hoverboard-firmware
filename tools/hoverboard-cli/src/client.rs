@@ -32,6 +32,15 @@ const UPDATE_CHECK: Duration = Duration::from_secs(10);
 const MAILBOX_POLL: Duration = Duration::from_millis(200);
 /// How long the bridge may go between `FLASH_STATUS` reports while it programs.
 const STATUS_GAP: Duration = Duration::from_secs(30);
+/// The longest [`Client::read_every`] sleeps at once, so a stop is seen within it.
+const STREAM_POLL: Duration = Duration::from_millis(50);
+
+/// One `board read --hz` line (`specs/board-route.md` section 2): the seconds since the stream
+/// started, to the millisecond, then the bytes as hex.
+pub fn sample_line(at: Duration, data: &[u8]) -> String {
+    let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{:.3} {hex}", at.as_secs_f64())
+}
 
 /// Why a command failed.
 #[derive(Debug, PartialEq, Eq)]
@@ -239,7 +248,7 @@ impl<W: Wire> Client<W> {
     }
 
     /// `ESP_INFO`, or `None` when the bridge answers with a payload of another layout (a bridge
-    /// built for another `ESP_INFO`), for a command that goes on without it (`update-esp`,
+    /// built for another `ESP_INFO`), for a command that goes on without it (`bridge update`,
     /// `specs/hoverboard-bridge.md`, "Installing and updating the bridge").
     pub fn info_if_decodes(&mut self) -> Result<Option<EspInfo>, ClientError> {
         for _ in 0..TRIES {
@@ -331,6 +340,35 @@ impl<W: Wire> Client<W> {
             out.extend(part);
         }
         Ok(out)
+    }
+
+    /// `board read --hz` (`specs/board-route.md` section 2): [`read`](Self::read) `len` bytes at
+    /// `addr` in slots `every` apart until `stop` says so, handing `sample` each read's bytes and
+    /// the time since the first slot at which it was asked. A read that runs past its slot takes
+    /// the next slot after it ends: a slow bridge yields fewer samples, and none is made up.
+    pub fn read_every(
+        &mut self,
+        addr: u32,
+        len: usize,
+        every: Duration,
+        stop: impl Fn() -> bool,
+        mut sample: impl FnMut(Duration, &[u8]),
+    ) -> Result<(), ClientError> {
+        let t0 = Instant::now();
+        let mut slot = Duration::ZERO;
+        while !stop() {
+            let wait = slot.saturating_sub(t0.elapsed());
+            if !wait.is_zero() {
+                std::thread::sleep(wait.min(STREAM_POLL));
+                continue;
+            }
+            let at = t0.elapsed();
+            let data = self.read(addr, len)?;
+            sample(at, &data);
+            let next = t0.elapsed().as_nanos() / every.as_nanos() + 1;
+            slot = every * u32::try_from(next).unwrap_or(u32::MAX);
+        }
+        Ok(())
     }
 
     /// `MEM_WRITE` (word-aligned, whole words), split into [`MEM_MAX`] pieces.

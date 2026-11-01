@@ -8,6 +8,9 @@ import com.hoverboard.protocol.config.ConfigClient
 import com.hoverboard.protocol.config.ConfigExchange
 import com.hoverboard.protocol.config.ConfigReadResult
 import com.hoverboard.protocol.config.ConfigWriteResult
+import com.hoverboard.protocol.config.IdentifyResult
+import com.hoverboard.protocol.config.NodeClient
+import com.hoverboard.protocol.config.StatusReadResult
 import com.hoverboard.protocol.config.TuneClient
 import com.hoverboard.protocol.config.TuneReadResult
 import com.hoverboard.protocol.config.TuneWriteResult
@@ -183,11 +186,11 @@ class BleHoverboardTransport(
     private var session: L3Session? = null
 
     /**
-     * The current session's config and tune clients, or null outside an attached session. Built per
-     * session over that session's engine and [linkLock], so they are driven by the same service loop
-     * that turns the engine and die with it: a request can never reach a later session's engine.
-     * One [ConfigExchange] under both, because the two lanes share the engine's one outstanding
-     * request and the reply opcode.
+     * The current session's config, tune and node clients, or null outside an attached session.
+     * Built per session over that session's engine and [linkLock], so they are driven by the same
+     * service loop that turns the engine and die with it: a request can never reach a later
+     * session's engine. One [ConfigExchange] under all three, because they share the engine's one
+     * outstanding request.
      */
     @Volatile
     private var clients: SessionClients? = null
@@ -195,6 +198,7 @@ class BleHoverboardTransport(
     private class SessionClients(val exchange: ConfigExchange) {
         val config = ConfigClient(exchange)
         val tune = TuneClient(exchange)
+        val node = NodeClient(exchange)
     }
 
     private val _attachedBoard = MutableStateFlow<Int?>(null)
@@ -666,6 +670,10 @@ class BleHoverboardTransport(
 
     override suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult? =
         clients?.config?.write(key, value, target)
+
+    override suspend fun identify(target: Int): IdentifyResult? = clients?.node?.identify(target)
+
+    override suspend fun readStatus(target: Int): StatusReadResult? = clients?.node?.status(target)
 
     override suspend fun readTune(key: Key, target: Int): TuneReadResult? =
         clients?.tune?.read(key, target)

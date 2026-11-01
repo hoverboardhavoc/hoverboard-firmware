@@ -54,13 +54,13 @@ IN SCOPE: his targets 1 (GD32F130) and 2 (GD32F103). Targets 3 (GD32E230) and 4 
 parts this image cannot run on at all, so they are skipped DELIBERATELY and named in the output,
 never silently dropped.
 
-THE LINKS. His USART pin pairs become the inter-board link fields `link.tx` / `link.rx` (0x56 /
-0x57, index = the link), as `specs/configured-links.md` section 6 sets out: link 0 is his USART1
+THE LINKS. His USART pin pairs become the inter-board link fields `links.<i>.tx` / `links.<i>.rx`
+(0x0F / 0x10, index = the link), as `specs/configured-links.md` section 6 sets out: link 0 is his USART1
 pair where the layout has one, else the first pair he lists, and link 1 is the other. A pair is
 staged only where runtime-hal's USART table routes it on the preset's family (`USART_PINS` below);
 one it does not route stays in `unmapped` with that reason, so a preset never stages a link the
-board would record as a permanent `board.status` entry. There is no verdict stage: the board judges
-its own fields at boot and reports what did not come up in `board.status`.
+board would record as a permanent entry in its boot report. There is no verdict stage: the board
+judges its own fields at boot and reports what did not come up in its boot report (`STATUS_READ`).
 
 DETERMINISM is a property, not an intention: canonical key order, no timestamps, no paths, no
 hostname, no toolchain identity, and generating twice from one SHA is byte-identical. That last one
@@ -87,7 +87,7 @@ import tempfile
 
 #: Bumped when the SCHEMA or the MAPPING changes, so a consumer can tell one generation from another.
 #: It is not a version of this file: a comment edit does not move it.
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 
 #: The upstream the pins come from, named as a repository rather than a path (a path is machine
 #: identity and would break determinism).
@@ -192,19 +192,19 @@ SYMBOLIC_TOKENS = [
 #: uses. Those layouts are carried as his file states them and never reordered: reordering his pins
 #: to satisfy the timer would silently permute the phases against the halls, which is the wrong
 #: commutation the decision exists to prevent, and a board that cannot drive the group reports it in
-#: `board.status` at boot. His own commit "Autodetect now works with wrong bldc colors" says the
+#: its boot report. His own commit "Autodetect now works with wrong bldc colors" says the
 #: labels are unreliable.
 GATE_COLOUR_FOR_PHASE = {"a": "Y", "b": "B", "c": "G"}
 
 # --------------------------------------------------------------------------------------------------
-# DECISION 2: ADC_BATTERY_VOLT to board.battery.cal
+# DECISION 2: ADC_BATTERY_VOLT to battery_sense.cal
 # --------------------------------------------------------------------------------------------------
 
 #: The conversion, done once and recorded here.
 #:
 #: His `ADC_BATTERY_VOLT` is VOLTS PER ADC COUNT at the pack: 0.02507 on the bench layout, a divider
-#: of about 30 against a 3.3 V reference over a 12-bit converter. Ours is `board.battery.cal`
-#: (id 0x69, `specs/sensing-and-safety.md`, "The battery word"): index 0 is the slope in MICROVOLTS
+#: of about 30 against a 3.3 V reference over a 12-bit converter. Ours is `battery_sense.cal`
+#: (id 0x18, `specs/sensing-and-safety.md`, "The battery word"): index 0 is the slope in MICROVOLTS
 #: PER COUNT and index 1 an offset in CENTIVOLTS, read as
 #: `centivolts = raw12 * slope / 10_000 + offset`.
 #:
@@ -227,7 +227,6 @@ GATE_COLOUR_FOR_PHASE = {"a": "Y", "b": "B", "c": "G"}
 #: at a fictitious 2.0 V (memory: battery sense is master-only; `specs/sensing-and-safety.md`), so a
 #: slave carrying this calibration is noise at best. Every preset says so in its notes, and a slave
 #: takes the battery over the link.
-VBATT_CAL_FIELD = 0x69
 VBATT_CAL_SLOPE_PER_VOLT = 1_000_000
 
 #: The i16 the field holds. A slope outside it is a finding, not a value to truncate.
@@ -235,7 +234,7 @@ I16_MAX = 32767
 
 
 def vbatt_cal_slope(volts_per_count):
-    """The `board.battery.cal` index-0 slope, microvolts per count, for his volts-per-count figure."""
+    """The `battery_sense.cal` index-0 slope, microvolts per count, for his volts-per-count figure."""
     return int(round(volts_per_count * VBATT_CAL_SLOPE_PER_VOLT))
 
 
@@ -267,7 +266,7 @@ IMU_ABSENT_REASON = (
 
 #: `gate.dead_time` is required at or above `DEAD_TIME_MIN_DTG` (18) wherever a gate group is
 #: configured (`motorcontroller/board/src/lib.rs`, `DEAD_TIME_MIN_DTG`), so a preset that omitted it
-#: would leave every gated board's motor down at boot, recorded in `board.status` as a dead time below
+#: would leave every gated board's motor down at boot, recorded in its boot report as a dead time below
 #: the floor, before anything about HIS file was tried.
 #:
 #: His dead time is a single figure in `defines.h` rather than per-layout data: `DEAD_TIME 60`, with
@@ -281,7 +280,6 @@ IMU_ABSENT_REASON = (
 #: 30 is above our floor of 18 and below the 32 the 12-FET runs, so it clears the floor and it is safe.
 #: It is HIS board-independent figure re-expressed for our divider, NOT a per-board measurement, and
 #: the bench boards' own silicon-proven value is 25 (`specs/commutation.md`). Every preset says so.
-DEAD_TIME_FIELD = 0x64
 HIS_DEAD_TIME_DIVIDER = 1
 OUR_DEAD_TIME_DIVIDER = 2
 
@@ -301,7 +299,8 @@ def dead_time_dtg(his_ticks):
 #: `motor` is the motor index for a per-motor field. `kind` is how the value is read:
 #:   "pin"     the marker's token is a pin, checked against the packed encoding
 #:   "link"    one half of the link pairs `link_assignment` maps from his USART pairs, one entry per
-#:             link index
+#:             link index; the key is the name table's path inside an element of `links`, as a
+#:             per-motor field's is inside an element of `motors`
 #:   others    the generator computes it; the entry names what from
 #:
 #: The three motor fields no pin map can state (`direction`,
@@ -312,34 +311,33 @@ def dead_time_dtg(his_ticks):
 #: hand-written presets take them from the board for the same reason
 #: (`shared/protocol-kotlin/.../LayoutPresets.kt`, `LayoutPreset.applyTo`).
 FIELDS = [
-    {"id": 0x40, "key": "board.self_hold", "kind": "pin", "frm": "SELF_HOLD"},
-    {"id": 0x41, "key": "board.battery.pin", "kind": "pin", "frm": "VBATT"},
-    {"id": 0x42, "key": "board.buzzer", "kind": "pin", "frm": "BUZZER"},
-    {"id": 0x43, "key": "led.green", "kind": "pin", "frm": "LED_GREEN"},
-    {"id": 0x44, "key": "led.orange", "kind": "pin", "frm": "LED_ORANGE"},
-    {"id": 0x45, "key": "led.red", "kind": "pin", "frm": "LED_RED"},
-    {"id": 0x46, "key": "pad.a", "kind": "pin", "frm": "PHOTO_L"},
-    {"id": 0x47, "key": "pad.b", "kind": "pin", "frm": "PHOTO_R"},
-    {"id": 0x48, "key": "imu.scl", "kind": "decision3"},
-    {"id": 0x49, "key": "imu.sda", "kind": "decision3"},
-    {"id": 0x4A, "key": "hall.a", "kind": "pin", "frm": "HALL_A", "motor": 0},
-    {"id": 0x4B, "key": "hall.b", "kind": "pin", "frm": "HALL_B", "motor": 0},
-    {"id": 0x4C, "key": "hall.c", "kind": "pin", "frm": "HALL_C", "motor": 0},
-    {"id": 0x4D, "key": "gate.hi_a", "kind": "pin", "frm": "BLDC_YH", "motor": 0},
-    {"id": 0x4E, "key": "gate.hi_b", "kind": "pin", "frm": "BLDC_BH", "motor": 0},
-    {"id": 0x4F, "key": "gate.hi_c", "kind": "pin", "frm": "BLDC_GH", "motor": 0},
-    {"id": 0x50, "key": "gate.lo_a", "kind": "pin", "frm": "BLDC_YL", "motor": 0},
-    {"id": 0x51, "key": "gate.lo_b", "kind": "pin", "frm": "BLDC_BL", "motor": 0},
-    {"id": 0x52, "key": "gate.lo_c", "kind": "pin", "frm": "BLDC_GL", "motor": 0},
-    {"id": 0x53, "key": "board.button", "kind": "pin", "frm": "BUTTON"},
-    {"id": 0x54, "key": "current.phase_a", "kind": "pin", "frm": "PHASE_A", "motor": 0},
-    {"id": 0x55, "key": "current.phase_b", "kind": "pin", "frm": "PHASE_B", "motor": 0},
-    {"id": 0x56, "key": "link.tx", "kind": "link", "half": "tx"},
-    {"id": 0x57, "key": "link.rx", "kind": "link", "half": "rx"},
-    {"id": 0x60, "key": "imu.model", "kind": "decision3"},
-    {"id": 0x64, "key": "gate.dead_time", "kind": "dead_time", "frm": "DEAD_TIME", "motor": 0},
-    {"id": 0x66, "key": "current.sense", "kind": "current_sense", "motor": 0},
-    {"id": 0x69, "key": "board.battery.cal", "kind": "vbatt_cal", "frm": "ADC_BATTERY_VOLT"},
+    {"id": 0x06, "key": "power.self_hold", "kind": "pin", "frm": "SELF_HOLD"},
+    {"id": 0x07, "key": "battery_sense.pin", "kind": "pin", "frm": "VBATT"},
+    {"id": 0x08, "key": "buzzer", "kind": "pin", "frm": "BUZZER"},
+    {"id": 0x09, "key": "leds.green", "kind": "pin", "frm": "LED_GREEN"},
+    {"id": 0x0A, "key": "leds.orange", "kind": "pin", "frm": "LED_ORANGE"},
+    {"id": 0x0B, "key": "leds.red", "kind": "pin", "frm": "LED_RED"},
+    {"id": 0x0C, "key": "pads.a", "kind": "pin", "frm": "PHOTO_L"},
+    {"id": 0x0D, "key": "pads.b", "kind": "pin", "frm": "PHOTO_R"},
+    {"id": 0x0E, "key": "power.button", "kind": "pin", "frm": "BUTTON"},
+    {"id": 0x0F, "key": "tx", "kind": "link", "half": "tx"},
+    {"id": 0x10, "key": "rx", "kind": "link", "half": "rx"},
+    {"id": 0x11, "key": "imu.scl", "kind": "decision3"},
+    {"id": 0x12, "key": "imu.sda", "kind": "decision3"},
+    {"id": 0x13, "key": "imu.model", "kind": "decision3"},
+    {"id": 0x18, "key": "battery_sense.cal", "kind": "vbatt_cal", "frm": "ADC_BATTERY_VOLT"},
+    {"id": 0x40, "key": "hall.a", "kind": "pin", "frm": "HALL_A", "motor": 0},
+    {"id": 0x41, "key": "hall.b", "kind": "pin", "frm": "HALL_B", "motor": 0},
+    {"id": 0x42, "key": "hall.c", "kind": "pin", "frm": "HALL_C", "motor": 0},
+    {"id": 0x43, "key": "gate.hi_a", "kind": "pin", "frm": "BLDC_YH", "motor": 0},
+    {"id": 0x44, "key": "gate.hi_b", "kind": "pin", "frm": "BLDC_BH", "motor": 0},
+    {"id": 0x45, "key": "gate.hi_c", "kind": "pin", "frm": "BLDC_GH", "motor": 0},
+    {"id": 0x46, "key": "gate.lo_a", "kind": "pin", "frm": "BLDC_YL", "motor": 0},
+    {"id": 0x47, "key": "gate.lo_b", "kind": "pin", "frm": "BLDC_BL", "motor": 0},
+    {"id": 0x48, "key": "gate.lo_c", "kind": "pin", "frm": "BLDC_GL", "motor": 0},
+    {"id": 0x49, "key": "current.phase_a", "kind": "pin", "frm": "PHASE_A", "motor": 0},
+    {"id": 0x4A, "key": "current.phase_b", "kind": "pin", "frm": "PHASE_B", "motor": 0},
+    {"id": 0x4B, "key": "gate.dead_time", "kind": "dead_time", "frm": "DEAD_TIME", "motor": 0},
 ]
 
 #: The reason a USART pin of his stays unmapped when its partner is missing. A pair that IS declared
@@ -362,7 +360,7 @@ UNMAPPED_KEYS = {
     "PHASE_C": "no field: our phase-current group is the injected group's two ranks, A and B only",
     "MOTOR_AMP_CONV_DC_AMP": (
         "no field yet: amps per count on the DC-BUS shunt chain, a different quantity from "
-        "current.cal (0x67), which is counts per amp on the PER-PHASE chain. Not convertible "
+        "current.cal (0x4C), which is counts per amp on the PER-PHASE chain. Not convertible "
         "between chains, so it stays open"
     ),
     "UPPER_LED": "no field: a second LED bank",
@@ -370,7 +368,7 @@ UNMAPPED_KEYS = {
     "LOWER_LED": "no field: a second LED bank",
     "MOSFET_OUT": "no field: his onboard indicator LED output",
     "CHARGE_STATE": "no field: the charger-present sense",
-    "BUTTON_PU": "no field: the button's pull direction (its PIN reaches board.button through his BUTTON alias)",
+    "BUTTON_PU": "no field: the button's pull direction (its PIN reaches power.button through his BUTTON alias)",
     "HAS_BUZZER": "not a pin: his own guard for the layouts that put the buzzer on the slave board",
     "DEBUG_PIN": "no field: a debug output his own comment says nothing uses any more",
     "DATA_PIN": "no field: a single-wire header pin of unknown function",
@@ -448,7 +446,7 @@ def asked_keys():
 # The links: his USART pairs, and the pairs runtime-hal can route
 # --------------------------------------------------------------------------------------------------
 
-#: The number of inter-board links the firmware brings up, each one index of `link.tx` / `link.rx`
+#: The number of inter-board links the firmware brings up, each one element of `links` in a file
 #: (`shared/store/src/field.rs`, `LINKS`).
 LINKS = 2
 
@@ -458,7 +456,7 @@ LINKS = 2
 #: PA2/PA3 are USART1 on both families, PB6/PB7 are USART0 on both (the F10x through the AFIO
 #: remap), and PB10/PB11 are USART2 on the F10x only (the F1x0 has no USART2). The firmware's link
 #: bring-up asks that table which USART a stored pair drives, so a pair it does not answer is a link
-#: the board records in `board.status` at every boot.
+#: the board records in its boot report at every boot.
 USART_PINS = [
     {"pin": "PA2", "usart": "USART1", "half": "tx", "families": ("F1x0", "F10x")},
     {"pin": "PA3", "usart": "USART1", "half": "rx", "families": ("F1x0", "F10x")},
@@ -533,7 +531,7 @@ def link_assignment(values, family):
                 continue
             why = (
                 "link %d would be his %s TX / %s RX, a pair runtime-hal's USART table does not "
-                "route on the %s, so staging it would put a permanent entry in board.status"
+                "route on the %s, so staging it would put a permanent entry in the boot report"
                 % (link, tx, rx, family)
             )
             empty[link] = "his %s/%s pair is not routable here: see its unmapped entries" % (
@@ -835,22 +833,6 @@ def field_entries(values, notes, layout_defines, links):
                 )
             )
             continue
-        if f["kind"] == "current_sense":
-            both = pack_pin(values.get("PHASE_A") or "") is not None and (
-                pack_pin(values.get("PHASE_B") or "") is not None
-            )
-            fields.append(
-                dict(
-                    ref(f),
-                    value=1 if both else 0,
-                    **{"from": "PHASE_A + PHASE_B"},
-                    note=(
-                        "derived: the declaration and the pins that realize it may not disagree, so "
-                        "it is 1 exactly where his layout gives both phase-sense pins"
-                    ),
-                )
-            )
-            continue
         if f["kind"] == "vbatt_cal":
             raw = values.get(f["frm"]) if f["frm"] in layout_defines else None
             if raw is None:
@@ -874,7 +856,7 @@ def field_entries(values, notes, layout_defines, links):
             slope = vbatt_cal_slope(float(raw))
             if abs(slope) > I16_MAX:
                 notes.append(
-                    "board.battery.cal slope %d does not fit the i16 the field holds, so his "
+                    "battery_sense.cal slope %d does not fit the i16 the field holds, so his "
                     "ADC_BATTERY_VOLT %s is carried unconverted in the notes only." % (slope, raw)
                 )
                 absent.append(
@@ -890,7 +872,7 @@ def field_entries(values, notes, layout_defines, links):
                     note=(
                         "his %s volts per ADC count x 1e6 = microvolts per count, the unit index 0 "
                         "holds. MASTER-ONLY: a slave's PA4 reads a fictitious 2.0 V, so a slave "
-                        "preset drops board.battery.pin and this calibration both." % raw
+                        "preset drops battery_sense.pin and this calibration both." % raw
                     ),
                 )
             )
@@ -936,7 +918,7 @@ def layout_notes(values, target, pairs):
     """The notes every preset for this layout carries, beyond the per-field ones."""
     notes = [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops "
-        "board.battery.pin and board.battery.cal (battery sense is master-only on this hardware; the slave "
+        "battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave "
         "takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for "
         "imu.scl, imu.sda and imu.model.",
@@ -1250,14 +1232,14 @@ def decision_record():
                 "a layout whose colour labels contradict the convention is carried as his file "
                 "states it, never silently reordered, because reordering would permute the phases "
                 "against the halls; a board that cannot drive that gate group reports it in "
-                "board.status at boot"
+                "its boot report"
             ),
         },
         {
-            "decision": "ADC_BATTERY_VOLT to board.battery.cal",
+            "decision": "ADC_BATTERY_VOLT to battery_sense.cal",
             "settled": "slope_uV_per_count = round(ADC_BATTERY_VOLT * 1e6); offset = 0",
             "oracle": (
-                "his figure is volts per ADC count; index 0 of board.battery.cal is microvolts per "
+                "his figure is volts per ADC count; index 0 of battery_sense.cal is microvolts per "
                 "count and the formula's /10_000 returns centivolts. 0.02507 becomes 25070 against "
                 "the registry default 25200 from the bench four-point fit, 0.5% apart"
             ),
@@ -1290,7 +1272,7 @@ def decision_record():
             ),
             "consequence": (
                 "a preset with no dead time leaves every gated board's motor down at boot, recorded "
-                "in board.status as a dead time below the floor. This is HIS single global figure, not per-board data: the bench boards' own "
+                "in its boot report as a dead time below the floor. This is HIS single global figure, not per-board data: the bench boards' own "
                 "silicon-proven value is 25"
             ),
         },

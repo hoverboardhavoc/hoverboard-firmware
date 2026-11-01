@@ -157,7 +157,7 @@ class TuneReadbackTest {
         gate.complete(Unit)
         runCurrent()
         assertEquals(listOf(board to gp), rig.transport.tuneReads.drop(tuneReads).take(1))
-        assertEquals(listOf(Triple(board, gp, Value.I16(3591))), rig.transport.writes)
+        assertEquals(listOf(Triple(board, gp, Value.I16(3591))), rig.transport.writes.filter { it.first == board })
         assertEquals(
             listOf(board to gp, board to gp),
             rig.transport.tuneReads.drop(tuneReads),

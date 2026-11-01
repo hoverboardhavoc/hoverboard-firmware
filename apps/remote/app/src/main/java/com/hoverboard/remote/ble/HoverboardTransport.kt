@@ -2,6 +2,8 @@ package com.hoverboard.remote.ble
 
 import com.hoverboard.protocol.config.ConfigReadResult
 import com.hoverboard.protocol.config.ConfigWriteResult
+import com.hoverboard.protocol.config.IdentifyResult
+import com.hoverboard.protocol.config.StatusReadResult
 import com.hoverboard.protocol.config.TuneReadResult
 import com.hoverboard.protocol.config.TuneWriteResult
 import com.hoverboard.protocol.store.Key
@@ -70,7 +72,7 @@ interface HoverboardTransport {
     /**
      * The L3 address of the node on the phone's own link, or null while no session is attached. The
      * link endpoint and nothing more: it may be a motor controller or a bridge, and which is a
-     * question for its `node.class` (`specs/l3.md`, "Node class").
+     * question for its `IDENTITY` (`specs/machine-settings.md` section 6.1).
      */
     val attachedBoard: StateFlow<Int?>
 
@@ -104,6 +106,19 @@ interface HoverboardTransport {
      * no session is attached, in which case nothing was sent.
      */
     suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult?
+
+    /**
+     * Ask the node at [target] what it is (`IDENTIFY`, `specs/machine-settings.md` section 6.1): its
+     * class, chip family, firmware version and factory unique ID. Null when no session is attached,
+     * in which case nothing was sent.
+     */
+    suspend fun identify(target: Int): IdentifyResult?
+
+    /**
+     * Read the node at [target]'s boot status record (`STATUS_READ`): what its last bring-up could
+     * not bring up. Null when no session is attached, in which case nothing was sent.
+     */
+    suspend fun readStatus(target: Int): StatusReadResult?
 
     /**
      * Read [key]'s STAGED value (the board's RAM gain shadow, `TUNE_READ`) from the board at

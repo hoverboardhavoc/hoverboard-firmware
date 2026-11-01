@@ -2,7 +2,7 @@ package com.hoverboard.remote
 
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.model.TakesEffect
+import com.hoverboard.protocol.store.Effect
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -48,8 +48,14 @@ class TuneBoundTest {
         rig.model.setBound(turnSlew, 240)
         runCurrent()
 
+        // A drive bound is a machine field: it goes to every motor controller, the tuned board first.
         assertEquals(
-            listOf(Triple(board, posClamp, Value.I16(60)), Triple(board, turnSlew, Value.I16(240))),
+            listOf(
+                Triple(board, posClamp, Value.I16(60)),
+                Triple(0x02, posClamp, Value.I16(60)),
+                Triple(board, turnSlew, Value.I16(240)),
+                Triple(0x02, turnSlew, Value.I16(240)),
+            ),
             rig.transport.writes,
         )
         assertEquals(60, rig.state.bound(posClamp))
@@ -65,7 +71,7 @@ class TuneBoundTest {
         runCurrent()
         rig.model.setBound(posClamp, 60)
         runCurrent()
-        assertEquals(1, rig.transport.writes.size)
+        assertEquals(listOf(board, 0x02), rig.transport.writes.map { it.first }, "one write to each board")
     }
 
     /**
@@ -111,7 +117,7 @@ class TuneBoundTest {
     @Test
     fun `every drive bound takes effect at the next arm`() {
         for (field in SetupFields.DRIVE_BOUNDS) {
-            assertEquals(TakesEffect.NEXT_ARM, field.takesEffect, "${field.key}")
+            assertEquals(Effect.ARM, field.takesEffect, "${field.key}")
         }
     }
 
