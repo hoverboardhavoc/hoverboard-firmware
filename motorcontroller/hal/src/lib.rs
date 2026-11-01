@@ -51,7 +51,7 @@ pub mod watchdog;
 pub use adc::DualAdc;
 pub use adc::{Adc, InjectedAdcController, InjectedHandle, TriggeredAdc};
 pub use addr::{AddrTable, PeriphLabel};
-pub use chip::{Chip, ClockPath, IrqLayout};
+pub use chip::{Chip, ClockPath, IrqLayout, UniqueId};
 pub use clock::{clear_reset_cause, reset_cause_flags, ClockConfig};
 #[cfg(target_arch = "arm")]
 pub use cortex_m_rt::interrupt;

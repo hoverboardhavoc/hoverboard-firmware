@@ -8,6 +8,7 @@ use crate::descriptor::{McuDescriptor, PageSize, DESCRIPTOR};
 use crate::error::DescriptorError;
 use crate::gpio::{self, Floating, Input, InputGroup, Pin, PinRole, INPUT_GROUP_LINES};
 use crate::pincap::{self, PinClaim};
+use crate::reg::Reg32;
 
 /// The clock tree of the compiled chip.
 ///
@@ -20,6 +21,22 @@ pub struct ClockPath;
 /// The interrupt layout of the compiled chip: a marker, as [`ClockPath`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IrqLayout;
+
+/// The 96-bit factory unique ID, as the three words the part stores at its signature block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UniqueId(pub [u32; 3]);
+
+impl UniqueId {
+    /// The ID as 12 bytes, word 0 first, each word little-endian: the order an SWD dump of the
+    /// signature block reads.
+    pub const fn to_bytes(self) -> [u8; 12] {
+        let [a, b, c] = self.0;
+        let (a, b, c) = (a.to_le_bytes(), b.to_le_bytes(), c.to_le_bytes());
+        [
+            a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], c[0], c[1], c[2], c[3],
+        ]
+    }
+}
 
 /// The context for the compiled chip.
 ///
@@ -83,6 +100,20 @@ impl Chip {
     #[inline]
     pub(crate) const fn base(&self, label: PeriphLabel) -> Result<u32, DescriptorError> {
         DESCRIPTOR.addrs.resolve(label)
+    }
+
+    /// The factory unique ID, read from the signature block at the descriptor's `UniqueId` base
+    /// (`0x1FFF_F7E8` on the GD32F10x, `0x1FFF_F7AC` on the GD32F1x0).
+    pub fn unique_id(&self) -> UniqueId {
+        const BASE: u32 = match DESCRIPTOR.addrs.get(PeriphLabel::UniqueId) {
+            Some(b) => b,
+            None => panic!("every descriptor carries the unique-ID base"),
+        };
+        UniqueId([
+            Reg32::new(BASE, 0x0).read(),
+            Reg32::new(BASE, 0x4).read(),
+            Reg32::new(BASE, 0x8).read(),
+        ])
     }
 
     /// The flash page size.
@@ -210,4 +241,29 @@ const fn packed_pin(port: PeriphLabel, pin: u8) -> Result<u8, DescriptorError> {
         other => return Err(DescriptorError::MissingBase(other)),
     };
     Ok((index << 4) | (pin & 0x0F))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unique_id_bytes_are_the_swd_dump_order() {
+        // The rover master's ID as an SWD dump reads it, and the three words the part stores.
+        let id = UniqueId([0x3239_dc8a, 0x1238_3533, 0x3333_3455]);
+        assert_eq!(
+            id.to_bytes(),
+            [0x8a, 0xdc, 0x39, 0x32, 0x33, 0x35, 0x38, 0x12, 0x55, 0x34, 0x33, 0x33]
+        );
+    }
+
+    #[test]
+    fn the_unique_id_base_is_the_familys_signature_block() {
+        let want = if cfg!(hal_gpio = "ctl") {
+            0x1FFF_F7AC
+        } else {
+            0x1FFF_F7E8
+        };
+        assert_eq!(DESCRIPTOR.addrs.get(PeriphLabel::UniqueId), Some(want));
+    }
 }
