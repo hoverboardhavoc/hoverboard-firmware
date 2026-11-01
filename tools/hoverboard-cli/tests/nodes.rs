@@ -1028,14 +1028,124 @@ fn an_swd_command_to_an_address_on_the_connected_bridges_mailbox_skips_the_walk(
     // boards, the first walk once more as the fresh bridge moves to 0x03, and the `board set` by
     // address sends none.
     assert_eq!(probes, [4, 1, 3, 0, 3, 3, 1], "{:02x?}", after.ops);
-    assert!(!after.ops[1].contains(&identify), "{:02x?}", after.ops[1]);
+    // The straight one asks the attached node alone whether it is a bridge, after the probe
+    // (`specs/board-route.md` section 5).
+    let hello = net::pdu::Opcode::NodeHello.to_u8();
+    let at = |ops: &[u8], op| ops.iter().position(|&o| o == op);
+    assert!(
+        at(&after.ops[1], probe) < at(&after.ops[1], identify),
+        "{:02x?}",
+        after.ops[1]
+    );
+    assert_eq!(after.ops[1].iter().filter(|&&op| op == identify).count(), 1);
+    // The uid prefix the bridge's SWD target does not report: one TARGET_ID, then the walk.
+    assert_eq!(
+        after.ops[5][..4],
+        [hello, identify, espsvc::OP_TARGET_ID_REQ, probe],
+        "{:02x?}",
+        after.ops[5]
+    );
     assert_eq!(
         after.ops[6].iter().filter(|&&op| op == identify).count(),
-        1,
-        "erase asks the board alone: {:02x?}",
+        2,
+        "erase asks the bridge and the board alone: {:02x?}",
         after.ops[6]
     );
     assert!(after.ops[6].contains(&espsvc::OP_STORE_ERASE));
+}
+
+/// `specs/board-route.md` sections 1 and 2 through the binary: a `uid` prefix of the target the
+/// connected bridge reads over SWD goes straight through it (no walk, no `PROBE_PORTS`), and
+/// `board read --hz` routes once and streams its samples on that one connection.
+#[test]
+fn a_uid_prefix_goes_straight_and_a_read_streams_on_one_connection() {
+    use std::io::BufRead;
+    // The simulated GD32's unique ID, which `TARGET_ID` reads.
+    const SWD_UID: &str = "8adc39320102030405060708";
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 2));
+
+    let (code, out, err) = cli_code(&[&tcp, "board", "target-id", "8ADC"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains(&format!("uid         {SWD_UID}")), "{out}");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hoverboard-cli"))
+        .args([
+            &tcp,
+            "board",
+            "read",
+            "8adc",
+            "0x20000000",
+            "16",
+            "--hz",
+            "20",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for l in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = tx.send(l);
+        }
+    });
+    let t0 = std::time::Instant::now();
+    let mut lines = Vec::new();
+    while t0.elapsed() < Duration::from_millis(1500) {
+        if let Ok(l) = rx.recv_timeout(Duration::from_millis(50)) {
+            lines.push(l);
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    // Each line: the seconds since the start, to the millisecond, then the 16 bytes; at most one
+    // per 50 ms slot, none made up.
+    assert!((3..=31).contains(&lines.len()), "{lines:?}");
+    let mut last = -1.0;
+    for l in &lines {
+        let (t, hex) = l.split_once(' ').unwrap();
+        assert_eq!(t.split_once('.').map(|(_, ms)| ms.len()), Some(3), "{l}");
+        let t: f64 = t.parse().unwrap();
+        assert!(t > last, "{lines:?}");
+        last = t;
+        assert_eq!(hex.len(), 32, "{l}");
+        assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()), "{l}");
+    }
+
+    let after = server.join().unwrap();
+    let hello = net::pdu::Opcode::NodeHello.to_u8();
+    let identify = net::pdu::Opcode::Identify.to_u8();
+    let id = espsvc::OP_TARGET_ID_REQ;
+    assert_eq!(
+        after.ops[0],
+        [hello, identify, id, id],
+        "{:02x?}",
+        after.ops[0]
+    );
+    let stream = &after.ops[1];
+    assert_eq!(stream[..3], [hello, identify, id], "{stream:02x?}");
+    let reads = stream
+        .iter()
+        .filter(|&&op| op == espsvc::OP_MEM_READ)
+        .count();
+    assert_eq!(
+        stream.len(),
+        3 + reads,
+        "one route, then reads: {stream:02x?}"
+    );
+    // The kill can land between a read and its line.
+    assert!(
+        reads == lines.len() || reads == lines.len() + 1,
+        "{reads} reads, {} lines",
+        lines.len()
+    );
 }
 
 /// A `CYCLIC_STATE` PDU from board `src` with `fault`, `flags` and the machine digest `machine`,

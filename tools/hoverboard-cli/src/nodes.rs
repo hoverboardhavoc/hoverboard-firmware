@@ -93,13 +93,28 @@ pub struct Walked {
     pub topology: Topology,
 }
 
-/// The walk's first two exchanges and no more: first contact, then the attached node's own
-/// `PROBE_PORTS`. An attached node with no address stops after the first, since the walk's next
-/// request would assign it. What the reply placed is enough to tell the board on the attached
+/// The walk's first two exchanges and no more: first contact ([`hello`]), then the attached node's
+/// own `PROBE_PORTS` ([`ports`]). What the reply placed is enough to tell the board on the attached
 /// bridge's mailbox (`target::wired_here`); [`finish`] walks on from here.
 pub fn start<W: Wire>(wire: &mut W) -> Result<Controller, String> {
-    walk_until(wire, Controller::new(), REPLY_WAIT, |c, replies| {
-        replies >= 2 || (replies == 1 && c.gateway_addr().is_none())
+    let c = hello(wire)?;
+    ports(wire, c)
+}
+
+/// The walk's first contact alone: the attached node's `NODE_HELLO` reply, which grants the guest
+/// address. A route by `uid` asks the attached node its `IDENTIFY` and `TARGET_ID` from here
+/// (`specs/board-route.md` section 1); [`ports`] goes on.
+pub fn hello<W: Wire>(wire: &mut W) -> Result<Controller, String> {
+    walk_until(wire, Controller::new(), REPLY_WAIT, |_, replies| {
+        replies >= 1
+    })
+}
+
+/// The walk's next exchange after [`hello`]: the attached node's own `PROBE_PORTS`. An attached
+/// node with no address sends nothing, since the walk's next request would assign it.
+pub fn ports<W: Wire>(wire: &mut W, c: Controller) -> Result<Controller, String> {
+    walk_until(wire, c, REPLY_WAIT, |c, replies| {
+        replies >= 1 || c.gateway_addr().is_none()
     })
 }
 

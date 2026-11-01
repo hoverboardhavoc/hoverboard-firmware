@@ -4,6 +4,7 @@
 
 use net::walk::{Controller, CLASS_BRIDGE, CLASS_MOTOR, PORT_SWD, UID_LEN};
 
+use crate::cli::Noun;
 use crate::nodes::{class_name, uid_hex, Found, Topology};
 
 /// A target as the command line gives it, before the walk.
@@ -43,17 +44,26 @@ pub fn is_uid_prefix(s: &str) -> bool {
     PREFIX_DIGITS.contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Whether `uid` is all zero or all `0xFF`, which no client matches by.
+fn blank(uid: &[u8; UID_LEN]) -> bool {
+    uid.iter().all(|&b| b == 0) || uid.iter().all(|&b| b == 0xFF)
+}
+
 /// `f`'s `uid` if a client may match by it (`specs/machine-settings.md` section 6.1): not all
 /// zero, not all `0xFF`, and reported by no other node of `found`.
 pub fn usable_uid(f: &Found, found: &[Found]) -> Option<[u8; UID_LEN]> {
     let uid = f.identity?.uid;
-    let blank = uid.iter().all(|&b| b == 0) || uid.iter().all(|&b| b == 0xFF);
     let shared = found
         .iter()
         .filter(|o| o.identity.is_some_and(|i| i.uid == uid))
         .count()
         > 1;
-    (!blank && !shared).then_some(uid)
+    (!blank(&uid) && !shared).then_some(uid)
+}
+
+/// Whether `uid` starts with the `uid` prefix `prefix`, in either case; a blank `uid` never does.
+pub fn uid_starts(uid: &[u8; UID_LEN], prefix: &str) -> bool {
+    !blank(uid) && uid_hex(uid).starts_with(&prefix.to_ascii_lowercase())
 }
 
 /// A node for messages: its address, and its name and the start of its `uid` where known.
@@ -67,6 +77,36 @@ pub fn label(f: &Found) -> String {
     }
 }
 
+/// The nodes of `found` whose `device.name` is `s`, and those whose usable `uid` starts with it.
+fn matching<'f>(s: &str, found: &'f [Found]) -> (Vec<&'f Found>, Vec<&'f Found>) {
+    let named = found
+        .iter()
+        .filter(|f| f.name.as_deref() == Some(s))
+        .collect();
+    let prefixed = if is_uid_prefix(s) {
+        found
+            .iter()
+            .filter(|f| usable_uid(f, found).is_some_and(|u| uid_starts(&u, s)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    (named, prefixed)
+}
+
+/// Whether `spec` names none of `found`: an address no node holds, or a name and a `uid` prefix
+/// that match none. A walk that misses its target says so (`specs/board-route.md` section 1).
+pub fn names_none(spec: &str, found: &[Found]) -> bool {
+    match parse(spec) {
+        Ok(Target::Address(a)) => !found.iter().any(|f| f.addr == a),
+        Ok(Target::Lookup(s)) => {
+            let (named, prefixed) = matching(s, found);
+            named.is_empty() && prefixed.is_empty()
+        }
+        Err(_) => false,
+    }
+}
+
 /// The node `spec` names among `found`, in the order of section 6.3: an address, then an exact
 /// `device.name`, then a `uid` prefix. A name that is also a prefix of another node's `uid` is
 /// refused naming both, and so is a spec that matches no node or more than one.
@@ -75,19 +115,7 @@ pub fn resolve(spec: &str, found: &[Found]) -> Result<u8, String> {
         Target::Address(a) => return Ok(a),
         Target::Lookup(s) => s,
     };
-    let named: Vec<&Found> = found
-        .iter()
-        .filter(|f| f.name.as_deref() == Some(s))
-        .collect();
-    let prefixed: Vec<&Found> = if is_uid_prefix(s) {
-        let want = s.to_ascii_lowercase();
-        found
-            .iter()
-            .filter(|f| usable_uid(f, found).is_some_and(|u| uid_hex(&u).starts_with(&want)))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let (named, prefixed) = matching(s, found);
     let list = |v: &[&Found]| v.iter().map(|f| label(f)).collect::<Vec<_>>().join(", ");
     match (&named[..], &prefixed[..]) {
         ([_, _, ..], _) => Err(format!("more than one node is named {s}: {}", list(&named))),
@@ -161,6 +189,56 @@ pub fn wired_here(started: &Controller, board: u8) -> Option<(u8, u8)> {
     let node = started.gateway_addr()?;
     let port = started.port_of_kind(node, PORT_SWD)?;
     (started.neighbour_on(node, port) == Some(board)).then_some((node, port))
+}
+
+/// `board halt`'s rule (`specs/board-route.md` section 3): the halt goes only where the route to
+/// `bridge`, the bridge wired to `board`, does not pass through `board`. A bridge's one walked
+/// neighbour is the board on its mailbox, so a bridge other than the node this link reaches is
+/// reached through that board, which a halt stops before its reply (an armed refusal included)
+/// comes back: refused before sending, naming the bridge to connect to. The test is
+/// [`erase_bridge`]'s.
+pub fn halt_bridge(found: &[Found], topo: &Topology, board: u8, bridge: u8) -> Result<(), String> {
+    if topo.gateway == Some(bridge) {
+        return Ok(());
+    }
+    let b = node_name(at(found, board)?);
+    Err(format!(
+        "{b}'s bridge is reached through {b}: a halt there cuts its own reply, including an \
+         armed refusal; connect to {} and halt it there",
+        node_name(at(found, bridge)?)
+    ))
+}
+
+/// The name lines about a node start with: its `device.name`, or its address when it has none.
+pub fn node_name(f: &Found) -> String {
+    f.name.clone().unwrap_or_else(|| format!("{:#04x}", f.addr))
+}
+
+/// The class a `board` or `bridge` command acts on.
+pub fn class_of(noun: Noun) -> u8 {
+    if noun == Noun::Bridge {
+        CLASS_BRIDGE
+    } else {
+        CLASS_MOTOR
+    }
+}
+
+/// Refuse `f` unless it is of the class `noun` acts on, naming the noun that takes it.
+pub fn check_class(f: &Found, noun: Noun) -> Result<(), String> {
+    if f.class() == Some(class_of(noun)) {
+        return Ok(());
+    }
+    let other = match f.class() {
+        Some(CLASS_BRIDGE) => ": use the bridge commands",
+        Some(CLASS_MOTOR) => ": use the board commands",
+        _ => "",
+    };
+    Err(format!(
+        "{} is a {}, not a {}{other}",
+        label(f),
+        class_name(f.class()),
+        noun.word()
+    ))
 }
 
 /// The bridge `board erase` goes through: the board's own bridge, which has to be the node this

@@ -27,8 +27,11 @@
 //! written through `board` goes to that board alone, and the command says the boards now differ.
 //!
 //! The `board` commands that use SWD (`erase`, `flash`, `clear-protection`, the target controls,
-//! `read`, `write`, `target-id`) walk to find the bridge wired to the board and go through it;
-//! `board erase` only through the board's own bridge, the one this link reaches.
+//! `read`, `write`, `target-id`) go through the bridge wired to the board ([`route`]): straight
+//! through the connected bridge when the `uid` prefix names the target it reads over SWD, or the
+//! address is on its mailbox, and found by the walk otherwise. `board erase` goes only through the
+//! board's own bridge, the one this link reaches, and `board halt` never over a route through the
+//! board it halts. `board read --hz` routes once and reads at that rate until interrupted.
 //!
 //! The `machine` commands act on every motor controller the walk finds: `nodes` lists the walk and
 //! marks each board from its `CYCLIC_STATE` and boot report; `get` and `set` a machine field;
@@ -47,12 +50,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use espsvc::FAMILY_F1X0;
+use espsvc::{Ctrl, FAMILY_F1X0};
 use net::pdu::NO_ADDRESS;
 use net::walk::{Controller, CLASS_BRIDGE};
 
 use hoverboard_cli::cli::{self, Command, Link, Mode, Noun, Swd};
-use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
+use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::erase;
@@ -61,7 +64,8 @@ use hoverboard_cli::install::{self, Answered, Given, Guard};
 use hoverboard_cli::machine::{self, MachineFile};
 use hoverboard_cli::names;
 use hoverboard_cli::nodes::{self, class_name, Found, Walked, CLASS_MOTOR};
-use hoverboard_cli::target::{self, label, Target};
+use hoverboard_cli::route::{self, Purpose, Route, Via};
+use hoverboard_cli::target::{self, check_class, class_of, label, node_name, Target};
 use hoverboard_cli::transport::{Serial, Tcp};
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 
@@ -535,33 +539,6 @@ fn no_answer(addr: u8) -> String {
     format!("no answer from {addr:#04x}; `hoverboard-cli machine nodes` lists the nodes this link reaches")
 }
 
-/// The class a `board` or `bridge` command acts on.
-fn class_of(noun: Noun) -> u8 {
-    if noun == Noun::Bridge {
-        CLASS_BRIDGE
-    } else {
-        CLASS_MOTOR
-    }
-}
-
-/// Refuse `f` unless it is of the class `noun` acts on, naming the noun that takes it.
-fn check_class(f: &Found, noun: Noun) -> Result<(), String> {
-    if f.class() == Some(class_of(noun)) {
-        return Ok(());
-    }
-    let other = match f.class() {
-        Some(CLASS_BRIDGE) => ": use the bridge commands",
-        Some(CLASS_MOTOR) => ": use the board commands",
-        _ => "",
-    };
-    Err(format!(
-        "{} is a {}, not a {}{other}",
-        label(f),
-        class_name(f.class()),
-        noun.word()
-    ))
-}
-
 /// Reach the node `spec` names for a `board` or `bridge` command (section 6.3, "A target"): an
 /// address by attaching and asking its `IDENTITY` and `device.name`, with no walk (a frame to an
 /// address the forwarders have not learned is flooded until the reply teaches the route); a name or
@@ -633,11 +610,6 @@ fn bridge_client(link: &Link, spec: &str, check: bool) -> Result<EspClient, Stri
         }
     };
     Ok(Client::addressed(wire, src, dst))
-}
-
-/// The name lines about a node start with: its `device.name`, or its address when it has none.
-fn node_name(f: &Found) -> String {
-    f.name.clone().unwrap_or_else(|| format!("{:#04x}", f.addr))
 }
 
 /// Every problem of a refused plan, one per line.
@@ -821,68 +793,54 @@ fn listen(wire: &mut impl Wire) -> Tally {
     tally
 }
 
-/// The client to the bridge wired to the board `spec` names, for its SWD commands; `erase` asks for
-/// the board's own bridge. The tool's guest address, the board, the bridge's address and its
-/// mailbox port.
-///
-/// An address the attached bridge's `PROBE_PORTS` names on its mailbox goes straight through that
-/// bridge, with no walk (`specs/machine-settings.md` section 6.3): a `board read` costs an attach,
-/// one `PROBE_PORTS` and the read. Only `erase` asks that board its `IDENTITY` and name, for its
-/// lines. Anything else walks on from the same start.
-fn swd_route(
-    link: &Link,
-    spec: &str,
-    erase: bool,
-) -> Result<(EspClient, u8, Found, u8, u8), String> {
-    let target = target::parse(spec)?;
+/// The client to the bridge wired to the board `spec` names, for an SWD command for `purpose`, and
+/// the route it took ([`route::swd`]): by the `uid` the attached bridge reads over SWD, by the
+/// attached bridge's mailbox for an address, or by the walk.
+fn swd_route(link: &Link, spec: &str, purpose: Purpose) -> Result<(EspClient, Route), String> {
     let mut wire = wire_on(link)?;
-    let started = nodes::start(&mut wire)?;
-    if let Target::Address(addr) = target {
-        if let Some((bridge, port)) = target::wired_here(&started, addr) {
-            let src = started.guest_addr();
-            let board = if erase {
-                let f = found_at(&mut wire, src, addr)?;
-                check_class(&f, Noun::Board)?;
-                f
-            } else {
-                Found {
-                    addr,
-                    identity: None,
-                    name: None,
-                }
-            };
-            eprintln!("{addr:#04x} is on the mailbox of bridge {bridge:#04x}, guest {src:#04x}");
-            return Ok((
-                Client::addressed(wire, src, NO_ADDRESS),
-                src,
-                board,
-                bridge,
-                port,
-            ));
-        }
+    let r = route::swd(&mut wire, spec, purpose)?;
+    match &r.via {
+        Via::Uid => eprintln!(
+            "{spec} is the SWD target of the bridge this link reaches, guest {:#04x}",
+            r.src
+        ),
+        Via::Mailbox { board, bridge, .. } => eprintln!(
+            "{board:#04x} is on the mailbox of bridge {bridge:#04x}, guest {:#04x}",
+            r.src
+        ),
+        Via::Walk { walked, .. } => eprintln!(
+            "walked {} nodes as guest {:#04x}",
+            walked.found.len(),
+            walked.src
+        ),
     }
-    let w = walk_on(&mut wire, started)?;
-    let board = target::at(&w.found, target::resolve(spec, &w.found)?)?.clone();
-    check_class(&board, Noun::Board)?;
-    let (bridge, port) = if erase {
-        target::erase_bridge(&w.found, &w.topology, board.addr)?
-    } else {
-        target::wired_bridge(&w.found, &w.topology, board.addr)?
-    };
-    let dst = if w.topology.gateway == Some(bridge) {
-        NO_ADDRESS
-    } else {
-        bridge
-    };
-    let c = Client::addressed(wire, w.src, dst);
-    Ok((c, w.src, board, bridge, port))
+    Ok((Client::addressed(wire, r.src, r.dst), r))
 }
 
 /// `board erase` (`specs/hoverboard-bridge.md`, "Erasing the store"): print what the erase loses
 /// that a dump leaves out, ask, send `STORE_ERASE` through the board's own bridge, wait for the
 /// board's mailbox, and give the board its old address back out the bridge's mailbox port.
 fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
-    let (mut c, src, board, bridge, mailbox) = swd_route(link, spec, true)?;
+    let (mut c, r) = swd_route(link, spec, Purpose::Erase)?;
+    let src = r.src;
+    let (board, bridge, mailbox) = match r.via {
+        Via::Mailbox {
+            board,
+            bridge,
+            port,
+        } => {
+            let f = found_at(c.wire(), src, board)?;
+            check_class(&f, Noun::Board)?;
+            (f, bridge, port)
+        }
+        Via::Walk {
+            walked,
+            board,
+            bridge,
+            port,
+        } => (target::at(&walked.found, board)?.clone(), bridge, port),
+        Via::Uid => unreachable!("board erase never routes by uid"),
+    };
     let name = node_name(&board);
     let mut on = Board {
         wire: c.wire(),
@@ -933,7 +891,12 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
         }
         _ => None,
     };
-    let (mut c, ..) = swd_route(link, spec, false)?;
+    let purpose = if *op == Swd::Ctrl(Ctrl::Halt) {
+        Purpose::Halt
+    } else {
+        Purpose::Other
+    };
+    let (mut c, _) = swd_route(link, spec, purpose)?;
     let e = |e: ClientError| e.to_string();
     match op {
         Swd::TargetId => print_id(&c.target_id().map_err(e)?),
@@ -962,7 +925,29 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
             println!("protection off, USER byte unchanged");
         }
         Swd::Ctrl(ctrl) => c.ctrl(*ctrl).map_err(e)?,
-        Swd::Read { addr, len } => hexdump(*addr, &c.read(*addr, *len as usize).map_err(e)?),
+        Swd::Read {
+            addr,
+            len,
+            every: None,
+        } => hexdump(*addr, &c.read(*addr, *len as usize).map_err(e)?),
+        Swd::Read {
+            addr,
+            len,
+            every: Some(every),
+        } => {
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
+                .map_err(|e| e.to_string())?;
+            c.read_every(
+                *addr,
+                *len as usize,
+                *every,
+                || stop.load(Ordering::Relaxed),
+                |at, data| println!("{}", sample_line(at, data)),
+            )
+            .map_err(e)?;
+        }
         Swd::Write { addr, data } => c.write(*addr, data).map_err(e)?,
         Swd::Flash(_) => {
             let image = image.expect("read above");

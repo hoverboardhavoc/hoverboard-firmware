@@ -22,7 +22,7 @@ use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
 use hoverboard_bridge_core::sim::{board, Family, Gd32, Inject, RamFlash, SimPins, SimPlatform};
 use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
 use hoverboard_bridge_core::update::Update;
-use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
+use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::transport::Tcp;
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 use link::StreamFramer;
@@ -284,6 +284,88 @@ fn info_id_memory_and_target_control_round_trip() {
     c.wire().esp.model().moe_stuck = true;
     c.wire().esp.model().cchp = 1 << 15;
     assert_eq!(c.ctrl(Ctrl::Halt), Err(ClientError::Status(Status::Armed)));
+}
+
+/// A bridge that answers each `MEM_READ` with a counter's bytes, `delay` after it was asked.
+struct SlowReads {
+    delay: Duration,
+    pending: VecDeque<Vec<u8>>,
+    reads: u32,
+}
+
+impl Wire for SlowReads {
+    fn send(&mut self, pdu: &[u8]) {
+        let p = Pdu::decode(pdu).unwrap();
+        if let Ok(Msg::MemRead { addr, len }) = Msg::decode(&p) {
+            self.reads += 1;
+            let data = vec![self.reads as u8; len as usize];
+            let mut buf = [0u8; espsvc::MAX_PDU];
+            let n = Msg::MemData { addr, data: &data }
+                .encode(p.dst, p.src, &mut buf)
+                .unwrap();
+            self.pending.push_back(buf[..n].to_vec());
+        }
+    }
+    fn recv(&mut self, _timeout: Duration) -> Option<Vec<u8>> {
+        let r = self.pending.pop_front()?;
+        std::thread::sleep(self.delay);
+        Some(r)
+    }
+    fn window(&self) -> usize {
+        1
+    }
+}
+
+/// `specs/board-route.md` section 6, test 5: `board read --hz` on one client reads every slot
+/// while the bridge keeps up, and a slow bridge yields fewer samples, each a real read, never one
+/// made up for a slot it missed. The line is the time, to the millisecond, and the bytes.
+#[test]
+fn a_streaming_read_takes_the_slots_the_bridge_keeps_up_with() {
+    let run = |delay: Duration, len: usize| {
+        let mut c = Client::new(SlowReads {
+            delay,
+            pending: VecDeque::new(),
+            reads: 0,
+        });
+        let t0 = Instant::now();
+        let mut got: Vec<(Duration, Vec<u8>)> = Vec::new();
+        c.read_every(
+            0x2000_0920,
+            len,
+            Duration::from_millis(50),
+            || t0.elapsed() >= Duration::from_millis(500),
+            |at, data| got.push((at, data.to_vec())),
+        )
+        .unwrap();
+        (got, c.wire().reads)
+    };
+    // Fast: one sample per 50 ms slot, each one read.
+    let (fast, reads) = run(Duration::ZERO, 4);
+    assert!((9..=11).contains(&fast.len()), "{} samples", fast.len());
+    assert_eq!(reads as usize, fast.len());
+    for (i, (at, data)) in fast.iter().enumerate() {
+        assert!(*at >= Duration::from_millis(50) * i as u32, "{i}: {at:?}");
+        assert_eq!(data, &vec![i as u8 + 1; 4]);
+    }
+    // Slow: each read takes 120 ms, so it misses two slots in three; the samples are the reads,
+    // each in the first slot after the last one ended.
+    let (slow, reads) = run(Duration::from_millis(120), 4);
+    assert!((3..=5).contains(&slow.len()), "{} samples", slow.len());
+    assert_eq!(reads as usize, slow.len());
+    for w in slow.windows(2) {
+        assert!(w[1].0 >= w[0].0 + Duration::from_millis(120), "{slow:?}");
+        assert_eq!(w[1].1[0], w[0].1[0] + 1, "no sample is made up");
+    }
+    // A range over MEM_MAX is the MEM_READs it needs, in one sample.
+    let (wide, reads) = run(Duration::ZERO, espsvc::MEM_MAX + 4);
+    assert_eq!(reads as usize, 2 * wide.len());
+    assert_eq!(wide[0].1.len(), espsvc::MEM_MAX + 4);
+
+    assert_eq!(
+        sample_line(Duration::from_millis(1234), &[0x4d, 0x42, 0x00, 0xff]),
+        "1.234 4d4200ff"
+    );
+    assert_eq!(sample_line(Duration::ZERO, &[]), "0.000 ");
 }
 
 #[test]

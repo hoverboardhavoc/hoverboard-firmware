@@ -2,6 +2,8 @@
 //! command acts on (`board`, `machine` or `bridge`) and its verb; `scan` stands outside, since it
 //! runs before there is a machine. [`parse`] reads it into a [`Command`] before any link is opened.
 
+use std::time::Duration;
+
 use espsvc::Ctrl;
 
 /// Which link to the bridge.
@@ -60,12 +62,15 @@ pub enum Swd {
     ClearProtection,
     /// `TARGET_CTRL`.
     Ctrl(Ctrl),
-    /// `MEM_READ` of `len` bytes at `addr`.
+    /// `MEM_READ` of `len` bytes at `addr`: once, or with `every` (`--hz`) again at that interval
+    /// until interrupted (`specs/board-route.md` section 2).
     Read {
         /// The address.
         addr: u32,
         /// How many bytes.
         len: u32,
+        /// The interval `--hz` gives.
+        every: Option<Duration>,
     },
     /// `MEM_WRITE` of whole words at a word-aligned `addr`.
     Write {
@@ -254,7 +259,7 @@ pub const USAGE: &str =
   board diff [--replace] <board> <file>... [--force] | status [<board>...] | compact <board>
   board fields --json | erase <board> [--yes] | flash <board> <elf> | clear-protection <board>
   board disarm|halt|resume|reset|reset-halt <board> | target-id <board>
-  board read <board> <addr> <len> | write <board> <addr> <hex>
+  board read <board> <addr> <len> [--hz N] | write <board> <addr> <hex>
   machine nodes | get <path> | set <path> <value> [--force] | dump <file> [--from <board>]
   machine apply <file> [--map <uid>=<board>]... [--force]
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
@@ -267,13 +272,14 @@ a board or bridge is an address (0x02), a device.name, or a uid prefix of 4 to 2
 /// The options a command may take, wherever they stand after the link options.
 const FLAGS: &[&str] = &["--force", "--yes", "--replace", "--json", "--no-confirm"];
 /// The command options that take a value.
-const VALUED: &[&str] = &["--secs", "--from", "--map"];
+const VALUED: &[&str] = &["--secs", "--from", "--map", "--hz"];
 
 /// The command's own options, as given.
 #[derive(Default)]
 struct Opts<'a> {
     flags: Vec<&'a str>,
     secs: Option<&'a str>,
+    hz: Option<&'a str>,
     from: Option<&'a str>,
     maps: Vec<&'a str>,
 }
@@ -290,6 +296,7 @@ impl Opts<'_> {
             .iter()
             .copied()
             .chain(self.secs.map(|_| "--secs"))
+            .chain(self.hz.map(|_| "--hz"))
             .chain(self.from.map(|_| "--from"))
             .chain(self.maps.iter().map(|_| "--map"));
         given.into_iter().all(|o| allowed.contains(&o))
@@ -331,6 +338,7 @@ pub fn parse(args: &[String]) -> (bool, Result<Invocation, String>) {
             o if VALUED.contains(&o) => match value() {
                 Some(v) => match o {
                     "--secs" => opts.secs = Some(v),
+                    "--hz" => opts.hz = Some(v),
                     "--from" => opts.from = Some(v),
                     _ => opts.maps.push(v),
                 },
@@ -381,6 +389,16 @@ pub fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("not hex: {s}")))
         .collect()
+}
+
+/// `--hz`'s interval: a rate above zero, at most one read a millisecond.
+fn parse_hz(s: &str) -> Result<Duration, String> {
+    match s.parse::<f64>() {
+        Ok(hz) if hz.is_finite() && hz > 0.0 && hz <= 1000.0 => {
+            Ok(Duration::from_secs_f64(1.0 / hz))
+        }
+        _ => Err(format!("--hz takes a rate above 0 and at most 1000: {s}")),
+    }
 }
 
 fn parse_secs(s: &str) -> Result<u64, String> {
@@ -583,13 +601,17 @@ fn node_command(
         ("clear-protection", [t]) if board => swd(t, Swd::ClearProtection),
         ("target-id", [t]) if board => swd(t, Swd::TargetId),
         (c, [t]) if board && ctrl(c).is_some() => swd(t, Swd::Ctrl(ctrl(c).expect("matched"))),
-        ("read", [t, addr, len]) if board => swd(
-            t,
-            Swd::Read {
-                addr: parse_u32(addr)?,
-                len: parse_u32(len)?,
-            },
-        ),
+        ("read", [t, addr, len]) if board => {
+            ok(&["--hz"])?;
+            Ok(Command::Swd {
+                target: target(t),
+                op: Swd::Read {
+                    addr: parse_u32(addr)?,
+                    len: parse_u32(len)?,
+                    every: o.hz.map(parse_hz).transpose()?,
+                },
+            })
+        }
         ("write", [t, addr, hex]) if board => {
             let (addr, data) = (parse_u32(addr)?, parse_hex(hex)?);
             if addr % 4 != 0 || data.len() % 4 != 0 {
@@ -788,6 +810,7 @@ mod tests {
                 swd(Swd::Read {
                     addr: 0x0800_F800,
                     len: 2048,
+                    every: None,
                 }),
             ),
             (
@@ -913,6 +936,42 @@ mod tests {
             cmd("machine apply m.json --map 8adc"),
             Err("--map takes <uid>=<board>, not 8adc".into())
         );
+    }
+
+    /// `specs/board-route.md` section 2: `board read --hz` reads at that rate until interrupted;
+    /// without it, once.
+    #[test]
+    fn board_read_takes_a_rate() {
+        let read = |every| {
+            Ok(Command::Swd {
+                target: s("0x01"),
+                op: Swd::Read {
+                    addr: 0x2000_0920,
+                    len: 204,
+                    every,
+                },
+            })
+        };
+        assert_eq!(
+            cmd("board read 0x01 0x20000920 204 --hz 10"),
+            read(Some(Duration::from_millis(100)))
+        );
+        assert_eq!(
+            cmd("board read 0x01 0x20000920 204 --hz=2.5"),
+            read(Some(Duration::from_millis(400)))
+        );
+        assert_eq!(cmd("board read 0x01 0x20000920 204"), read(None));
+        for bad in ["0", "-1", "x", "2000", "inf"] {
+            assert_eq!(
+                cmd(&format!("board read 0x01 0x20000920 204 --hz {bad}")),
+                Err(format!("--hz takes a rate above 0 and at most 1000: {bad}"))
+            );
+        }
+        assert_eq!(
+            cmd("board write 0x01 0x20000000 01020304 --hz 10"),
+            Err(USAGE.into())
+        );
+        assert_eq!(cmd("board target-id 0x01 --hz 10"), Err(USAGE.into()));
     }
 
     #[test]
