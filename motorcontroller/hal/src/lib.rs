@@ -31,10 +31,14 @@ pub mod config;
 pub mod dbg;
 pub mod descriptor;
 pub mod error;
+pub mod fmc;
 pub mod gpio;
+pub mod i2c;
 pub mod irq;
 pub mod pincap;
 pub mod reg;
+pub mod spi;
+pub mod watchdog;
 
 pub use addr::{AddrTable, PeriphLabel};
 pub use chip::{Chip, ClockPath, IrqLayout};
@@ -45,7 +49,10 @@ pub use dbg::debug_hold_timer0;
 pub use descriptor::{McuDescriptor, PageSize};
 pub use error::{DescriptorError, FmcError};
 pub use gpio::{Floating, Input, InputGroup, Output, Pin, PullDown, PullUp, PushPull};
+pub use i2c::{I2c, I2cMode};
 /// The interrupt enum under the name cortex-m-rt's `#[interrupt]` attribute looks for, next to
 /// the attribute itself, so an image writes `use hal::interrupt;` and `#[interrupt] fn ADC0_1()`.
 pub use irq::Interrupt as interrupt;
 pub use irq::Interrupt;
+pub use spi::Spi;
+pub use watchdog::{FreeWatchdog, WdgTimeout};

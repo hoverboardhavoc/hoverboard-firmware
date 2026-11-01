@@ -323,7 +323,6 @@ const CFG0_PLLMF: u32 = (1 << 27) | (0b1111 << 18);
 const SCS_PLL: u32 = 0b10;
 const SCSS_PLL: u32 = 0b10 << 2;
 
-const FMC_WS: u32 = 0x4002_2000;
 const FMC_WS_WSCNT: u32 = 0b111;
 
 /// Program the tree: flash wait states first, then the source and its stable poll, the bus
@@ -339,7 +338,8 @@ pub fn configure_tree(chip: &Chip, clock: &ClockConfig) -> Result<(), ClockError
     let ctl = Reg32::new(rcu, CTL);
     let cfg0 = Reg32::new(rcu, CFG0);
 
-    Reg32::new(FMC_WS, 0).modify(FMC_WS_WSCNT, model::wait_states(clock.sysclk_hz));
+    Reg32::new(crate::fmc::FMC_BASE, crate::fmc::WS)
+        .modify(FMC_WS_WSCNT, model::wait_states(clock.sysclk_hz));
 
     let (en, stb) = match clock.source {
         ClockSource::Irc8m => (CTL_IRC8MEN, CTL_IRC8MSTB),
