@@ -90,7 +90,7 @@ pub const EV_CONFIG: u16 = 1 << 12;
 /// link has heard no peer since boot, or its peer's machine digest differs from this board's
 /// ([`crate::machine::Machine::disagrees`]). Not in [`FAULT_A_BITS`]: it blocks arming (the mode
 /// machine's OFF-inhibit) and does nothing else, so it never disengages a running machine.
-pub const EV_MACHINE: u16 = 1 << 13;
+pub const EV_MACHINE: u16 = linkctl::CyclicState::FAULT_MACHINE;
 /// The four motor-side causes: the set `motor::motor_fault_level` returns.
 pub const EV_MOTOR_BITS: u16 = EV_MOTOR_HALL | EV_MOTOR_CAL | EV_MOTOR_PERIOD | EV_MOTOR_ARM;
 

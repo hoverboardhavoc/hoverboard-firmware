@@ -2,27 +2,12 @@
 //! a TCP relay. BLE is the `ble` cargo feature, on by default; a build without it (the bench Pi's)
 //! refuses `--device` and `scan`.
 //!
-//! ```text
-//! hoverboard-cli scan [--secs N]
-//! hoverboard-cli [LINK] nodes
-//! hoverboard-cli [LINK] name <node> <text>
-//! hoverboard-cli [LINK] config <node> <path> [<value>] [--force]
-//! hoverboard-cli [LINK] dump <node> [<file>]
-//! hoverboard-cli [LINK] diff [--replace] <node> <file>... [--force]
-//! hoverboard-cli [LINK] apply <node> <file>... [--force]
-//! hoverboard-cli [LINK] replace <node> <file>... [--yes] [--force]
-//! hoverboard-cli [LINK] compact <node>
-//! hoverboard-cli fields --json
-//! hoverboard-cli [LINK] [--node NODE] info | id | clear-protection
-//! hoverboard-cli [LINK] [--node NODE] disarm | halt | resume | reset | reset-halt
-//! hoverboard-cli [LINK] [--node NODE] read <addr> <len> | write <addr> <hex>
-//! hoverboard-cli [LINK] [--node NODE] flash <elf>
-//! hoverboard-cli [LINK] [--node NODE] erase-store [--yes]
-//! hoverboard-cli [LINK] [--node NODE] update-esp <bin> [--no-confirm]
-//! hoverboard-cli [--serial PORT] install-esp <image.bin> [<file>...] [--yes]
-//! hoverboard-cli [LINK] watch <secs> [<node>...]
-//! hoverboard-cli [LINK] drive <value> <secs> [<node>...]
+//! Every command starts with the noun it acts on (`specs/machine-settings.md` section 6.3): `board`
+//! (one motor controller), `machine` (every motor controller) or `bridge`; the link options come
+//! before it, and `scan` stands outside. `hoverboard-cli` with no command prints the whole grammar
+//! ([`cli::USAGE`]).
 //!
+//! ```text
 //! LINK: --device NAME|ADDRESS   BLE (the default; with no --device, the first advertiser whose
 //!                               name starts with `hb-bridge-`)
 //!       --serial DEVICE         the ESP's USB console (/dev/ttyACM0, /dev/cu.usbmodem*)
@@ -30,52 +15,30 @@
 //!                               console through a serial-to-TCP relay
 //! ```
 //!
-//! A node is an address (`0x03`) or a `device.name`. An address is reached directly: the tool
-//! attaches and reads the node's `device.name`, with no walk. A name needs the walk, which reads
-//! every node's name and resolves it. `nodes` walks the machine with `net`'s controller and lists
-//! every node's address, class, factory unique ID and name (`IDENTIFY`); `name` writes the node's
-//! `device.name` and prints the status by name. `status` reads each motor controller's boot report
-//! (`STATUS_READ`).
+//! A board or bridge is named by a target ([`target`]): an address (`0x03`), which needs no walk,
+//! else an exact `device.name`, else a prefix of its factory unique ID (`8adc`), which need the walk.
 //!
-//! `config`, `dump`, `diff`, `apply`, `replace` and `compact` treat a board's store as a file
-//! (`specs/cli-config.md`): a field goes by its name in the store's name table (`motors.1.hall.a`,
-//! `machine.mode`) or by its raw `<id>.<index>`, and a value takes the file's forms (`PC13`,
-//! `balance`, `null` to un-store). Every line about a board starts with its `device.name`. `diff`
-//! exits 0 with no changes, 1 with changes, 2 on an error. `fields --json` prints the name table.
-//! A secret (`wifi.pass`) is never printed: it shows as `(set)`, `dump` leaves it out and says so,
-//! and a file that gives one always writes it (`specs/bridge-onboarding.md` section 2.2).
+//! `board get`, `set`, `dump`, `apply`, `replace` and `diff` (and the same under `bridge`) treat a
+//! node's store as a file (`specs/cli-config.md`): a field goes by its name in the store's name
+//! table (`motors.1.hall.a`, `machine.mode`) or by its raw `<id>.<index>`, and a value takes the
+//! file's forms (`PC13`, `balance`, `null` to un-store). Every line about a board starts with its
+//! `device.name`. `diff` exits 0 with no changes, 1 with changes, 2 on an error. A secret
+//! (`wifi.pass`) is never printed (`specs/bridge-onboarding.md` section 2.2). A machine field
+//! written through `board` goes to that board alone, and the command says the boards now differ.
 //!
-//! An ESP command goes to the bridge the link reaches (`0x00`, the one peer) unless `--node` names
-//! another, which is reached through the boards by its address. Over a board's own BLE module the
-//! node on the link is not a bridge, and the command is refused.
+//! The `board` commands that use SWD (`erase`, `flash`, `clear-protection`, the target controls,
+//! `read`, `write`, `target-id`) walk to find the bridge wired to the board and go through it;
+//! `board erase` only through the board's own bridge, the one this link reaches.
 //!
-//! `scan` is BLE only. `watch` and `drive` attach as an L3 guest with `NODE_HELLO` and send from
-//! the granted address. With no nodes given they walk first, and take the motor controllers the
-//! walk found: `watch` counts only those nodes' `CYCLIC_STATE`, `drive` drives them and counts
-//! every source.
+//! The `machine` commands act on every motor controller the walk finds: `nodes` lists the walk and
+//! marks each board from its `CYCLIC_STATE` and boot report; `get` and `set` a machine field;
+//! `dump`, `apply`, `replace` and `diff` a machine file, whose `boards` entries go to the board
+//! reporting each `uid`; `watch` and `drive` attach as an L3 guest.
 //!
-//! `update-esp` sends a bridge image (`espflash save-image` output) into the bridge's other app slot,
-//! waits for the bridge to reset into it, reconnects over the same link, and confirms it; with
-//! `--no-confirm` it stops after the reconnect, and the bridge's next reset returns to the previous
-//! slot. It needs no `ESP_INFO` it can decode: one from a bridge built for another layout is
-//! skipped with a note.
-//!
-//! `erase-store` erases the store of the board behind the bridge (`STORE_ERASE`,
-//! `specs/hoverboard-bridge.md`, "Erasing the store"). It walks to find that board (the bridge's one
-//! walked neighbour), prints what a `dump` leaves out and the erase loses (`node.address`, each
-//! motor's `odometer`, with the `config` line that writes a stored odometer back), asks, and prints
-//! `erased` once the bridge reports success and its mailbox is up again. It then gives the board
-//! its old `node.address` back with a directed `ASSIGN` out the bridge's mailbox port, as the walk
-//! assigns a frontier node, and prints `node.address <n> restored`; a board whose address was not
-//! read or was unset is left unassigned, and an `ASSIGN` with no `ASSIGN_ACK` fails the command
-//! with the `config` line that restores the address by hand. Without a terminal it refuses unless
-//! `--yes` is given.
-//!
-//! `install-esp` makes a SuperMini a bridge over its own USB port (`specs/bridge-onboarding.md`
-//! section 3): it asks before erasing a bridge that answers there, writes the merged 4 MB install
-//! image through the `espflash` library, waits for the first boot, applies the files given (a new
-//! bridge's `device.name`, `wifi.ssid` and `wifi.pass`), and with an SSID among them resets the
-//! bridge and waits for it to join.
+//! `bridge update` sends a bridge image into the bridge's other app slot, reconnects and confirms
+//! it; it needs no walk and no `IDENTIFY` for an address, so it reaches a bridge on an older image.
+//! `bridge install` makes a SuperMini a bridge over its own USB port
+//! (`specs/bridge-onboarding.md` section 3).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write as _};
@@ -84,17 +47,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use espsvc::{Ctrl, FAMILY_F1X0};
+use espsvc::FAMILY_F1X0;
 use net::pdu::NO_ADDRESS;
+use net::walk::CLASS_BRIDGE;
 
+use hoverboard_cli::cli::{self, Command, Link, Mode, Noun, Swd};
 use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::erase;
 use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
 use hoverboard_cli::install::{self, Answered, Given, Guard};
+use hoverboard_cli::machine::{self, MachineFile};
 use hoverboard_cli::names;
-use hoverboard_cli::nodes::{self, class_name, Found, CLASS_MOTOR};
+use hoverboard_cli::nodes::{self, class_name, Found, Walked, CLASS_MOTOR};
+use hoverboard_cli::target::{self, label, Target};
 use hoverboard_cli::transport::{Serial, Tcp};
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 
@@ -130,31 +97,6 @@ fn scan_names(secs: u64) -> Result<Vec<(String, String)>, String> {
 #[cfg(not(feature = "ble"))]
 fn scan_names(_secs: u64) -> Result<Vec<(String, String)>, String> {
     Err(NO_BLE.into())
-}
-
-fn parse_u32(s: &str) -> Result<u32, String> {
-    let r = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        Some(h) => u32::from_str_radix(h, 16),
-        None => s.parse(),
-    };
-    r.map_err(|_| format!("not a number: {s}"))
-}
-
-fn parse_secs(s: Option<&&str>, need: &str) -> Result<u64, String> {
-    let s = s.ok_or(need)?;
-    s.parse()
-        .map_err(|_| format!("not a number of seconds: {s}"))
-}
-
-fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
-    let s = s.trim_start_matches("0x");
-    if !s.len().is_multiple_of(2) {
-        return Err("hex needs an even number of digits".into());
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("not hex: {s}")))
-        .collect()
 }
 
 fn hexdump(addr: u32, data: &[u8]) {
@@ -255,17 +197,42 @@ use install::slot_name;
 const UPDATE_REBOOT: Duration = Duration::from_secs(120);
 /// The pause before each reconnect attempt.
 const RECONNECT_GAP: Duration = Duration::from_secs(2);
+/// How long `machine nodes` and the end of `machine apply` listen for `CYCLIC_STATE`: every motor
+/// controller's frames arrive on the attached port at 5 Hz or faster.
+const LISTEN: Duration = Duration::from_secs(1);
 
 /// A client over whichever link was opened.
 type EspClient = Client<Framed<Box<dyn ByteLink>>>;
 
-/// Open `via` again until the bridge answers the attach, within [`UPDATE_REBOOT`].
-fn reconnect(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
+/// Open `link`.
+fn open(link: &Link) -> Result<Box<dyn ByteLink>, String> {
+    Ok(match link {
+        Link::Ble(device) => ble_link(device.as_deref())?,
+        Link::Serial(device) => {
+            let s = Serial::open(device)?;
+            eprintln!("opened {device}");
+            Box::new(s)
+        }
+        Link::Tcp(addr) => {
+            let t = Tcp::connect(addr)?;
+            eprintln!("connected to {addr}");
+            Box::new(t)
+        }
+    })
+}
+
+/// A framed wire over `link`.
+fn wire_on(link: &Link) -> Result<Framed<Box<dyn ByteLink>>, String> {
+    Ok(Framed::new(open(link)?))
+}
+
+/// Open `link` again until the bridge `spec` names answers the attach, within [`UPDATE_REBOOT`].
+fn reconnect(link: &Link, spec: &str) -> Result<EspClient, String> {
     let t0 = Instant::now();
     let mut why = String::from("no answer");
     while t0.elapsed() < UPDATE_REBOOT {
         std::thread::sleep(RECONNECT_GAP);
-        match esp_client(via, node) {
+        match bridge_client(link, spec, false) {
             Ok(c) => return Ok(c),
             Err(e) => why = e,
         }
@@ -276,10 +243,10 @@ fn reconnect(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
     ))
 }
 
-/// The note `update-esp` prints for an `ESP_INFO` it cannot decode.
+/// The note `bridge update` prints for an `ESP_INFO` it cannot decode.
 const OTHER_LAYOUT: &str = "bridge's info has another layout; continuing";
 
-/// `ESP_INFO` for `update-esp`: `None`, with [`OTHER_LAYOUT`] printed, when it does not decode.
+/// `ESP_INFO` for `bridge update`: `None`, with [`OTHER_LAYOUT`] printed, when it does not decode.
 fn info_or_note(c: &mut EspClient) -> Result<Option<espsvc::EspInfo>, String> {
     let i = c.info_if_decodes().map_err(|e| e.to_string())?;
     if i.is_none() {
@@ -288,17 +255,17 @@ fn info_or_note(c: &mut EspClient) -> Result<Option<espsvc::EspInfo>, String> {
     Ok(i)
 }
 
-/// `update-esp`: send the image, reconnect after the reset, and confirm it unless `no_confirm`.
+/// `bridge update`: send the image, reconnect after the reset, and confirm it unless `no_confirm`.
 /// It depends on no reply whose layout can change: the attach, `ESP_UPDATE_BEGIN`'s answer and
 /// `ESP_UPDATE_CONFIRM`'s `RESULT`; `ESP_INFO` is printed, and the new slot checked against it,
 /// only where it decodes (`specs/hoverboard-bridge.md`, "Installing and updating the bridge").
-fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Result<(), String> {
+fn bridge_update(link: &Link, spec: &str, path: &str, no_confirm: bool) -> Result<(), String> {
     let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let version = espsvc::app_version(&image).ok_or_else(|| {
         format!("{path}: not an ESP32-C3 app image (make one with espflash save-image)")
     })?;
     let e = |e: ClientError| e.to_string();
-    let mut c = esp_client(via, node)?;
+    let mut c = bridge_client(link, spec, false)?;
     let before = info_or_note(&mut c)?;
     let running = before
         .as_ref()
@@ -323,7 +290,7 @@ fn update_esp(via: &Via, node: Option<&str>, path: &str, no_confirm: bool) -> Re
     );
     drop(c);
 
-    let mut c = reconnect(via, node)?;
+    let mut c = reconnect(link, spec)?;
     if no_confirm {
         let after = info_or_note(&mut c)?;
         if let (Some(b), Some(a)) = (&before, &after) {
@@ -371,7 +338,7 @@ type OnPort = (EspClient, u8, String, Option<espsvc::EspInfo>);
 fn bridge_on(port: &str, wait: Duration) -> Option<OnPort> {
     let link: Box<dyn ByteLink> = Box::new(Serial::open(port).ok()?);
     let mut wire = Framed::new(link);
-    let src = guest::attach(&mut wire, 1, wait)?;
+    let src = guest::attach(&mut wire, 1, wait)?.guest;
     let name = match nodes::read(&mut wire, src, NO_ADDRESS, store::DEVICE_NAME.key())
         .ok()?
         .value()
@@ -412,10 +379,15 @@ fn wait_for_bridge(
     None
 }
 
-/// `install-esp` (`specs/bridge-onboarding.md` section 3.2): check the image and the files, choose
-/// the port, ask before erasing a bridge that answers there, write the image, wait for the first
-/// boot, apply the files, and when they set an SSID, reset the bridge and wait for it to join.
-fn install_esp(given: Given, image_path: &str, files: &[&str], yes: bool) -> Result<(), String> {
+/// `bridge install` (`specs/bridge-onboarding.md` section 3.2): check the image and the files,
+/// choose the port, ask before erasing a bridge that answers there, write the image, wait for the
+/// first boot, apply the files, and when they set an SSID, reset the bridge and wait for it to join.
+fn bridge_install(
+    given: Given,
+    image_path: &str,
+    files: &[String],
+    yes: bool,
+) -> Result<(), String> {
     let (port, found) = install::choose_port(given, &install::host_ports())?;
     let image = std::fs::read(image_path).map_err(|e| format!("{image_path}: {e}"))?;
     install::check_image(&image).map_err(|e| format!("{image_path}: {e}"))?;
@@ -478,12 +450,10 @@ fn install_esp(given: Given, image_path: &str, files: &[&str], yes: bool) -> Res
         src,
         dst: NO_ADDRESS,
         name,
+        class: CLASS_BRIDGE,
     };
     let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
-    let plan = config::plan(&files, &reads, &unknown, false).map_err(|p| {
-        let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
-        msgs.join("\nerror: ")
-    })?;
+    let plan = config::plan(&files, &reads, &unknown, false).map_err(joined)?;
     let after = config::execute(&mut b, &plan).map_err(|r| {
         for l in config::written_lines(&b.name, &plan, &reads, &r) {
             println!("{l}");
@@ -524,6 +494,11 @@ fn confirm(prompt: &str) -> bool {
     line.trim().eq_ignore_ascii_case("y")
 }
 
+/// Whether stdin is a terminal, which a question needs.
+fn terminal() -> bool {
+    std::io::stdin().is_terminal()
+}
+
 /// How many `NODE_HELLO`s an attach sends, and how long it waits for each answer.
 const HELLO_TRIES: u32 = 3;
 const HELLO_WAIT: Duration = Duration::from_secs(1);
@@ -534,79 +509,122 @@ const POLL: Duration = Duration::from_millis(50);
 /// The interval between `watch` lines.
 const LINE_EVERY: Duration = Duration::from_secs(1);
 
-/// Attach to the node on the link as a guest and return the granted address.
-fn attach(wire: &mut impl Wire) -> Result<u8, String> {
+/// Attach to the node on the link as a guest.
+fn attach(wire: &mut impl Wire) -> Result<guest::Attached, String> {
     let a = guest::attach(wire, HELLO_TRIES, HELLO_WAIT)
         .ok_or("no NODE_HELLO answer from the node on this link")?;
-    eprintln!("attached as guest {a:#04x}");
+    eprintln!("attached as guest {:#04x}", a.guest);
     Ok(a)
 }
 
-/// Walk the machine, then ask every node's `IDENTITY` and read its name; the guest address and what
-/// was found.
-fn walk(wire: &mut impl Wire) -> Result<(u8, Vec<Found>), String> {
-    let c = nodes::walk(wire)?;
-    let found = nodes::survey(wire, &c);
-    eprintln!(
-        "walked {} nodes as guest {:#04x}",
-        found.len(),
-        c.guest_addr()
-    );
-    Ok((c.guest_addr(), found))
+/// Walk the machine, then ask every node's `IDENTITY` and read its name.
+fn walk(wire: &mut impl Wire) -> Result<Walked, String> {
+    let w = nodes::walk_all(wire)?;
+    eprintln!("walked {} nodes as guest {:#04x}", w.found.len(), w.src);
+    Ok(w)
 }
 
-/// A node for messages: its address and, when it has one, its name.
-fn label(f: &Found) -> String {
-    match &f.name {
-        Some(n) => format!("{:#04x} ({n})", f.addr),
-        None => format!("{:#04x}", f.addr),
+/// The line `no answer from <addr>` ends with.
+fn no_answer(addr: u8) -> String {
+    format!("no answer from {addr:#04x}; `hoverboard-cli machine nodes` lists the nodes this link reaches")
+}
+
+/// The class a `board` or `bridge` command acts on.
+fn class_of(noun: Noun) -> u8 {
+    if noun == Noun::Bridge {
+        CLASS_BRIDGE
+    } else {
+        CLASS_MOTOR
     }
 }
 
-/// Reach the node `spec` names (`specs/cli-config.md` section 4.1): an address by attaching and
-/// reading its `device.name`, with no walk (a frame to an address the forwarders have not learned
-/// is flooded until the reply teaches the route); a name by walking and resolving it. The node's
-/// `IDENTITY` is asked only for a name (the walk asks it); [`identity_of`] asks it for an address.
-fn reach(wire: &mut impl Wire, spec: &str) -> Result<(u8, Found), String> {
-    if nodes::parse_int(spec).is_none() {
-        return walk_to(wire, spec);
+/// Refuse `f` unless it is of the class `noun` acts on, naming the noun that takes it.
+fn check_class(f: &Found, noun: Noun) -> Result<(), String> {
+    if f.class() == Some(class_of(noun)) {
+        return Ok(());
     }
-    let addr = nodes::resolve(spec, &[])?;
-    let src = attach(wire)?;
-    let r = nodes::read(wire, src, addr, store::DEVICE_NAME.key()).map_err(|_| {
-        format!(
-            "no answer from {addr:#04x}; `hoverboard-cli nodes` lists the nodes this link reaches"
-        )
-    })?;
-    let name = match r.value() {
-        Some(store::Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
-        _ => None,
+    let other = match f.class() {
+        Some(CLASS_BRIDGE) => ": use the bridge commands",
+        Some(CLASS_MOTOR) => ": use the board commands",
+        _ => "",
     };
-    Ok((
-        src,
-        Found {
-            addr,
-            identity: None,
-            name,
-        },
+    Err(format!(
+        "{} is a {}, not a {}{other}",
+        label(f),
+        class_name(f.class()),
+        noun.word()
     ))
 }
 
-/// `f`'s `IDENTITY`, asked of the node when reaching it did not.
-fn identity_of(wire: &mut impl Wire, src: u8, f: &Found) -> Option<nodes::Identity> {
-    f.identity
-        .or_else(|| nodes::identify(wire, src, f.addr).ok())
+/// Reach the node `spec` names for a `board` or `bridge` command (section 6.3, "A target"): an
+/// address by attaching and asking its `IDENTITY` and `device.name`, with no walk (a frame to an
+/// address the forwarders have not learned is flooded until the reply teaches the route); a name or
+/// a `uid` prefix by walking and resolving it. A node of the other class is refused.
+fn reach(wire: &mut impl Wire, spec: &str, noun: Noun) -> Result<(u8, Found), String> {
+    let (src, f) = match target::parse(spec)? {
+        Target::Address(addr) => {
+            let src = attach(wire)?.guest;
+            let identity = nodes::identify(wire, src, addr).map_err(|_| no_answer(addr))?;
+            let name = nodes::read(wire, src, addr, store::DEVICE_NAME.key())
+                .ok()
+                .and_then(|r| match r.value() {
+                    Some(store::Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+                    _ => None,
+                });
+            (
+                src,
+                Found {
+                    addr,
+                    identity: Some(identity),
+                    name,
+                },
+            )
+        }
+        Target::Lookup(_) => {
+            let w = walk(wire)?;
+            let a = target::resolve(spec, &w.found)?;
+            (w.src, target::at(&w.found, a)?.clone())
+        }
+    };
+    check_class(&f, noun)?;
+    Ok((src, f))
 }
 
-/// Walk and resolve `spec` to a node the walk found.
-fn walk_to(wire: &mut impl Wire, spec: &str) -> Result<(u8, Found), String> {
-    let (src, found) = walk(wire)?;
-    let a = nodes::resolve(spec, &found)?;
-    let f = found
-        .into_iter()
-        .find(|f| f.addr == a)
-        .ok_or_else(|| format!("the walk found no node {a:#04x}"))?;
-    Ok((src, f))
+/// The client for a bridge command to the bridge `spec` names. An address needs no walk: the
+/// tool attaches and sends to `0x00` when the address is the attached node's own, else to the
+/// address. With `check`, the node has to answer `IDENTIFY` as a bridge; `bridge update` skips
+/// that, so it reaches a bridge on an image older than `IDENTIFY` (`specs/machine-settings.md`
+/// section 8, step 4), and relies on the update's own replies.
+fn bridge_client(link: &Link, spec: &str, check: bool) -> Result<EspClient, String> {
+    let mut wire = wire_on(link)?;
+    let (src, dst) = match target::parse(spec)? {
+        Target::Address(a) => {
+            let at = attach(&mut wire)?;
+            let dst = if at.node == Some(a) { NO_ADDRESS } else { a };
+            if check {
+                let id = nodes::identify(&mut wire, at.guest, dst).map_err(|_| no_answer(a))?;
+                let f = Found {
+                    addr: a,
+                    identity: Some(id),
+                    name: None,
+                };
+                check_class(&f, Noun::Bridge)?;
+            }
+            (at.guest, dst)
+        }
+        Target::Lookup(_) => {
+            let w = walk(&mut wire)?;
+            let a = target::resolve(spec, &w.found)?;
+            check_class(target::at(&w.found, a)?, Noun::Bridge)?;
+            let dst = if w.topology.gateway == Some(a) {
+                NO_ADDRESS
+            } else {
+                a
+            };
+            (w.src, dst)
+        }
+    };
+    Ok(Client::addressed(wire, src, dst))
 }
 
 /// The name lines about a node start with: its `device.name`, or its address when it has none.
@@ -614,12 +632,23 @@ fn node_name(f: &Found) -> String {
     f.name.clone().unwrap_or_else(|| format!("{:#04x}", f.addr))
 }
 
-/// The files of `diff`, `apply` and `replace`, read and checked before any link is opened; the
-/// problems `--force` lets through are printed as warnings.
-fn load_files(paths: &[&str], force: bool) -> Result<config::Files, String> {
-    if paths.is_empty() {
-        return Err("give at least one file".into());
+/// Every problem of a refused plan, one per line.
+fn joined(p: Vec<names::Problem>) -> String {
+    let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
+    msgs.join("\nerror: ")
+}
+
+/// Print the problems `force` lets through as warnings, and stop on the others.
+fn check_problems(problems: &[names::Problem], force: bool) -> Result<(), String> {
+    for w in config::warnings(problems, force) {
+        eprintln!("{w}");
     }
+    config::stop_on(problems, force)
+}
+
+/// The board files of `board` and `bridge` commands, read and checked before any link is opened;
+/// the problems `--force` lets through are printed as warnings. A machine file is refused.
+fn load_files(paths: &[String], force: bool) -> Result<config::Files, String> {
     let texts = paths
         .iter()
         .map(|p| {
@@ -629,47 +658,73 @@ fn load_files(paths: &[&str], force: bool) -> Result<config::Files, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let files = config::read_files(&texts);
-    for w in config::warnings(&files.problems, force) {
-        eprintln!("{w}");
-    }
-    config::stop_on(&files.problems, force)?;
+    check_problems(&files.problems, force)?;
     Ok(files)
 }
 
-/// `diff`, `apply` and `replace` (`specs/cli-config.md` section 4): check the files, read the board,
-/// plan, and unless `dry`, write. Returns whether anything is (or would be) written.
-fn file_command(
-    via: &Via,
+/// The machine file of the `machine` commands, read and checked before any link is opened. A
+/// board file is refused.
+fn load_machine(path: &str, force: bool) -> Result<MachineFile, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let file = machine::read_machine_file(path, &text)?;
+    check_problems(&file.problems(), force)?;
+    Ok(file)
+}
+
+/// Whether `key` is a machine field.
+fn is_machine(key: store::Key) -> bool {
+    names::row_of(key).and_then(|r| r.scope()) == Some(store::Scope::Machine)
+}
+
+/// The line a `board` command ends with when it changed a machine field on one board.
+fn machine_only(name: &str) -> String {
+    format!("machine fields changed on {name} only: the boards now differ (\"machine diff\")")
+}
+
+/// The line after a write that changed a pin.
+fn pin_hint(plan: &config::Plan) {
+    if config::changed_keys(plan)
+        .any(|k| names::row_of(k).is_some_and(|r| r.kind == store::Kind::Pin))
+    {
+        println!("{}", hoverboard_cli::status::PIN_HINT);
+    }
+}
+
+/// `board`/`bridge` `diff`, `apply` and `replace` (`specs/cli-config.md` section 4): check the
+/// files, read the node, plan, and unless a diff, write. Returns whether anything is (or would be)
+/// written.
+fn files_command(
+    link: &Link,
+    noun: Noun,
     spec: &str,
-    paths: &[&str],
-    replace: bool,
-    dry: bool,
-    flags: &Flags,
+    paths: &[String],
+    mode: Mode,
+    force: bool,
+    yes: bool,
 ) -> Result<bool, String> {
-    let files = load_files(paths, flags.force)?;
-    let mut wire = Framed::new(via.open()?);
-    let (src, f) = reach(&mut wire, spec)?;
+    let files = load_files(paths, force)?;
+    let mut wire = wire_on(link)?;
+    let (src, f) = reach(&mut wire, spec, noun)?;
     let mut b = Board {
         wire: &mut wire,
         src,
         dst: f.addr,
         name: node_name(&f),
+        class: class_of(noun),
     };
     let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
-    let plan = config::plan(&files, &reads, &unknown, replace).map_err(|p| {
-        let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
-        msgs.join("\nerror: ")
-    })?;
+    let replace = matches!(mode, Mode::Replace | Mode::Diff { replace: true });
+    let plan = config::plan(&files, &reads, &unknown, replace).map_err(joined)?;
     let none = BTreeMap::new();
-    if dry {
+    if let Mode::Diff { .. } = mode {
         for l in config::report(&b.name, &plan, &reads, &none) {
             println!("{l}");
         }
         return Ok(plan.changes());
     }
     let n = plan.unstores();
-    if replace && n > 0 && !flags.yes {
-        if !std::io::stdin().is_terminal() {
+    if replace && n > 0 && !yes {
+        if !terminal() {
             return Err(format!(
                 "{}: replace would un-store {n} keys; give --yes to do it without a terminal",
                 b.name
@@ -691,134 +746,116 @@ fn file_command(
     for l in config::report(&b.name, &plan, &reads, &after) {
         println!("{l}");
     }
-    // What the board's bring-up made of a pin is in its boot report.
-    if config::changed_keys(&plan)
-        .any(|k| names::row_of(k).is_some_and(|r| r.kind == store::Kind::Pin))
-    {
-        println!("{}", hoverboard_cli::status::PIN_HINT);
+    pin_hint(&plan);
+    if config::changed_keys(&plan).any(is_machine) {
+        println!("{}", machine_only(&b.name));
     }
     Ok(plan.changes())
 }
 
-/// The flags of the configuration commands.
-struct Flags {
-    /// `--force`: the checks it may let through become warnings.
-    force: bool,
-    /// `--yes`: `replace` un-stores without asking.
-    yes: bool,
-}
-
-/// A node's boot status entries (`STATUS_READ`), or `None` when it does not answer.
+/// A node's boot report entries (`STATUS_READ`), or `None` when it does not answer.
 fn board_status(wire: &mut impl Wire, src: u8, addr: u8) -> Option<Vec<u8>> {
     nodes::status_read(wire, src, addr).ok()
 }
 
-/// The motor controllers the walk found, for `watch` and `drive` with no nodes given.
-fn motor_controllers(wire: &mut impl Wire) -> Result<(u8, Vec<u8>), String> {
-    let (src, found) = walk(wire)?;
-    let motors: Vec<u8> = found
+/// The motor controllers among `found`.
+fn motors(found: &[Found]) -> Vec<&Found> {
+    found
         .iter()
         .filter(|f| f.class() == Some(CLASS_MOTOR))
-        .map(|f| f.addr)
-        .collect();
-    if motors.is_empty() {
+        .collect()
+}
+
+/// The boards `targets` name, among a walk's; every motor controller when none is given.
+fn boards_of<'a>(w: &'a Walked, targets: &[String]) -> Result<Vec<&'a Found>, String> {
+    let out: Vec<&Found> = if targets.is_empty() {
+        motors(&w.found)
+    } else {
+        targets
+            .iter()
+            .map(|t| target::at(&w.found, target::resolve(t, &w.found)?))
+            .collect::<Result<_, String>>()?
+    };
+    if out.is_empty() {
         return Err("the walk found no motor controller".into());
     }
-    Ok((src, motors))
+    Ok(out)
 }
 
-/// The client for an ESP command: to the bridge `node` names, through the boards, or with none given
-/// to the node on the link, which has to be a bridge.
-fn esp_client(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
-    let mut wire = Framed::new(via.open()?);
-    let (src, dst) = match node {
-        Some(spec) => {
-            let (src, mut f) = reach(&mut wire, spec)?;
-            f.identity = identity_of(&mut wire, src, &f);
-            if f.class() != Some(net::walk::CLASS_BRIDGE) {
-                return Err(format!(
-                    "{} is a {}, not a bridge",
-                    label(&f),
-                    class_name(f.class())
-                ));
-            }
-            (src, f.addr)
+/// The boards `machine watch` and `drive` act on: with only addresses given, no walk.
+fn guest_boards(wire: &mut impl Wire, targets: &[String]) -> Result<(u8, Vec<u8>), String> {
+    let addrs: Option<Vec<u8>> = targets
+        .iter()
+        .map(|t| match target::parse(t) {
+            Ok(Target::Address(a)) => Some(a),
+            _ => None,
+        })
+        .collect();
+    match addrs {
+        Some(a) if !a.is_empty() => Ok((attach(wire)?.guest, a)),
+        _ => {
+            let w = walk(wire)?;
+            let b = boards_of(&w, targets)?.iter().map(|f| f.addr).collect();
+            Ok((w.src, b))
         }
-        None => {
-            let src = attach(&mut wire)?;
-            let here = nodes::identify(&mut wire, src, NO_ADDRESS)?;
-            if here.class != net::walk::CLASS_BRIDGE {
-                let (_, found) = walk(&mut wire)?;
-                let bridges: Vec<String> = found
-                    .iter()
-                    .filter(|f| f.class() == Some(net::walk::CLASS_BRIDGE))
-                    .map(label)
-                    .collect();
-                return Err(if bridges.is_empty() {
-                    "no bridge on this machine".to_string()
-                } else {
-                    format!(
-                        "the node on this link is not a bridge; give --node with one of: {}",
-                        bridges.join(", ")
-                    )
-                });
-            }
-            (src, NO_ADDRESS)
-        }
-    };
-    Ok(Client::addressed(wire, src, dst))
-}
-
-/// `erase-store`: walk, find the board behind the bridge (`node` names the bridge, or the one on
-/// the link), print what the erase loses that a `dump` leaves out, ask, send `STORE_ERASE`, wait
-/// for the board's mailbox, and give the board its old address back out the bridge's mailbox port.
-fn erase_store(via: &Via, node: Option<&str>, yes: bool) -> Result<(), String> {
-    let mut wire = Framed::new(via.open()?);
-    let walked = nodes::walk(&mut wire)?;
-    let found = nodes::survey(&mut wire, &walked);
-    let src = walked.guest_addr();
-    let (bridge, dst) = match node {
-        Some(spec) => {
-            let a = nodes::resolve(spec, &found)?;
-            (a, a)
-        }
-        None => (
-            walked
-                .gateway_addr()
-                .ok_or("the walk found no node on this link")?,
-            NO_ADDRESS,
-        ),
-    };
-    let at = |a: u8| found.iter().find(|f| f.addr == a);
-    let b = at(bridge).ok_or_else(|| format!("the walk found no node {bridge:#04x}"))?;
-    if b.class() != Some(net::walk::CLASS_BRIDGE) {
-        return Err(format!(
-            "{} is a {}, not a bridge; give --node with a bridge",
-            label(b),
-            class_name(b.class())
-        ));
     }
-    let board = walked
-        .neighbours(bridge)
-        .into_iter()
-        .filter_map(at)
-        .find(|f| f.class() == Some(CLASS_MOTOR))
-        .ok_or_else(|| format!("the walk found no board behind {}", label(b)))?;
-    let name = node_name(board);
-    let mailbox = walked
-        .port_of_kind(bridge, net::walk::PORT_SWD)
-        .ok_or_else(|| format!("{} reported no mailbox port", label(b)))?;
+}
+
+/// Listen for `CYCLIC_STATE` for [`LISTEN`].
+fn listen(wire: &mut impl Wire) -> Tally {
+    let mut tally = Tally::new();
+    let t0 = Instant::now();
+    while t0.elapsed() < LISTEN {
+        if let Some(pkt) = wire.recv(LISTEN.saturating_sub(t0.elapsed()).min(POLL)) {
+            tally.feed(&pkt, t0.elapsed());
+        }
+    }
+    tally
+}
+
+/// The client to the bridge wired to the board `spec` names, for its SWD commands; `erase` asks for
+/// the board's own bridge. The walk, the board, the bridge's address and its mailbox port.
+fn swd_route(
+    link: &Link,
+    spec: &str,
+    erase: bool,
+) -> Result<(EspClient, Walked, Found, u8, u8), String> {
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let board = target::at(&w.found, target::resolve(spec, &w.found)?)?.clone();
+    check_class(&board, Noun::Board)?;
+    let (bridge, port) = if erase {
+        target::erase_bridge(&w.found, &w.topology, board.addr)?
+    } else {
+        target::wired_bridge(&w.found, &w.topology, board.addr)?
+    };
+    let dst = if w.topology.gateway == Some(bridge) {
+        NO_ADDRESS
+    } else {
+        bridge
+    };
+    let c = Client::addressed(wire, w.src, dst);
+    Ok((c, w, board, bridge, port))
+}
+
+/// `board erase` (`specs/hoverboard-bridge.md`, "Erasing the store"): print what the erase loses
+/// that a dump leaves out, ask, send `STORE_ERASE` through the board's own bridge, wait for the
+/// board's mailbox, and give the board its old address back out the bridge's mailbox port.
+fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
+    let (mut c, w, board, bridge, mailbox) = swd_route(link, spec, true)?;
+    let name = node_name(&board);
     let mut on = Board {
-        wire: &mut wire,
-        src,
+        wire: c.wire(),
+        src: w.src,
         dst: board.addr,
         name: name.clone(),
+        class: CLASS_MOTOR,
     };
     let (reads, _) = config::read_board(&mut on, &config::board_owned_keys())?;
     for l in erase::lines(&name, &reads) {
         println!("{l}");
     }
-    match erase::guard(&name, yes, std::io::stdin().is_terminal()) {
+    match erase::guard(&name, yes, terminal()) {
         Guard::Proceed => {}
         Guard::Refuse(why) => return Err(why),
         Guard::Ask(q) => {
@@ -827,7 +864,6 @@ fn erase_store(via: &Via, node: Option<&str>, yes: bool) -> Result<(), String> {
             }
         }
     }
-    let mut c = Client::addressed(wire, src, dst);
     let e = |e: ClientError| e.to_string();
     c.store_erase().map_err(e)?;
     let state = c.wait_mailbox(erase::MAILBOX_WAIT).map_err(e)?;
@@ -840,21 +876,422 @@ fn erase_store(via: &Via, node: Option<&str>, yes: bool) -> Result<(), String> {
         ));
     }
     println!("erased");
-    let line = erase::restore(c.wire(), src, bridge, mailbox, &name, &reads)?;
+    let line = erase::restore(c.wire(), w.src, bridge, mailbox, &name, &reads)?;
     println!("{line}");
     Ok(())
 }
 
-/// Board addresses from the command line.
-fn board_list(args: &[&str]) -> Result<Vec<u8>, String> {
-    args.iter()
-        .map(|s| {
-            parse_u32(s).and_then(|a| match u8::try_from(a) {
-                Ok(a) if net::pdu::is_board(a) => Ok(a),
-                _ => Err(format!("not a board address (0x01..0x7f): {s}")),
+/// A board's SWD command through the bridge wired to it.
+fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
+    // Read the ELF before the link, so a refused image costs no connection.
+    let image = match op {
+        Swd::Flash(path) => {
+            let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+            elf::check(&bytes).map_err(|e| e.to_string())?;
+            eprintln!("ELF checks passed (no wfi, code floor, required symbols)");
+            Some(elf::to_bin(&bytes).map_err(|e| e.to_string())?)
+        }
+        _ => None,
+    };
+    let (mut c, ..) = swd_route(link, spec, false)?;
+    let e = |e: ClientError| e.to_string();
+    match op {
+        Swd::TargetId => print_id(&c.target_id().map_err(e)?),
+        Swd::ClearProtection => {
+            let id = c.target_id().map_err(e)?;
+            print_id(&id);
+            if !confirm(
+                "Clearing protection MASS-ERASES the chip: the stock firmware is lost unless it \
+                 was backed up with gdf130backup. Continue?",
+            ) {
+                return Err("not cleared".into());
+            }
+            c.clear_protection().map_err(e)?;
+            println!("cleared; USER byte recorded as {:#04x}", id.user);
+            print!("Power-cycle the board by hand, then press Enter. ");
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stdin().lock().read_line(&mut String::new());
+            let after = c.target_id().map_err(e)?;
+            print_id(&after);
+            if after.rdp != 0xA5 || after.user != id.user {
+                return Err(format!(
+                    "the clear did not take: protection {:#04x}, USER {:#04x} (was {:#04x})",
+                    after.rdp, after.user, id.user
+                ));
+            }
+            println!("protection off, USER byte unchanged");
+        }
+        Swd::Ctrl(ctrl) => c.ctrl(*ctrl).map_err(e)?,
+        Swd::Read { addr, len } => hexdump(*addr, &c.read(*addr, *len as usize).map_err(e)?),
+        Swd::Write { addr, data } => c.write(*addr, data).map_err(e)?,
+        Swd::Flash(_) => {
+            let image = image.expect("read above");
+            let t0 = Instant::now();
+            let mut stage = None;
+            let mut times = StageTimes::new();
+            c.flash(&image, |p: Progress| {
+                times.on(p, t0.elapsed());
+                if stage.is_some() && stage != Some(p.stage) {
+                    eprintln!();
+                }
+                stage = Some(p.stage);
+                eprint!(
+                    "\r{:?} {}/{} ({:.1} s)   ",
+                    p.stage,
+                    p.done,
+                    p.total,
+                    t0.elapsed().as_secs_f32()
+                );
             })
+            .map_err(e)?;
+            eprintln!();
+            println!(
+                "booted ({} B in {:.1} s)",
+                image.len(),
+                t0.elapsed().as_secs_f32()
+            );
+            let stages: Vec<String> = times
+                .durations()
+                .iter()
+                .map(|(name, d)| format!("{name} {:.2} s", d.as_secs_f32()))
+                .collect();
+            println!("stages: {}", stages.join(", "));
+        }
+    }
+    Ok(())
+}
+
+/// `board status`: the boot report of each board given, or of every motor controller.
+fn board_status_cmd(link: &Link, targets: &[String]) -> Result<(), String> {
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let src = w.src;
+    for f in boards_of(&w, targets)? {
+        let name = node_name(f);
+        let Some(value) = board_status(&mut wire, src, f.addr) else {
+            println!("{name}: no STATUS answer");
+            continue;
+        };
+        let mut link_pins = |i: u8| {
+            let mut pin = |k: store::Key| match nodes::read(&mut wire, src, f.addr, k).ok()?.value()
+            {
+                Some(store::Value::U8(p)) => Some(p),
+                _ => None,
+            };
+            Some((
+                pin(store::LINK_TX.at(i).key())?,
+                pin(store::LINK_RX.at(i).key())?,
+            ))
+        };
+        let pins: Vec<Option<(u8, u8)>> = (0..store::LINKS).map(&mut link_pins).collect();
+        for l in hoverboard_cli::status::lines(&name, &value, |i| {
+            pins.get(i as usize).copied().flatten()
+        }) {
+            println!("{l}");
+        }
+    }
+    Ok(())
+}
+
+/// `machine nodes`: the walk, with each node's address, class, `uid` and name, and each motor
+/// controller marked from the `CYCLIC_STATE` heard over [`LISTEN`] and its boot report.
+fn machine_nodes(link: &Link) -> Result<(), String> {
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let entries: Vec<usize> = w
+        .found
+        .iter()
+        .map(|f| match f.class() {
+            Some(CLASS_MOTOR) => board_status(&mut wire, w.src, f.addr)
+                .map_or(0, |v| v.len() / board::status::ENTRY_LEN),
+            _ => 0,
+        })
+        .collect();
+    let heard = listen(&mut wire);
+    println!("address  class             uid                       name");
+    for (f, n) in w.found.iter().zip(entries) {
+        let marks = machine::marks(f.class(), heard.last(f.addr), n);
+        let mark = if marks.is_empty() {
+            String::new()
+        } else {
+            format!("  ! {}", marks.join(", "))
+        };
+        let uid = f.identity.map_or("-".into(), |i| nodes::uid_hex(&i.uid));
+        println!(
+            "{:#04x}     {:<16}  {uid:<24}  {}{mark}",
+            f.addr,
+            class_name(f.class()),
+            f.name.as_deref().unwrap_or("-")
+        );
+    }
+    Ok(())
+}
+
+/// Each motor controller's reads of `keys`, with its name.
+fn read_each(
+    wire: &mut impl Wire,
+    w: &Walked,
+    keys: &[store::Key],
+) -> Result<Vec<(Found, config::Reads)>, String> {
+    let mut out = Vec::new();
+    for f in motors(&w.found) {
+        let mut b = Board {
+            wire: &mut *wire,
+            src: w.src,
+            dst: f.addr,
+            name: node_name(f),
+            class: CLASS_MOTOR,
+        };
+        let (reads, _) = config::read_board(&mut b, keys)?;
+        out.push((f.clone(), reads));
+    }
+    if out.is_empty() {
+        return Err("the walk found no motor controller".into());
+    }
+    Ok(out)
+}
+
+/// `machine get`: one line when every copy holds the same value, else one per board.
+fn machine_get(link: &Link, path: &str) -> Result<(), String> {
+    let key = machine::machine_key(path)?;
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let copies: Vec<(String, nodes::ConfigResp)> = read_each(&mut wire, &w, &[key])?
+        .into_iter()
+        .filter_map(|(f, mut r)| Some((node_name(&f), r.remove(&key)?)))
+        .collect();
+    for l in machine::get_lines(key, &copies) {
+        println!("{l}");
+    }
+    Ok(())
+}
+
+/// `machine set`: the field to every motor controller.
+fn machine_set(link: &Link, path: &str, value: &str, force: bool) -> Result<(), String> {
+    let key = machine::machine_key(path)?;
+    let checks = names::write_checks(key);
+    check_problems(&checks, force)?;
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let mut changed = Vec::new();
+    for f in motors(&w.found) {
+        let mut b = Board {
+            wire: &mut wire,
+            src: w.src,
+            dst: f.addr,
+            name: node_name(f),
+            class: CLASS_MOTOR,
+        };
+        let written = config::config_write(&mut b, key, value, force)?;
+        for l in &written.warnings {
+            eprintln!("{l}");
+        }
+        println!("{}", written.line);
+        changed.extend(written.changed);
+    }
+    if let Some(l) = config::effect_line(changed) {
+        println!("{l}");
+    }
+    Ok(())
+}
+
+/// The motor controllers of a walk as matching sees them: each with a `uid` it may match by.
+fn candidates(w: &Walked) -> Vec<machine::Board> {
+    motors(&w.found)
+        .into_iter()
+        .map(|f| machine::Board {
+            addr: f.addr,
+            label: label(f),
+            uid: target::usable_uid(f, &w.found),
         })
         .collect()
+}
+
+/// `machine dump`: every motor controller's file, filed under its `uid`, with the machine section
+/// once; refused when the copies differ, unless `from` names the copy to write.
+fn machine_dump(link: &Link, out: &str, from: Option<&str>) -> Result<(), String> {
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let each = read_each(&mut wire, &w, &config::dump_keys())?;
+    let mut boards = Vec::new();
+    for (f, reads) in &each {
+        let uid = target::usable_uid(f, &w.found).ok_or_else(|| {
+            format!(
+                "{} reports no uid a machine file can file it under",
+                label(f)
+            )
+        })?;
+        for l in config::left_out(&node_name(f), reads) {
+            eprintln!("{l}");
+        }
+        boards.push((uid, reads.clone()));
+    }
+    let copies: Vec<(String, config::Reads)> = each
+        .iter()
+        .map(|(f, r)| (node_name(f), r.clone()))
+        .collect();
+    let differ = machine::differing(&copies);
+    let from = match from {
+        Some(spec) => {
+            let a = target::resolve(spec, &w.found)?;
+            each.iter()
+                .position(|(f, _)| f.addr == a)
+                .ok_or_else(|| format!("{spec} is not a motor controller of this machine"))?
+        }
+        None if differ.is_empty() => 0,
+        None => {
+            return Err(format!(
+                "the boards' machine settings differ; give --from <board> to write one copy:\n{}",
+                differ.join("\n")
+            ))
+        }
+    };
+    let text = serde_json::to_string_pretty(&machine::dump_file(&boards, from))
+        .map_err(|e| e.to_string())?
+        + "\n";
+    std::fs::write(out, text).map_err(|e| format!("{out}: {e}"))?;
+    eprintln!("{} boards written to {out}", boards.len());
+    Ok(())
+}
+
+/// `machine diff` with no file: the machine fields whose copies differ, by board. Whether any do.
+fn machine_diff_copies(link: &Link) -> Result<bool, String> {
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let copies: Vec<(String, config::Reads)> = read_each(&mut wire, &w, &machine::machine_keys())?
+        .into_iter()
+        .map(|(f, r)| (node_name(&f), r))
+        .collect();
+    let differ = machine::differing(&copies);
+    if differ.is_empty() {
+        println!("the boards' machine settings agree");
+    }
+    for l in &differ {
+        println!("{l}");
+    }
+    Ok(!differ.is_empty())
+}
+
+/// `machine apply`, `replace` and `diff` with a file (section 6.3): match each entry to its board,
+/// give every motor controller the machine section and each matched board its entry, report, and
+/// after a write say whether the digests agree. The exit code: 1 when an entry was skipped or a
+/// diff has changes.
+fn machine_files(
+    link: &Link,
+    path: &str,
+    mode: Mode,
+    force: bool,
+    yes: bool,
+    maps: &[(String, String)],
+) -> Result<u8, String> {
+    let file = load_machine(path, force)?;
+    let uids: Vec<machine::Uid> = file.entries.iter().map(|e| e.uid).collect();
+    let map_entries = maps
+        .iter()
+        .map(|(u, _)| machine::map_entry(&uids, u))
+        .collect::<Result<Vec<usize>, _>>()?;
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let map_boards = maps
+        .iter()
+        .map(|(_, t)| target::resolve(t, &w.found))
+        .collect::<Result<Vec<u8>, _>>()?;
+    let pairs: Vec<(usize, u8)> = map_entries.into_iter().zip(map_boards).collect();
+    let boards = candidates(&w);
+    let matching = machine::match_entries(&uids, &boards, &pairs)?
+        .decide(|q| terminal().then(|| confirm(&format!("{q}?"))))?;
+    let replace_all = matches!(mode, Mode::Replace | Mode::Diff { replace: true });
+    let diff = matches!(mode, Mode::Diff { .. });
+
+    // Plan every board before writing any.
+    let mut plans = Vec::new();
+    for f in motors(&w.found) {
+        let entry = matching.entry_of(f.addr);
+        if entry.is_none() && file.machine.entries.is_empty() {
+            println!("{}: no entry in {path}; left alone", node_name(f));
+            continue;
+        }
+        let files = file.board_files(entry);
+        let mut b = Board {
+            wire: &mut wire,
+            src: w.src,
+            dst: f.addr,
+            name: node_name(f),
+            class: CLASS_MOTOR,
+        };
+        let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
+        // A board with no entry gets the machine section merged, never replaced, and its report
+        // names only the machine fields it keeps.
+        let replace = replace_all && entry.is_some();
+        let mut plan = config::plan(&files, &reads, &unknown, replace).map_err(joined)?;
+        if entry.is_none() {
+            plan.kept.retain(|(k, _)| is_machine(*k));
+        }
+        plans.push((f.clone(), reads, plan, entry.is_some()));
+    }
+    let none = BTreeMap::new();
+    let mut changes = false;
+    let unstores: usize = plans.iter().map(|p| p.2.unstores()).sum();
+    if !diff && unstores > 0 && !yes {
+        if !terminal() {
+            return Err(format!(
+                "replace would un-store {unstores} keys; give --yes to do it without a terminal"
+            ));
+        }
+        for (f, reads, plan, _) in &plans {
+            for l in config::report(&node_name(f), plan, reads, &none) {
+                println!("{l}");
+            }
+        }
+        if !confirm(&format!("Un-store {unstores} keys?")) {
+            return Err("nothing written".into());
+        }
+    }
+    for (f, reads, plan, listed) in &plans {
+        let name = node_name(f);
+        if !listed {
+            println!("{name}: no entry in {path}: the machine section only");
+        }
+        if diff {
+            for l in config::report(&name, plan, reads, &none) {
+                println!("{l}");
+            }
+            changes |= plan.changes();
+            continue;
+        }
+        let mut b = Board {
+            wire: &mut wire,
+            src: w.src,
+            dst: f.addr,
+            name: name.clone(),
+            class: CLASS_MOTOR,
+        };
+        let after = config::execute(&mut b, plan).map_err(|r| {
+            for l in config::written_lines(&name, plan, reads, &r) {
+                println!("{l}");
+            }
+            r.msg
+        })?;
+        for l in config::report(&name, plan, reads, &after) {
+            println!("{l}");
+        }
+        pin_hint(plan);
+    }
+    for &i in &matching.skipped {
+        println!(
+            "{}: no board of this machine reports this uid; skipped",
+            nodes::uid_hex(&uids[i])
+        );
+    }
+    if !diff {
+        let heard = listen(&mut wire);
+        let digests: Vec<(String, Option<u16>)> = motors(&w.found)
+            .into_iter()
+            .map(|f| (node_name(f), heard.last(f.addr).map(|s| s.machine)))
+            .collect();
+        println!("{}", machine::digest_line(&digests));
+    }
+    Ok(u8::from(changes || !matching.skipped.is_empty()))
 }
 
 /// Listen for `secs`, or until `stop` is set, counting `CYCLIC_STATE` into `tally` and printing
@@ -908,71 +1345,12 @@ fn print_summary(tally: &Tally, elapsed: Duration) {
     }
 }
 
-/// Which link to the bridge.
-enum Via<'a> {
-    /// BLE, to this advertiser or the first `hb-bridge-` one.
-    Ble(Option<&'a str>),
-    /// The USB console at this device.
-    Serial(&'a str),
-    /// The USB console through the relay at this `host:port`.
-    Tcp(&'a str),
-}
-
-impl Via<'_> {
-    fn open(&self) -> Result<Box<dyn ByteLink>, String> {
-        Ok(match *self {
-            Via::Ble(device) => ble_link(device)?,
-            Via::Serial(device) => {
-                let s = Serial::open(device)?;
-                eprintln!("opened {device}");
-                Box::new(s)
-            }
-            Via::Tcp(addr) => {
-                let t = Tcp::connect(addr)?;
-                eprintln!("connected to {addr}");
-                Box::new(t)
-            }
-        })
-    }
-}
-
-/// Every command word; any other is a usage error before a link is opened.
-const COMMANDS: &[&str] = &[
-    "scan",
-    "nodes",
-    "status",
-    "name",
-    "config",
-    "dump",
-    "diff",
-    "apply",
-    "replace",
-    "compact",
-    "fields",
-    "info",
-    "id",
-    "flash",
-    "update-esp",
-    "install-esp",
-    "clear-protection",
-    "erase-store",
-    "disarm",
-    "halt",
-    "resume",
-    "reset",
-    "reset-halt",
-    "read",
-    "write",
-    "watch",
-    "drive",
-];
-
-/// Run the command line. `diff` exits 2 on every error, usage errors included, so its 1 means
+/// Run the command line. A `diff` exits 2 on every error, usage errors included, so its 1 means
 /// only "there are changes" (`specs/cli-config.md` section 4.2).
 fn run(args: &[String]) -> Result<u8, String> {
-    let mut cmd = None;
-    match dispatch(args, &mut cmd) {
-        Err(e) if cmd.as_deref() == Some("diff") => {
+    let (diff, inv) = cli::parse(args);
+    match inv.and_then(execute) {
+        Err(e) if diff => {
             eprintln!("error: {e}");
             Ok(2)
         }
@@ -980,543 +1358,195 @@ fn run(args: &[String]) -> Result<u8, String> {
     }
 }
 
-/// The command line's work; `cmd` is set to the command as soon as it is known, before any error
-/// in the options is returned.
-fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String> {
-    let mut via = None;
-    // The first error in the options, returned once the command is known.
-    let mut early: Option<String> = None;
-    let mut node: Option<&str> = None;
-    let mut rest: Vec<&str> = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        // `--opt value` or `--opt=value`.
-        let (opt, inline) = match a.split_once('=') {
-            Some((o, v)) if a.starts_with("--") => (o, Some(v)),
-            _ => (a.as_str(), None),
-        };
-        let make: fn(&str) -> Via = match opt {
-            "--device" => |d| Via::Ble(Some(d)),
-            "--serial" => |d| Via::Serial(d),
-            "--tcp" => |d| Via::Tcp(d),
-            "--secs" | "--no-confirm" | "--force" | "--yes" | "--replace" | "--json" => {
-                rest.push(a); // the commands' own options
-                continue;
-            }
-            "--node" => {
-                match inline.or_else(|| it.next().map(String::as_str)) {
-                    Some(v) if node.replace(v).is_some() => {
-                        early.get_or_insert("give --node once".into());
-                    }
-                    Some(_) => {}
-                    None => {
-                        early.get_or_insert("--node needs a value".into());
-                    }
-                }
-                continue;
-            }
-            o if o.starts_with("--") => {
-                early.get_or_insert(format!("unknown option {o}"));
-                continue;
-            }
-            _ => {
-                rest.push(a);
-                continue;
-            }
-        };
-        match inline.or_else(|| it.next().map(String::as_str)) {
-            Some(v) if via.replace(make(v)).is_some() => {
-                early.get_or_insert("give one of --device, --serial, --tcp".into());
-            }
-            Some(_) => {}
-            None => {
-                early.get_or_insert(format!("{opt} needs a value"));
-            }
-        }
-    }
-    // The command word is the first argument that is neither a flag nor `--secs`'s value, wherever
-    // the flags stand; it moves to the front, so the positional arguments follow it.
-    let mut word = None;
-    let mut i = 0;
-    while i < rest.len() {
-        match rest[i] {
-            "--secs" => i += 2,
-            a if a.starts_with("--") => i += 1,
-            _ => {
-                word = Some(i);
-                break;
-            }
-        }
-    }
-    if let Some(i) = word {
-        let w = rest.remove(i);
-        rest.insert(0, w);
-    }
-    *cmd_out = word.map(|_| rest[0].to_string());
-    if let Some(e) = early {
-        return Err(e);
-    }
-    let given = match &via {
+/// Carry out one command.
+fn execute(inv: cli::Invocation) -> Result<u8, String> {
+    let given = match &inv.link {
         None => Given::Nothing,
-        Some(Via::Serial(p)) => Given::Serial(p),
-        Some(Via::Tcp(_)) => Given::Tcp,
-        Some(Via::Ble(_)) => Given::Device,
+        Some(Link::Serial(p)) => Given::Serial(p),
+        Some(Link::Tcp(_)) => Given::Tcp,
+        Some(Link::Ble(_)) => Given::Device,
     };
-    let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|status [<node>...]|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|erase-store [--yes]|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
-    let cmd = match word {
-        Some(_) if COMMANDS.contains(&rest[0]) => rest[0],
-        _ => return Err(usage.into()),
-    };
-    let e = |e: ClientError| e.to_string();
-
-    // The configuration commands' flags, wherever they stand; what remains is positional.
-    let flags = Flags {
-        force: rest.contains(&"--force"),
-        yes: rest.contains(&"--yes"),
-    };
-    let replace_flag = rest.contains(&"--replace");
-    let json_flag = rest.contains(&"--json");
-    if [
-        "config", "dump", "diff", "apply", "replace", "compact", "fields",
-    ]
-    .contains(&cmd)
-    {
-        rest.retain(|a| !["--force", "--yes", "--replace", "--json"].contains(a));
-        let allowed = match cmd {
-            "config" | "apply" => !flags.yes && !replace_flag && !json_flag,
-            "diff" => !flags.yes && !json_flag,
-            "replace" => !replace_flag && !json_flag,
-            "fields" => json_flag && !flags.force && !flags.yes && !replace_flag,
-            _ => !flags.force && !flags.yes && !replace_flag && !json_flag,
-        };
-        if !allowed {
-            return Err(usage.into());
-        }
-    }
-
-    if cmd == "fields" {
-        if rest.len() != 1 {
-            return Err("fields takes --json".into());
-        }
-        let text = serde_json::to_string_pretty(&names::table_json()).map_err(|e| e.to_string())?;
-        println!("{text}");
-        return Ok(0);
-    }
-
-    if cmd == "diff" {
-        let [_, spec, ref paths @ ..] = rest[..] else {
-            return Err("diff needs [--replace] <node> <file>...".into());
-        };
-        return file_command(&via, spec, paths, replace_flag, true, &flags).map(u8::from);
-    }
-
-    if cmd == "apply" || cmd == "replace" {
-        let [_, spec, ref paths @ ..] = rest[..] else {
-            return Err(format!("{cmd} needs <node> <file>..."));
-        };
-        file_command(&via, spec, paths, cmd == "replace", false, &flags)?;
-        return Ok(0);
-    }
-
-    if cmd == "dump" {
-        let (spec, out) = match rest[..] {
-            [_, spec] => (spec, None),
-            [_, spec, out] => (spec, Some(out)),
-            _ => return Err("dump needs <node> [<file>]".into()),
-        };
-        let mut wire = Framed::new(via.open()?);
-        let (src, f) = reach(&mut wire, spec)?;
-        let mut b = Board {
-            wire: &mut wire,
-            src,
-            dst: f.addr,
-            name: node_name(&f),
-        };
-        let (reads, unknown) = config::read_board(&mut b, &config::dump_keys())?;
-        for k in unknown {
-            eprintln!(
-                "warning: {}: the board does not know {}",
-                b.name,
-                names::path_of(k)
-            );
-        }
-        for l in config::left_out(&b.name, &reads) {
-            eprintln!("{l}");
-        }
-        let stored = reads
-            .values()
-            .filter(|r| r.status == net::walk::CFG_OK)
-            .count();
-        let text = serde_json::to_string_pretty(&config::to_file(&reads))
-            .map_err(|e| e.to_string())?
-            + "\n";
-        match out {
-            Some(p) => {
-                std::fs::write(p, text).map_err(|e| format!("{p}: {e}"))?;
-                eprintln!("{}: {stored} stored keys written to {p}", b.name);
+    let link = inv.link.clone().unwrap_or(Link::Ble(None));
+    let link = &link;
+    match inv.command {
+        Command::Scan { secs } => {
+            if !matches!(link, Link::Ble(_)) {
+                return Err("scan is BLE only".into());
             }
-            None => print!("{text}"),
+            for (name, addr) in scan_names(secs)? {
+                println!("{addr}  {name}");
+            }
         }
-        return Ok(0);
-    }
-
-    if cmd == "compact" {
-        let [_, spec] = rest[..] else {
-            return Err("compact needs <node>".into());
-        };
-        let mut wire = Framed::new(via.open()?);
-        let (src, f) = reach(&mut wire, spec)?;
-        let status = nodes::compact(&mut wire, src, f.addr)?;
-        println!("{}: compact: {}", node_name(&f), nodes::status_name(status));
-        config_outcome(status)?;
-        return Ok(0);
-    }
-
-    if cmd == "scan" {
-        if !matches!(via, Via::Ble(_)) {
-            return Err("scan is BLE only".into());
+        Command::Fields => {
+            let text =
+                serde_json::to_string_pretty(&names::table_json()).map_err(|e| e.to_string())?;
+            println!("{text}");
         }
-        let secs = match rest.get(1) {
-            Some(&"--secs") => rest
-                .get(2)
-                .ok_or("--secs needs a number")?
-                .parse()
-                .map_err(|_| "bad --secs")?,
-            _ => 5,
-        };
-        for (name, addr) in scan_names(secs)? {
-            println!("{addr}  {name}");
-        }
-        return Ok(0);
-    }
-
-    if cmd == "nodes" {
-        if rest.len() > 1 {
-            return Err(usage.into());
-        }
-        let mut wire = Framed::new(via.open()?);
-        let (src, found) = walk(&mut wire)?;
-        println!("address  class             uid                       name");
-        for f in &found {
-            // A motor controller whose boot report has entries is marked (`STATUS_READ`).
-            let n = match f.class() {
-                Some(CLASS_MOTOR) => board_status(&mut wire, src, f.addr)
-                    .map(|v| v.len() / board::status::ENTRY_LEN)
-                    .unwrap_or(0),
-                _ => 0,
+        Command::Get { noun, target, path } => {
+            let (key, _) = names::parse_path(&path).map_err(|p| p.msg)?;
+            let mut wire = wire_on(link)?;
+            let (src, f) = reach(&mut wire, &target, noun)?;
+            let mut b = Board {
+                wire: &mut wire,
+                src,
+                dst: f.addr,
+                name: node_name(&f),
+                class: class_of(noun),
             };
-            let mark = if n > 0 {
-                format!("  ! {n} status entries, see \"status\"")
-            } else {
-                String::new()
-            };
-            let uid = f.identity.map_or("-".into(), |i| nodes::uid_hex(&i.uid));
-            println!(
-                "{:#04x}     {:<16}  {uid:<24}  {}{mark}",
-                f.addr,
-                class_name(f.class()),
-                f.name.as_deref().unwrap_or("-")
-            );
+            println!("{}", config::config_read(&mut b, key)?);
         }
-        return Ok(0);
-    }
-
-    if cmd == "status" {
-        let mut wire = Framed::new(via.open()?);
-        let (src, found) = walk(&mut wire)?;
-        let targets: Vec<&Found> = if rest.len() > 1 {
-            rest[1..]
-                .iter()
-                .map(|spec| {
-                    let a = nodes::resolve(spec, &found)?;
-                    found
-                        .iter()
-                        .find(|f| f.addr == a)
-                        .ok_or_else(|| format!("the walk found no node {a:#04x}"))
-                })
-                .collect::<Result<_, String>>()?
-        } else {
-            found
-                .iter()
-                .filter(|f| f.class() == Some(CLASS_MOTOR))
-                .collect()
-        };
-        if targets.is_empty() {
-            return Err("the walk found no motor controller".into());
-        }
-        for f in targets {
-            let name = node_name(f);
-            let Some(value) = board_status(&mut wire, src, f.addr) else {
-                println!("{name}: no STATUS answer");
-                continue;
+        Command::Set {
+            noun,
+            target,
+            path,
+            value,
+            force,
+        } => {
+            let (key, _) = names::parse_path(&path).map_err(|p| p.msg)?;
+            check_problems(&names::write_checks(key), force)?;
+            let mut wire = wire_on(link)?;
+            let (src, f) = reach(&mut wire, &target, noun)?;
+            let mut b = Board {
+                wire: &mut wire,
+                src,
+                dst: f.addr,
+                name: node_name(&f),
+                class: class_of(noun),
             };
-            let mut link_pins = |i: u8| {
-                let mut pin =
-                    |k: store::Key| match nodes::read(&mut wire, src, f.addr, k).ok()?.value() {
-                        Some(store::Value::U8(p)) => Some(p),
-                        _ => None,
-                    };
-                Some((
-                    pin(store::LINK_TX.at(i).key())?,
-                    pin(store::LINK_RX.at(i).key())?,
-                ))
-            };
-            let pins: Vec<Option<(u8, u8)>> = (0..store::LINKS).map(&mut link_pins).collect();
-            for l in hoverboard_cli::status::lines(&name, &value, |i| {
-                pins.get(i as usize).copied().flatten()
-            }) {
+            let w = config::config_write(&mut b, key, &value, force)?;
+            for l in &w.warnings {
+                eprintln!("{l}");
+            }
+            for l in w.lines() {
                 println!("{l}");
             }
-        }
-        return Ok(0);
-    }
-
-    if cmd == "name" {
-        let [_, spec, text] = rest[..] else {
-            return Err("name needs <node> <text>".into());
-        };
-        let mut wire = Framed::new(via.open()?);
-        let (src, mut f) = reach(&mut wire, spec)?;
-        f.identity = identity_of(&mut wire, src, &f);
-        let key = store::DEVICE_NAME.key();
-        let r = nodes::write(
-            &mut wire,
-            src,
-            f.addr,
-            key,
-            store::Type::Str,
-            text.as_bytes(),
-        )?;
-        let shown = nodes::name_status(f.class(), r.status);
-        println!("device.name of {}: {shown}", label(&f));
-        return if r.status == net::walk::CFG_OK {
-            Ok(0)
-        } else {
-            Err(format!("refused: {shown}"))
-        };
-    }
-
-    if cmd == "config" {
-        let (spec, path, value) = match rest[..] {
-            [_, spec, path] => (spec, path, None),
-            [_, spec, path, value] => (spec, path, Some(value)),
-            _ => return Err("config needs <node> <path> [<value>]".into()),
-        };
-        let (key, _) = names::parse_path(path).map_err(|p| p.msg)?;
-        if value.is_some() {
-            let checks = names::write_checks(key);
-            for w in config::warnings(&checks, flags.force) {
-                eprintln!("{w}");
-            }
-            config::stop_on(&checks, flags.force)?;
-        }
-        let mut wire = Framed::new(via.open()?);
-        let (src, f) = reach(&mut wire, spec)?;
-        let mut b = Board {
-            wire: &mut wire,
-            src,
-            dst: f.addr,
-            name: node_name(&f),
-        };
-        match value {
-            None => println!("{}", config::config_read(&mut b, key)?),
-            Some(text) => {
-                let w = config::config_write(&mut b, key, text, flags.force)?;
-                for l in w.warnings {
-                    eprintln!("{l}");
-                }
-                for l in w.lines {
-                    println!("{l}");
-                }
+            if w.changed.is_some_and(is_machine) {
+                println!("{}", machine_only(&b.name));
             }
         }
-        return Ok(0);
-    }
-
-    if cmd == "watch" {
-        let secs = parse_secs(rest.get(1), "watch needs <secs> [<node>...]")?;
-        let given = board_list(&rest[2.min(rest.len())..])?;
-        let mut wire = Framed::new(via.open()?);
-        let watched = if given.is_empty() {
-            motor_controllers(&mut wire)?.1
-        } else {
-            attach(&mut wire)?;
-            given
-        };
-        let (tally, elapsed) = session(
-            &mut wire,
-            Tally::only(&watched),
-            secs,
-            None,
-            &AtomicBool::new(false),
-        );
-        print_summary(&tally, elapsed);
-        return Ok(0);
-    }
-
-    if cmd == "drive" {
-        let need = "drive needs <value> <secs> [<node>...]";
-        let value: i16 = rest
-            .get(1)
-            .ok_or(need)?
-            .parse()
-            .map_err(|_| format!("not a drive value (-32768..32767): {}", rest[1]))?;
-        let secs = parse_secs(rest.get(2), need)?;
-        let given = board_list(&rest[3.min(rest.len())..])?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
-            .map_err(|e| e.to_string())?;
-        let mut wire = Framed::new(via.open()?);
-        let (src, nodes) = if given.is_empty() {
-            motor_controllers(&mut wire)?
-        } else {
-            (attach(&mut wire)?, given)
-        };
-        let mut drive = Drive::new(src, nodes, value);
-        let (tally, elapsed) = session(&mut wire, Tally::new(), secs, Some(&mut drive), &stop);
-        for _ in 0..STOP_REPEATS {
-            for f in drive.stop() {
-                wire.send(&f);
-            }
-            std::thread::sleep(STOP_GAP);
-        }
-        if stop.load(Ordering::Relaxed) {
-            eprintln!("interrupted");
-        }
-        println!("neutral sent, power 0 sent");
-        print_summary(&tally, elapsed);
-        return Ok(0);
-    }
-
-    if cmd == "install-esp" {
-        let yes = rest.contains(&"--yes");
-        rest.retain(|a| *a != "--yes");
-        let need = "install-esp needs <image.bin> [<file>...] [--yes]";
-        let [_, image, ref files @ ..] = rest[..] else {
-            return Err(need.into());
-        };
-        if rest.iter().any(|a| a.starts_with("--")) {
-            return Err(need.into());
-        }
-        if node.is_some() {
-            return Err("install-esp takes no --node: it installs the bridge on the port".into());
-        }
-        return install_esp(given, image, files, yes).map(|()| 0);
-    }
-
-    if cmd == "erase-store" {
-        let yes = rest.contains(&"--yes");
-        rest.retain(|a| *a != "--yes");
-        if rest.len() != 1 {
-            return Err("erase-store takes [--yes]".into());
-        }
-        return erase_store(&via, node, yes).map(|()| 0);
-    }
-
-    if cmd == "update-esp" {
-        let need = "update-esp needs <bin> [--no-confirm]";
-        let path = *rest.get(1).ok_or(need)?;
-        let no_confirm = match &rest[2..] {
-            [] => false,
-            ["--no-confirm"] => true,
-            _ => return Err(need.into()),
-        };
-        return update_esp(&via, node, path, no_confirm).map(|()| 0);
-    }
-
-    // Read the ELF before the link, so a refused image costs no connection.
-    let image = if cmd == "flash" {
-        let path = rest.get(1).ok_or("flash needs an ELF path")?;
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        elf::check(&bytes).map_err(|e| e.to_string())?;
-        eprintln!("ELF checks passed (no wfi, code floor, required symbols)");
-        Some(elf::to_bin(&bytes).map_err(|e| e.to_string())?)
-    } else {
-        None
-    };
-
-    let mut c = esp_client(&via, node)?;
-    match cmd {
-        "info" => print_info(&c.info().map_err(e)?),
-        "id" => print_id(&c.target_id().map_err(e)?),
-        "clear-protection" => {
-            let id = c.target_id().map_err(e)?;
-            print_id(&id);
-            if !confirm(
-                "Clearing protection MASS-ERASES the chip: the stock firmware is lost unless it \
-                 was backed up with gdf130backup. Continue?",
-            ) {
-                return Err("not cleared".into());
-            }
-            c.clear_protection().map_err(e)?;
-            println!("cleared; USER byte recorded as {:#04x}", id.user);
-            print!("Power-cycle the board by hand, then press Enter. ");
-            let _ = std::io::stdout().flush();
-            let _ = std::io::stdin().lock().read_line(&mut String::new());
-            let after = c.target_id().map_err(e)?;
-            print_id(&after);
-            if after.rdp != 0xA5 || after.user != id.user {
-                return Err(format!(
-                    "the clear did not take: protection {:#04x}, USER {:#04x} (was {:#04x})",
-                    after.rdp, after.user, id.user
-                ));
-            }
-            println!("protection off, USER byte unchanged");
-        }
-        "disarm" => c.ctrl(Ctrl::Disarm).map_err(e)?,
-        "halt" => c.ctrl(Ctrl::Halt).map_err(e)?,
-        "resume" => c.ctrl(Ctrl::Resume).map_err(e)?,
-        "reset" => c.ctrl(Ctrl::Reset).map_err(e)?,
-        "reset-halt" => c.ctrl(Ctrl::ResetHalt).map_err(e)?,
-        "read" => {
-            let addr = parse_u32(rest.get(1).ok_or("read needs <addr> <len>")?)?;
-            let len = parse_u32(rest.get(2).ok_or("read needs <addr> <len>")?)? as usize;
-            hexdump(addr, &c.read(addr, len).map_err(e)?);
-        }
-        "write" => {
-            let addr = parse_u32(rest.get(1).ok_or("write needs <addr> <hex>")?)?;
-            let data = parse_hex(rest.get(2).ok_or("write needs <addr> <hex>")?)?;
-            if addr % 4 != 0 || data.len() % 4 != 0 {
-                return Err("write takes a word-aligned address and whole words".into());
-            }
-            c.write(addr, &data).map_err(e)?;
-        }
-        "flash" => {
-            let image = image.expect("read above");
-            let t0 = std::time::Instant::now();
-            let mut stage = None;
-            let mut times = StageTimes::new();
-            c.flash(&image, |p: Progress| {
-                times.on(p, t0.elapsed());
-                if stage.is_some() && stage != Some(p.stage) {
-                    eprintln!();
-                }
-                stage = Some(p.stage);
-                eprint!(
-                    "\r{:?} {}/{} ({:.1} s)   ",
-                    p.stage,
-                    p.done,
-                    p.total,
-                    t0.elapsed().as_secs_f32()
+        Command::Dump { noun, target, out } => {
+            let mut wire = wire_on(link)?;
+            let (src, f) = reach(&mut wire, &target, noun)?;
+            let mut b = Board {
+                wire: &mut wire,
+                src,
+                dst: f.addr,
+                name: node_name(&f),
+                class: class_of(noun),
+            };
+            let (reads, unknown) = config::read_board(&mut b, &config::dump_keys())?;
+            for k in unknown {
+                eprintln!(
+                    "warning: {}: the board does not know {}",
+                    b.name,
+                    names::path_of(k)
                 );
-            })
-            .map_err(e)?;
-            eprintln!();
-            println!(
-                "booted ({} B in {:.1} s)",
-                image.len(),
-                t0.elapsed().as_secs_f32()
-            );
-            let stages: Vec<String> = times
-                .durations()
-                .iter()
-                .map(|(name, d)| format!("{name} {:.2} s", d.as_secs_f32()))
-                .collect();
-            println!("stages: {}", stages.join(", "));
+            }
+            for l in config::left_out(&b.name, &reads) {
+                eprintln!("{l}");
+            }
+            let stored = reads
+                .values()
+                .filter(|r| r.status == net::walk::CFG_OK)
+                .count();
+            let text = serde_json::to_string_pretty(&config::to_file(&reads))
+                .map_err(|e| e.to_string())?
+                + "\n";
+            match out {
+                Some(p) => {
+                    std::fs::write(&p, text).map_err(|e| format!("{p}: {e}"))?;
+                    eprintln!("{}: {stored} stored keys written to {p}", b.name);
+                }
+                None => print!("{text}"),
+            }
         }
-        _ => unreachable!("{cmd} is in COMMANDS and handled above"),
+        Command::Files {
+            noun,
+            target,
+            files,
+            mode,
+            force,
+            yes,
+        } => {
+            let changes = files_command(link, noun, &target, &files, mode, force, yes)?;
+            if let Mode::Diff { .. } = mode {
+                return Ok(u8::from(changes));
+            }
+        }
+        Command::Compact { target } => {
+            let mut wire = wire_on(link)?;
+            let (src, f) = reach(&mut wire, &target, Noun::Board)?;
+            let status = nodes::compact(&mut wire, src, f.addr)?;
+            println!("{}: compact: {}", node_name(&f), nodes::status_name(status));
+            config_outcome(status)?;
+        }
+        Command::Status { targets } => board_status_cmd(link, &targets)?,
+        Command::Erase { target, yes } => board_erase(link, &target, yes)?,
+        Command::Swd { target, op } => board_swd(link, &target, &op)?,
+        Command::Nodes => machine_nodes(link)?,
+        Command::MachineGet { path } => machine_get(link, &path)?,
+        Command::MachineSet { path, value, force } => machine_set(link, &path, &value, force)?,
+        Command::MachineDump { out, from } => machine_dump(link, &out, from.as_deref())?,
+        Command::MachineFiles {
+            file: None, mode, ..
+        } => {
+            debug_assert!(matches!(mode, Mode::Diff { replace: false }));
+            return machine_diff_copies(link).map(u8::from);
+        }
+        Command::MachineFiles {
+            file: Some(path),
+            mode,
+            force,
+            yes,
+            maps,
+        } => return machine_files(link, &path, mode, force, yes, &maps),
+        Command::Watch { secs, targets } => {
+            let mut wire = wire_on(link)?;
+            let (_, watched) = guest_boards(&mut wire, &targets)?;
+            let (tally, elapsed) = session(
+                &mut wire,
+                Tally::only(&watched),
+                secs,
+                None,
+                &AtomicBool::new(false),
+            );
+            print_summary(&tally, elapsed);
+        }
+        Command::Drive {
+            value,
+            secs,
+            targets,
+        } => {
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
+                .map_err(|e| e.to_string())?;
+            let mut wire = wire_on(link)?;
+            let (src, boards) = guest_boards(&mut wire, &targets)?;
+            let mut drive = Drive::new(src, boards, value);
+            let (tally, elapsed) = session(&mut wire, Tally::new(), secs, Some(&mut drive), &stop);
+            for _ in 0..STOP_REPEATS {
+                for f in drive.stop() {
+                    wire.send(&f);
+                }
+                std::thread::sleep(STOP_GAP);
+            }
+            if stop.load(Ordering::Relaxed) {
+                eprintln!("interrupted");
+            }
+            println!("neutral sent, power 0 sent");
+            print_summary(&tally, elapsed);
+        }
+        Command::BridgeInfo { target } => {
+            let mut c = bridge_client(link, &target, true)?;
+            print_info(&c.info().map_err(|e| e.to_string())?);
+        }
+        Command::BridgeUpdate {
+            target,
+            bin,
+            no_confirm,
+        } => bridge_update(link, &target, &bin, no_confirm)?,
+        Command::BridgeInstall { image, files, yes } => bridge_install(given, &image, &files, yes)?,
     }
     Ok(0)
 }

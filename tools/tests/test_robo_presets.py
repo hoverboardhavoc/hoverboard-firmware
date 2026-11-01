@@ -45,7 +45,7 @@ CLONE = os.path.join(_ROOT, "reference", "robo-gd32")
 #: The committed presets, which are also the asset the app ships.
 PRESETS = os.path.join(_ROOT, rp.DEFAULT_OUT)
 
-#: The store's name table as `hoverboard-cli fields --json` prints it (`specs/cli-config.md`
+#: The store's name table as `hoverboard-cli board fields --json` prints it (`specs/cli-config.md`
 #: section 3), committed beside the tool; a hoverboard-cli test holds the file equal to the binary's
 #: output, so this suite checks against it with no Rust toolchain.
 FIELDS_JSON = os.path.join(_ROOT, "tools", "hoverboard-cli", "fields.json")

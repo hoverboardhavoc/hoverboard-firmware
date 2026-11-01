@@ -1,4 +1,4 @@
-//! `install-esp` (`specs/bridge-onboarding.md` section 3): a blank or reinstalled SuperMini made a
+//! `bridge install` (`specs/bridge-onboarding.md` section 3): a blank or reinstalled SuperMini made a
 //! bridge over its own USB port. The port is chosen here, the image checked, the guard decided, and
 //! the image written through the `espflash` library, which resets the C3 into its ROM loader with
 //! the USB-Serial-JTAG's control lines, loads Espressif's flasher stub and writes the image at
@@ -29,7 +29,7 @@ pub struct PortInfo {
     pub usb: Option<(u16, u16)>,
 }
 
-/// The link the command line names, as `install-esp` sees it.
+/// The link the command line names, as `bridge install` sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Given<'a> {
     /// No link: the port is looked for.
@@ -43,7 +43,8 @@ pub enum Given<'a> {
 }
 
 /// Why the install needs the port itself, for the refusals of the other links.
-const NEEDS_USB: &str = "install-esp needs the C3's USB port (--serial PORT): it resets the chip \
+const NEEDS_USB: &str =
+    "bridge install needs the C3's USB port (--serial PORT): it resets the chip \
                          into its ROM loader with the port's control lines, which";
 
 /// The serial ports the host lists, with their USB ids.
@@ -188,7 +189,7 @@ pub fn guard(answered: Option<&Answered>, yes: bool, terminal: bool) -> Guard {
     }
 }
 
-/// The app slot `ESP_INFO` reports, as `info` prints it.
+/// The app slot `ESP_INFO` reports, as `bridge info` prints it.
 pub fn slot_name(i: &EspInfo) -> String {
     let slot = match i.slot {
         SLOT_NONE => "neither app slot".to_string(),
@@ -201,7 +202,7 @@ pub fn slot_name(i: &EspInfo) -> String {
     }
 }
 
-/// The Wi-Fi state `ESP_INFO` reports, as `info` prints it.
+/// The Wi-Fi state `ESP_INFO` reports, as `bridge info` prints it.
 pub fn wifi_text(i: &EspInfo) -> String {
     let [a, b, c, d] = i.ip;
     match WifiState::from_u8(i.wifi) {
@@ -213,7 +214,7 @@ pub fn wifi_text(i: &EspInfo) -> String {
     }
 }
 
-/// `espflash`'s progress, printed in the form `flash` prints its own: the stage, the blocks done
+/// `espflash`'s progress, printed in the form `board flash` prints its own: the stage, the blocks done
 /// and the time.
 struct Progress {
     t0: Instant,
@@ -347,7 +348,7 @@ mod tests {
         );
         // --tcp and --device carry no control lines.
         let tcp = choose_port(Given::Tcp, std::slice::from_ref(&c3)).unwrap_err();
-        assert!(tcp.starts_with("install-esp needs the C3's USB port (--serial PORT)"));
+        assert!(tcp.starts_with("bridge install needs the C3's USB port (--serial PORT)"));
         assert!(tcp.ends_with("--tcp does not carry"), "{tcp}");
         assert!(choose_port(Given::Device, &[c3])
             .unwrap_err()

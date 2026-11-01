@@ -106,7 +106,7 @@ pub fn lines(name: &str, value: &[u8], link_pins: impl Fn(u8) -> Option<(u8, u8)
 
 /// The line `apply` and `replace` end with when a changed field is a pin: what the board's
 /// bring-up made of it at the next boot is in the boot report.
-pub const PIN_HINT: &str = "check the boot report with \"status\" after the next boot";
+pub const PIN_HINT: &str = "check the boot report with \"board status\" after the next boot";
 
 #[cfg(test)]
 mod tests {

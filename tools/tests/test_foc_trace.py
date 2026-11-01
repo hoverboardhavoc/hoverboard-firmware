@@ -4,7 +4,7 @@
 Run: python3 tools/tests/test_foc_trace.py
 
 Covers specs/foc-torque.md section 9, "tools": the decode of CTRL_OBS words 47 to 49 (and the other
-words the sampler prints) out of `hoverboard-cli read`'s hexdump, the word map against the
+words the sampler prints) out of `hoverboard-cli board read`'s hexdump, the word map against the
 firmware's own offset pins, the 0x4C read, and the host-side frame arithmetic of `--frame`
 (Clarke, forward Park, the sine table and `angle_path_offset`) against motorcontroller/commutation's check
 values. stdlib only, no hardware.
@@ -34,7 +34,7 @@ GAINS = 0x20000564
 
 
 def hexdump(addr, data):
-    """`hoverboard-cli read`'s output (tools/hoverboard-cli/src/main.rs, `hexdump`)."""
+    """`hoverboard-cli board read`'s output (tools/hoverboard-cli/src/main.rs, `hexdump`)."""
     rows = []
     for i in range(0, len(data), 16):
         rows.append(f"{addr + i:08x}: " + " ".join(f"{b:02x}" for b in data[i:i + 16]))
@@ -70,7 +70,8 @@ def block(**f):
 
 
 class FakeCli:
-    """hoverboard-cli behind a fake runner: RAM by address, and 0x4C per node."""
+    """hoverboard-cli behind a fake runner: RAM by address, and 0x4C per board (`board read`,
+    `board get`)."""
 
     def __init__(self, ram, cal=None):
         self.ram, self.cal, self.calls = dict(ram), dict(cal or {}), []
@@ -80,18 +81,18 @@ class FakeCli:
         cmd = [a for a in argv[1:]]
         while cmd and cmd[0].startswith("--"):
             cmd = cmd[2:]
-        if cmd[0] == "read":
-            addr, n = int(cmd[1], 16), int(cmd[2])
+        if cmd[:2] == ["board", "read"]:
+            addr, n = int(cmd[3], 16), int(cmd[4])
             data = bytes(self.ram.get(addr + i, 0) for i in range(n))
             return types.SimpleNamespace(returncode=0, stdout=hexdump(addr, data), stderr="")
-        if cmd[0] == "config":
-            node = cmd[1]
-            if node in self.cal:
-                v = self.cal[node]
-                out = f"0x4C.0 at 0x01 ({node}): ok {v} ({v:#06x})\n"
-            else:
-                out = f"0x4C.0 at 0x01 ({node}): armed \n"
-            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+        if cmd[:2] == ["board", "get"]:
+            board = cmd[2]
+            if board in self.cal:
+                v = self.cal[board]
+                out = f"rover-left: motors[0].current.cal = {v}\n"
+                return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+            err = f"error: no answer from {board}"
+            return types.SimpleNamespace(returncode=1, stdout="", stderr=err)
         return types.SimpleNamespace(returncode=2, stdout="", stderr="usage")
 
 
@@ -178,27 +179,29 @@ class Decode(unittest.TestCase):
     def test_bridge_argv_and_reads(self):
         words = block(iq=5, vq=-6)
         cli = FakeCli(ram_of(CTRL, words))
-        b = ft.Bridge("hb", ["--tcp", "bridge.local:5333"], node="0x02", run=cli)
+        b = ft.Bridge("hb", ["--tcp", "bridge.local:5333"], "rover-left", run=cli)
         self.assertEqual(b.read_words(CTRL, len(words)), [w & 0xFFFFFFFF for w in words])
-        self.assertEqual(cli.calls[0], ["hb", "--tcp", "bridge.local:5333", "--node", "0x02",
-                                        "read", f"0x{CTRL:08x}", str(4 * len(words))])
-        failing = ft.Bridge("hb", ["--tcp", "x:1"], run=lambda a: types.SimpleNamespace(
+        self.assertEqual(cli.calls[0], ["hb", "--tcp", "bridge.local:5333", "board", "read",
+                                        "rover-left", f"0x{CTRL:08x}", str(4 * len(words))])
+        failing = ft.Bridge("hb", ["--tcp", "x:1"], "0x01", run=lambda a: types.SimpleNamespace(
             returncode=1, stdout="", stderr="error: no answer"))
         with self.assertRaises(RuntimeError):
             failing.read_words(CTRL, 4)
 
     def test_the_cal_read(self):
         cli = FakeCli({}, cal={"left": 455, "low": 40})
-        b = ft.Bridge("hb", ["--tcp", "x:1"], node="0x02", run=cli)
-        self.assertEqual(ft.read_cal(b, "left"), (455, 455))
-        self.assertNotIn("--node", cli.calls[-1], "config addresses the node itself")
-        self.assertEqual(cli.calls[-1][-3:], ["config", "left", "0x4c.0"])
-        self.assertEqual(ft.read_cal(b, "low"), (40, swdobs.CURRENT_CAL_MIN), "the boot seam's clamp")
-        with self.assertRaises(SystemExit):
-            ft.read_cal(b, "armed-board")
-        self.assertEqual(ft.parse_config("0x4C.0 at 0x01: ok 455 (0x01c7)\n", 0x4C), ("ok", 455))
-        self.assertEqual(ft.parse_config("0x4C.0 at 0x01: armed \n", 0x4C), ("armed", None))
-        self.assertEqual(ft.parse_config("0x4E.0 at 0x01: ok 10000 (0x00002710)\n", 0x4C), (None, None))
+        board = lambda b: ft.Bridge("hb", ["--tcp", "x:1"], b, run=cli)
+        self.assertEqual(ft.read_cal(board("left")), (455, 455))
+        self.assertEqual(cli.calls[-1][-4:], ["board", "get", "left", "0x4c.0"])
+        self.assertEqual(ft.read_cal(board("low")), (40, swdobs.CURRENT_CAL_MIN), "the boot seam's clamp")
+        with self.assertRaises(SystemExit) as e:
+            ft.read_cal(board("silent-board"))
+        self.assertIn("no answer from silent-board", str(e.exception.code))
+        # `board get`'s line, stored or default.
+        self.assertEqual(ft.parse_get("rover-left: motors[0].current.cal = 455\n"), 455)
+        self.assertEqual(ft.parse_get("rover-left: motors[0].current.cal = 455 (default)\n"), 455)
+        self.assertEqual(ft.parse_get("rover-left: machine.mode = balance\n"), None)
+        self.assertEqual(ft.parse_get(""), None)
 
     def test_gains_text(self):
         t = ft.gains_text(GAINS, [4000, 1024, 119, 1024, 32767, 32767 * 1024])
@@ -336,14 +339,14 @@ class EndToEnd(unittest.TestCase):
                 mock.patch.object(ft.signal, "signal"), \
                 contextlib.redirect_stdout(out):
             with self.assertRaises(Stop):
-                ft.main(["--tcp", "bridge.local:5333", "--cal-node", "0x01", "--cli", "hb",
+                ft.main(["--tcp", "bridge.local:5333", "--board", "0x01", "--cli", "hb",
                          "--frame", "0", "1"])
         text = out.getvalue()
         self.assertIn(f"FOC_GAINS at 0x{GAINS:08x}", text)
         self.assertIn("kp_divisor 1024", text)
-        self.assertIn("motor.current_cal (0x4C) on 0x01 = 455", text)
+        self.assertIn("motors[0].current.cal (0x4C) on 0x01 = 455", text)
         reads = [c for c in cli.calls if "read" in c]
-        self.assertTrue(reads and all("--node" not in c for c in reads), "no --node, no bridge hop")
+        self.assertTrue(reads and all(c[3:6] == ["board", "read", "0x01"] for c in reads), reads)
         row = text.strip().splitlines()[-1].split()
         self.assertEqual(row[1], "-5000")
         self.assertEqual(row[10:16], ["-300", "150", "-12", "430", "430", "420"])
@@ -359,7 +362,7 @@ class EndToEnd(unittest.TestCase):
                 mock.patch.object(ft.subprocess, "run", side_effect=lambda argv, **_: cli(argv)), \
                 contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as e:
-                ft.main(["--tcp", "x:1", "--cal", "455", "--cli", "hb"])
+                ft.main(["--tcp", "x:1", "--board", "0x01", "--cal", "455", "--cli", "hb"])
         self.assertIn("magic", str(e.exception.code))
 
     def test_the_block_size_is_checked_against_the_map(self):

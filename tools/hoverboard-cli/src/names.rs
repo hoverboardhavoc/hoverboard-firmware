@@ -553,7 +553,7 @@ pub fn effect_name(e: store::Effect) -> &'static str {
     }
 }
 
-/// The name table as `fields --json` prints it (`specs/cli-config.md` section 3, "The other
+/// The name table as `board fields --json` prints it (`specs/cli-config.md` section 3, "The other
 /// consumers"): one object per row, for the tools that check their own copy of the names.
 pub fn table_json() -> Json {
     let rows = NAMES.iter().map(|r| {

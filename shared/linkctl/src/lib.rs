@@ -423,6 +423,12 @@ impl CyclicState {
     /// section 5). Cleared when it boots. Consumer: a client, which says "restart the board".
     pub const FLAG_REBOOT: u8 = 1 << 4;
 
+    /// `fault` bit13, `EV_MACHINE`: the board refuses to arm because a configured link's peer was
+    /// not heard or reports another [`Self::machine`] digest (`specs/machine-settings.md` section
+    /// 4.2). It blocks arming and nothing else. Consumer: a client, which marks the board
+    /// (`hoverboard-cli machine nodes`).
+    pub const FAULT_MACHINE: u16 = 1 << 13;
+
     /// `flags` bit7: lockdown, the stock master-shutdown semantic. The receiver treats it as a
     /// gating fault into the engagement machine (sub-state forced to 0, torque setpoint 0) for
     /// as long as it is asserted (level, latest-wins).
@@ -451,6 +457,11 @@ impl CyclicState {
     /// Reboot flag (bit4): a boot-effect field is written and not yet running.
     pub const fn reboot(&self) -> bool {
         self.flags & Self::FLAG_REBOOT != 0
+    }
+
+    /// The machine fault (`fault` bit13): the board refuses to arm until its peers agree.
+    pub const fn machine_mismatch(&self) -> bool {
+        self.fault & Self::FAULT_MACHINE != 0
     }
 
     /// Lockdown flag (bit7): lockdown -> immediate disengage on the receiver.

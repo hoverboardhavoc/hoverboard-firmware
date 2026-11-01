@@ -72,9 +72,22 @@ fn serve_with(
     connections: usize,
     setup: impl FnOnce(&mut Machine<'static>),
 ) -> After {
+    serve_heard(listener, connections, setup, Vec::new())
+}
+
+/// [`serve_with`], with the master putting each of `beat` (a `CYCLIC_STATE` PDU, its own or one
+/// it forwards from the slave) on its mailbox every 100 ms, which the bridge re-publishes on its
+/// links as the firmware's frames are.
+fn serve_heard(
+    listener: TcpListener,
+    connections: usize,
+    setup: impl FnOnce(&mut Machine<'static>),
+    beat: Vec<Vec<u8>>,
+) -> After {
     use hoverboard_cli::wire::Wire;
     let mut m = machine();
     setup(&mut m);
+    let mut next_beat = std::time::Instant::now();
     let mut ops = Vec::new();
     for _ in 0..connections {
         let mut tap = hoverboard_cli::wire::Framed::new(Tap::default());
@@ -97,6 +110,12 @@ fn serve_with(
                 }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(_) => break,
+            }
+            if !beat.is_empty() && std::time::Instant::now() >= next_beat {
+                for f in &beat {
+                    let _ = m.fw.link.send(f);
+                }
+                next_beat += Duration::from_millis(100);
             }
             let moved = m.step();
             loop {
@@ -140,13 +159,13 @@ fn cli(args: &[&str]) -> (bool, String, String) {
 }
 
 #[test]
-fn nodes_name_config_and_esp_commands_by_node() {
+fn the_noun_commands_by_target() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || serve(listener, 10));
 
     // The walk: the fresh bridge ends at 0x03 and the boards keep theirs.
-    let (ok, out, err) = cli(&[&tcp, "nodes"]);
+    let (ok, out, err) = cli(&[&tcp, "machine", "nodes"]);
     assert!(ok, "{err}");
     let rows: Vec<&str> = out.lines().collect();
     assert_eq!(rows.len(), 4, "{out}");
@@ -155,13 +174,14 @@ fn nodes_name_config_and_esp_commands_by_node() {
         "address  class             uid                       name"
     );
     // Each node's `IDENTITY`: a board's factory unique ID, the bridge's MAC and six zero bytes.
+    // The simulated boards send no CYCLIC_STATE, so each is marked silent.
     assert_eq!(
         rows[1],
-        "0x01     motor controller  010101010101010101010101  Hoverboard"
+        "0x01     motor controller  010101010101010101010101  Hoverboard  ! silent"
     );
     assert_eq!(
         rows[2],
-        "0x02     motor controller  020202020202020202020202  Hoverboard"
+        "0x02     motor controller  020202020202020202020202  Hoverboard  ! silent"
     );
     assert_eq!(
         rows[3],
@@ -169,25 +189,36 @@ fn nodes_name_config_and_esp_commands_by_node() {
     );
 
     // A name the bridge cannot advertise is refused with the rule, and the old one stays.
-    let (ok, out, err) = cli(&[&tcp, "name", "0x03", "Offroad master"]);
+    let (ok, out, err) = cli(&[
+        &tcp,
+        "bridge",
+        "set",
+        "0x03",
+        "device.name",
+        "Offroad master",
+    ]);
     assert!(!ok);
+    assert!(out.is_empty(), "{out}");
     let rule = "name must be 1 to 26 letters, digits or '-'";
-    assert_eq!(
-        out.trim(),
-        format!("device.name of 0x03 (hb-bridge-ab12): {rule}")
+    assert!(
+        err.contains(&format!("hb-bridge-ab12: device.name: refused: {rule}")),
+        "{err}"
     );
-    assert!(err.contains(&format!("refused: {rule}")), "{err}");
 
     // A name, then the node by that name.
-    let (ok, out, err) = cli(&[&tcp, "name", "0x03", "rover-esp"]);
+    let (ok, out, err) = cli(&[&tcp, "bridge", "set", "0x03", "device.name", "rover-esp"]);
     assert!(ok, "{err}");
-    assert_eq!(out.trim(), "device.name of 0x03 (hb-bridge-ab12): ok");
-    let (ok, out, err) = cli(&[&tcp, "config", "rover-esp", "0x02"]);
+    assert_eq!(
+        out,
+        "hb-bridge-ab12: device.name: \"hb-bridge-ab12\" (default) -> \"rover-esp\"\n\
+         1 takes effect at the next boot\n"
+    );
+    let (ok, out, err) = cli(&[&tcp, "bridge", "get", "rover-esp", "0x02"]);
     assert!(ok, "{err}");
     assert_eq!(out.trim(), "rover-esp: device.name = \"rover-esp\"");
 
     // A key the board's image does not know: forced past the name table, refused by the board.
-    let (ok, _, err) = cli(&[&tcp, "config", "0x01", "0x99", "5", "--force"]);
+    let (ok, _, err) = cli(&[&tcp, "board", "set", "0x01", "0x99", "5", "--force"]);
     assert!(!ok);
     assert!(
         err.contains("warning: 0x99 is not in the name table"),
@@ -198,27 +229,30 @@ fn nodes_name_config_and_esp_commands_by_node() {
         "{err}"
     );
 
-    // An ESP command to the bridge on the link, and by name through the walk.
-    let (ok, out, err) = cli(&[&tcp, "info"]);
+    // A bridge command to the bridge on the link by its address, and by name through the walk.
+    let (ok, out, err) = cli(&[&tcp, "bridge", "info", "0x03"]);
     assert!(ok, "{err}");
     assert!(out.contains("node        0x03"), "{out}");
     assert!(out.contains("store       mounted"), "{out}");
-    let (ok, out, err) = cli(&[&tcp, "--node", "rover-esp", "info"]);
+    let (ok, out, err) = cli(&[&tcp, "bridge", "info", "rover-esp"]);
     assert!(ok, "{err}");
     assert!(out.contains("node        0x03"), "{out}");
 
     // A motor controller is not a bridge.
-    let (ok, _, err) = cli(&[&tcp, "--node=0x01", "info"]);
+    let (ok, _, err) = cli(&[&tcp, "bridge", "info", "0x01"]);
     assert!(!ok);
-    assert!(err.contains("motor controller, not a bridge"), "{err}");
+    assert!(
+        err.contains("0x01 (0101...) is a motor controller, not a bridge: use the board commands"),
+        "{err}"
+    );
 
-    // `drive` with no nodes drives the motor controllers the walk found.
-    let (ok, out, err) = cli(&[&tcp, "drive", "300", "1"]);
+    // `machine drive` with no boards drives the motor controllers the walk found.
+    let (ok, out, err) = cli(&[&tcp, "machine", "drive", "300", "1"]);
     assert!(ok, "{err}");
     assert!(out.contains("neutral sent, power 0 sent"), "{out}");
 
-    // `watch` with nodes given only attaches.
-    let (ok, _, err) = cli(&[&tcp, "watch", "1", "0x01"]);
+    // `machine watch` with boards given by address only attaches.
+    let (ok, _, err) = cli(&[&tcp, "machine", "watch", "1", "0x01"]);
     assert!(ok, "{err}");
 
     let after = server.join().unwrap();
@@ -254,7 +288,8 @@ fn a_boards_store_as_a_file_through_the_binary() {
     // The refusals that need no board come first: they open no link.
     let (ok, _, err) = cli(&[
         "--tcp=127.0.0.1:9",
-        "config",
+        "board",
+        "set",
         "rover-left",
         "machine.mod",
         "balance",
@@ -266,7 +301,8 @@ fn a_boards_store_as_a_file_through_the_binary() {
     );
     let (ok, _, err) = cli(&[
         "--tcp=127.0.0.1:9",
-        "config",
+        "board",
+        "set",
         "x",
         "machine.mode.1",
         "balance",
@@ -277,17 +313,33 @@ fn a_boards_store_as_a_file_through_the_binary() {
         "error: machine.mode has one index (--force writes index 1 anyway)"
     );
     let missing = scratch("missing.json");
-    let (code, _, err) = cli_code(&["--tcp=127.0.0.1:9", "diff", "x", &missing]);
+    let (code, _, err) = cli_code(&["--tcp=127.0.0.1:9", "board", "diff", "x", &missing]);
     assert_eq!(code, Some(2), "{err}");
     // diff's 1 means changes alone: a usage error is 2 like any other, wherever it stands.
     for args in [
-        &["--tcp=127.0.0.1:9", "diff", "x", "f.json", "--bogus"][..],
-        &["--bogus", "--tcp=127.0.0.1:9", "diff", "x", "f.json"],
-        &["--tcp=127.0.0.1:9", "diff", "--yes", "x", "f.json"],
-        &["--tcp=127.0.0.1:9", "diff"],
+        &[
+            "--tcp=127.0.0.1:9",
+            "board",
+            "diff",
+            "x",
+            "f.json",
+            "--bogus",
+        ][..],
+        &[
+            "--bogus",
+            "--tcp=127.0.0.1:9",
+            "board",
+            "diff",
+            "x",
+            "f.json",
+        ],
+        &["--tcp=127.0.0.1:9", "board", "diff", "--yes", "x", "f.json"],
+        &["--tcp=127.0.0.1:9", "board", "diff"],
+        &["--tcp=127.0.0.1:9", "machine", "diff", "--yes"],
         &[
             "--tcp=127.0.0.1:9",
             "--tcp=127.0.0.1:9",
+            "board",
             "diff",
             "x",
             "f.json",
@@ -297,7 +349,14 @@ fn a_boards_store_as_a_file_through_the_binary() {
         assert_eq!(code, Some(2), "{args:?}: {err}");
         assert!(err.starts_with("error: "), "{err}");
     }
-    let (code, _, err) = cli_code(&["--bogus", "--tcp=127.0.0.1:9", "apply", "x", "f.json"]);
+    let (code, _, err) = cli_code(&[
+        "--bogus",
+        "--tcp=127.0.0.1:9",
+        "board",
+        "apply",
+        "x",
+        "f.json",
+    ]);
     assert_eq!(
         (code, err.trim()),
         (Some(1), "error: unknown option --bogus")
@@ -306,19 +365,44 @@ fn a_boards_store_as_a_file_through_the_binary() {
     let empty = scratch("empty.json");
     std::fs::write(&empty, "{}").unwrap();
     for args in [
-        &["--tcp", "127.0.0.1:9", "--yes", "diff", "x", &empty][..],
-        &["--replace", "--tcp=127.0.0.1:9", "diff", "x", &empty],
-        &["--tcp=127.0.0.1:9", "--replace", "diff", "x", &empty],
+        &[
+            "--tcp",
+            "127.0.0.1:9",
+            "--force",
+            "board",
+            "diff",
+            "x",
+            &empty,
+        ][..],
+        &[
+            "--replace",
+            "--tcp=127.0.0.1:9",
+            "board",
+            "diff",
+            "x",
+            &empty,
+        ],
+        &[
+            "--tcp=127.0.0.1:9",
+            "--replace",
+            "board",
+            "diff",
+            "x",
+            &empty,
+        ],
     ] {
         let (code, _, err) = cli_code(args);
         assert_eq!(code, Some(2), "{args:?}: {err}");
     }
-    // An unknown command word is a usage error before any link is opened.
+    // An unknown command, or an old flat one, is a usage error before any link is opened.
     let idle = TcpListener::bind("127.0.0.1:0").unwrap();
     let at = format!("--tcp={}", idle.local_addr().unwrap());
     for args in [
         &[at.as_str(), "bogus"][..],
         &["--yes", at.as_str(), "bogus", "x"],
+        &[at.as_str(), "nodes"],
+        &[at.as_str(), "config", "0x01", "machine.mode"],
+        &[at.as_str(), "board", "nodes"],
     ] {
         let (code, _, err) = cli_code(args);
         assert_eq!(code, Some(1), "{args:?}: {err}");
@@ -341,7 +425,7 @@ fn a_boards_store_as_a_file_through_the_binary() {
     };
 
     // One field at a time, by name or by number.
-    let (code, out, err) = run(&["config", "0x01", "device.name", "rover-left"]);
+    let (code, out, err) = run(&["board", "set", "0x01", "device.name", "rover-left"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
@@ -349,20 +433,21 @@ fn a_boards_store_as_a_file_through_the_binary() {
         "Hoverboard: device.name: \"Hoverboard\" (default) -> \"rover-left\"\n\
          1 takes effect at the next boot\n"
     );
-    let (code, out, err) = run(&["config", "rover-left", "machine.mode", "balance"]);
+    let (code, out, err) = run(&["board", "set", "rover-left", "machine.mode", "balance"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
         "rover-left: machine.mode: throttle (default) -> balance\n\
-         1 takes effect at the next arm\n"
+         1 takes effect at the next arm\n\
+         machine fields changed on rover-left only: the boards now differ (\"machine diff\")\n"
     );
-    let (code, out, err) = run(&["config", "0x01", "0x40.1", "PB5"]);
+    let (code, out, err) = run(&["board", "set", "0x01", "0x40.1", "PB5"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
         "rover-left: motors[1].hall.a: none (default) -> PB5\n1 takes effect at the next boot\n"
     );
-    let (code, _, err) = run(&["config", "rover-lft", "machine.mode", "balance"]);
+    let (code, _, err) = run(&["board", "set", "rover-lft", "machine.mode", "balance"]);
     assert_eq!(code, Some(1));
     assert!(
         err.contains("no node named rover-lft (nodes: rover-left, Hoverboard, hb-bridge-ab12)"),
@@ -371,7 +456,7 @@ fn a_boards_store_as_a_file_through_the_binary() {
 
     // Dump, then a diff against the dump reports nothing.
     let file = scratch("rover-left.json");
-    let (code, _, err) = run(&["dump", "rover-left", &file]);
+    let (code, _, err) = run(&["board", "dump", "rover-left", &file]);
     assert_eq!(code, Some(0), "{err}");
     assert!(
         err.contains("rover-left: 3 stored keys written to"),
@@ -387,14 +472,14 @@ fn a_boards_store_as_a_file_through_the_binary() {
             "motors": [{}, { "hall": { "a": "PB5" } }],
         })
     );
-    let (code, out, err) = run(&["diff", "rover-left", &file]);
+    let (code, out, err) = run(&["board", "diff", "rover-left", &file]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-left: 0 changed, 0 pinned, 3 unchanged");
 
     // A stray key: kept by a merge, un-stored by a replace.
-    let (code, _, err) = run(&["config", "rover-left", "machine.frame", "rigid"]);
+    let (code, _, err) = run(&["board", "set", "rover-left", "machine.frame", "rigid"]);
     assert_eq!(code, Some(0), "{err}");
-    let (code, out, err) = run(&["diff", "--replace", "rover-left", &file]);
+    let (code, out, err) = run(&["board", "diff", "--replace", "rover-left", &file]);
     assert_eq!(code, Some(1), "{err}");
     assert_eq!(
         out,
@@ -403,34 +488,35 @@ fn a_boards_store_as_a_file_through_the_binary() {
          1 takes effect at the next arm\n"
     );
     // Without a terminal, replace refuses rather than asking; with --yes it un-stores.
-    let (code, _, err) = run(&["replace", "rover-left", &file]);
+    let (code, _, err) = run(&["board", "replace", "rover-left", &file]);
     assert_eq!(code, Some(1));
     assert!(
         err.contains("rover-left: replace would un-store 1 keys; give --yes"),
         "{err}"
     );
-    let (code, out, err) = run(&["replace", "rover-left", &file, "--yes"]);
+    let (code, out, err) = run(&["board", "replace", "rover-left", &file, "--yes"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
         "rover-left: 0 changed, 0 pinned, 3 unchanged, 1 un-stored\n\
          rover-left: machine.frame: rigid -> pivoting (default)\n\
-         1 takes effect at the next arm\n"
+         1 takes effect at the next arm\n\
+         machine fields changed on rover-left only: the boards now differ (\"machine diff\")\n"
     );
-    let (code, out, err) = run(&["compact", "rover-left"]);
+    let (code, out, err) = run(&["board", "compact", "rover-left"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-left: compact: ok");
-    let (code, out, err) = run(&["diff", "--replace", "rover-left", &file]);
+    let (code, out, err) = run(&["board", "diff", "--replace", "rover-left", &file]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-left: 0 changed, 0 pinned, 3 unchanged");
-    let (code, out, err) = run(&["config", "rover-left", "machine.frame"]);
+    let (code, out, err) = run(&["board", "get", "rover-left", "machine.frame"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-left: machine.frame = pivoting (default)");
 
     // apply merges: a file naming one changed key writes it and keeps the rest.
     let machine = scratch("machine.json");
     std::fs::write(&machine, r#"{ "machine": { "mode": "throttle" } }"#).unwrap();
-    let (code, out, err) = run(&["apply", "rover-left", &machine]);
+    let (code, out, err) = run(&["board", "apply", "rover-left", &machine]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
@@ -438,12 +524,13 @@ fn a_boards_store_as_a_file_through_the_binary() {
          rover-left: machine.mode: balance -> throttle\n\
          rover-left: kept: device.name = \"rover-left\" (stored, not in the file)\n\
          rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n\
-         1 takes effect at the next arm\n"
+         1 takes effect at the next arm\n\
+         machine fields changed on rover-left only: the boards now differ (\"machine diff\")\n"
     );
     // A pin ends with where to see what the board made of it.
     let links = scratch("links.json");
     std::fs::write(&links, r#"{ "links": [{ "tx": "PA2", "rx": "PA3" }] }"#).unwrap();
-    let (code, out, err) = run(&["apply", "rover-left", &links]);
+    let (code, out, err) = run(&["board", "apply", "rover-left", &links]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
@@ -454,7 +541,7 @@ fn a_boards_store_as_a_file_through_the_binary() {
          rover-left: kept: machine.mode = throttle (stored, not in the file)\n\
          rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n\
          2 take effect at the next boot\n\
-         check the boot report with \"status\" after the next boot\n"
+         check the boot report with \"board status\" after the next boot\n"
     );
     server.join().unwrap();
 }
@@ -480,7 +567,7 @@ fn a_secret_through_the_binary_is_never_printed_and_diff_always_counts_it() {
     )
     .unwrap();
 
-    let (code, out, err) = run(&["apply", "0x01", &creds]);
+    let (code, out, err) = run(&["board", "apply", "0x01", &creds]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
@@ -491,7 +578,7 @@ fn a_secret_through_the_binary_is_never_printed_and_diff_always_counts_it() {
     );
     assert!(!out.contains(PASS) && !err.contains(PASS), "{out}{err}");
 
-    let (code, out, err) = run(&["diff", "0x01", &creds]);
+    let (code, out, err) = run(&["board", "diff", "0x01", &creds]);
     assert_eq!(code, Some(1), "{err}");
     assert_eq!(
         out,
@@ -501,7 +588,7 @@ fn a_secret_through_the_binary_is_never_printed_and_diff_always_counts_it() {
     );
     assert!(!out.contains(PASS) && !err.contains(PASS), "{out}{err}");
 
-    let (code, out, err) = run(&["config", "0x01", "wifi.pass"]);
+    let (code, out, err) = run(&["board", "get", "0x01", "wifi.pass"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "Hoverboard: wifi.pass = (set)");
     server.join().unwrap();
@@ -526,7 +613,7 @@ fn a_value_one_pdu_cannot_carry_is_refused_before_any_link_or_install() {
 
     let idle = TcpListener::bind("127.0.0.1:0").unwrap();
     let at = format!("--tcp={}", idle.local_addr().unwrap());
-    let (code, out, err) = cli_code(&[&at, "apply", "0x01", &creds]);
+    let (code, out, err) = cli_code(&[&at, "board", "apply", "0x01", &creds]);
     assert_eq!(code, Some(1));
     assert_eq!(err.trim(), refusal);
     assert!(!out.contains(&long) && !err.contains(&long));
@@ -544,7 +631,9 @@ fn a_value_one_pdu_cannot_carry_is_refused_before_any_link_or_install() {
     bytes[0] = 0xE9;
     std::fs::write(&image, bytes).unwrap();
     let port = scratch("no-such-port");
-    let (code, out, err) = cli_code(&["--serial", &port, "install-esp", &image, &creds, "--yes"]);
+    let (code, out, err) = cli_code(&[
+        "--serial", &port, "bridge", "install", &image, &creds, "--yes",
+    ]);
     assert_eq!(code, Some(1));
     assert_eq!(err.trim(), refusal);
     assert!(out.is_empty(), "{out}");
@@ -563,28 +652,29 @@ fn an_address_needs_no_walk_and_a_name_does() {
         a.extend_from_slice(args);
         cli_code(&a)
     };
-    let (code, out, err) = run(&["config", "0x02", "machine.mode"]);
+    let (code, out, err) = run(&["board", "get", "0x02", "machine.mode"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "Hoverboard: machine.mode = throttle (default)");
-    let (code, _, err) = run(&["config", "0x02", "device.name", "rover-right"]);
+    let (code, _, err) = run(&["board", "set", "0x02", "device.name", "rover-right"]);
     assert_eq!(code, Some(0), "{err}");
     // The prefix is the name the read returns.
-    let (code, out, err) = run(&["config", "0x02", "machine.mode"]);
+    let (code, out, err) = run(&["board", "get", "0x02", "machine.mode"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-right: machine.mode = throttle (default)");
-    let (code, out, err) = run(&["config", "rover-right", "machine.mode"]);
+    let (code, out, err) = run(&["board", "get", "rover-right", "machine.mode"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-right: machine.mode = throttle (default)");
     // An address nothing answers: an error naming it, and no walk to fall back on.
-    let (code, _, err) = run(&["config", "0x05", "machine.mode"]);
+    let (code, _, err) = run(&["board", "get", "0x05", "machine.mode"]);
     assert_eq!(code, Some(1));
     assert!(
         err.contains(
-            "no answer from 0x05; `hoverboard-cli nodes` lists the nodes this link reaches"
+            "no answer from 0x05; `hoverboard-cli machine nodes` lists the nodes this link \
+             reaches"
         ),
         "{err}"
     );
-    let (code, out, err) = run(&["compact", "0x02"]);
+    let (code, out, err) = run(&["board", "compact", "0x02"]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-right: compact: ok");
 
@@ -604,8 +694,8 @@ fn an_address_needs_no_walk_and_a_name_does() {
 #[test]
 fn fields_json_is_the_committed_name_table() {
     // `tools/robo-presets.py`'s test checks its names against this file, so the file must be what
-    // the binary prints: regenerate it with `hoverboard-cli fields --json > fields.json`.
-    let (ok, out, err) = cli(&["fields", "--json"]);
+    // the binary prints: regenerate it with `hoverboard-cli board fields --json > fields.json`.
+    let (ok, out, err) = cli(&["board", "fields", "--json"]);
     assert!(ok, "{err}");
     // A checkout that turned the file's line ends into CRLF still holds the same table.
     let committed = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/fields.json"))
@@ -613,7 +703,7 @@ fn fields_json_is_the_committed_name_table() {
         .replace("\r\n", "\n");
     assert!(
         out == committed,
-        "tools/hoverboard-cli/fields.json is not `hoverboard-cli fields --json`'s output"
+        "tools/hoverboard-cli/fields.json is not `hoverboard-cli board fields --json`'s output"
     );
 }
 
@@ -669,9 +759,9 @@ fn over_a_boards_own_link_an_esp_command_finds_no_bridge() {
             }
         }
     });
-    let (ok, _, err) = cli(&[&tcp, "info"]);
+    let (ok, _, err) = cli(&[&tcp, "bridge", "info", "0x01"]);
     assert!(!ok);
-    assert!(err.contains("no bridge on this machine"), "{err}");
+    assert!(err.contains("motor controller, not a bridge"), "{err}");
     drop(server);
 }
 
@@ -720,7 +810,7 @@ fn status_reads_the_boot_report_from_each_motor_controller() {
         })
     });
 
-    let (ok, out, err) = cli(&[&tcp, "status"]);
+    let (ok, out, err) = cli(&[&tcp, "board", "status"]);
     assert!(ok, "{err}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -738,18 +828,19 @@ fn status_reads_the_boot_report_from_each_motor_controller() {
         "{out}"
     );
 
-    let (ok, out, err) = cli(&[&tcp, "status", "0x02"]);
+    let (ok, out, err) = cli(&[&tcp, "board", "status", "0x02"]);
     assert!(ok, "{err}");
     assert_eq!(out, "Hoverboard: ok\n");
 
-    let (ok, out, err) = cli(&[&tcp, "nodes"]);
+    let (ok, out, err) = cli(&[&tcp, "machine", "nodes"]);
     assert!(ok, "{err}");
     let rows: Vec<&str> = out.lines().collect();
     assert!(
-        rows[1].starts_with("0x01") && rows[1].ends_with("! 7 status entries, see \"status\""),
+        rows[1].starts_with("0x01")
+            && rows[1].ends_with("! silent, 7 status entries (\"board status\")"),
         "{out}"
     );
-    assert!(!rows[2].contains('!'), "{out}");
+    assert!(rows[2].ends_with("Hoverboard  ! silent"), "{out}");
     server.join().unwrap();
 }
 
@@ -814,24 +905,29 @@ fn erase_store_prints_what_a_dump_leaves_out_refuses_without_a_terminal_and_eras
         cli_code(&a)
     };
 
-    let (code, _, err) = run(&["config", "0x01", "device.name", "rover-left"]);
+    let (code, _, err) = run(&["board", "set", "0x01", "device.name", "rover-left"]);
     assert_eq!(code, Some(0), "{err}");
-    let (code, _, err) = run(&["config", "0x01", "motors.0.odometer", "123456", "--force"]);
+    let (code, _, err) = run(&[
+        "board",
+        "set",
+        "0x01",
+        "motors.0.odometer",
+        "123456",
+        "--force",
+    ]);
     assert_eq!(code, Some(0), "{err}");
 
-    // Usage: nothing but --yes, and no link opened for it.
-    let (code, _, err) = cli_code(&["--tcp=127.0.0.1:9", "erase-store", "now"]);
-    assert_eq!(
-        (code, err.trim()),
-        (Some(1), "error: erase-store takes [--yes]")
-    );
+    // Usage: a board and --yes, and no link opened for it.
+    let (code, _, err) = cli_code(&["--tcp=127.0.0.1:9", "board", "erase", "0x01", "now"]);
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("error: usage: "), "{err}");
 
     // Without a terminal (the test's stdin is not one) and without --yes: the lines, then the
-    // refusal, and no STORE_ERASE sent. The board is the one behind the bridge on the link.
-    let restore = "  write it back with: hoverboard-cli config rover-left motors.0.odometer \
+    // refusal, and no STORE_ERASE sent. The board's own bridge is the one on the link.
+    let restore = "  write it back with: hoverboard-cli board set rover-left motors.0.odometer \
                    123456 --force";
     let lines = |out: &str| out.lines().map(str::to_string).collect::<Vec<_>>();
-    let (code, out, err) = run(&["erase-store"]);
+    let (code, out, err) = run(&["board", "erase", "0x01"]);
     assert_eq!(code, Some(1), "{out}{err}");
     assert_eq!(
         lines(&out),
@@ -844,13 +940,13 @@ fn erase_store_prints_what_a_dump_leaves_out_refuses_without_a_terminal_and_eras
         "{out}"
     );
     assert!(
-        err.contains("rover-left: erase-store erases every stored setting; give --yes"),
+        err.contains("rover-left: board erase erases every stored setting; give --yes"),
         "{err}"
     );
 
-    // By the bridge's name too; with --yes it erases, waits for the mailbox, and gives the board
+    // By the board's name too; with --yes it erases, waits for the mailbox, and gives the board
     // its old address back through the bridge's mailbox port.
-    let (code, out, err) = run(&["--node", "hb-bridge-ab12", "erase-store", "--yes"]);
+    let (code, out, err) = run(&["board", "erase", "rover-left", "--yes"]);
     assert_eq!(code, Some(0), "{out}{err}");
     assert_eq!(lines(&out)[2], restore, "{out}");
     assert_eq!(
@@ -859,10 +955,13 @@ fn erase_store_prints_what_a_dump_leaves_out_refuses_without_a_terminal_and_eras
         "{out}"
     );
 
-    // A motor controller is not a bridge.
-    let (code, _, err) = run(&["--node", "0x02", "erase-store", "--yes"]);
+    // The slave has no bridge on its mailbox: refused before anything is erased.
+    let (code, _, err) = run(&["board", "erase", "0x02", "--yes"]);
     assert_eq!(code, Some(1));
-    assert!(err.contains("motor controller, not a bridge"), "{err}");
+    assert!(
+        err.contains("no bridge is wired to 0x02 (Hoverboard, 0202...)"),
+        "{err}"
+    );
 
     let after = server.join().unwrap();
     let erase = espsvc::OP_STORE_ERASE;
@@ -880,4 +979,283 @@ fn erase_store_prints_what_a_dump_leaves_out_refuses_without_a_terminal_and_eras
         after.store_pages.iter().all(|&h| h == 0xFFFF),
         "the master's store pages are erased"
     );
+}
+
+/// A `CYCLIC_STATE` PDU from board `src` with `fault`, `flags` and the machine digest `machine`,
+/// every other word zero, as a board sends it to `0x00` on its mailbox.
+fn cyclic(src: u8, fault: u16, flags: u8, machine: u16) -> Vec<u8> {
+    use linkctl::{ChipTag, CyclicObs, CyclicState};
+    let s = CyclicState {
+        pitch: 0,
+        roll: 0,
+        wheel_speed: 0,
+        battery: 0,
+        mode: 0,
+        fault,
+        flags,
+        peer_demand: 0,
+        wheel_pos: 0,
+        obs: CyclicObs {
+            phase_peak: 0,
+            phase_mean: 0,
+            duty_on: 0,
+            boot_tag: 0,
+            chip: ChipTag::Unknown,
+            odometer: 0,
+        },
+        wheel_rate: 0,
+        machine,
+    };
+    let mut b = [0u8; CyclicState::ENCODED_LEN];
+    let n = s.encode(&mut b);
+    let mut buf = [0u8; 64];
+    let k = net::pdu::Pdu::new(linkctl::OP_CYCLIC_STATE, src, 0x00, &b[..n])
+        .unwrap()
+        .encode(&mut buf)
+        .unwrap();
+    buf[..k].to_vec()
+}
+
+/// `specs/machine-settings.md` section 6.3: `machine nodes` marks each board from the frames it
+/// hears after the walk, and `machine apply` ends with whether the reported digests agree.
+#[test]
+fn machine_nodes_marks_each_board_from_its_frames() {
+    use linkctl::CyclicState as C;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let beat = vec![
+        cyclic(0x01, C::FAULT_MACHINE, C::FLAG_REARM, 0x1234),
+        cyclic(0x02, 0, C::FLAG_REBOOT, 0x5678),
+    ];
+    let server = std::thread::spawn(move || serve_heard(listener, 2, |_| {}, beat));
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+    let (code, out, err) = run(&["machine", "nodes"]);
+    assert_eq!(code, Some(0), "{err}");
+    let rows: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        rows[1],
+        "0x01     motor controller  010101010101010101010101  Hoverboard  ! machine differs \
+         (\"machine diff\"), written, runs at the next arm"
+    );
+    assert_eq!(
+        rows[2],
+        "0x02     motor controller  020202020202020202020202  Hoverboard  ! written, runs at the \
+         next boot"
+    );
+    assert!(rows[3].ends_with("hb-bridge-ab12"), "{out}");
+
+    let file = scratch("heard.json");
+    std::fs::write(&file, r#"{ "machine": { "mode": "balance" } }"#).unwrap();
+    let (code, out, err) = run(&["machine", "apply", &file]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out.lines().last(),
+        Some("machine digests differ: Hoverboard 0x1234, Hoverboard 0x5678 (\"machine diff\")"),
+        "{out}"
+    );
+    server.join().unwrap();
+}
+
+/// The `machine` commands over the simulated machine: a field to every board, the copies that
+/// differ, the machine file out and back, and the files of the wrong kind refused.
+#[test]
+fn the_machine_commands_through_the_binary() {
+    let left = "010101010101010101010101";
+    let right = "020202020202020202020202";
+    // The refusals that need no machine open no link.
+    let idle = "--tcp=127.0.0.1:9";
+    let (code, _, err) = cli_code(&[idle, "machine", "get", "leds.green"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("leds.green is not a machine field"), "{err}");
+    let machine_file = scratch("machine-kind.json");
+    std::fs::write(&machine_file, r#"{ "boards": {} }"#).unwrap();
+    let (code, _, err) = cli_code(&[idle, "board", "apply", "0x01", &machine_file]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("a machine file (it has \"boards\"): give it to the machine commands"),
+        "{err}"
+    );
+    let board_file = scratch("board-kind.json");
+    std::fs::write(&board_file, r#"{ "leds": { "green": "PB3" } }"#).unwrap();
+    let (code, _, err) = cli_code(&[idle, "machine", "apply", &board_file]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("is a board file (it has \"leds\"): give it to the board commands"),
+        "{err}"
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 15));
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+    let (code, _, err) = run(&["board", "set", "0x01", "device.name", "rover-left"]);
+    assert_eq!(code, Some(0), "{err}");
+    let (code, _, err) = run(&["board", "set", "0x02", "device.name", "rover-right"]);
+    assert_eq!(code, Some(0), "{err}");
+
+    // A machine field to every motor controller, read back as one value.
+    let (code, out, err) = run(&["machine", "set", "machine.mode", "balance"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "rover-left: machine.mode: throttle (default) -> balance\n\
+         rover-right: machine.mode: throttle (default) -> balance\n\
+         2 take effect at the next arm\n"
+    );
+    let (code, out, err) = run(&["machine", "get", "machine.mode"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "machine.mode = balance\n");
+
+    // One board's copy changed through `board`: the boards differ, and `machine diff` says how.
+    let (code, out, err) = run(&["board", "set", "rover-left", "machine.frame", "rigid"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        out.ends_with(
+            "machine fields changed on rover-left only: the boards now differ (\"machine diff\")\n"
+        ),
+        "{out}"
+    );
+    let (code, out, err) = run(&["machine", "diff"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert_eq!(
+        out,
+        "machine.frame: rover-left rigid, rover-right pivoting (default)\n"
+    );
+    let (code, out, err) = run(&["machine", "get", "machine.frame"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "rover-left: machine.frame = rigid\nrover-right: machine.frame = pivoting (default)\n"
+    );
+
+    // The dump refuses copies that differ unless told which to write.
+    let file = scratch("machine.json");
+    let (code, _, err) = run(&["machine", "dump", &file]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("give --from <board>"), "{err}");
+    assert!(
+        err.contains("machine.frame: rover-left rigid, rover-right pivoting (default)"),
+        "{err}"
+    );
+    let (code, _, err) = run(&["machine", "dump", &file, "--from", "rover-left"]);
+    assert_eq!(code, Some(0), "{err}");
+    let dumped: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        dumped,
+        serde_json::json!({
+            "machine": { "mode": "balance", "frame": "rigid" },
+            "boards": {
+                left: { "device": { "name": "rover-left" } },
+                right: { "device": { "name": "rover-right" } },
+            },
+        })
+    );
+
+    // Applied back, every board takes the machine section and its own entry; the digests are
+    // not heard from the simulated boards.
+    let (code, out, err) = run(&["machine", "apply", &file]);
+    assert_eq!(code, Some(0), "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines.contains(&"rover-left: 0 changed, 0 pinned, 3 unchanged"),
+        "{out}"
+    );
+    assert!(
+        lines.contains(&"rover-right: machine.frame: pivoting (default) -> rigid"),
+        "{out}"
+    );
+    assert_eq!(
+        lines.last(),
+        Some(&"machine digests: nothing heard from rover-left, rover-right")
+    );
+    let (code, out, err) = run(&["machine", "diff"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "the boards' machine settings agree\n");
+
+    // A replaced controller: the file's right-hand entry names a uid not on the machine and the
+    // right board has no entry. Without a terminal it is refused, naming the --map that answers;
+    // with that --map the entry goes to the board.
+    let gone = "8adc39323335381255343333";
+    let swapped = scratch("swapped.json");
+    std::fs::write(
+        &swapped,
+        serde_json::json!({
+            "boards": {
+                left: { "device": { "name": "rover-left" } },
+                gone: { "device": { "name": "rover-new" } },
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code, out, err) = run(&["machine", "apply", &swapped]);
+    assert_eq!(code, Some(1));
+    assert!(out.is_empty(), "nothing written: {out}");
+    assert!(
+        err.contains(&format!(
+            "8adc... is not on this machine; write its entry to 0x02 (rover-right, 0202...): give \
+             --map {gone}=0x02 to write it without a terminal"
+        )),
+        "{err}"
+    );
+    let map = format!("{gone}=rover-right");
+    let (code, out, err) = run(&["machine", "apply", &swapped, "--map", &map]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        out.contains("rover-right: device.name: \"rover-right\" -> \"rover-new\""),
+        "{out}"
+    );
+
+    // An entry no board reports and no board to offer it to: skipped and listed, the rest
+    // written, exit 1.
+    let extra = scratch("extra.json");
+    std::fs::write(
+        &extra,
+        serde_json::json!({
+            "machine": { "turn": [12000, 600] },
+            "boards": {
+                left: {}, right: {}, gone: { "device": { "name": "elsewhere" } },
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (code, out, err) = run(&["machine", "apply", &extra]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        out.contains(&format!(
+            "{gone}: no board of this machine reports this uid; skipped"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("rover-new: machine.turn[0]: 0 (default) -> 12000"),
+        "{out}"
+    );
+
+    // A board the file has no entry for, and no machine section to give it: left alone.
+    let one = scratch("one.json");
+    std::fs::write(
+        &one,
+        serde_json::json!({ "boards": { left: { "device": { "name": "rover-left" } } } })
+            .to_string(),
+    )
+    .unwrap();
+    let (code, out, err) = run(&["machine", "apply", &one]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        out.contains(&format!("rover-new: no entry in {one}; left alone")),
+        "{out}"
+    );
+    assert!(!out.contains("rover-new: 0 changed"), "{out}");
+    server.join().unwrap();
 }

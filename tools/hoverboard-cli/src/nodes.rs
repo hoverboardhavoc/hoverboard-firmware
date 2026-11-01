@@ -1,8 +1,9 @@
 //! The walk and the configuration requests (`specs/hoverboard-bridge.md`, "The terminal tool"): the
 //! whole walk with `net`'s [`Controller`], then `IDENTIFY` and `device.name` asked of every
 //! address; `CONFIG_READ`, `CONFIG_WRITE` (a value or an un-store), `CONFIG_COMPACT` and
-//! `STATUS_READ`; and a node resolved to an address by number or by name.
+//! `STATUS_READ`; and where the walk placed every node.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use net::pdu::{Opcode, Pdu, NO_ADDRESS};
@@ -37,6 +38,69 @@ impl Found {
     pub fn class(&self) -> Option<u8> {
         self.identity.map(|i| i.class)
     }
+}
+
+/// Where the walk placed every node: the node the link is attached to, each node's walked
+/// neighbours (`Controller::neighbours`), and each node's mailbox port, its `PORT_SWD` port
+/// (`Controller::port_of_kind`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Topology {
+    /// The node on the far end of the tool's own link (`Controller::gateway_addr`).
+    pub gateway: Option<u8>,
+    /// Each node's walked neighbours.
+    pub neighbours: BTreeMap<u8, Vec<u8>>,
+    /// Each node's mailbox port, where it has one.
+    pub mailbox: BTreeMap<u8, u8>,
+}
+
+impl Topology {
+    /// The placement `walked` recorded for each of its nodes.
+    pub fn of(walked: &Controller) -> Self {
+        let addrs = walked.assigned_addrs();
+        Topology {
+            gateway: walked.gateway_addr(),
+            neighbours: addrs
+                .iter()
+                .map(|&a| (a, walked.neighbours(a).to_vec()))
+                .collect(),
+            mailbox: addrs
+                .iter()
+                .filter_map(|&a| Some((a, walked.port_of_kind(a, net::walk::PORT_SWD)?)))
+                .collect(),
+        }
+    }
+
+    /// The walked neighbours of `addr`.
+    pub fn neighbours(&self, addr: u8) -> &[u8] {
+        self.neighbours.get(&addr).map_or(&[], Vec::as_slice)
+    }
+
+    /// The mailbox port of `addr`.
+    pub fn mailbox(&self, addr: u8) -> Option<u8> {
+        self.mailbox.get(&addr).copied()
+    }
+}
+
+/// A whole walk: the tool's guest address, every node with its `IDENTITY` and name, and where the
+/// walk placed them.
+#[derive(Debug, Clone)]
+pub struct Walked {
+    /// The tool's guest address.
+    pub src: u8,
+    /// Every node, in address order.
+    pub found: Vec<Found>,
+    /// Where they sit.
+    pub topology: Topology,
+}
+
+/// Walk the machine, then ask every node its `IDENTITY` and read its name ([`survey`]).
+pub fn walk_all<W: Wire>(wire: &mut W) -> Result<Walked, String> {
+    let c = walk(wire)?;
+    Ok(Walked {
+        src: c.guest_addr(),
+        found: survey(wire, &c),
+        topology: Topology::of(&c),
+    })
 }
 
 /// A factory unique ID as 24 lowercase hex digits (`specs/machine-settings.md` section 6.2).
@@ -350,30 +414,6 @@ pub fn parse_int(s: &str) -> Option<i128> {
         None => digits.parse::<i128>().ok()?,
     };
     Some(if neg { -v } else { v })
-}
-
-/// The node `spec` names among `found`: an address, or a `device.name`.
-pub fn resolve(spec: &str, found: &[Found]) -> Result<u8, String> {
-    if let Some(a) = parse_int(spec) {
-        return u8::try_from(a)
-            .ok()
-            .filter(|&a| net::pdu::is_board(a))
-            .ok_or_else(|| format!("not a node address (0x01..0x7f): {spec}"));
-    }
-    let named: Vec<u8> = found
-        .iter()
-        .filter(|f| f.name.as_deref() == Some(spec))
-        .map(|f| f.addr)
-        .collect();
-    let names = || {
-        let n: Vec<&str> = found.iter().filter_map(|f| f.name.as_deref()).collect();
-        n.join(", ")
-    };
-    match named[..] {
-        [a] => Ok(a),
-        [] => Err(format!("no node named {spec} (nodes: {})", names())),
-        _ => Err(format!("more than one node is named {spec}")),
-    }
 }
 
 /// A field argument: `<id>` or `<id>.<index>`, each a number.

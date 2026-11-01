@@ -1,5 +1,5 @@
 //! A board's store as a file (`specs/cli-config.md`): `dump`, `apply`, `replace`, `diff`, and one
-//! field at a time with `config`. A file holds one value per stored `(field_id, index)` at
+//! field at a time with `get` and `set`, under `board` and `bridge`. A file holds one value per stored `(field_id, index)` at
 //! the path the name table gives it ([`crate::names`]) and nothing else.
 //!
 //! Every command checks the files completely before it reads the board, reads every key the table
@@ -35,6 +35,8 @@ pub struct Board<'w, W: Wire> {
     pub dst: u8,
     /// The board's `device.name`, or its address when it answered none.
     pub name: String,
+    /// Its `IDENTITY` class, which names a bridge's refusal of a name it cannot advertise.
+    pub class: u8,
 }
 
 impl<W: Wire> Board<'_, W> {
@@ -114,7 +116,11 @@ impl FileReader<'_> {
 
     fn top(&mut self, top: &Map<String, Json>) {
         for (k, v) in top {
-            if let Some((array, what)) = object_arrays().find(|(a, _)| a == k) {
+            if k == "boards" {
+                self.stop(
+                    "a machine file (it has \"boards\"): give it to the machine commands".into(),
+                );
+            } else if let Some((array, what)) = object_arrays().find(|(a, _)| a == k) {
                 let Some(items) = v.as_array() else {
                     self.stop(format!("{array} takes a list, one object per {what}"));
                     continue;
@@ -255,7 +261,7 @@ pub fn dump_keys() -> Vec<Key> {
 }
 
 /// The keys a store erase loses that `dump` leaves out: the board-owned ones (`node.address` and
-/// each motor's `odometer`), which `erase-store` prints before it asks.
+/// each motor's `odometer`), which `board erase` prints before it asks.
 pub fn board_owned_keys() -> Vec<Key> {
     table_keys()
         .into_iter()
@@ -746,7 +752,7 @@ pub fn written_lines(name: &str, plan: &Plan, before: &Reads, r: &Refused) -> Ve
     out
 }
 
-/// `config <node> <path>`: the line for the key's value, ` (default)` when nothing is stored.
+/// `get <node> <path>`: the line for the key's value, ` (default)` when nothing is stored.
 pub fn config_read<W: Wire>(b: &mut Board<'_, W>, key: Key) -> Result<String, String> {
     let r = b.read(key)?;
     if answered(&r) {
@@ -761,17 +767,28 @@ pub fn config_read<W: Wire>(b: &mut Board<'_, W>, key: Key) -> Result<String, St
     }
 }
 
-/// What `config <node> <path> <value>` did.
+/// What `set <node> <path> <value>` did.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Written {
     /// The value checks `--force` let through (the key's own, [`write_checks`], are the caller's
     /// to print, before the board is reached).
     pub warnings: Vec<String>,
-    /// The key's line from the read-back, and when the change takes effect ([`effect_line`]).
-    pub lines: Vec<String>,
+    /// The key's line from the read-back.
+    pub line: String,
+    /// The key, when the write changed the value the board runs.
+    pub changed: Option<Key>,
 }
 
-/// `config <node> <path> <value>`: write `text` to `key` in the file's value forms. `force` lets
+impl Written {
+    /// The key's line, and when the change takes effect ([`effect_line`]).
+    pub fn lines(&self) -> Vec<String> {
+        let mut l = vec![self.line.clone()];
+        l.extend(effect_line(self.changed));
+        l
+    }
+}
+
+/// `set <node> <path> <value>`: write `text` to `key` in the file's value forms. `force` lets
 /// through the checks of `specs/cli-config.md` section 5 that it may; the board's own refusals
 /// stand.
 pub fn config_write<W: Wire>(
@@ -809,20 +826,19 @@ pub fn config_write<W: Wire>(
     stop_on(&warn, force)?;
     let status = b.write(key, storage, bytes.as_deref())?;
     if status != CFG_OK {
-        return Err(format!(
-            "{}: {}: refused: {}",
-            b.name,
-            path_of(key),
+        let why = if key == store::DEVICE_NAME.key() {
+            nodes::name_status(Some(b.class), status)
+        } else {
             status_name(status)
-        ));
+        };
+        return Err(format!("{}: {}: refused: {why}", b.name, path_of(key)));
     }
     let after = b.read(key)?;
-    let mut lines = vec![change_line(&b.name, key, &before, &after)];
     let changed = (after.tag, &after.bytes) != (before.tag, &before.bytes);
-    lines.extend(effect_line(changed.then_some(key)));
     Ok(Written {
         warnings: warnings(&warn, force),
-        lines,
+        line: change_line(&b.name, key, &before, &after),
+        changed: changed.then_some(key),
     })
 }
 
@@ -910,6 +926,7 @@ mod tests {
             src: 0x80,
             dst: 0x01,
             name: "rover-left".into(),
+            class: net::walk::CLASS_MOTOR,
         }
     }
 
@@ -1414,7 +1431,7 @@ mod tests {
         assert_eq!(plan.steps[0].bytes, Some(12000u32.to_le_bytes().to_vec()));
     }
 
-    /// `specs/bridge-onboarding.md` section 2.2 on a board model: `config`, `dump`, `apply`,
+    /// `specs/bridge-onboarding.md` section 2.2 on a board model: `get`, `set`, `dump`, `apply`,
     /// `replace` and `diff` (the plan `diff` prints) never print the password, write it whenever a
     /// file gives it, and `replace` never un-stores it unless a file says `null`.
     #[test]
@@ -1431,13 +1448,13 @@ mod tests {
         all.push(l);
         let w = config_write(&mut b, pass, PASS, false).unwrap();
         assert_eq!(
-            w.lines,
+            w.lines(),
             [
                 "rover-left: wifi.pass: (default) -> (set)",
                 "1 takes effect at the next boot"
             ]
         );
-        all.extend(w.lines);
+        all.extend(w.lines());
         let l = config_read(&mut b, pass).unwrap();
         assert_eq!(l, "rover-left: wifi.pass = (set)");
         all.push(l);
@@ -1553,7 +1570,7 @@ mod tests {
             "rover-left: motors[0].current.cal = 455 (default)"
         );
         let lines =
-            |b: &mut Board<'_, Loop>, key, text| config_write(b, key, text, false).unwrap().lines;
+            |b: &mut Board<'_, Loop>, key, text| config_write(b, key, text, false).unwrap().lines();
         assert_eq!(
             lines(&mut b, k(0x20, 0), "balance"),
             [
@@ -1608,10 +1625,8 @@ mod tests {
             config_write(&mut b, k(0x20, 1), "balance", true).unwrap(),
             Written {
                 warnings: Vec::new(),
-                lines: vec![
-                    "rover-left: machine.mode[1]: throttle (default) -> balance".into(),
-                    "1 takes effect at the next arm".into()
-                ],
+                line: "rover-left: machine.mode[1]: throttle (default) -> balance".into(),
+                changed: Some(k(0x20, 1)),
             }
         );
         assert_eq!(

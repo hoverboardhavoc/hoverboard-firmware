@@ -239,7 +239,7 @@ impl<W: Wire> Client<W> {
     }
 
     /// `ESP_INFO`, or `None` when the bridge answers with a payload of another layout (a bridge
-    /// built for another `ESP_INFO`), for a command that goes on without it (`update-esp`,
+    /// built for another `ESP_INFO`), for a command that goes on without it (`bridge update`,
     /// `specs/hoverboard-bridge.md`, "Installing and updating the bridge").
     pub fn info_if_decodes(&mut self) -> Result<Option<EspInfo>, ClientError> {
         for _ in 0..TRIES {
