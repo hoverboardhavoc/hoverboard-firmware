@@ -191,7 +191,7 @@ wants_features() {  # wants_features <workspace>
 # be expanded against the files in this directory.
 set -f
 status=0
-for ws in "${runs[@]}"; do
+for ws in ${runs[@]+"${runs[@]}"}; do
   cmd=(cargo test --target "$HOST_TARGET")
   if [ "${#selected[@]}" != 0 ]; then
     for p in $(sel_of "$ws"); do
