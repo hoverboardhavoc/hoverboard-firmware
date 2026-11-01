@@ -1,0 +1,48 @@
+# Mode: final_state. The vendor configures one register at a time across the three pins, the HAL one
+# pin at a time across the registers. End state on GPIOA (over the port A reset, which holds PA13/PA14
+# for SWD):
+#   CTL    = AF (2) at pins 5, 6, 7               | 0x28000000 reset
+#   OMODE  = push-pull                             0
+#   OSPD   = 50 MHz (3) at pins 5 and 7 (MISO is an input) | 0x0C000000 reset
+#   PUD    = no pull at pins 5, 6, 7               | 0x24000000 reset
+#   AFSEL0 = AF0 at pins 5, 6, 7                   0 (CTL = AF routes them)
+#
+# ignore RCU: Chip::route_spi_pin enables the port clock (AHBEN); the vendor body does not, and
+# clock/enable_spi0_gpioa_f1x0 compares that enable. ignore AFSEL1: gpio_af_set rewrites both AFSEL
+# registers, the HAL only the one holding the pin; both leave AFSEL1 at its reset 0.
+description = """
+The alternate-function configuration of the SPI0 pins SCK = PA5, MISO = PA6, MOSI = PA7 on the
+GD32F1x0 GPIO model: AF mode, AF0 in the per-pin mux, no pull, and for SCK and MOSI push-pull at
+50 MHz.
+
+Vendor: gpio_mode_set(AF, PUPD_NONE) and gpio_af_set(AF_0) for the three pins;
+        gpio_output_options_set(OTYPE_PP, 50MHZ) for PA5 | PA7.
+HAL: chip.route_spi_pin(PA5 / PA7, SpiAfPushPull); chip.route_spi_pin(PA6, SpiInput).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+ignore = [
+    "<RCU_BASE>",
+    "<GPIOA_BASE>+0x24",
+]
+
+[vendor]
+body = '''
+    gpio_mode_set(GPIOA, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7);
+    gpio_af_set(GPIOA, GPIO_AF_0, GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7);
+    gpio_output_options_set(GPIOA, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_5 | GPIO_PIN_7);
+'''
+
+[hal]
+body = '''
+    use hal::gpio::PinRole;
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        chip.route_spi_pin(0x05, PinRole::SpiAfPushPull).unwrap(); // SCK
+        chip.route_spi_pin(0x06, PinRole::SpiInput).unwrap(); // MISO
+        chip.route_spi_pin(0x07, PinRole::SpiAfPushPull).unwrap(); // MOSI
+    }
+'''

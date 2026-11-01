@@ -1,0 +1,31 @@
+# Mode: final_state. The vendor's rcu_adc_clock_config clears then sets on each of RCU_CFG0 and
+# RCU_CFG2 (four writes); the HAL makes one read-modify-write per register. The end state:
+#   APB2EN = ADC (bit 9)
+#   CFG0   = ADCPSC bits 15:14 = 2 (APB2 / 6) over the seeded tree
+#   CFG2   = ADCSEL (bit 8): the ADC clock from the APB2 divider, not the IRC14M
+description = """
+The ADC clock enable, divider and source on the GD32F1x0: APB2EN bit 9, RCU_CFG0 ADCPSC = APB2 / 6
+(12 MHz from the 72 MHz tree) and RCU_CFG2 ADCSEL selecting that APB2-derived clock.
+
+Vendor: rcu_periph_clock_enable(RCU_ADC); rcu_adc_clock_config(RCU_ADCCK_APB2_DIV6).
+HAL: clock::enable_adc(Adc0).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_ADC);
+    rcu_adc_clock_config(RCU_ADCCK_APB2_DIV6);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        clock::enable_adc(chip.rcu_base().unwrap(), chip.clock(), PeriphLabel::Adc0).unwrap();
+    }
+'''

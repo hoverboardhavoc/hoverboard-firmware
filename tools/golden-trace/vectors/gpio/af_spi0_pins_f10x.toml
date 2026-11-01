@@ -1,0 +1,42 @@
+# Mode: final_state. The three pins sit in CTL0; both sides read-modify-write their nibbles over the
+# 0x44444444 reset. End state: CTL0 = 0xB4B44444 (PA5 SCK and PA7 MOSI AF push-pull 50 MHz = 0xB,
+# PA6 MISO floating input = 0x4, the reset nibble).
+#
+# ignore RCU: Chip::route_spi_pin enables the port clock (APB2EN) as part of routing; the vendor
+# body is gpio_init alone, and clock/enable_spi0_gpioa_f10x compares that enable.
+#
+# chips: the GD32F103C8 only. On the GD32F103RC, PA7 is TIMER7's CH0N gate output, and the HAL refuses
+# a non-gate claim on a gate pin (pincap::check_pin_ownership), so MOSI on PA7 is not routable there.
+description = """
+The alternate-function configuration of the SPI0 pins SCK = PA5, MISO = PA6, MOSI = PA7 on the
+GD32F10x GPIO model: no per-pin mux, the CTL0 nibble alone. SCK and MOSI AF push-pull at 50 MHz,
+MISO a floating input.
+
+Vendor: gpio_init(GPIOA, GPIO_MODE_AF_PP, 50MHZ, PIN_5 | PIN_7);
+        gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, 50MHZ, PIN_6).
+HAL: chip.route_spi_pin(PA5 / PA7, SpiAfPushPull); chip.route_spi_pin(PA6, SpiInput).
+"""
+family = "gd32f10x"
+chips = ["gd32f103c8"]
+mode = "final_state"
+ignore = ["<RCU_BASE>"]
+
+[vendor]
+body = '''
+    gpio_init(GPIOA, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_5 | GPIO_PIN_7);
+    gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_50MHZ, GPIO_PIN_6);
+'''
+
+[hal]
+body = '''
+    use hal::gpio::PinRole;
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        chip.route_spi_pin(0x05, PinRole::SpiAfPushPull).unwrap(); // SCK
+        chip.route_spi_pin(0x06, PinRole::SpiInput).unwrap(); // MISO
+        chip.route_spi_pin(0x07, PinRole::SpiAfPushPull).unwrap(); // MOSI
+    }
+'''

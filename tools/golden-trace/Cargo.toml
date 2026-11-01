@@ -1,0 +1,13 @@
+[package]
+name = "golden-trace"
+version = "0.1.0"
+license.workspace = true
+edition = "2021"
+description = "The golden register-trace harness (specs/hal.md, section 8.1): runs each operation through the GigaDevice standard peripheral library and through the HAL, both under the Unicorn emulator, and compares the peripheral register accesses. Host-only (links Unicorn's cmake-built native lib)."
+
+[dependencies]
+# The same Unicorn binding emulator-runner pins (tools/Cargo.lock), so both share CI's cmake build.
+unicorn-engine = "2"
+object = { version = "0.36", default-features = false, features = ["read", "std"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"

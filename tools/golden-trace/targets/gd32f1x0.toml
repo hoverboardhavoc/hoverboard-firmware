@@ -1,0 +1,77 @@
+# The GD32F1x0 peripheral blocks the vectors touch, as the vendor headers place them
+# (third_party/gd32-spl/GD32F1x0: gd32f1x0.h bus bases plus the per-peripheral offsets in each
+# gd32f1x0_<periph>.h). See gd32f10x.toml for what the fields mean and why the table is taken from
+# the vendor side.
+
+[blocks.GPIOA_BASE]
+base = 0x4800_0000
+size = 0x400
+registers = { "0x00" = "CTL", "0x04" = "OMODE", "0x08" = "OSPD", "0x0C" = "PUD", "0x10" = "ISTAT", "0x14" = "OCTL", "0x18" = "BOP", "0x1C" = "LOCK", "0x20" = "AFSEL0", "0x24" = "AFSEL1", "0x28" = "BC", "0x2C" = "TG" }
+# Port A resets with PA13/PA14 in AF mode (SWDIO/SWCLK), PA13 at high speed with the pull-up and PA14
+# with the pull-down (GD32F1x0 User Manual 6.4.1, 6.4.3, 6.4.4); a write that clobbers those fields
+# instead of read-modify-writing them shows in the final state.
+reset = { "0x00" = 0x2800_0000, "0x08" = 0x0C00_0000, "0x0C" = 0x2400_0000 }
+
+[blocks.GPIOB_BASE]
+base = 0x4800_0400
+size = 0x400
+registers = { "0x00" = "CTL", "0x04" = "OMODE", "0x08" = "OSPD", "0x0C" = "PUD", "0x10" = "ISTAT", "0x14" = "OCTL", "0x18" = "BOP", "0x1C" = "LOCK", "0x20" = "AFSEL0", "0x24" = "AFSEL1", "0x28" = "BC", "0x2C" = "TG" }
+
+[blocks.GPIOC_BASE]
+base = 0x4800_0800
+size = 0x400
+registers = { "0x00" = "CTL", "0x04" = "OMODE", "0x08" = "OSPD", "0x0C" = "PUD", "0x10" = "ISTAT", "0x14" = "OCTL", "0x18" = "BOP", "0x1C" = "LOCK", "0x20" = "AFSEL0", "0x24" = "AFSEL1", "0x28" = "BC", "0x2C" = "TG" }
+
+[blocks.GPIOD_BASE]
+base = 0x4800_0C00
+size = 0x400
+registers = { "0x00" = "CTL", "0x04" = "OMODE", "0x08" = "OSPD", "0x0C" = "PUD", "0x10" = "ISTAT", "0x14" = "OCTL", "0x18" = "BOP", "0x1C" = "LOCK", "0x20" = "AFSEL0", "0x24" = "AFSEL1", "0x28" = "BC", "0x2C" = "TG" }
+
+[blocks.GPIOF_BASE]
+base = 0x4800_1400
+size = 0x400
+registers = { "0x00" = "CTL", "0x04" = "OMODE", "0x08" = "OSPD", "0x0C" = "PUD", "0x10" = "ISTAT", "0x14" = "OCTL", "0x18" = "BOP", "0x1C" = "LOCK", "0x20" = "AFSEL0", "0x24" = "AFSEL1", "0x28" = "BC", "0x2C" = "TG" }
+
+[blocks.ADC0_BASE]
+base = 0x4001_2400
+size = 0x400
+registers = { "0x00" = "STAT", "0x04" = "CTL0", "0x08" = "CTL1", "0x0C" = "SAMPT0", "0x10" = "SAMPT1", "0x2C" = "RSQ0", "0x30" = "RSQ1", "0x34" = "RSQ2", "0x38" = "ISQ", "0x3C" = "IDATA0", "0x40" = "IDATA1", "0x44" = "IDATA2", "0x48" = "IDATA3", "0x4C" = "RDATA" }
+
+[blocks.TIMER0_BASE]
+base = 0x4001_2C00
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "SMCFG", "0x0C" = "DMAINTEN", "0x10" = "INTF", "0x14" = "SWEVG", "0x18" = "CHCTL0", "0x1C" = "CHCTL1", "0x20" = "CHCTL2", "0x24" = "CNT", "0x28" = "PSC", "0x2C" = "CAR", "0x30" = "CREP", "0x34" = "CH0CV", "0x38" = "CH1CV", "0x3C" = "CH2CV", "0x40" = "CH3CV", "0x44" = "CCHP" }
+
+# SPI0 at SPI_BASE + 0xF800 (gd32f1x0_spi.h), on APB2.
+[blocks.SPI0_BASE]
+base = 0x4001_3000
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "STAT", "0x0C" = "DATA", "0x1C" = "I2SCTL", "0x20" = "I2SPSC" }
+
+[blocks.USART0_BASE]
+base = 0x4001_3800
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "CTL2", "0x0C" = "BAUD", "0x10" = "GP", "0x14" = "RT", "0x18" = "CMD", "0x1C" = "STAT", "0x20" = "INTC", "0x24" = "RDATA", "0x28" = "TDATA" }
+
+[blocks.USART1_BASE]
+base = 0x4000_4400
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "CTL2", "0x0C" = "BAUD", "0x10" = "GP", "0x14" = "RT", "0x18" = "CMD", "0x1C" = "STAT", "0x20" = "INTC", "0x24" = "RDATA", "0x28" = "TDATA" }
+
+[blocks.I2C0_BASE]
+base = 0x4000_5400
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "SADDR0", "0x0C" = "SADDR1", "0x10" = "DATA", "0x14" = "STAT0", "0x18" = "STAT1", "0x1C" = "CKCFG", "0x20" = "RT" }
+
+[blocks.RCU_BASE]
+base = 0x4002_1000
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CFG0", "0x08" = "INT", "0x0C" = "APB2RST", "0x10" = "APB1RST", "0x14" = "AHBEN", "0x18" = "APB2EN", "0x1C" = "APB1EN", "0x20" = "BDCTL", "0x24" = "RSTSCK", "0x28" = "AHBRST", "0x2C" = "CFG1", "0x30" = "CFG2", "0x34" = "CTL1" }
+# CFG0 seeded with the running 72 MHz tree, as in gd32f10x.toml (the bit layout is the same). AHBEN
+# holds its reset value (the SRAM and FMC clocks on, GD32F1x0 User Manual 4.3.6).
+reset = { "0x04" = 0x001D_0408, "0x14" = 0x0000_0014 }
+
+[blocks.FMC_BASE]
+base = 0x4002_2000
+size = 0x400
+registers = { "0x00" = "WS", "0x04" = "KEY", "0x08" = "OBKEY", "0x0C" = "STAT", "0x10" = "CTL", "0x14" = "ADDR" }

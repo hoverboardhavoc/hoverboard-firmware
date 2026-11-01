@@ -1,0 +1,30 @@
+# Mode: with_polling over the ADC0 block.
+#
+# STAT (0x00) reads 0x00000000 (EOIC clear, busy), then 0x00000004 (EOIC set). IDATA0 (0x3C) and
+# IDATA1 (0x40) read two left-aligned phase-current counts, 0xA000 and 0xB000 (placeholders, not a
+# silicon capture).
+description = """
+The injected "wait, then read" on the GD32F10x: wait for EOIC, then read IDATA0 and IDATA1 (the two
+phase currents). A read before EOIC fails.
+
+Vendor: wait ADC_FLAG_EOIC; adc_inserted_data_read(INSERTED_CHANNEL_0); (INSERTED_CHANNEL_1).
+HAL: chip.adc() then wait_eoic(); read_injected_data(0); read_injected_data(1).
+"""
+family = "gd32f10x"
+mode = "with_polling"
+assert_only = ["<ADC0_BASE>"]
+
+[read_responses]
+"<ADC0_BASE>+0x00" = [0x0000_0000, 0x0000_0004]
+"<ADC0_BASE>+0x3C" = 0x0000_A000
+"<ADC0_BASE>+0x40" = 0x0000_B000
+
+[vendor]
+body = '''
+    while(RESET == adc_flag_get(ADC0, ADC_FLAG_EOIC)){}
+    (void)adc_inserted_data_read(ADC0, ADC_INSERTED_CHANNEL_0);
+    (void)adc_inserted_data_read(ADC0, ADC_INSERTED_CHANNEL_1);
+'''
+
+[hal]
+pending = "the ADC driver"

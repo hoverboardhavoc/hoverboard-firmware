@@ -1,0 +1,31 @@
+# Mode: with_polling over the ADC0 block.
+#
+# STAT (0x00) reads: 0x00000000 (EOC clear, busy), then 0x00000002 (EOC set). RDATA (0x4C) reads
+# 0x05D2, about 1.2 V on a 3.3 V reference (a placeholder, not a silicon capture). Reading RDATA
+# clears EOC in hardware, so the vendor body does not clear it separately.
+description = """
+One software-triggered conversion of VREFINT (channel 17) and its result on the GD32F1x0: point
+regular rank 0 at channel 17, trigger, wait for EOC, read RDATA. A read of RDATA before EOC fails.
+
+Vendor: adc_regular_channel_config(rank 0, channel 17, 239.5); adc_software_trigger_enable(REGULAR);
+        wait ADC_FLAG_EOC; adc_regular_data_read.
+HAL: chip.adc() then read_channel(17).
+"""
+family = "gd32f1x0"
+mode = "with_polling"
+assert_only = ["<ADC0_BASE>"]
+
+[read_responses]
+"<ADC0_BASE>+0x00" = [0x0000_0000, 0x0000_0002]
+"<ADC0_BASE>+0x4C" = 0x0000_05D2
+
+[vendor]
+body = '''
+    adc_regular_channel_config(0U, ADC_CHANNEL_17, ADC_SAMPLETIME_239POINT5);
+    adc_software_trigger_enable(ADC_REGULAR_CHANNEL);
+    while(RESET == adc_flag_get(ADC_FLAG_EOC)){}
+    (void)adc_regular_data_read();
+'''
+
+[hal]
+pending = "the ADC driver"

@@ -1,0 +1,65 @@
+# Mode: final_state, for the reason tree_72m_irc8m_f10x gives. End state:
+#   FMC_WS   = WSCNT 1
+#   RCU_CTL0 = IRC8MEN | PLLEN, over the scripted stable bits
+#   RCU_CFG0 = APB1 / 2 | PLLMF x18 (bit 27 | 1 << 18) | SCS = PLL, over the scripted SCSS bits
+# The polls read with the OR form, as in the F10x vector.
+description = """
+The 72 MHz clock tree from the IRC8M on the GD32F1x0: flash wait states, IRC8M on and its stable
+poll, AHB / 1, APB2 / 1, APB1 / 2, the PLL from IRC8M / 2 at x18, PLL on and its lock poll, the
+switch to the PLL and its read-back confirm.
+
+Vendor: register code with the SPL's names, the recipe of system_gd32f1x0.c's
+system_clock_72m_irc8m written for the tree the fleet runs, which differs from that function in two
+places, both on purpose:
+- One flash wait state, not two. Measured on a GD32F130 at 72 MHz (2026-07-26): WSCNT = 1 gives
+  GD32F103 parity on a straight-line benchmark, WSCNT = 2 an alignment-dependent cliff (80 cycles
+  for 64 nops at one link address, 4,247 at another). The HAL's F1x0 model takes 1.
+- APB1 at AHB / 2 (36 MHz), not / 1: the arrangement both families share and the USART and I2C
+  dividers assume.
+HAL: clock::configure_tree(&chip, &ClockConfig::REFERENCE_72M_IRC8M).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+
+[read_responses]
+"<RCU_BASE>+0x00" = { or = 0x0200_0002 }
+"<RCU_BASE>+0x04" = { or = 0x0000_0008 }
+
+# From reset, not from the running tree the family table seeds.
+[reset_overrides]
+"<RCU_BASE>+0x00" = 0
+"<RCU_BASE>+0x04" = 0
+"<FMC_BASE>+0x00" = 0
+
+[vendor]
+body = '''
+    fmc_wscnt_set(WS_WSCNT_1);
+    RCU_CTL0 |= RCU_CTL0_IRC8MEN;
+    while(0U == (RCU_CTL0 & RCU_CTL0_IRC8MSTB)){}
+    RCU_CFG0 &= ~RCU_CFG0_AHBPSC;
+    RCU_CFG0 |= RCU_AHB_CKSYS_DIV1;
+    RCU_CFG0 &= ~RCU_CFG0_APB2PSC;
+    RCU_CFG0 |= RCU_APB2_CKAHB_DIV1;
+    RCU_CFG0 &= ~RCU_CFG0_APB1PSC;
+    RCU_CFG0 |= RCU_APB1_CKAHB_DIV2;
+    RCU_CFG0 &= ~RCU_CFG0_PLLSEL;
+    RCU_CFG0 |= RCU_PLLSRC_IRC8M_DIV2;
+    RCU_CFG0 &= ~RCU_CFG0_PLLMF;
+    RCU_CFG0 |= RCU_PLL_MUL18;
+    RCU_CTL0 |= RCU_CTL0_PLLEN;
+    while(0U == (RCU_CTL0 & RCU_CTL0_PLLSTB)){}
+    RCU_CFG0 &= ~RCU_CFG0_SCS;
+    RCU_CFG0 |= RCU_CKSYSSRC_PLL;
+    while(RCU_SCSS_PLL != (RCU_CFG0 & RCU_CFG0_SCSS)){}
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, ClockConfig};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        clock::configure_tree(&chip, &ClockConfig::REFERENCE_72M_IRC8M).unwrap();
+    }
+'''

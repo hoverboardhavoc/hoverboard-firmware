@@ -1,0 +1,32 @@
+# Mode: final_state. The vendor's rcu_adc_clock_config clears the whole ADCPSC field (bits 15:14 and
+# the high bit 28) and then sets it, two writes; the HAL writes the field in one read-modify-write.
+# The end state is what configures the hardware:
+#   APB2EN = ADC0 (bit 9)
+#   CFG0   = ADCPSC bits 15:14 = 2 (APB2 / 6) over the seeded tree, bit 28 clear
+description = """
+The ADC0 clock enable and the ADC clock divider on the GD32F10x: APB2EN bit 9, and RCU_CFG0 ADCPSC =
+APB2 / 6 (12 MHz from the 72 MHz tree, under the 14 MHz ADC limit). The F10x has no ADC clock-source
+select, so only CFG0 changes.
+
+Vendor: rcu_periph_clock_enable(RCU_ADC0); rcu_adc_clock_config(RCU_CKADC_CKAPB2_DIV6).
+HAL: clock::enable_adc(Adc0).
+"""
+family = "gd32f10x"
+mode = "final_state"
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_ADC0);
+    rcu_adc_clock_config(RCU_CKADC_CKAPB2_DIV6);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        clock::enable_adc(chip.rcu_base().unwrap(), chip.clock(), PeriphLabel::Adc0).unwrap();
+    }
+'''

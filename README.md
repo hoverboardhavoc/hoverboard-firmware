@@ -185,6 +185,13 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
 - **Shipping image: `cargo image` in `motorcontroller/`.** This is the build-std release build whose
   bytes reach flash (`motorcontroller/.cargo/config.toml` explains why it is an alias and not a
   config key). The ELF is `motorcontroller/target/thumbv7m-none-eabi/release/firmware`.
+- **Golden register traces: `cargo run -p golden-trace -- check` in `tools/`.** It compares the
+  HAL's register accesses for every vector in `tools/golden-trace/vectors/` against the checked-in
+  trace of the same operation through GigaDevice's standard peripheral library, under Unicorn
+  (specs/hal.md, section 8.1). `-- regen --check` rebuilds those vendor traces from
+  `third_party/gd32-spl/` and fails unless they reproduce byte for byte; it, `-- regen` (write them)
+  and `-- trace VECTOR --vendor` need `arm-none-eabi-gcc` from the Arm GNU Toolchain 15.2.Rel1, and
+  every command needs cmake for Unicorn's build. `-- trace VECTOR --chip CHIP` prints one HAL trace.
 - **runtime-hal is a git dependency pinned by the lockfiles** (`[workspace.dependencies]` in
   `motorcontroller/Cargo.toml` and, identically, `shared/Cargo.toml`). A plain build uses the
   pinned commit, locally and in CI. To build against a local runtime-hal checkout beside this one
@@ -228,6 +235,10 @@ terms of the GNU General Public License as published by the Free Software Founda
 be useful, but WITHOUT ANY WARRANTY, without even the implied warranty of MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE), or
 [gnu.org/licenses](https://www.gnu.org/licenses/).
+
+`third_party/gd32-spl/` is GigaDevice's standard peripheral library and ARM's CMSIS headers, under
+their BSD-3-Clause licences ([third_party/gd32-spl/LICENSE](third_party/gd32-spl/LICENSE)); the
+golden-trace harness compiles it and nothing in the firmware links it.
 
 ## Prior art
 

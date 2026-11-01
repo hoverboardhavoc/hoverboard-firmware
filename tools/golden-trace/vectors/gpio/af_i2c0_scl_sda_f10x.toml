@@ -1,0 +1,23 @@
+# Mode: final_state, narrowed with assert_only to GPIOB CTL0. The HAL routes I2C pins only inside its
+# I2C bring-up, which also enables clocks, programs I2C0 and first drives the pins as open-drain
+# outputs to clear the bus; the AF write is the last write to CTL0, so CTL0's end state is the
+# routing. End state: CTL0 = 0xFF444444 (PB6 and PB7 AF open-drain 50 MHz = 0xF; the bus pull-ups
+# are the board's, the F10x AF modes have none).
+description = """
+The alternate-function configuration of the I2C0 pins SCL = PB6, SDA = PB7 on the GD32F10x GPIO
+model: AF open-drain at 50 MHz (nibble 0xF; the SPI pins' AF push-pull is 0xB).
+
+Vendor: gpio_init(GPIOB, GPIO_MODE_AF_OD, 50MHZ, PIN_6 | PIN_7).
+HAL: I2c::new on PB6/PB7 (it routes both pins).
+"""
+family = "gd32f10x"
+mode = "final_state"
+assert_only = ["<GPIOB_BASE>+0x00"]
+
+[vendor]
+body = '''
+    gpio_init(GPIOB, GPIO_MODE_AF_OD, GPIO_OSPEED_50MHZ, GPIO_PIN_6 | GPIO_PIN_7);
+'''
+
+[hal]
+pending = "the I2C driver"

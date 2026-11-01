@@ -1,0 +1,41 @@
+# Mode: final_state, narrowed with assert_only to CTL0, SAMPT1 and ISQ. The HAL's only injected
+# bring-up (InjectedAdcController::configure) also calibrates, and calibration's self-clearing
+# CTL1 bits are not a register state the vendor body reproduces; CTL1's trigger fields are compared
+# by the timer-to-ADC coupling once the HAL side exists. End state:
+#   CTL0   = 0x00000180 (SM, bit 8: the group has two ranks | EOICIE, bit 7)
+#   SAMPT1 = 0x00009000 (channels 4 and 5 at 7.5 cycles)
+#   ISQ    = 0x00129000 (IL = 1 (two ranks) | rank 0 channel 4 | rank 1 channel 5, the SPL packing)
+# SM: a multi-rank inserted group converts only rank 0 with scan off.
+description = """
+ADC0's injected group for the phase currents on the GD32F1x0: channels 4 and 5 at 7.5 cycles,
+left-aligned, scan on, triggered by TIMER0 CH3, the injected end-of-conversion interrupt enabled,
+ADC on. No conversion.
+
+Vendor: scan on, left alignment, inserted length 2, ranks 0/1 = channels 4/5 at 7.5, trigger source
+        TIMER0 CH3 (ADC_EXTTRIG_INSERTED_T0_CH3) enabled, adc_interrupt_enable(ADC_INT_EOIC), adc_enable.
+HAL: InjectedAdcController::new().configure(&chip, &InjectedAdcConfig { Adc0, [4, 5] at code 1,
+     left-aligned, Timer0 Ch3, /6 }).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+assert_only = [
+    "<ADC0_BASE>+0x04",
+    "<ADC0_BASE>+0x10",
+    "<ADC0_BASE>+0x38",
+]
+
+[vendor]
+body = '''
+    adc_special_function_config(ADC_SCAN_MODE, ENABLE);
+    adc_data_alignment_config(ADC_DATAALIGN_LEFT);
+    adc_channel_length_config(ADC_INSERTED_CHANNEL, 2U);
+    adc_inserted_channel_config(0U, ADC_CHANNEL_4, ADC_SAMPLETIME_7POINT5);
+    adc_inserted_channel_config(1U, ADC_CHANNEL_5, ADC_SAMPLETIME_7POINT5);
+    adc_external_trigger_source_config(ADC_INSERTED_CHANNEL, ADC_EXTTRIG_INSERTED_T0_CH3);
+    adc_external_trigger_config(ADC_INSERTED_CHANNEL, ENABLE);
+    adc_interrupt_enable(ADC_INT_EOIC);
+    adc_enable();
+'''
+
+[hal]
+pending = "the ADC driver"

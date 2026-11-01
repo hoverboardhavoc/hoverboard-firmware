@@ -1,0 +1,45 @@
+# Mode: with_polling, narrowed with assert_only to STAT and DATA: the full-duplex handshake. The
+# bring-up before it is compared by bringup_spi0_1m_mode0_f10x.
+#
+# STAT (0x08) reads in order (each read the next value, the last one repeats), per byte:
+#   0x00 busy, 0x02 TBE set; then 0x00 busy, 0x01 RBNE set
+# so each poll spins once. The flags are the ones the vendor body polls, not a silicon capture.
+description = """
+A two-byte full-duplex SPI0 transfer on the GD32F10x (the unit a MOSI-to-MISO loopback runs):
+per byte, wait TBE, write DATA, wait RBNE, read DATA. A dropped or reordered poll fails.
+
+Vendor: the bring-up of bringup_spi0_1m_mode0_f10x, then for 0xA5 and 0x5A: wait SPI_FLAG_TBE;
+        spi_i2s_data_transmit; wait SPI_FLAG_RBNE; spi_i2s_data_receive.
+HAL: Spi::bring_up(...) then transfer_byte(0xA5); transfer_byte(0x5A).
+"""
+family = "gd32f10x"
+mode = "with_polling"
+assert_only = ["<SPI0_BASE>+0x08..0x0C"]
+
+[read_responses]
+"<SPI0_BASE>+0x08" = [0x00, 0x02, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01]
+
+[vendor]
+body = '''
+    spi_parameter_struct sp;
+    sp.device_mode = SPI_MASTER;
+    sp.trans_mode = SPI_TRANSMODE_FULLDUPLEX;
+    sp.frame_size = SPI_FRAMESIZE_8BIT;
+    sp.nss = SPI_NSS_SOFT;
+    sp.endian = SPI_ENDIAN_MSB;
+    sp.clock_polarity_phase = SPI_CK_PL_LOW_PH_1EDGE;
+    sp.prescale = SPI_PSC_128;
+    spi_init(SPI0, &sp);
+    spi_enable(SPI0);
+    while(RESET == spi_i2s_flag_get(SPI0, SPI_FLAG_TBE)){}
+    spi_i2s_data_transmit(SPI0, 0xA5U);
+    while(RESET == spi_i2s_flag_get(SPI0, SPI_FLAG_RBNE)){}
+    (void)spi_i2s_data_receive(SPI0);
+    while(RESET == spi_i2s_flag_get(SPI0, SPI_FLAG_TBE)){}
+    spi_i2s_data_transmit(SPI0, 0x5AU);
+    while(RESET == spi_i2s_flag_get(SPI0, SPI_FLAG_RBNE)){}
+    (void)spi_i2s_data_receive(SPI0);
+'''
+
+[hal]
+pending = "the SPI driver"

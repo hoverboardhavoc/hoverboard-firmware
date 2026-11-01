@@ -1,0 +1,31 @@
+# Mode: register_writes. Two read-modify-writes in the same order on both sides, to two registers:
+#   W4 AHBEN  = 0x00040014 (GPIOB, bit 18, over the reset SRAM and FMC enables)
+#   W4 APB1EN = 0x00200000 (I2C0, bit 21)
+description = """
+The clock enables for the IMU's I2C link (I2C0 on PB6/PB7) on the GD32F1x0: the F1x0 puts the GPIO
+port enables on AHBEN (GPIOB = bit 18) and I2C0 on APB1EN (bit 21). The port first, then the bus.
+
+Vendor: rcu_periph_clock_enable(RCU_GPIOB); rcu_periph_clock_enable(RCU_I2C0).
+HAL: clock::enable_gpio_port(Gpiob); clock::enable_i2c(I2c0).
+"""
+family = "gd32f1x0"
+mode = "register_writes"
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_GPIOB);
+    rcu_periph_clock_enable(RCU_I2C0);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let rcu = chip.rcu_base().unwrap();
+        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpiob).unwrap();
+        clock::enable_i2c(rcu, chip.clock(), PeriphLabel::I2c0).unwrap();
+    }
+'''

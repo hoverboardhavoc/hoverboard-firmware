@@ -1,0 +1,32 @@
+# Mode: register_writes. Both enables are on APB2EN on the F10x, so the second read-modify-write sees
+# the first one's bit; the order is part of the comparison:
+#   W4 APB2EN = 0x00000004 (GPIOA, bit 2)
+#   W4 APB2EN = 0x00001004 (SPI0, bit 12)
+description = """
+The clock enables for SPI0 and its port (SCK/MISO/MOSI on PA5/PA6/PA7) on the GD32F10x: GPIOA is
+APB2EN bit 2 and SPI0 APB2EN bit 12.
+
+Vendor: rcu_periph_clock_enable(RCU_GPIOA); rcu_periph_clock_enable(RCU_SPI0).
+HAL: clock::enable_gpio_port(Gpioa); clock::enable_spi(Spi0).
+"""
+family = "gd32f10x"
+mode = "register_writes"
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_GPIOA);
+    rcu_periph_clock_enable(RCU_SPI0);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let rcu = chip.rcu_base().unwrap();
+        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpioa).unwrap();
+        clock::enable_spi(rcu, chip.clock(), PeriphLabel::Spi0).unwrap();
+    }
+'''

@@ -1,0 +1,33 @@
+# Mode: final_state, narrowed with assert_only to the I2C0 block: the HAL's bring-up (I2c::new)
+# also routes PB6/PB7 and enables the clocks, which the gpio/af_i2c0_scl_sda and
+# clock/enable_i2c0_gpiob vectors compare. i2c_clock_config builds CKCFG with ORs from reset and the
+# mode and ACK helpers clear then set CTL0, so the write counts differ; the end state:
+#   CTL1   = 0x00000024 (I2CCLK = 36 MHz)
+#   RT     = 0x00000025 (rise time 37)
+#   CKCFG  = 0x000000B4 (CLKC 180, standard mode)
+#   SADDR0 = 0x00000024 (the own address the HAL programs)
+#   CTL0   = 0x00000401 (I2CEN | ACKEN)
+description = """
+I2C0 brought up at 100 kHz standard mode on the GD32F1x0, no transfer. The timing values follow
+from APB1 = 36 MHz (the family table seeds the running tree, which the vendor's i2c_clock_config
+reads through rcu_clock_freq_get), so a clock-tree mistake shows as a wrong CKCFG or RT. The I2C
+block is the same on both families.
+
+Vendor: i2c_clock_config(I2C0, 100000, I2C_DTCY_2); i2c_mode_addr_config(I2C, 7-bit, 0x24);
+        i2c_enable; i2c_ack_config(ENABLE).
+HAL: I2c::new(&chip, &REFERENCE_72M_IRC8M, I2c0, (PB6, PB7), I2cMode::standard(100_000)).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+assert_only = ["<I2C0_BASE>"]
+
+[vendor]
+body = '''
+    i2c_clock_config(I2C0, 100000U, I2C_DTCY_2);
+    i2c_mode_addr_config(I2C0, I2C_I2CMODE_ENABLE, I2C_ADDFORMAT_7BITS, 0x24U);
+    i2c_enable(I2C0);
+    i2c_ack_config(I2C0, I2C_ACK_ENABLE);
+'''
+
+[hal]
+pending = "the I2C driver"

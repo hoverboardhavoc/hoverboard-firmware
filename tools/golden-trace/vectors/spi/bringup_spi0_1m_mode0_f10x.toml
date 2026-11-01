@@ -1,0 +1,35 @@
+# Mode: final_state. spi_init reads CTL0, keeps the bits under SPI_INIT_MASK, ORs the parameters and
+# writes once, then spi_enable sets SPIEN; it clears I2SCTL.I2SSEL with a read-modify-write. The
+# end state:
+#   CTL0   = 0x00000374: MSTMOD (bit 2) | SWNSS (8) | SWNSSEN (9) | PSC /128 (6 << 3) | SPIEN (6)
+#   I2SCTL = 0x00000000: SPI mode
+description = """
+SPI0 brought up for a 1 MHz SCK, mode 0, 8-bit frames, MSB first, master, software NSS, on the
+GD32F10x, no transfer. SPI0 is on APB2 at 72 MHz, so the fastest power-of-two divider at or under
+1 MHz is /128 (562.5 kHz; /64 is 1.125 MHz). Software NSS keeps the master out of a mode fault with
+no NSS line wired; the caller owns chip select. The SPI block is the same on both families.
+
+Vendor: spi_init(SPI0, &{MASTER, FULLDUPLEX, 8BIT, NSS_SOFT, MSB, CK_PL_LOW_PH_1EDGE, PSC_128});
+        spi_enable(SPI0).
+HAL: Spi::bring_up(&chip, &REFERENCE_72M_IRC8M, &SpiConfig { Spi0, mode 0, 8 bit, 1 MHz, MSB,
+     software NSS }).
+"""
+family = "gd32f10x"
+mode = "final_state"
+
+[vendor]
+body = '''
+    spi_parameter_struct sp;
+    sp.device_mode = SPI_MASTER;
+    sp.trans_mode = SPI_TRANSMODE_FULLDUPLEX;
+    sp.frame_size = SPI_FRAMESIZE_8BIT;
+    sp.nss = SPI_NSS_SOFT;
+    sp.endian = SPI_ENDIAN_MSB;
+    sp.clock_polarity_phase = SPI_CK_PL_LOW_PH_1EDGE;
+    sp.prescale = SPI_PSC_128;
+    spi_init(SPI0, &sp);
+    spi_enable(SPI0);
+'''
+
+[hal]
+pending = "the SPI driver"

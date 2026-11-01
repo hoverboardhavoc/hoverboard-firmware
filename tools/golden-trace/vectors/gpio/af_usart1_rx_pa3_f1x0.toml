@@ -1,0 +1,31 @@
+# Mode: final_state, narrowed with assert_only to the GPIOA mode registers and AFSEL0. The HAL routes
+# USART pins only inside Usart::new (clocks and USART1 too), TX and RX together; both pins share
+# GPIOA's registers, so this vector and af_usart1_tx_pa2_f1x0 trace the same call. End state over the
+# port A reset (which holds PA13/PA14 for SWD):
+#   CTL    = AF (2) at pins 2 and 3            AFSEL0 = AF1 at pins 2 and 3 (0x1100)
+#   OSPD   = 50 MHz at pin 2 (TX) only         OMODE  = push-pull      PUD = no pull at pins 2, 3
+# AFSEL1 is outside the scope: gpio_af_set rewrites it, the HAL does not; both leave its reset 0.
+description = """
+The routing of the USART1 RX pin PA3 (with TX on PA2) at AF1 on the GD32F1x0 GPIO model: TX AF
+push-pull at 50 MHz, RX an AF input.
+
+Vendor: gpio_mode_set(AF, PUPD_NONE) and gpio_af_set(AF_1) for PA2 | PA3;
+        gpio_output_options_set(PP, 50MHZ) for PA2.
+HAL: Usart::new(USART1, (PA2, PA3), 115200).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+assert_only = [
+    "<GPIOA_BASE>+0x00..0x0C",
+    "<GPIOA_BASE>+0x20",
+]
+
+[vendor]
+body = '''
+    gpio_mode_set(GPIOA, GPIO_MODE_AF, GPIO_PUPD_NONE, GPIO_PIN_2 | GPIO_PIN_3);
+    gpio_af_set(GPIOA, GPIO_AF_1, GPIO_PIN_2 | GPIO_PIN_3);
+    gpio_output_options_set(GPIOA, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_2);
+'''
+
+[hal]
+pending = "the USART driver"

@@ -1,0 +1,26 @@
+# Mode: register_writes. One read-modify-write on each side: APB2EN bit 11.
+description = """
+The advanced timer TIMER0's clock enable on the GD32F1x0: APB2EN bit 11 (RCU_APB2EN_TIMER0EN,
+gd32f1x0_rcu.h), the same bit as on the GD32F10x.
+
+Vendor: rcu_periph_clock_enable(RCU_TIMER0).
+HAL: clock::enable_timer(rcu, chip.clock(), Timer0).
+"""
+family = "gd32f1x0"
+mode = "register_writes"
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_TIMER0);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        clock::enable_timer(chip.rcu_base().unwrap(), chip.clock(), PeriphLabel::Timer0).unwrap();
+    }
+'''

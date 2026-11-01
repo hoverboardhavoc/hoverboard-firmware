@@ -16,7 +16,7 @@ name: CI
 # ESP32-C3 image, 1.92). Each cargo step runs from inside its workspace, so that workspace's
 # rust-toolchain.toml and .cargo/ apply; the root holds no Cargo workspace.
 #
-# Eight checks:
+# Nine checks:
 #   - lint: rustfmt over the motorcontroller, shared and tools workspaces (the bridge's runs in its
 #     own job), then clippy over both build surfaces of the motorcontroller and shared workspaces
 #     (thumbv7m and host --all-targets; without --all-targets clippy lints only the lib and skips
@@ -29,6 +29,9 @@ name: CI
 #   - run swd-bridge's tests (the HostMailbox <-> Mailbox agreement suite), in tools/,
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
 #     emulator-runner (it lives in that job because its unicorn build needs cmake),
+#   - run the golden register traces (tools/golden-trace, specs/hal.md section 8.1): rebuild every
+#     vendor trace from third_party/gd32-spl and require the checked-in files byte for byte, then
+#     compare every HAL trace against them, plus the harness's tests and clippy,
 #   - run the Kotlin protocol mirror's drift gate: it reads the Rust as text and compares it to
 #     shared/protocol-kotlin's mirror of the wire protocol,
 #   - run the remote app's unit tests (both variants) and detekt. That job and the drift gate are
@@ -78,8 +81,8 @@ jobs:
   # swd-mailbox's board-only code) is the code the motorcontroller build compiles into the image;
   # both surfaces run on the pinned nightly that shared/rust-toolchain.toml names.
   # The tools/ workspace: rustfmt covers every member here; swd-bridge is clippy'd here;
-  # emulator-runner is clippy'd in the emulator-tests job (its unicorn native build needs cmake,
-  # installed there); hoverboard-cli in its own job, per platform; hardware-runner is ONLY
+  # emulator-runner is clippy'd in the emulator-tests job and golden-trace in the golden-traces job
+  # (their unicorn native build needs cmake, installed there); hoverboard-cli in its own job, per platform; hardware-runner is ONLY
   # fmt-checked (it drives real probes over probe-rs, so nothing in CI compiles or runs it). The
   # bridge workspace's rustfmt and clippy run in the bridge job, which carries its toolchain.
   lint:
@@ -1053,6 +1056,70 @@ jobs:
           cargo clippy
           -p emulator-runner
           --features unicorn
+          --all-targets
+          --target ${{ env.HOST_TARGET }}
+          -- -D warnings
+
+  # The golden register traces (specs/hal.md, section 8.1). tools/golden-trace runs each vector's
+  # vendor body (C against the GD standard peripheral library in third_party/gd32-spl) and its HAL
+  # body (motorcontroller/hal, built for thumbv7m per chip feature) under Unicorn and compares the
+  # peripheral accesses. The vendor traces are checked in: `regen --check` rebuilds every one from
+  # the pinned source with the pinned compiler and fails unless it reproduces the checked-in file
+  # byte for byte, so arm-none-eabi-gcc is pinned to the release they were generated with
+  # (15.2.Rel1; the harness refuses any other). `check` then compares every HAL trace against them
+  # and fails on any mismatch; a vector whose HAL module does not exist yet reports as pending. The
+  # unicorn dep is the cmake-built native lib emulator-runner uses, so this job installs cmake too
+  # and carries golden-trace's clippy (the lint job covers its rustfmt).
+  golden-traces:
+    name: Golden register traces (vendor SPL vs HAL)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Install Rust (pinned nightly) + host and thumbv7m targets + clippy
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi
+          components: rustfmt, clippy, rust-src
+
+      - name: Install build tools for Unicorn (cmake + pkg-config)
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config build-essential
+
+      - name: Install arm-none-eabi-gcc (the release the vendor traces are generated with)
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: "15.2.Rel1"
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            hoverboard-firmware/tools
+
+      - name: Harness tests
+        working-directory: hoverboard-firmware/tools
+        run: cargo test -p golden-trace --target ${{ env.HOST_TARGET }}
+
+      - name: Vendor traces reproduce from the pinned source
+        working-directory: hoverboard-firmware/tools
+        run: cargo run -p golden-trace --target ${{ env.HOST_TARGET }} -- regen --check
+
+      - name: HAL traces against the vendor traces
+        working-directory: hoverboard-firmware/tools
+        run: cargo run -p golden-trace --target ${{ env.HOST_TARGET }} -- check
+
+      - name: clippy (golden-trace, all targets)
+        working-directory: hoverboard-firmware/tools
+        run: >
+          cargo clippy
+          -p golden-trace
           --all-targets
           --target ${{ env.HOST_TARGET }}
           -- -D warnings

@@ -1,0 +1,44 @@
+# Mode: with_polling, narrowed with assert_only to STAT and TDATA: the transmit handshake. The
+# bring-up before it is compared by bringup_usart1_115200_8n1_f1x0.
+#
+# STAT (0x1C) reads in order (each read the next value, the last one repeats):
+#   0x00  TBE poll: busy
+#   0x80  TBE poll: TBE set (bit 7)
+#   0x80  TC poll: busy
+#   0xC0  TC poll: TC set (bit 6)
+# so each poll spins once. The flags are the ones the vendor body polls, not a silicon capture.
+description = """
+One byte sent with polling on USART1 of the GD32F1x0: wait for TBE, write TDATA, wait for TC. The
+STAT flags are scripted busy then done, so each poll is traced and a dropped one fails.
+
+Vendor: the bring-up of bringup_usart1_115200_8n1_f1x0, then wait TBE; usart_data_transmit(0x41);
+        wait TC.
+HAL: Usart::bring_up(...) then write_byte(0x41).
+"""
+family = "gd32f1x0"
+mode = "with_polling"
+assert_only = [
+    "<USART1_BASE>+0x1C",
+    "<USART1_BASE>+0x28",
+]
+
+[read_responses]
+"<USART1_BASE>+0x1C" = [0x00, 0x80, 0x80, 0xC0]
+
+[vendor]
+body = '''
+    usart_disable(USART1);
+    usart_baudrate_set(USART1, 115200U);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+    usart_enable(USART1);
+    while(RESET == usart_flag_get(USART1, USART_FLAG_TBE)){}
+    usart_data_transmit(USART1, 0x41U);
+    while(RESET == usart_flag_get(USART1, USART_FLAG_TC)){}
+'''
+
+[hal]
+pending = "the USART driver"

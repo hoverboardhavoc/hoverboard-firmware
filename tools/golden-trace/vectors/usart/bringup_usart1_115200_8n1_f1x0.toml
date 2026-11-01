@@ -1,0 +1,31 @@
+# Mode: final_state, for the reason bringup_usart1_115200_8n1_f10x gives. End state:
+#   BAUD = 0x00000139 (115200 on the 36 MHz APB1)    +0x0C
+#   CTL0 = UEN bit 0 | TEN bit 3 | REN bit 2         +0x00
+#   CTL1 = 0x00000000 (one stop bit)                 +0x04
+description = """
+USART1 brought up at 115200 8N1 on the GD32F1x0 register model (CTL0 0x00 with UEN at bit 0, CTL1
+0x04, BAUD 0x0C, STAT 0x1C, separate RDATA/TDATA), no transfer. The family table seeds RCU_CFG0
+with the running 72 MHz tree, so the vendor's usart_baudrate_set reads APB1 = 36 MHz without
+SystemInit; the HAL takes the same tree. Both give BAUD = 0x139.
+
+Vendor: usart_disable; usart_baudrate_set(115200); word length 8, one stop bit, no parity; transmit
+        and receive on; usart_enable.
+HAL: Usart::bring_up(&chip, &REFERENCE_72M_IRC8M, &UsartConfig { Usart1, 115200, 8N1, by 16 }).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+
+[vendor]
+body = '''
+    usart_disable(USART1);
+    usart_baudrate_set(USART1, 115200U);
+    usart_word_length_set(USART1, USART_WL_8BIT);
+    usart_stop_bit_set(USART1, USART_STB_1BIT);
+    usart_parity_config(USART1, USART_PM_NONE);
+    usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
+    usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+    usart_enable(USART1);
+'''
+
+[hal]
+pending = "the USART driver"

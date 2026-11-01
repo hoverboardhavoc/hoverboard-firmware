@@ -1,0 +1,32 @@
+# Mode: final_state, narrowed with assert_only to the GPIOB mode registers and AFSEL0. The HAL routes
+# I2C pins only inside its I2C bring-up (clocks, I2C0, a bus clear on the pins first); the AF
+# configuration is the last write to each of these registers. End state (pin 6 and 7):
+#   CTL    = AF (2) at bits 13:12 and 15:14
+#   OMODE  = open-drain, bits 6 and 7
+#   OSPD   = 50 MHz (3) at bits 13:12 and 15:14
+#   PUD    = pull-up (1) at bits 13:12 and 15:14
+#   AFSEL0 = AF1 at bits 27:24 and 31:28
+# AFSEL1 is outside the scope: gpio_af_set rewrites it, the HAL does not; both leave its reset 0.
+description = """
+The alternate-function configuration of the IMU's I2C0 pins SCL = PB6, SDA = PB7 on the GD32F1x0
+GPIO model: AF mode at AF1, open-drain, 50 MHz, with the pull-up.
+
+Vendor: gpio_mode_set(AF, PULLUP); gpio_af_set(AF_1); gpio_output_options_set(OD, 50MHZ) on PB6|PB7.
+HAL: I2c::new on PB6/PB7 (it routes both pins).
+"""
+family = "gd32f1x0"
+mode = "final_state"
+assert_only = [
+    "<GPIOB_BASE>+0x00..0x0C",
+    "<GPIOB_BASE>+0x20",
+]
+
+[vendor]
+body = '''
+    gpio_mode_set(GPIOB, GPIO_MODE_AF, GPIO_PUPD_PULLUP, GPIO_PIN_6 | GPIO_PIN_7);
+    gpio_af_set(GPIOB, GPIO_AF_1, GPIO_PIN_6 | GPIO_PIN_7);
+    gpio_output_options_set(GPIOB, GPIO_OTYPE_OD, GPIO_OSPEED_50MHZ, GPIO_PIN_6 | GPIO_PIN_7);
+'''
+
+[hal]
+pending = "the I2C driver"
