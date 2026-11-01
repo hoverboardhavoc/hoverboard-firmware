@@ -17,6 +17,7 @@
 //! hoverboard-cli [LINK] [--node NODE] disarm | halt | resume | reset | reset-halt
 //! hoverboard-cli [LINK] [--node NODE] read <addr> <len> | write <addr> <hex>
 //! hoverboard-cli [LINK] [--node NODE] flash <elf>
+//! hoverboard-cli [LINK] [--node NODE] erase-store [--yes]
 //! hoverboard-cli [LINK] [--node NODE] update-esp <bin> [--no-confirm]
 //! hoverboard-cli [--serial PORT] install-esp <image.bin> [<file>...] [--yes]
 //! hoverboard-cli [LINK] watch <secs> [<node>...]
@@ -58,6 +59,13 @@
 //! slot. It needs no `ESP_INFO` it can decode: one from a bridge built for another layout is
 //! skipped with a note.
 //!
+//! `erase-store` erases the store of the board behind the bridge (`STORE_ERASE`,
+//! `specs/hoverboard-bridge.md`, "Erasing the store"). It walks to find that board (the bridge's one
+//! walked neighbour), prints what a `dump` leaves out and the erase loses (`node.address`, each
+//! motor's `odometer`, with the `config` line that writes a stored odometer back), asks, and prints
+//! `erased` once the bridge reports success and its mailbox is up again. Without a terminal it
+//! refuses unless `--yes` is given.
+//!
 //! `install-esp` makes a SuperMini a bridge over its own USB port (`specs/bridge-onboarding.md`
 //! section 3): it asks before erasing a bridge that answers there, writes the merged 4 MB install
 //! image through the `espflash` library, waits for the first boot, applies the files given (a new
@@ -77,6 +85,7 @@ use net::pdu::NO_ADDRESS;
 use hoverboard_cli::client::{Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
+use hoverboard_cli::erase;
 use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
 use hoverboard_cli::install::{self, Answered, Given, Guard};
 use hoverboard_cli::names;
@@ -767,6 +776,77 @@ fn esp_client(via: &Via, node: Option<&str>) -> Result<EspClient, String> {
     Ok(Client::addressed(wire, src, dst))
 }
 
+/// `erase-store`: walk, find the board behind the bridge (`node` names the bridge, or the one on
+/// the link), print what the erase loses that a `dump` leaves out, ask, send `STORE_ERASE`, and wait
+/// for the board's mailbox.
+fn erase_store(via: &Via, node: Option<&str>, yes: bool) -> Result<(), String> {
+    let mut wire = Framed::new(via.open()?);
+    let walked = nodes::walk(&mut wire)?;
+    let found = nodes::survey(&mut wire, &walked);
+    let src = walked.guest_addr();
+    let (bridge, dst) = match node {
+        Some(spec) => {
+            let a = nodes::resolve(spec, &found)?;
+            (a, a)
+        }
+        None => (
+            walked
+                .gateway_addr()
+                .ok_or("the walk found no node on this link")?,
+            NO_ADDRESS,
+        ),
+    };
+    let at = |a: u8| found.iter().find(|f| f.addr == a);
+    let b = at(bridge).ok_or_else(|| format!("the walk found no node {bridge:#04x}"))?;
+    if b.class != Some(net::walk::CLASS_BRIDGE) {
+        return Err(format!(
+            "{} is a {}, not a bridge; give --node with a bridge",
+            label(b),
+            class_name(b.class)
+        ));
+    }
+    let board = walked
+        .neighbours(bridge)
+        .into_iter()
+        .filter_map(at)
+        .find(|f| f.class == Some(CLASS_MOTOR))
+        .ok_or_else(|| format!("the walk found no board behind {}", label(b)))?;
+    let name = node_name(board);
+    let mut on = Board {
+        wire: &mut wire,
+        src,
+        dst: board.addr,
+        name: name.clone(),
+    };
+    let (reads, _) = config::read_board(&mut on, &config::board_owned_keys())?;
+    for l in erase::lines(&name, &reads) {
+        println!("{l}");
+    }
+    match erase::guard(&name, yes, std::io::stdin().is_terminal()) {
+        Guard::Proceed => {}
+        Guard::Refuse(why) => return Err(why),
+        Guard::Ask(q) => {
+            if !confirm(&q) {
+                return Err("nothing erased".into());
+            }
+        }
+    }
+    let mut c = Client::addressed(wire, src, dst);
+    let e = |e: ClientError| e.to_string();
+    c.store_erase().map_err(e)?;
+    let state = c.wait_mailbox(erase::MAILBOX_WAIT).map_err(e)?;
+    if state != espsvc::MailboxState::Up as u8 {
+        let state = espsvc::MailboxState::from_u8(state)
+            .map_or_else(|| format!("{state}"), |s| format!("{s:?}"));
+        return Err(format!(
+            "{name}: the store is erased, but the board's mailbox was not up within {} s ({state})",
+            erase::MAILBOX_WAIT.as_secs()
+        ));
+    }
+    println!("erased");
+    Ok(())
+}
+
 /// Board addresses from the command line.
 fn board_list(args: &[&str]) -> Result<Vec<u8>, String> {
     args.iter()
@@ -877,6 +957,7 @@ const COMMANDS: &[&str] = &[
     "update-esp",
     "install-esp",
     "clear-protection",
+    "erase-store",
     "disarm",
     "halt",
     "resume",
@@ -984,7 +1065,7 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
         Some(Via::Ble(_)) => Given::Device,
     };
     let via = via.unwrap_or(Via::Ble(None));
-    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|status [<node>...]|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
+    let usage = "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] [--node NODE] scan|nodes|status [<node>...]|name <node> <text>|config <node> <path> [<value>] [--force]|dump <node> [<file>]|diff [--replace] <node> <file>...|apply <node> <file>...|replace <node> <file>... [--yes]|compact <node>|fields --json|info|id|flash <elf>|update-esp <bin> [--no-confirm]|install-esp <image.bin> [<file>...] [--yes]|clear-protection|erase-store [--yes]|disarm|halt|resume|reset|reset-halt|read <addr> <len>|write <addr> <hex>|watch <secs> [<node>...]|drive <value> <secs> [<node>...]";
     let cmd = match word {
         Some(_) if COMMANDS.contains(&rest[0]) => rest[0],
         _ => return Err(usage.into()),
@@ -1324,6 +1405,15 @@ fn dispatch(args: &[String], cmd_out: &mut Option<String>) -> Result<u8, String>
             return Err("install-esp takes no --node: it installs the bridge on the port".into());
         }
         return install_esp(given, image, files, yes).map(|()| 0);
+    }
+
+    if cmd == "erase-store" {
+        let yes = rest.contains(&"--yes");
+        rest.retain(|a| *a != "--yes");
+        if rest.len() != 1 {
+            return Err("erase-store takes [--yes]".into());
+        }
+        return erase_store(&via, node, yes).map(|()| 0);
     }
 
     if cmd == "update-esp" {

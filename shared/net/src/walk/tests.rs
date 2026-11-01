@@ -626,6 +626,11 @@ fn a_fresh_bridge_in_front_of_an_addressed_pair_ends_at_0x03_and_the_boards_keep
         .host_link()
         .expect("the bridge reports the host");
     assert_eq!((hl.node, hl.port, hl.kind), (0x03, 2, PORT_UART));
+    // The board behind the bridge is its one neighbour; the master sits between the bridge and
+    // the slave.
+    assert_eq!(m.ctrl.ctrl.neighbours(0x03).as_slice(), [0x01]);
+    assert_eq!(m.ctrl.ctrl.neighbours(0x01).as_slice(), [0x03, 0x02]);
+    assert_eq!(m.ctrl.ctrl.neighbours(0x02).as_slice(), [0x01]);
 
     // Each node reports its class: 2 for the bridge, 1 for the boards.
     for (addr, class) in [(0x03, CLASS_BRIDGE), (0x01, MOTOR), (0x02, MOTOR)] {

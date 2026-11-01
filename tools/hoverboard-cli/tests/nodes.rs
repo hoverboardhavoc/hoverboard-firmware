@@ -30,12 +30,20 @@ fn machine() -> Machine<'static> {
 }
 
 /// What the machine holds once the clients are done: the bridge's address and stored name, the
-/// `DRIVE_CMD`s each board took, and the opcodes each client connection sent.
+/// `DRIVE_CMD`s each board took, the opcodes each client connection sent, and the master's store
+/// pages on its flash (the simulated GD32's, which `STORE_ERASE` reaches).
 struct After {
     esp: u8,
     name: Vec<u8>,
     drives: [usize; 2],
     ops: Vec<Vec<u8>>,
+    store_pages: Vec<u16>,
+}
+
+/// The store pages' first halfword in the simulated GD32's flash.
+fn store_half() -> usize {
+    use hoverboard_bridge_core::flash::{FLASH_BASE, STORE_START};
+    ((STORE_START - FLASH_BASE) / 2) as usize
 }
 
 /// The bytes a client sent, framed back into packets for [`After::ops`].
@@ -115,6 +123,7 @@ fn serve_with(
         name: m.node.store().get_text(store::DEVICE_NAME).to_vec(),
         drives: [drives(&m.master.got), drives(&m.slave.got)],
         ops,
+        store_pages: m.port.swd().pins().bus.flash[store_half()..].to_vec(),
     }
 }
 
@@ -704,4 +713,83 @@ fn status_reads_board_status_from_each_motor_controller() {
     );
     assert!(!rows[2].contains('!'), "{out}");
     server.join().unwrap();
+}
+
+#[test]
+fn erase_store_prints_what_a_dump_leaves_out_refuses_without_a_terminal_and_erases_with_yes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    // The master's flash holds records in its store pages.
+    let server = std::thread::spawn(move || {
+        serve_with(listener, 5, |m| {
+            let at = store_half();
+            for h in &mut m.port.swd().pins().bus.flash[at..at + 16] {
+                *h = 0x1234;
+            }
+        })
+    });
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+
+    let (code, _, err) = run(&["config", "0x01", "device.name", "rover-left"]);
+    assert_eq!(code, Some(0), "{err}");
+    let (code, _, err) = run(&["config", "0x01", "motors.0.odometer", "123456", "--force"]);
+    assert_eq!(code, Some(0), "{err}");
+
+    // Usage: nothing but --yes, and no link opened for it.
+    let (code, _, err) = cli_code(&["--tcp=127.0.0.1:9", "erase-store", "now"]);
+    assert_eq!(
+        (code, err.trim()),
+        (Some(1), "error: erase-store takes [--yes]")
+    );
+
+    // Without a terminal (the test's stdin is not one) and without --yes: the lines, then the
+    // refusal, and no STORE_ERASE sent. The board is the one behind the bridge on the link.
+    let restore = "  write it back with: hoverboard-cli config rover-left motors.0.odometer \
+                   123456 --force";
+    let lines = |out: &str| out.lines().map(str::to_string).collect::<Vec<_>>();
+    let (code, out, err) = run(&["erase-store"]);
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert_eq!(
+        lines(&out),
+        [
+            "rover-left: node.address = 1",
+            "rover-left: motors[0].odometer = 123456",
+            restore,
+            "rover-left: motors[1].odometer = 0 (default)",
+        ],
+        "{out}"
+    );
+    assert!(
+        err.contains("rover-left: erase-store erases every stored setting; give --yes"),
+        "{err}"
+    );
+
+    // By the bridge's name too; with --yes it erases and waits for the mailbox.
+    let (code, out, err) = run(&["--node", "hb-bridge-ab12", "erase-store", "--yes"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert_eq!(lines(&out)[2], restore, "{out}");
+    assert_eq!(out.lines().last(), Some("erased"), "{out}");
+
+    // A motor controller is not a bridge.
+    let (code, _, err) = run(&["--node", "0x02", "erase-store", "--yes"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("motor controller, not a bridge"), "{err}");
+
+    let after = server.join().unwrap();
+    let erase = espsvc::OP_STORE_ERASE;
+    let sent: Vec<bool> = after.ops.iter().map(|o| o.contains(&erase)).collect();
+    assert_eq!(
+        sent,
+        [false, false, false, true, false],
+        "{:02x?}",
+        after.ops
+    );
+    assert!(
+        after.store_pages.iter().all(|&h| h == 0xFFFF),
+        "the master's store pages are erased"
+    );
 }

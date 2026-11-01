@@ -1103,6 +1103,18 @@ impl Controller {
         self.host_link
     }
 
+    /// The nodes the walk placed next to `addr`: the relay it was reached through, then every node
+    /// reached through it. A bridge's one walked neighbour is the board on its mailbox, since its
+    /// other ports hold controllers, which the walk does not place; this is how a tool finds the
+    /// board behind a bridge (`hoverboard-cli erase-store`).
+    pub fn neighbours(&self, addr: u8) -> Vec<u8, MAX_NODES> {
+        let mut v: Vec<u8, MAX_NODES> = self.parent_of(addr).into_iter().collect();
+        for p in self.assigned.iter().filter(|p| p.relay == addr) {
+            let _ = v.push(p.addr);
+        }
+        v
+    }
+
     /// The walk is finished: nothing queued and nothing outstanding.
     pub fn is_complete(&self) -> bool {
         self.queue.is_empty() && self.outstanding.is_none()
