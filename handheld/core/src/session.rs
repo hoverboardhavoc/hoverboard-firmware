@@ -1,5 +1,5 @@
 //! One connection's L3 conversation (`specs/handheld-remote.md` section 3.5): the full walk with
-//! `net::walk::Controller`, `node.class` at every address, then the ride facts from every motor
+//! `net::walk::Controller`, `IDENTIFY` at every address, then the ride facts from every motor
 //! controller, one request at a time with a 1 s reply timeout and three tries each (the app's
 //! `L3Session`), and the re-walk every 3 s while no motor controller is known.
 //!
@@ -7,8 +7,9 @@
 //! time ([`Session::poll`]); each hands back the PDUs to send.
 
 use heapless::Vec;
-use net::pdu::Pdu;
-use net::walk::{config_read, ConfigResp, Controller, PduBuf, CLASS_BRIDGE};
+use net::pdu::{Opcode, Pdu};
+use net::walk::{config_read, is_reply, request, ConfigResp, Controller, Identity, PduBuf};
+pub use net::walk::{CLASS_BRIDGE, CLASS_MOTOR};
 use store::{Key, Value};
 
 /// How long a request waits for its reply before it is sent again, ms.
@@ -22,15 +23,12 @@ pub const MAX_NODES: usize = net::walk::MAX_NODES;
 /// The most motor controllers whose facts are held.
 pub const MAX_MCS: usize = 4;
 
-/// The motor controller's `node.class` (`specs/l3.md`, "Node class").
-pub const CLASS_MOTOR: u8 = store::NODE_CLASS.default();
-
 /// A ride fact (section 3.5), in the order they are read.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fact {
     Frame,
     Side,
-    DriveMode,
+    Mode,
     PolePairs,
     WheelDiameter,
     CurrentLimit,
@@ -45,7 +43,7 @@ pub enum Fact {
 pub const FACTS: [(Fact, Key); 11] = [
     (Fact::Frame, store::CONTROL_FRAME.key()),
     (Fact::Side, store::CONTROL_SIDE.key()),
-    (Fact::DriveMode, store::MACHINE_DRIVE_MODE.key()),
+    (Fact::Mode, store::CONTROL_MODE.key()),
     (Fact::PolePairs, store::field::MOTOR_POLE_PAIRS.key()),
     (Fact::WheelDiameter, store::field::WHEEL_DIAMETER_MM.key()),
     (Fact::CurrentLimit, store::MOTOR_CURRENT_LIMIT.key()),
@@ -60,7 +58,8 @@ pub const FACTS: [(Fact, Key); 11] = [
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Node {
     pub addr: u8,
-    /// Its `node.class`, `None` while unread or after its read failed.
+    /// Its `IDENTITY` class (`specs/machine-settings.md` section 6.1), `None` while unread or after
+    /// its `IDENTIFY` failed.
     pub class: Option<u8>,
 }
 
@@ -84,7 +83,7 @@ impl Facts {
 pub enum Phase {
     /// The walk is running.
     Walking,
-    /// Reading `node.class`, `n` of `total` done.
+    /// Asking every node its `IDENTITY`, `n` of `total` done.
     Classes { n: u8, total: u8 },
     /// Reading the ride facts, `n` of `total` done.
     Facts { n: u8, total: u8 },
@@ -202,8 +201,8 @@ impl Session {
     }
 
     /// Take one received PDU. Returns the PDUs to send in answer; `consumed` is whether it was a
-    /// reply this session took (a probe of its own port, a walk reply or a `CONFIG_RESP` it
-    /// waited for), so the caller files everything else as telemetry.
+    /// reply this session took (a probe of its own port, a walk reply, or an `IDENTITY` or
+    /// `CONFIG_RESP` it waited for), so the caller files everything else as telemetry.
     pub fn on_pdu(&mut self, frame: &[u8], now: u32, sends: &mut Sends) -> bool {
         if let Some(r) = self.walk.reply_to_probe(frame) {
             let _ = sends.push(r);
@@ -223,10 +222,10 @@ impl Session {
             }
             Waiting::Class { node } => {
                 let addr = self.nodes[node].addr;
-                let Some(v) = self.answer(frame, addr, store::NODE_CLASS.key()) else {
+                let Some(identity) = self.identity(frame, addr) else {
                     return false;
                 };
-                self.nodes[node].class = v.map(|c| c as u8);
+                self.nodes[node].class = identity.map(|i| i.class);
                 self.out = None;
                 self.advance(now, sends);
                 true
@@ -242,6 +241,14 @@ impl Session {
                 true
             }
         }
+    }
+
+    /// The identity in `frame` if it is the `IDENTITY` answering our `IDENTIFY` of `addr`:
+    /// `Some(None)` for a reply that does not decode, `None` for a frame that is not the reply.
+    fn identity(&self, frame: &[u8], addr: u8) -> Option<Option<Identity>> {
+        let src = self.walk.granted()?;
+        let pdu = Pdu::decode(frame).ok()?;
+        is_reply(&pdu, Opcode::Identity, src, addr).then(|| Identity::decode(pdu.payload))
     }
 
     /// The value in `frame` if it is the `CONFIG_RESP` to our read of `key` at `addr`: `Some(None)`
@@ -355,7 +362,9 @@ impl Session {
             if (n as usize) < self.nodes.len() {
                 let node = n as usize;
                 self.phase = Phase::Classes { n: n + 1, total };
-                let pdu = config_read(src, self.nodes[node].addr, store::NODE_CLASS.key());
+                // An empty request always fits.
+                let pdu =
+                    request(Opcode::Identify, src, self.nodes[node].addr, &[]).unwrap_or_default();
                 self.send(pdu, Waiting::Class { node }, now, sends);
                 return;
             }
@@ -397,7 +406,6 @@ impl Session {
 mod tests {
     extern crate std;
     use super::*;
-    use net::pdu::Opcode;
     use std::vec::Vec as StdVec;
 
     /// A machine the walk finds whole on its first request: a bridge at 0x01 that holds its address
@@ -405,7 +413,7 @@ mod tests {
     /// It answers what the session sends, and is told which requests to ignore.
     struct Machine {
         guest: u8,
-        drop_class_reads: u8,
+        drop_identifies: u8,
     }
 
     fn pdu(op: Opcode, src: u8, dst: u8, payload: &[u8]) -> StdVec<u8> {
@@ -414,16 +422,24 @@ mod tests {
         b[..n].to_vec()
     }
 
+    /// An `IDENTITY` payload of `class`.
+    fn identity(class: u8) -> [u8; Identity::LEN] {
+        Identity {
+            class,
+            mcu: net::walk::MCU_F1X0,
+            fw_ver: 1,
+            uid: [class; net::walk::UID_LEN],
+        }
+        .encode()
+    }
+
     impl Machine {
         fn answer(&mut self, req: &[u8]) -> Option<StdVec<u8>> {
             let p = Pdu::decode(req).unwrap();
             match p.known()? {
-                Opcode::NodeHello => Some(pdu(
-                    Opcode::NodeHello,
-                    0x01,
-                    p.src,
-                    &[0x01, 1, 0, 0, 0, self.guest],
-                )),
+                Opcode::NodeHello => {
+                    Some(pdu(Opcode::NodeHello, 0x01, p.src, &[0x01, 1, self.guest]))
+                }
                 Opcode::ProbePorts => {
                     // 0x01 reports 0x02 on port 0 and the guest on port 1; 0x02 reports 0x03.
                     let entries: StdVec<[u8; 4]> = match p.dst {
@@ -437,22 +453,25 @@ mod tests {
                     }
                     Some(pdu(Opcode::Ports, p.dst, p.src, &pl))
                 }
-                Opcode::ConfigRead => {
-                    let key = [p.payload[0], p.payload[1]];
-                    if key == [store::NODE_CLASS.key().field_id, 0] && self.drop_class_reads > 0 {
-                        self.drop_class_reads -= 1;
+                Opcode::Identify => {
+                    if self.drop_identifies > 0 {
+                        self.drop_identifies -= 1;
                         return None;
                     }
-                    let class = if p.dst == 0x01 {
-                        CLASS_BRIDGE
-                    } else {
-                        CLASS_MOTOR
-                    };
-                    let value = if key[0] == store::NODE_CLASS.key().field_id {
-                        class
-                    } else {
-                        key[0] // each fact reads back its own field id
-                    };
+                    Some(pdu(
+                        Opcode::Identity,
+                        p.dst,
+                        p.src,
+                        &identity(if p.dst == 0x01 {
+                            CLASS_BRIDGE
+                        } else {
+                            CLASS_MOTOR
+                        }),
+                    ))
+                }
+                Opcode::ConfigRead => {
+                    let key = [p.payload[0], p.payload[1]];
+                    let value = key[0]; // each fact reads back its own field id
                     Some(pdu(
                         Opcode::ConfigResp,
                         p.dst,
@@ -498,7 +517,7 @@ mod tests {
         let mut s = Session::new();
         let mut m = Machine {
             guest: 0x81,
-            drop_class_reads: 0,
+            drop_identifies: 0,
         };
         let (_, sent) = run(&mut s, &mut m, 0, 5000);
         assert!(s.ready());
@@ -515,11 +534,14 @@ mod tests {
         assert_eq!(s.motor_controllers().collect::<StdVec<_>>(), [0x02, 0x03]);
         let f = s.facts_of(0x03).unwrap();
         assert_eq!(
-            f.get(Fact::DriveMode),
-            Some(store::MACHINE_DRIVE_MODE.key().field_id as i64)
+            f.get(Fact::Mode),
+            Some(store::CONTROL_MODE.key().field_id as i64)
         );
-        assert_eq!(f.get(Fact::ImuModel), Some(0x60));
-        // Hello, three probes, three classes, 22 facts.
+        assert_eq!(
+            f.get(Fact::ImuModel),
+            Some(store::IMU_MODEL.key().field_id as i64)
+        );
+        // Hello, three probes, three IDENTIFYs, 22 facts.
         assert_eq!(sent, 1 + 3 + 3 + 2 * FACTS.len());
     }
 
@@ -528,7 +550,7 @@ mod tests {
         let mut s = Session::new();
         let mut m = Machine {
             guest: 0x81,
-            drop_class_reads: 2,
+            drop_identifies: 2,
         };
         run(&mut s, &mut m, 0, 10_000);
         assert!(s.ready());
@@ -541,7 +563,7 @@ mod tests {
         let mut s = Session::new();
         let mut m = Machine {
             guest: 0x81,
-            drop_class_reads: 3,
+            drop_identifies: 3,
         };
         run(&mut s, &mut m, 0, 10_000);
         assert!(s.ready());
@@ -580,21 +602,15 @@ mod tests {
             fn answer(req: &[u8]) -> Option<StdVec<u8>> {
                 let p = Pdu::decode(req).unwrap();
                 match p.known()? {
-                    Opcode::NodeHello => Some(pdu(
-                        Opcode::NodeHello,
-                        0x01,
-                        p.src,
-                        &[0x01, 1, 0, 0, 0, 0x81],
-                    )),
+                    Opcode::NodeHello => {
+                        Some(pdu(Opcode::NodeHello, 0x01, p.src, &[0x01, 1, 0x81]))
+                    }
                     Opcode::ProbePorts => {
                         Some(pdu(Opcode::Ports, 0x01, p.src, &[1, 1, 1, 2, 0x81]))
                     }
-                    Opcode::ConfigRead => Some(pdu(
-                        Opcode::ConfigResp,
-                        0x01,
-                        p.src,
-                        &[p.payload[0], 0, 0, store::Type::U8.tag(), CLASS_BRIDGE],
-                    )),
+                    Opcode::Identify => {
+                        Some(pdu(Opcode::Identity, 0x01, p.src, &identity(CLASS_BRIDGE)))
+                    }
                     _ => None,
                 }
             }

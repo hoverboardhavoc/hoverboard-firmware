@@ -99,6 +99,9 @@ pub struct Model {
     pub tx_rate: u16,
     pub heap_free: u32,
     released: bool,
+    /// Whether a machine of two motor controllers that is not rigid uses the turn axis:
+    /// DIFFERENTIAL with it, BOUND without ([`drive::TURN_AXIS`]).
+    turn_axis: bool,
 }
 
 /// The throttle overlay's state (section 5.7), in pixels.
@@ -184,6 +187,7 @@ impl Model {
             tx_rate: 0,
             heap_free: 0,
             released: false,
+            turn_axis: drive::TURN_AXIS,
         }
     }
 
@@ -357,7 +361,8 @@ impl Model {
             .iter()
             .map(|f| Board {
                 addr: f.addr,
-                mode: f.get(Fact::DriveMode).map(|v| v as u8),
+                mode: f.get(Fact::Mode).map(|v| v as u8),
+                frame: f.get(Fact::Frame).map(|v| v as u8),
                 side: f.get(Fact::Side).map(|v| v as u8),
                 leader: self.inbox.get(f.addr).is_some_and(|s| s.leader()),
             })
@@ -366,7 +371,7 @@ impl Model {
 
     /// The drive in force (section 4.6).
     pub fn drive(&self) -> Result<Targets, Refusal> {
-        drive::targets(&self.boards(), self.session.class_unread())
+        drive::targets(&self.boards(), self.session.class_unread(), self.turn_axis)
     }
 
     /// The motor controllers store different frames (the app's `MachineArm.FramesDiffer`).
@@ -502,12 +507,7 @@ impl Model {
                 "disarmed"
             }
         );
-        let mode = self
-            .session
-            .facts()
-            .first()
-            .and_then(|f| f.get(Fact::DriveMode))
-            .and_then(|v| drive::DriveMode::of(v as u8));
+        let mode = drive::mode(&self.boards(), self.session.class_unread(), self.turn_axis);
         let _ = match (self.drive(), mode) {
             (Ok(t), Some(m)) => write!(s, "mode {} to {:02x?}", m.name(), t.drive.as_slice()),
             (Ok(t), None) => write!(s, "mode none to {:02x?}", t.drive.as_slice()),
@@ -1153,18 +1153,27 @@ mod tests {
         b[..n].to_vec()
     }
 
-    /// A bench machine: bridge 0x01, motor controllers 0x02 and 0x03 (BOUND, sides left and
-    /// right, 15 pole pairs, 165 mm, 10 cells Li-ion), answering what the model sends.
-    fn answer(req: &[u8], guest: u8, mode: u8) -> Option<StdVec<u8>> {
+    /// A bench machine: bridge 0x01, motor controllers 0x02 and 0x03 (throttle on pivoting
+    /// platforms, so BOUND without the turn axis; sides left and right, 15 pole pairs, 165 mm, 10
+    /// cells Li-ion), answering what the model sends.
+    fn answer(req: &[u8], guest: u8) -> Option<StdVec<u8>> {
         let p = Pdu::decode(req).unwrap();
         let op = |o: Opcode| o.to_u8();
         match p.known()? {
-            Opcode::NodeHello => Some(pdu(
-                op(Opcode::NodeHello),
-                0x01,
-                p.src,
-                &[1, 1, 0, 0, 0, guest],
-            )),
+            Opcode::NodeHello => Some(pdu(op(Opcode::NodeHello), 0x01, p.src, &[1, 1, guest])),
+            Opcode::Identify => {
+                let identity = net::walk::Identity {
+                    class: if p.dst == 1 {
+                        net::walk::CLASS_BRIDGE
+                    } else {
+                        CLASS_MOTOR
+                    },
+                    mcu: net::walk::MCU_F1X0,
+                    fw_ver: 1,
+                    uid: [p.dst; net::walk::UID_LEN],
+                };
+                Some(pdu(op(Opcode::Identity), p.dst, p.src, &identity.encode()))
+            }
             Opcode::ProbePorts => {
                 let e: StdVec<[u8; 4]> = match p.dst {
                     0x01 => std::vec![[0, 0, 2, 0x02], [1, 1, 2, guest]],
@@ -1180,12 +1189,8 @@ mod tests {
             Opcode::ConfigRead => {
                 let f = p.payload[0];
                 let (tag, bytes): (store::Type, StdVec<u8>) =
-                    if f == store::NODE_CLASS.key().field_id {
-                        (store::Type::U8, std::vec![if p.dst == 1 { 2 } else { 1 }])
-                    } else if f == store::CONTROL_SIDE.key().field_id {
+                    if f == store::CONTROL_SIDE.key().field_id {
                         (store::Type::U8, std::vec![if p.dst == 3 { 1 } else { 0 }])
-                    } else if f == store::MACHINE_DRIVE_MODE.key().field_id {
-                        (store::Type::U8, std::vec![mode])
                     } else if f == store::field::MOTOR_POLE_PAIRS.key().field_id {
                         (store::Type::U8, std::vec![15])
                     } else if f == store::field::WHEEL_DIAMETER_MM.key().field_id {
@@ -1226,11 +1231,6 @@ mod tests {
     /// Run the model connected to the bench machine for `ms`, both boards streaming. Each reply
     /// is handed back at once, in the same 10 ms step.
     fn run(m: &mut Model, start: u32, ms: u32, fault: u16) -> u32 {
-        run_mode(m, start, ms, fault, 1)
-    }
-
-    /// [`run`] with the boards storing drive mode `mode`.
-    fn run_mode(m: &mut Model, start: u32, ms: u32, fault: u16, mode: u8) -> u32 {
         let mut now = start;
         while now < start + ms {
             let mut sends = Sends::new();
@@ -1241,7 +1241,7 @@ mod tests {
             m.poll(now, &mut sends);
             let mut pending: StdVec<StdVec<u8>> = sends.iter().map(|s| s.to_vec()).collect();
             while let Some(r) = pending.pop() {
-                if let Some(a) = answer(&r, 0x81, mode) {
+                if let Some(a) = answer(&r, 0x81) {
                     let mut more = Sends::new();
                     m.on_pdu(&a, now, &mut more);
                     pending.extend(more.iter().map(|s| s.to_vec()));
@@ -1320,7 +1320,7 @@ mod tests {
             m.poll(now, &mut sends);
             pending.extend(sends.iter().map(|s| s.to_vec()));
             if let Some(r) = pending.pop() {
-                if let Some(a) = answer(&r, 0x81, 1) {
+                if let Some(a) = answer(&r, 0x81) {
                     let mut more = Sends::new();
                     m.on_pdu(&a, now, &mut more);
                     pending.extend(more.iter().map(|s| s.to_vec()));
@@ -1552,11 +1552,12 @@ mod tests {
         assert_eq!(m.outbox.drive[0].1.kind, linkctl::DriveKind::Neutral);
     }
 
-    /// The bench machine set to DIFFERENTIAL (board 0x03 the right wheel), armed.
+    /// The bench machine with the turn axis, so DIFFERENTIAL (board 0x03 the right wheel), armed.
     fn differential() -> (Model, u32) {
         let mut m = Model::new(Some(bench()));
+        m.turn_axis = true;
         m.connected(0);
-        let mut now = run_mode(&mut m, 0, 4000, 0, 2);
+        let mut now = run(&mut m, 0, 4000, 0);
         assert_eq!(m.drive().unwrap().right, Some(3));
         now = hold_band(&mut m, now);
         assert!(m.arm.armed());

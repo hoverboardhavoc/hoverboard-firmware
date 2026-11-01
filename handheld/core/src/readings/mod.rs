@@ -63,6 +63,7 @@ pub(crate) mod test_support {
                 odometer: 0,
             },
             wheel_rate: 0,
+            machine: 0,
         }
     }
 }

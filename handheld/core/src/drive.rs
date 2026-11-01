@@ -1,59 +1,52 @@
 //! Which boards a drive mode drives (`specs/handheld-remote.md` section 4.6): the app's
-//! `DriveInForce` (`apps/remote/.../model/Nodes.kt`) and `DriveFrame` (`model/DriveFrame.kt`),
-//! plus the handheld's own refusal of SINGLE with two motor controllers. The turn is spent only in
-//! DIFFERENTIAL, as each wheel's share of the mix (section 4.8); `steer` on the wire is 0 in every
-//! mode.
+//! `DriveInForce` (`apps/remote/.../model/Nodes.kt`) and `DriveFrame` (`model/DriveFrame.kt`). The
+//! drive mode is derived, not stored (`specs/machine-settings.md` section 7): RIGID is
+//! `machine.mode` balance with `machine.frame` rigid, SINGLE is one motor controller, and two or
+//! more that are not rigid are DIFFERENTIAL with the turn axis and BOUND without. The turn is spent
+//! only in DIFFERENTIAL, as each wheel's share of the mix (section 4.8); `steer` on the wire is 0 in
+//! every mode.
 
 use heapless::Vec;
 
 /// The most motor controllers a drive addresses.
 pub const MAX_BOARDS: usize = 2;
 
-/// `machine.drive_mode`'s vocabulary (`shared/store/src/field.rs`, `MACHINE_DRIVE_MODE`).
+/// The drive modes (the app's `DriveMode`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DriveMode {
-    Single = 0,
-    Bound = 1,
-    Differential = 2,
-    Rigid = 3,
+    Single,
+    Bound,
+    Differential,
+    Rigid,
 }
 
-impl DriveMode {
-    /// The mode a stored byte names.
-    pub fn of(byte: u8) -> Option<DriveMode> {
-        match byte {
-            0 => Some(DriveMode::Single),
-            1 => Some(DriveMode::Bound),
-            2 => Some(DriveMode::Differential),
-            3 => Some(DriveMode::Rigid),
-            _ => None,
-        }
-    }
+/// `machine.mode`'s balance byte (`shared/store/src/field.rs`, `CONTROL_MODE`: 0 throttle, 1
+/// balance; the firmware runs every other byte as throttle).
+pub const MODE_BALANCE: u8 = 1;
+/// `machine.frame`'s rigid byte (`shared/store/src/field.rs`, `CONTROL_FRAME`: 0 pivoting, 1
+/// rigid; the firmware runs every other byte as pivoting).
+pub const FRAME_RIGID: u8 = 1;
 
+impl DriveMode {
     /// Whether the mode drives every motor controller found, and so needs exactly two.
     pub fn drives_both(self) -> bool {
         self != DriveMode::Single
     }
 }
 
-/// Why a drive is refused (the app's `DriveRefusal`, and [`Refusal::SingleWithTwo`]).
+/// Why a drive is refused (the app's `DriveRefusal`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
-    /// A node's class, or a motor controller's stored mode, has not been read.
+    /// A node's class, or a motor controller's `machine.mode` or `machine.frame`, has not been read.
     Unread,
-    /// The motor controllers store different modes.
+    /// The motor controllers hold different `machine.mode` or `machine.frame` copies.
     Disagree,
-    /// The stored byte is not a known mode.
-    UnknownMode,
-    /// The stored mode drives two motor controllers and `found` were found.
+    /// The derived mode drives two motor controllers and `found` were found.
     NotTwo { mode: DriveMode, found: u8 },
     /// RIGID, and not exactly one motor controller reports itself the leader.
     NoLeader,
     /// DIFFERENTIAL, and not exactly one motor controller is set as the right wheel.
     NoRightWheel,
-    /// SINGLE with two motor controllers: the app drives the board picked on Tune or Setup, and
-    /// the handheld has no picker.
-    SingleWithTwo,
 }
 
 impl DriveMode {
@@ -70,16 +63,12 @@ impl DriveMode {
 
 impl Refusal {
     /// The Ride statement (`specs/remote-ui.md` 3.1c's short forms; `apps/remote/app/src/main/res/
-    /// values/strings.xml`, `drive_refusal_*`), and the handheld's own for
-    /// [`Refusal::SingleWithTwo`].
+    /// values/strings.xml`, `drive_refusal_*`).
     pub fn write(self, out: &mut impl core::fmt::Write) -> core::fmt::Result {
         match self {
-            Refusal::Unread => out.write_str("Reading the drive mode from every board."),
+            Refusal::Unread => out.write_str("Reading the control mode and frame."),
             Refusal::Disagree => {
-                out.write_str("Cannot arm: the boards store different drive modes.")
-            }
-            Refusal::UnknownMode => {
-                out.write_str("Cannot arm: the boards store an unknown drive mode.")
+                out.write_str("Cannot arm: the boards store different control modes or frames.")
             }
             Refusal::NotTwo { mode, found } => write!(
                 out,
@@ -93,9 +82,6 @@ impl Refusal {
             Refusal::NoRightWheel => {
                 out.write_str("Cannot arm: no single board is the right wheel.")
             }
-            Refusal::SingleWithTwo => {
-                out.write_str("Cannot arm: SINGLE needs a board picked on the phone.")
-            }
         }
     }
 }
@@ -105,8 +91,10 @@ impl Refusal {
 pub struct Board {
     /// Its L3 address.
     pub addr: u8,
-    /// Its stored `machine.drive_mode`, `None` while unread.
+    /// Its stored `machine.mode`, `None` while unread.
     pub mode: Option<u8>,
+    /// Its stored `machine.frame`, `None` while unread.
+    pub frame: Option<u8>,
     /// Its stored `control.side`, `None` while unread.
     pub side: Option<u8>,
     /// Whether its own `CYCLIC_STATE` claims the rigid frame's lead (`flags` bit 1).
@@ -148,32 +136,69 @@ impl Targets {
     }
 }
 
-/// `control.side`'s right wheel (`shared/store/src/field.rs`, `CONTROL_SIDE`: 0 left, 1 right).
+/// `side`'s right wheel (motor 0's, `shared/store/src/field.rs`, `CONTROL_SIDE`: 0 left, 1 right).
 pub const SIDE_RIGHT: u8 = 1;
 
-/// The targets of the drive in force on a machine whose motor controllers are `mcs` (sorted by
-/// address), or why it is refused. `class_unread` is whether any node's class is still unread.
-/// No motor controller and nothing unread is `Ok` with no targets (nothing to drive and nothing to
-/// say: "No motor controller found yet." comes from the arm rule).
-pub fn targets(mcs: &[Board], class_unread: bool) -> Result<Targets, Refusal> {
-    let mut t = Targets::default();
-    if class_unread || mcs.iter().any(|b| b.mode.is_none()) {
+/// Whether the handheld uses the turn axis on a machine of two or more motor controllers that is
+/// not rigid: DIFFERENTIAL with it, BOUND without. The app keeps this as a Ride-screen setting
+/// (`LinkSettings.turnAxis`, off until set); the handheld has no such setting and takes the app's
+/// default.
+pub const TURN_AXIS: bool = false;
+
+/// The mode a machine whose motor controllers are `mcs` derives to, or why it cannot be trusted
+/// (the app's `DriveInForce.derive`). `None` with no refusal on a machine with no motor
+/// controller.
+fn derive(
+    mcs: &[Board],
+    class_unread: bool,
+    turn_axis: bool,
+) -> Result<Option<DriveMode>, Refusal> {
+    if class_unread || mcs.iter().any(|b| b.mode.is_none() || b.frame.is_none()) {
         return Err(Refusal::Unread);
     }
+    // Effective values: every mode byte but balance runs as throttle, every frame byte but rigid
+    // as pivoting.
+    let balance = |b: &Board| b.mode == Some(MODE_BALANCE);
+    let rigid = |b: &Board| b.frame == Some(FRAME_RIGID);
     let Some(first) = mcs.first() else {
-        return Ok(t);
+        return Ok(None);
     };
-    let byte = first.mode.unwrap_or(0);
-    if mcs.iter().any(|b| b.mode != Some(byte)) {
+    if mcs
+        .iter()
+        .any(|b| balance(b) != balance(first) || rigid(b) != rigid(first))
+    {
         return Err(Refusal::Disagree);
     }
-    let mode = DriveMode::of(byte).ok_or(Refusal::UnknownMode)?;
+    Ok(Some(if balance(first) && rigid(first) {
+        DriveMode::Rigid
+    } else if mcs.len() == 1 {
+        DriveMode::Single
+    } else if turn_axis {
+        DriveMode::Differential
+    } else {
+        DriveMode::Bound
+    }))
+}
+
+/// The mode the machine whose motor controllers are `mcs` derives to, when every copy it is
+/// derived from is read and agrees.
+pub fn mode(mcs: &[Board], class_unread: bool, turn_axis: bool) -> Option<DriveMode> {
+    derive(mcs, class_unread, turn_axis).ok().flatten()
+}
+
+/// The targets of the drive in force on a machine whose motor controllers are `mcs` (sorted by
+/// address), or why it is refused. `class_unread` is whether any node's class is still unread;
+/// `turn_axis` chooses DIFFERENTIAL over BOUND ([`TURN_AXIS`]). No motor controller and nothing
+/// unread is `Ok` with no targets (nothing to drive and nothing to say: "No motor controller found
+/// yet." comes from the arm rule).
+pub fn targets(mcs: &[Board], class_unread: bool, turn_axis: bool) -> Result<Targets, Refusal> {
+    let mut t = Targets::default();
+    let Some(mode) = derive(mcs, class_unread, turn_axis)? else {
+        return Ok(t);
+    };
     if !mode.drives_both() {
-        if mcs.len() != 1 {
-            return Err(Refusal::SingleWithTwo);
-        }
-        let _ = t.drive.push(first.addr);
-        let _ = t.arm.push(first.addr);
+        let _ = t.drive.push(mcs[0].addr);
+        let _ = t.arm.push(mcs[0].addr);
         return Ok(t);
     }
     if mcs.len() != 2 {
@@ -211,14 +236,21 @@ pub fn targets(mcs: &[Board], class_unread: bool) -> Result<Targets, Refusal> {
 mod tests {
     use super::*;
 
-    fn b(addr: u8, mode: u8) -> Board {
+    /// A motor controller at `addr` whose copies derive to `mode` on a machine of two (SINGLE on
+    /// one): `machine.mode` and `machine.frame` both balance and rigid for RIGID, both throttle and
+    /// pivoting otherwise.
+    fn b(addr: u8, mode: DriveMode) -> Board {
+        let rigid = mode == DriveMode::Rigid;
         Board {
             addr,
-            mode: Some(mode),
+            mode: Some(if rigid { MODE_BALANCE } else { 0 }),
+            frame: Some(if rigid { FRAME_RIGID } else { 0 }),
             side: Some(0),
             leader: false,
         }
     }
+
+    use DriveMode::{Bound, Differential, Rigid, Single};
 
     fn v(a: &[u8]) -> Vec<u8, MAX_BOARDS> {
         Vec::from_slice(a).unwrap()
@@ -227,31 +259,54 @@ mod tests {
     #[test]
     fn the_section_4_6_table() {
         // SINGLE: the one motor controller.
-        let t = targets(&[b(2, 0)], false).unwrap();
+        let t = targets(&[b(2, Single)], false, false).unwrap();
         assert_eq!((t.drive, t.arm), (v(&[2]), v(&[2])));
         // BOUND: both, both.
-        let t = targets(&[b(2, 1), b(3, 1)], false).unwrap();
+        let t = targets(&[b(2, Bound), b(3, Bound)], false, false).unwrap();
         assert_eq!((t.drive, t.arm), (v(&[2, 3]), v(&[2, 3])));
         // DIFFERENTIAL: both, the right wheel named; both armed.
-        let mut r = b(3, 2);
+        let mut r = b(3, Differential);
         r.side = Some(SIDE_RIGHT);
-        let t = targets(&[b(2, 2), r], false).unwrap();
+        let t = targets(&[b(2, Differential), r], false, true).unwrap();
         assert_eq!(t.right, Some(3));
         assert_eq!((t.drive, t.arm), (v(&[2, 3]), v(&[2, 3])));
         // RIGID: the leader only; both armed.
-        let mut lead = b(3, 3);
+        let mut lead = b(3, Rigid);
         lead.leader = true;
-        let t = targets(&[b(2, 3), lead], false).unwrap();
+        let t = targets(&[b(2, Rigid), lead], false, false).unwrap();
         assert_eq!((t.drive, t.arm), (v(&[3]), v(&[2, 3])));
         assert_eq!(t.right, None, "only DIFFERENTIAL names a right wheel");
     }
 
     #[test]
+    fn the_mode_is_derived_from_the_mode_and_the_frame() {
+        let m = |mode_byte: u8, frame: u8, n: usize, turn: bool| {
+            let one = Board {
+                addr: 2,
+                mode: Some(mode_byte),
+                frame: Some(frame),
+                side: Some(0),
+                leader: false,
+            };
+            mode(&[one, Board { addr: 3, ..one }][..n], false, turn)
+        };
+        assert_eq!(m(MODE_BALANCE, FRAME_RIGID, 2, false), Some(Rigid));
+        assert_eq!(m(MODE_BALANCE, FRAME_RIGID, 1, true), Some(Rigid));
+        // Balance on pivoting platforms, and throttle on a rigid body, are not RIGID.
+        assert_eq!(m(MODE_BALANCE, 0, 2, false), Some(Bound));
+        assert_eq!(m(0, FRAME_RIGID, 2, true), Some(Differential));
+        assert_eq!(m(0, 0, 1, true), Some(Single));
+        // An unknown byte runs as throttle and pivoting.
+        assert_eq!(m(9, 9, 2, false), Some(Bound));
+        assert_eq!(mode(&[], false, false), None);
+    }
+
+    #[test]
     fn the_right_wheels_demand_goes_to_the_board_whose_side_is_right() {
         // The right wheel at the lower address, so the order of `drive` does not decide it.
-        let mut r = b(2, 2);
+        let mut r = b(2, Differential);
         r.side = Some(SIDE_RIGHT);
-        let t = targets(&[r, b(3, 2)], false).unwrap();
+        let t = targets(&[r, b(3, Differential)], false, true).unwrap();
         assert_eq!(t.right, Some(2));
         // Positive turn: the left wheel faster (`DriveMix`, a turn to the right).
         let d = t.demands(4000, 2000);
@@ -264,48 +319,69 @@ mod tests {
 
     #[test]
     fn bound_and_rigid_ignore_the_turn() {
-        let t = targets(&[b(2, 1), b(3, 1)], false).unwrap();
+        let t = targets(&[b(2, Bound), b(3, Bound)], false, false).unwrap();
         assert_eq!(t.demands(4000, 20_000).as_slice(), &[(2, 4000), (3, 4000)]);
-        let mut lead = b(3, 3);
+        let mut lead = b(3, Rigid);
         lead.leader = true;
-        let t = targets(&[b(2, 3), lead], false).unwrap();
+        let t = targets(&[b(2, Rigid), lead], false, true).unwrap();
         assert_eq!(t.demands(-500, -9000).as_slice(), &[(3, -500)]);
-        let t = targets(&[b(2, 0)], false).unwrap();
+        let t = targets(&[b(2, Single)], false, true).unwrap();
         assert_eq!(t.demands(700, 30_000).as_slice(), &[(2, 700)]);
     }
 
     #[test]
     fn each_refusal() {
-        assert_eq!(targets(&[b(2, 1)], true), Err(Refusal::Unread));
-        let mut u = b(3, 1);
+        assert_eq!(targets(&[b(2, Single)], true, false), Err(Refusal::Unread));
+        let (mut u, mut f) = (b(3, Bound), b(3, Bound));
         u.mode = None;
-        assert_eq!(targets(&[b(2, 1), u], false), Err(Refusal::Unread));
-        assert_eq!(targets(&[b(2, 1), b(3, 3)], false), Err(Refusal::Disagree));
-        assert_eq!(targets(&[b(2, 9)], false), Err(Refusal::UnknownMode));
+        f.frame = None;
         assert_eq!(
-            targets(&[b(2, 1)], false),
+            targets(&[b(2, Bound), u], false, false),
+            Err(Refusal::Unread)
+        );
+        assert_eq!(
+            targets(&[b(2, Bound), f], false, false),
+            Err(Refusal::Unread)
+        );
+        assert_eq!(
+            targets(&[b(2, Bound), b(3, Rigid)], false, false),
+            Err(Refusal::Disagree)
+        );
+        // Balance on one board and throttle on the other, both pivoting.
+        let mut bal = b(3, Bound);
+        bal.mode = Some(MODE_BALANCE);
+        assert_eq!(
+            targets(&[b(2, Bound), bal], false, false),
+            Err(Refusal::Disagree)
+        );
+        let mut lone = b(2, Rigid);
+        lone.leader = true;
+        assert_eq!(
+            targets(&[lone], false, false),
             Err(Refusal::NotTwo {
-                mode: DriveMode::Bound,
+                mode: Rigid,
                 found: 1
             })
         );
-        assert_eq!(targets(&[b(2, 3), b(3, 3)], false), Err(Refusal::NoLeader));
-        let (mut l1, mut l2) = (b(2, 3), b(3, 3));
+        assert_eq!(
+            targets(&[b(2, Rigid), b(3, Rigid)], false, false),
+            Err(Refusal::NoLeader)
+        );
+        let (mut l1, mut l2) = (b(2, Rigid), b(3, Rigid));
         l1.leader = true;
         l2.leader = true;
-        assert_eq!(targets(&[l1, l2], false), Err(Refusal::NoLeader));
+        assert_eq!(targets(&[l1, l2], false, false), Err(Refusal::NoLeader));
         assert_eq!(
-            targets(&[b(2, 2), b(3, 2)], false),
+            targets(&[b(2, Differential), b(3, Differential)], false, true),
             Err(Refusal::NoRightWheel)
         );
-        let mut s = b(3, 2);
+        let mut s = b(3, Differential);
         s.side = None;
-        assert_eq!(targets(&[b(2, 2), s], false), Err(Refusal::NoRightWheel));
         assert_eq!(
-            targets(&[b(2, 0), b(3, 0)], false),
-            Err(Refusal::SingleWithTwo)
+            targets(&[b(2, Differential), s], false, true),
+            Err(Refusal::NoRightWheel)
         );
-        assert_eq!(targets(&[], false), Ok(Targets::default()));
+        assert_eq!(targets(&[], false, false), Ok(Targets::default()));
     }
 
     fn text(r: Refusal) -> heapless::String<80> {
@@ -316,13 +392,14 @@ mod tests {
 
     #[test]
     fn the_statements_are_the_apps() {
+        assert_eq!(text(Refusal::Unread), "Reading the control mode and frame.");
         assert_eq!(
-            text(Refusal::Unread),
-            "Reading the drive mode from every board."
+            text(Refusal::Disagree),
+            "Cannot arm: the boards store different control modes or frames."
         );
         assert_eq!(
             text(Refusal::NotTwo {
-                mode: DriveMode::Rigid,
+                mode: Rigid,
                 found: 1
             }),
             "Cannot arm: RIGID needs two boards, 1 found."
@@ -331,12 +408,6 @@ mod tests {
             text(Refusal::NoRightWheel),
             "Cannot arm: no single board is the right wheel."
         );
-        assert_eq!(
-            text(Refusal::SingleWithTwo),
-            "Cannot arm: SINGLE needs a board picked on the phone."
-        );
-        for r in [Refusal::Disagree, Refusal::UnknownMode, Refusal::NoLeader] {
-            assert!(text(r).starts_with("Cannot arm: "));
-        }
+        assert!(text(Refusal::NoLeader).starts_with("Cannot arm: "));
     }
 }
