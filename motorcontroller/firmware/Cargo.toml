@@ -5,6 +5,20 @@ license.workspace = true
 edition = "2021"
 description = "The universal firmware binary: one thumbv7m image that detects which GD32 it is on at boot (runtime-hal detect_chip), mounts the flash store at the detected top-of-flash, and runs the bare housekeeping loop. The shipping image: `cargo image` (the build-std alias in .cargo/config.toml) -> the universal `firmware` ELF -> `.bin`, valid on every part (memory.x sized to the smallest, the F130)."
 
+# The images this crate builds, one table per image, keyed by image name (specs/firmware-bundle.md
+# section 3.3; the name's form is section 3.2's `<role>-<chip>`). `hoverboard-cli firmware pack`
+# copies the name, kind and targets into the bundle manifest, and `hoverboard-cli board update`
+# picks the image whose target equals the family and flash size the board's TARGET_ID reports. The
+# image's guards are keyed by the same name in tools/image-guard-syms.sh. `features` are the cargo
+# features that build the image; the packer checks the name's chip against them.
+[package.metadata.hoverboard-image.mainboard-gd32]
+kind = "board"
+features = []
+targets = [
+    { family = "gd32f10x", flash_kib = 64 },
+    { family = "gd32f1x0", flash_kib = 64 },
+]
+
 [dependencies]
 # The libraries firmware assembles; it owns no behavior of its own. `base` is pulled in transitively
 # by `store`; firmware names `store` (the flash KV store + FmcFlash) directly.

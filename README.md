@@ -150,14 +150,18 @@ Configuration lives on the board, not in the build:
 
 ## Builds
 
-CI builds the universal `firmware` image on every push to `main` (one `firmware.bin`, valid on any
-supported part), so you can flash without a local toolchain:
+CI builds the motor-controller images on every push to `main` and packs them into one firmware
+bundle (`firmware-<commit>.hbfw`, `specs/firmware-bundle.md`), so you can flash without a local
+toolchain. `hoverboard-cli board update <board> <bundle>` reads the chip on the board and flashes
+the image built for it; `hoverboard-cli board flash <board> <elf>` flashes a development ELF as it
+is; `hoverboard-cli firmware info <bundle>` lists what the bundle holds. Only the universal
+image exists so far, so the bundle holds one image, for both GD32 families at 64 KiB.
 
-- **Latest `main` build** (no login): [download `firmware.zip`](https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware.zip)
-  (the `firmware.bin` and ELF from the most recent green `main` build, served by
-  [nightly.link](https://nightly.link)).
+- **Latest `main` build** (no login): [download `firmware-bundle.zip`](https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware-bundle.zip)
+  (the bundle from the most recent green `main` build, served by [nightly.link](https://nightly.link)).
 - Or open any commit's run in the [Actions](https://github.com/hoverboardhavoc/hoverboard-firmware/actions)
-  tab and grab the **firmware** artifact (needs a GitHub login).
+  tab and grab the **firmware-bundle** artifact (needs a GitHub login). The **firmware-elfs**
+  artifact holds the unstripped ELFs, by image name, for the tools that read their symbols.
 
 Each build chain is its own folder; run cargo or Gradle from inside it:
 

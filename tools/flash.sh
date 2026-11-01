@@ -281,24 +281,19 @@ refuse_unrunnable() {
 }
 
 # Which image is being flashed, so the gutted-image guard (below) applies the right .text floor and
-# required-symbol set. The integrated firmware is ~54 KB .text with the control-stack symbols; the
-# imu-bench validator is a legitimately small ~18 KB .text image with only IMU_BENCH_OBS. A single
-# integrated-tuned guard rejects the legit imu-bench image (round 9), so the profile selects the set.
-# FAIL-CLOSED, in two different ways: an ABSENT or empty value defaults to `integrated` (the shipping
-# image), so a stray flash is never waved through a laxer floor, and an UNKNOWN value is refused
-# outright by the `*)` arm below rather than defaulted. Neither can select a weaker guard set.
+# required-symbol set. A release image's guards come from tools/image-guard-syms.sh, keyed by the
+# image name its Cargo.toml table gives (`mainboard-gd32`, the universal image, is the default); the
+# bench validators below are not release images and keep their own profiles. The integrated firmware
+# is ~54 KB .text with the control-stack symbols; the imu-bench validator is a legitimately small
+# ~18 KB .text image with only IMU_BENCH_OBS. A single integrated-tuned guard rejects the legit
+# imu-bench image (round 9), so the profile selects the set.
+# FAIL-CLOSED, in two different ways: an ABSENT or empty value defaults to `mainboard-gd32` (the
+# shipping image), so a stray flash is never waved through a laxer floor, and an UNKNOWN value is
+# refused outright by the `*)` arm below rather than defaulted. Neither can select a weaker guard set.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-IMAGE_PROFILE="${IMAGE_PROFILE:-integrated}"
+IMAGE_PROFILE="${IMAGE_PROFILE:-mainboard-gd32}"
+. "$SCRIPT_DIR/image-guard-syms.sh"
 case "$IMAGE_PROFILE" in
-  integrated)
-    # ~54 KB healthy. The two symbol lists live in tools/image-guard-syms.sh, which is the ONE copy
-    # CI's build-time guard and the flash-guard harness read as well, and which carries the reason
-    # every entry is on them. They were literals here and in ci.yml until 2026-10-24 and had already
-    # drifted apart.
-    PROFILE_TEXT_FLOOR=40000
-    . "$SCRIPT_DIR/image-guard-syms.sh"
-    PROFILE_REQ_SYMS="$IMAGE_GUARD_REQ_SYMS"
-    PROFILE_HOT_SYMS="$IMAGE_GUARD_HOT_SYMS" ;;
   imu-bench)
     # ~18 KB healthy (full-LTO Mahony/CORDIC); the one SWD-readable block the validator publishes.
     # Floor well below 18 KB but far above a gutted few-KB image.
@@ -346,7 +341,17 @@ case "$IMAGE_PROFILE" in
     # one profile covers both examples.
     PROFILE_TEXT_FLOOR=3000
     PROFILE_REQ_SYMS='cortex_m_rt_main,5probe3run,5probe15bus_fault_entry,5probe20bus_fault_trampoline' ;;
-  *) echo "flash: IMAGE_PROFILE must be integrated|imu-bench|probe|motor-verify|commutation-example (got '$IMAGE_PROFILE')" >&2; exit 2 ;;
+  *)
+    # A release image: its floor and both symbol lists live in tools/image-guard-syms.sh, which is
+    # the ONE copy CI's build-time guard, the bundle packer and the flash-guard harness read as well,
+    # and which carries the reason every entry is on them. They were literals here and in ci.yml
+    # until 2026-10-24 and had already drifted apart.
+    if ! image_guards "$IMAGE_PROFILE"; then
+      echo "flash: IMAGE_PROFILE must be an image named in tools/image-guard-syms.sh or one of imu-bench|probe|motor-verify|commutation-example (got '$IMAGE_PROFILE')" >&2; exit 2
+    fi
+    PROFILE_TEXT_FLOOR="$IMAGE_GUARD_FLOOR"
+    PROFILE_REQ_SYMS="$IMAGE_GUARD_REQ_SYMS"
+    PROFILE_HOT_SYMS="$IMAGE_GUARD_HOT_SYMS" ;;
 esac
 
 LOCK="$SCRIPT_DIR/bench-lock.sh"

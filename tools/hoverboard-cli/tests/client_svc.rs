@@ -569,138 +569,12 @@ fn a_flash_over_tcp_keeps_64_chunks_in_flight_and_reaches_the_same_sha256() {
     assert_eq!(g.mailbox().magic(), swd_mailbox::MAGIC, "booted");
 }
 
-/// An executable ARM ELF as the linker would leave it for `flash`: one loadable `.text` at the
-/// flash base holding `code` (padded to the code floor, marked `$d` so the `wfi` scan reads none of
-/// it as instructions), a `.bss`, and the guard's required symbols.
-fn flashable_elf(code: &[u8]) -> Vec<u8> {
-    use object::elf::*;
-    use object::write::elf::{FileHeader, ProgramHeader, SectionHeader, Sym, Writer};
-    let base = 0x0800_0000u32;
-    let mut text = code.to_vec();
-    text.resize(text.len().max(hoverboard_cli::elf::CODE_FLOOR as usize), 0);
-    let (t_syms, b_syms) = common::all_required();
-
-    let mut out = Vec::new();
-    let mut w = Writer::new(object::Endianness::Little, false, &mut out);
-    w.reserve_file_header();
-    w.reserve_program_headers(1);
-    let text_off = w.reserve(text.len(), 4);
-    let text_name = w.add_section_name(b".text");
-    let bss_name = w.add_section_name(b".bss");
-    w.reserve_null_section_index();
-    let text_idx = w.reserve_section_index();
-    let bss_idx = w.reserve_section_index();
-    let d_name = w.add_string(b"$d");
-    let t_names: Vec<_> = t_syms.iter().map(|n| w.add_string(n.as_bytes())).collect();
-    let b_names: Vec<_> = b_syms.iter().map(|n| w.add_string(n.as_bytes())).collect();
-    w.reserve_null_symbol_index();
-    w.reserve_symbol_index(Some(text_idx)); // $d, the one local
-    for _ in &t_names {
-        w.reserve_symbol_index(Some(text_idx));
-    }
-    for _ in &b_names {
-        w.reserve_symbol_index(Some(bss_idx));
-    }
-    w.reserve_symtab_section_index();
-    w.reserve_strtab_section_index();
-    w.reserve_shstrtab_section_index();
-    w.reserve_symtab();
-    w.reserve_strtab();
-    w.reserve_shstrtab();
-    w.reserve_section_headers();
-
-    w.write_file_header(&FileHeader {
-        os_abi: 0,
-        abi_version: 0,
-        e_type: ET_EXEC,
-        e_machine: EM_ARM,
-        e_entry: u64::from(base),
-        e_flags: 0,
-    })
-    .unwrap();
-    w.write_align_program_headers();
-    w.write_program_header(&ProgramHeader {
-        p_type: PT_LOAD,
-        p_flags: PF_R | PF_X,
-        p_offset: text_off as u64,
-        p_vaddr: u64::from(base),
-        p_paddr: u64::from(base),
-        p_filesz: text.len() as u64,
-        p_memsz: text.len() as u64,
-        p_align: 4,
-    });
-    w.write_align(4);
-    w.write(&text);
-    w.write_null_symbol();
-    let sym = |name, section, st_info, st_value| Sym {
-        name: Some(name),
-        section: Some(section),
-        st_info,
-        st_other: 0,
-        st_shndx: 0,
-        st_value,
-        st_size: 0,
-    };
-    w.write_symbol(&sym(
-        d_name,
-        text_idx,
-        (STB_LOCAL << 4) | STT_NOTYPE,
-        u64::from(base),
-    ));
-    for n in t_names {
-        w.write_symbol(&sym(
-            n,
-            text_idx,
-            (STB_GLOBAL << 4) | STT_FUNC,
-            u64::from(base),
-        ));
-    }
-    for n in b_names {
-        w.write_symbol(&sym(
-            n,
-            bss_idx,
-            (STB_GLOBAL << 4) | STT_OBJECT,
-            0x2000_0000,
-        ));
-    }
-    w.write_strtab();
-    w.write_shstrtab();
-    w.write_null_section_header();
-    w.write_section_header(&SectionHeader {
-        name: Some(text_name),
-        sh_type: SHT_PROGBITS,
-        sh_flags: u64::from(SHF_ALLOC | SHF_EXECINSTR),
-        sh_addr: u64::from(base),
-        sh_offset: text_off as u64,
-        sh_size: text.len() as u64,
-        sh_link: 0,
-        sh_info: 0,
-        sh_addralign: 4,
-        sh_entsize: 0,
-    });
-    w.write_section_header(&SectionHeader {
-        name: Some(bss_name),
-        sh_type: SHT_NOBITS,
-        sh_flags: u64::from(SHF_ALLOC | SHF_WRITE),
-        sh_addr: 0x2000_0000,
-        sh_offset: 0,
-        sh_size: 64,
-        sh_link: 0,
-        sh_info: 0,
-        sh_addralign: 4,
-        sh_entsize: 0,
-    });
-    w.write_symtab_section_header(2);
-    w.write_strtab_section_header();
-    w.write_shstrtab_section_header();
-    out
-}
-
-/// Run the built binary; a run that outlives `limit` is killed and fails the test (a command that
+/// Run the built binary, with no terminal on its input; a run that outlives `limit` is killed and fails the test (a command that
 /// took the BLE path on a host with no radio waits there).
 fn cli(args: &[&str], limit: Duration) -> (bool, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_hoverboard-cli"))
         .args(args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -734,6 +608,20 @@ struct Master {
 /// clients one after the other, with the master's store pages holding `store` first. A board's SWD
 /// commands go through the bridge wired to it, which the walk finds.
 fn serve_machine_over_tcp(listener: TcpListener, store: Vec<u16>, connections: usize) -> Master {
+    serve_machine_with(listener, store, connections, |_| {})
+}
+
+/// What [`serve_machine_with`] does to the master's GD32 before serving.
+type Prep = fn(&mut Gd32);
+
+/// [`serve_machine_over_tcp`], with `prep` applied to the master's GD32 first (its family, its
+/// flash size).
+fn serve_machine_with(
+    listener: TcpListener,
+    store: Vec<u16>,
+    connections: usize,
+    prep: Prep,
+) -> Master {
     use hoverboard_bridge_core::sim::Machine;
     let flash: &'static mut RamFlash = Box::leak(Box::new(RamFlash::erased(4096)));
     let svc = Service::new(
@@ -748,6 +636,7 @@ fn serve_machine_over_tcp(listener: TcpListener, store: Vec<u16>, connections: u
     );
     let mut m = Machine::new(flash, svc);
     m.port.swd().pins().bus.flash[31 * 1024..].copy_from_slice(&store);
+    prep(&mut m.port.swd().pins().bus);
     for _ in 0..connections {
         let (mut sock, _) = listener.accept().unwrap();
         m.router.connect(Port::Tcp);
@@ -826,7 +715,7 @@ fn the_binary_runs_a_multi_chunk_read_and_a_flash_through_the_boards_bridge() {
 
     let img = image(5 * 1024 + 11);
     let elf = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("flash-over-tcp.elf");
-    std::fs::write(&elf, flashable_elf(&img)).unwrap();
+    std::fs::write(&elf, common::flashable_elf(&img)).unwrap();
     let tcp = format!("--tcp={addr}");
     let (ok, out, err) = cli(
         &[&tcp, "board", "flash", "0x01", elf.to_str().unwrap()],
@@ -840,11 +729,162 @@ fn the_binary_runs_a_multi_chunk_read_and_a_flash_through_the_boards_bridge() {
     }
 
     let g = server.join().unwrap();
-    let n = (hoverboard_cli::elf::CODE_FLOOR as usize).max(img.len());
+    let n = (common::release_guards().code_floor as usize).max(img.len());
     assert_eq!(&g.bytes[..img.len()], &img[..]);
     assert!(g.bytes[img.len()..n].iter().all(|&b| b == 0));
     assert_eq!(&g.flash[31 * 1024..], &store[..]);
     assert!(g.booted, "booted");
+}
+
+/// A bundle packed from `elf` as the universal image, with `targets` in place of its table's when
+/// given.
+fn bundle_file(
+    name: &str,
+    elf: &[u8],
+    targets: Option<Vec<hoverboard_cli::bundle::Target>>,
+) -> String {
+    use hoverboard_cli::bundle::{image_table, pack, PackEntry};
+    let mut table = image_table(
+        include_str!("../../../motorcontroller/firmware/Cargo.toml"),
+        "mainboard-gd32",
+    )
+    .unwrap();
+    if let Some(t) = targets {
+        table.targets = t;
+    }
+    let z = pack(
+        &[PackEntry {
+            name: "mainboard-gd32",
+            table,
+            guards: common::release_guards(),
+            elf,
+        }],
+        "c0eb25917cd904d5d9ba9307f56cb8251cbb61dd",
+        "2026-11-01T17:03:58Z",
+    )
+    .unwrap();
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, z).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+#[test]
+fn the_binary_flashes_the_image_a_bundle_holds_for_the_chip() {
+    let img = image(5 * 1024 + 11);
+    // Named .elf: the content says it is a bundle.
+    let path = bundle_file("bundle-named-elf.elf", &common::flashable_elf(&img), None);
+    let f10x: Prep = |g| g.family = Family::F10x;
+    let f1x0: Prep = |g| g.family = Family::F1x0;
+    for (prep, name) in [(f10x, "gd32f10x"), (f1x0, "gd32f1x0")] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server =
+            std::thread::spawn(move || serve_machine_with(listener, vec![0xFFFF; 1024], 2, prep));
+        let tcp = format!("--tcp={addr}");
+        let limit = Duration::from_secs(60);
+
+        // No terminal and no --yes: chosen and checked, then refused before anything is streamed.
+        let (ok, out, err) = cli(&[&tcp, "board", "update", "0x01", &path], limit);
+        assert!(!ok, "{out}");
+        assert!(err.contains("give --yes"), "{err}");
+        let line = format!(
+            "image mainboard-gd32 for the chip ({name} 64 KiB), from the bundle built from commit \
+             c0eb25917cd904d5d9ba9307f56cb8251cbb61dd"
+        );
+        assert!(out.contains(&line), "{out}");
+
+        // board flash takes only an ELF: the bundle is refused, pointing at board update.
+        let (ok, _, err) = cli(&[&tcp, "board", "flash", "0x01", &path], limit);
+        assert!(!ok);
+        assert!(
+            err.contains("`board update` installs from a bundle"),
+            "{err}"
+        );
+
+        let (ok, out, err) = cli(&[&tcp, "board", "update", "0x01", &path, "--yes"], limit);
+        assert!(ok, "{err}");
+        assert!(err.contains("SHA-256 checked"), "{err}");
+        assert!(out.starts_with(&line), "{out}");
+        assert!(out.contains("\nbooted"), "{out}");
+
+        let g = server.join().unwrap();
+        assert_eq!(&g.bytes[..img.len()], &img[..]);
+        assert!(g.booted, "booted");
+    }
+}
+
+#[test]
+fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
+    use hoverboard_cli::bundle::{Family as F, Target};
+    let img = image(1024);
+    let path = bundle_file(
+        "bundle-32k.hbfw",
+        &common::flashable_elf(&img),
+        Some(vec![Target {
+            family: F::Gd32f1x0,
+            flash_kib: 32,
+        }]),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let prep: Prep = |g| {
+        g.family = Family::F1x0;
+        g.flash_kib = 32;
+    };
+    let server =
+        std::thread::spawn(move || serve_machine_with(listener, vec![0xFFFF; 1024], 2, prep));
+    let tcp = format!("--tcp={addr}");
+    let limit = Duration::from_secs(30);
+    let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &path, "--yes"], limit);
+    assert!(!ok);
+    assert!(err.contains("would refuse a gd32f1x0 32 KiB part"), "{err}");
+    // The chip is not the image's: refused naming both.
+    let other = bundle_file("bundle-64k.hbfw", &common::flashable_elf(&img), None);
+    let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &other, "--yes"], limit);
+    assert!(!ok);
+    assert!(
+        err.contains("no image in the bundle is for the chip (gd32f1x0 32 KiB)"),
+        "{err}"
+    );
+    let g = server.join().unwrap();
+    // Nothing streamed: the master still runs the image the simulated machine boots.
+    assert!(g.booted);
+    assert_ne!(&g.bytes[..img.len()], &img[..]);
+}
+
+#[test]
+fn firmware_info_prints_the_manifest_and_reads_no_board() {
+    let limit = Duration::from_secs(20);
+    let elf = common::flashable_elf(&image(64));
+    let path = bundle_file("info.hbfw", &elf, None);
+    let (ok, out, err) = cli(&["firmware", "info", &path], limit);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "commit  c0eb25917cd904d5d9ba9307f56cb8251cbb61dd\nbuilt   2026-11-01T17:03:58Z\n\
+         image   mainboard-gd32 (board): gd32f10x 64 KiB, gd32f1x0 64 KiB; 40000 B flashed\n"
+    );
+    let elf_path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("info.elf");
+    std::fs::write(&elf_path, &elf).unwrap();
+    let (ok, _, err) = cli(&["firmware", "info", elf_path.to_str().unwrap()], limit);
+    assert!(!ok && err.contains("not a firmware bundle"), "{err}");
+    // --image belongs to board update, and an ELF has no images to choose from.
+    let (ok, _, err) = cli(&["firmware", "info", &path, "--image", "x"], limit);
+    assert!(!ok && err.contains("--image"), "{err}");
+    let (ok, _, err) = cli(
+        &[
+            "--tcp=127.0.0.1:1",
+            "board",
+            "update",
+            "0x01",
+            elf_path.to_str().unwrap(),
+        ],
+        limit,
+    );
+    assert!(
+        !ok && err.contains("is an ELF: `board flash` takes an ELF"),
+        "{err}"
+    );
 }
 
 #[test]

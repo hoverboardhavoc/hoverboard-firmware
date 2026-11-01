@@ -79,8 +79,22 @@ pub enum Swd {
         /// The bytes.
         data: Vec<u8>,
     },
-    /// The flash job, from the ELF at this path.
-    Flash(String),
+    /// `board flash`: the ELF at `file`, a development build, flashed as it is
+    /// (`specs/firmware-bundle.md` section 4.1, last paragraph).
+    Flash {
+        /// An ELF; a bundle is refused (it takes `board update`).
+        file: String,
+    },
+    /// `board update`: the image a firmware bundle has for the board's chip
+    /// (`specs/firmware-bundle.md` section 4.1).
+    Update {
+        /// A bundle; an ELF is refused (it takes `board flash`).
+        bundle: String,
+        /// `--image`: the image to take when several in the bundle match the chip.
+        image: Option<String>,
+        /// `--yes`: flash without asking.
+        yes: bool,
+    },
 }
 
 /// One command, its arguments read and checked.
@@ -230,6 +244,20 @@ pub enum Command {
         /// `--no-confirm`.
         no_confirm: bool,
     },
+    /// `firmware info`: a bundle's manifest; no link.
+    FirmwareInfo {
+        /// The bundle.
+        bundle: String,
+    },
+    /// `firmware pack`: build a bundle; no link.
+    FirmwarePack {
+        /// Where to write it.
+        out: String,
+        /// Each `<crate-dir>:<image-name>=<elf>`.
+        entries: Vec<String>,
+        /// `--dirty`: pack from a tree with uncommitted changes.
+        dirty: bool,
+    },
     /// `bridge install`: the first install over USB.
     BridgeInstall {
         /// The merged install image.
@@ -257,7 +285,8 @@ pub const USAGE: &str =
   board get <board> <path> | set <board> <path> <value> [--force] | dump <board> [<file>]
   board apply <board> <file>... [--force] | replace <board> <file>... [--yes] [--force]
   board diff [--replace] <board> <file>... [--force] | status [<board>...] | compact <board>
-  board fields --json | erase <board> [--yes] | flash <board> <elf> | clear-protection <board>
+  board fields --json | erase <board> [--yes] | clear-protection <board>
+  board update <board> <bundle> [--image NAME] [--yes] | flash <board> <elf>
   board disarm|halt|resume|reset|reset-halt <board> | target-id <board>
   board read <board> <addr> <len> [--hz N] | write <board> <addr> <hex>
   machine nodes | get <path> | set <path> <value> [--force] | dump <file> [--from <board>]
@@ -267,12 +296,20 @@ pub const USAGE: &str =
   machine watch <secs> [<board>...] | drive <value> <secs> [<board>...]
   bridge info <bridge> | update <bridge> <bin> [--no-confirm] | install <image> [<file>...] [--yes]
   bridge get|set|dump|apply|replace|diff, as under board
+  firmware info <bundle> | pack <out.hbfw> <crate-dir>:<image-name>=<elf>... [--dirty]
 a board or bridge is an address (0x02), a device.name, or a uid prefix of 4 to 24 hex digits";
 
 /// The options a command may take, wherever they stand after the link options.
-const FLAGS: &[&str] = &["--force", "--yes", "--replace", "--json", "--no-confirm"];
+const FLAGS: &[&str] = &[
+    "--force",
+    "--yes",
+    "--replace",
+    "--json",
+    "--no-confirm",
+    "--dirty",
+];
 /// The command options that take a value.
-const VALUED: &[&str] = &["--secs", "--from", "--map", "--hz"];
+const VALUED: &[&str] = &["--secs", "--from", "--map", "--hz", "--image"];
 
 /// The command's own options, as given.
 #[derive(Default)]
@@ -281,6 +318,7 @@ struct Opts<'a> {
     secs: Option<&'a str>,
     hz: Option<&'a str>,
     from: Option<&'a str>,
+    image: Option<&'a str>,
     maps: Vec<&'a str>,
 }
 
@@ -298,6 +336,7 @@ impl Opts<'_> {
             .chain(self.secs.map(|_| "--secs"))
             .chain(self.hz.map(|_| "--hz"))
             .chain(self.from.map(|_| "--from"))
+            .chain(self.image.map(|_| "--image"))
             .chain(self.maps.iter().map(|_| "--map"));
         given.into_iter().all(|o| allowed.contains(&o))
     }
@@ -340,6 +379,7 @@ pub fn parse(args: &[String]) -> (bool, Result<Invocation, String>) {
                     "--secs" => opts.secs = Some(v),
                     "--hz" => opts.hz = Some(v),
                     "--from" => opts.from = Some(v),
+                    "--image" => opts.image = Some(v),
                     _ => opts.maps.push(v),
                 },
                 None => {
@@ -447,6 +487,20 @@ fn command(pos: &[&str], o: &Opts) -> Result<Command, String> {
                 Noun::Bridge
             };
             node_command(noun, verb, rest, o, &ok, mode, file_opts)?
+        }
+        ["firmware", "info", bundle] => {
+            ok(&[])?;
+            Command::FirmwareInfo {
+                bundle: bundle.to_string(),
+            }
+        }
+        ["firmware", "pack", out, entries @ ..] if !entries.is_empty() => {
+            ok(&["--dirty"])?;
+            Command::FirmwarePack {
+                out: out.to_string(),
+                entries: owned(entries),
+                dirty: o.has("--dirty"),
+            }
         }
         ["machine", "nodes"] => {
             ok(&[])?;
@@ -597,7 +651,23 @@ fn node_command(
                 yes: o.has("--yes"),
             })
         }
-        ("flash", [t, elf]) if board => swd(t, Swd::Flash(elf.to_string())),
+        ("flash", [t, file]) if board => swd(
+            t,
+            Swd::Flash {
+                file: file.to_string(),
+            },
+        ),
+        ("update", [t, bundle]) if board => {
+            ok(&["--image", "--yes"])?;
+            Ok(Command::Swd {
+                target: target(t),
+                op: Swd::Update {
+                    bundle: bundle.to_string(),
+                    image: o.image.map(str::to_string),
+                    yes: o.has("--yes"),
+                },
+            })
+        }
         ("clear-protection", [t]) if board => swd(t, Swd::ClearProtection),
         ("target-id", [t]) if board => swd(t, Swd::TargetId),
         (c, [t]) if board && ctrl(c).is_some() => swd(t, Swd::Ctrl(ctrl(c).expect("matched"))),
@@ -776,7 +846,7 @@ mod tests {
             (
                 "flash",
                 "board flash rover-left fw.elf",
-                swd(Swd::Flash(s("fw.elf"))),
+                swd(Swd::Flash { file: s("fw.elf") }),
             ),
             (
                 "clear-protection",
@@ -986,13 +1056,72 @@ mod tests {
             "bridge compact 0x03",
             "bridge flash 0x03 fw.elf",
             "board info 0x01",
-            "board update 0x01 b.bin",
+            "board update 0x01 b.hbfw --dirty",
             "bridge update 0x03 b.bin --yes",
             "machine nodes --yes",
             "scan --yes",
+            "board erase 0x01 --image x",
+            "board flash 0x01 fw.hbfw --dirty",
+            "firmware info b.hbfw --yes",
+            "firmware info b.hbfw --image x",
+            "firmware pack out.hbfw",
+            "firmware pack out.hbfw a:b=c --yes",
         ] {
             assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
         }
+    }
+
+    #[test]
+    fn board_update_takes_a_bundle_board_flash_an_elf_and_firmware_reads_bundles() {
+        let update = |image: Option<&str>, yes| {
+            Ok(Command::Swd {
+                target: s("offroad-master"),
+                op: Swd::Update {
+                    bundle: s("firmware-adab056.hbfw"),
+                    image: image.map(s),
+                    yes,
+                },
+            })
+        };
+        let line = "board update offroad-master firmware-adab056.hbfw";
+        assert_eq!(cmd(line), update(None, false));
+        assert_eq!(cmd(&format!("{line} --yes")), update(None, true));
+        assert_eq!(
+            cmd(&format!("{line} --image mainboard-gd32 --yes")),
+            update(Some("mainboard-gd32"), true)
+        );
+        assert_eq!(
+            cmd(&format!("{line} --image=mainboard-gd32")),
+            update(Some("mainboard-gd32"), false)
+        );
+        assert_eq!(
+            cmd("board flash offroad-master fw.elf"),
+            Ok(Command::Swd {
+                target: s("offroad-master"),
+                op: Swd::Flash { file: s("fw.elf") },
+            })
+        );
+        // board flash takes no bundle options.
+        for line in [
+            "board flash offroad-master fw.elf --yes",
+            "board flash offroad-master fw.elf --image mainboard-gd32",
+        ] {
+            assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
+        }
+        assert_eq!(
+            cmd("firmware info b.hbfw"),
+            Ok(Command::FirmwareInfo {
+                bundle: s("b.hbfw")
+            })
+        );
+        assert_eq!(
+            cmd("firmware pack o.hbfw motorcontroller/firmware:mainboard-gd32=fw --dirty"),
+            Ok(Command::FirmwarePack {
+                out: s("o.hbfw"),
+                entries: vec![s("motorcontroller/firmware:mainboard-gd32=fw")],
+                dirty: true,
+            })
+        );
     }
 
     #[test]
