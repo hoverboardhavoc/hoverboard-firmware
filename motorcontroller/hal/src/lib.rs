@@ -31,6 +31,7 @@ pub mod clock;
 pub mod config;
 pub mod dbg;
 pub mod descriptor;
+mod dma;
 pub mod error;
 pub mod fmc;
 pub mod gpio;
@@ -38,8 +39,12 @@ pub mod i2c;
 pub mod irq;
 pub mod pincap;
 pub mod reg;
+pub mod serial;
 pub mod spi;
 pub mod timer;
+pub mod usart;
+pub mod usart_rx;
+pub mod usart_tx;
 pub mod watchdog;
 
 #[cfg(hal_adc = "f10x")]
@@ -59,6 +64,10 @@ pub use i2c::{I2c, I2cMode};
 /// the attribute itself, so an image writes `use hal::interrupt;` and `#[interrupt] fn ADC0_1()`.
 pub use irq::Interrupt as interrupt;
 pub use irq::Interrupt;
+pub use serial::SplitSerial;
 pub use spi::Spi;
 pub use timer::{ArmGate, PwmHandle, PwmTimer};
+pub use usart::Usart;
+pub use usart_rx::{supports_rx, RingBufferedRx};
+pub use usart_tx::DmaTx;
 pub use watchdog::{FreeWatchdog, WdgTimeout};

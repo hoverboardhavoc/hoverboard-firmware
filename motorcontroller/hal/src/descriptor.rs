@@ -118,7 +118,9 @@ const COMMON: AddrTable = AddrTable::new()
     .with(PeriphLabel::Timer1, 0x4000_0000)
     // SPI0 on APB2 on both: the F1x0 SPL puts it at `SPI_BASE + 0xF800` = 0x4001_3000
     // (gd32f1x0_spi.h); 0x4000_3800 is SPI1 there.
-    .with(PeriphLabel::Spi0, 0x4001_3000);
+    .with(PeriphLabel::Spi0, 0x4001_3000)
+    // DMA0 on AHB on both (`gd32f10x.h`: `AHB1_BUS_BASE + 0x8000`; `gd32f1x0.h`: `AHB1_BUS_BASE`).
+    .with(PeriphLabel::Dma0, 0x4002_0000);
 
 /// The GD32F10x bases: GPIO on APB2 (0x400 stride, port E not carried), USART2, the second I2C, and the factory unique ID at `0x1FFF_F7E8` (GD32F10x User Manual 1.5.2).
 #[cfg(any(feature = "gd32f103c8", feature = "gd32f103rc"))]
