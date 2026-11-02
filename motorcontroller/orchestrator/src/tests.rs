@@ -33,8 +33,49 @@ fn test_machine() -> Machine {
     )
 }
 
+/// A state as the firmware's boot leaves it: constructed, then the arm row's control values
+/// installed (`specs/config-read-once.md` section 5), the boot inputs one for one.
+#[allow(clippy::too_many_arguments)]
+fn built(
+    control_mode_byte: u8,
+    frame_byte: u8,
+    side_byte: u8,
+    imu_configured: bool,
+    imu_staged: bool,
+    attitude_cfg: attitude::Config,
+    gains: control::GainShadow,
+    vbatt_cal: Option<battery::VbattCal>,
+    pos_clamp: i16,
+    drive_turn: control::DriveTurn,
+    rider_required_byte: u8,
+    battery_floor: i16,
+    identity: BoardIdentity,
+    machine: Machine,
+) -> OrchestratorState {
+    let mut s = OrchestratorState::new(
+        imu_configured,
+        imu_staged,
+        attitude_cfg,
+        gains,
+        vbatt_cal,
+        identity,
+        machine,
+    );
+    dispatch::re_apply_control_values(
+        &mut s,
+        control_mode_byte,
+        frame_byte,
+        side_byte,
+        rider_required_byte,
+        battery_floor,
+        pos_clamp,
+    );
+    s.ctl.drive_turn = drive_turn;
+    s
+}
+
 fn fresh() -> OrchestratorState {
-    OrchestratorState::new(
+    built(
         0,
         0,
         0,
@@ -58,12 +99,12 @@ fn fresh() -> OrchestratorState {
 /// most vectors here need a balance board that commands torque; the one that pins the inert
 /// default builds its own.
 fn sf_start() -> control::GainShadow {
-    control::GainShadow::of_stored([3491, 4002, 197, 926, 0, 41], control::DEFAULT_GAIN_MAX)
+    control::GainShadow::of_stored([3491, 4002, 197, 926, 0, 41])
 }
 
 /// A disarmed balance board (CONTROL_MODE = 1, IMU configured, a known battery word) on `gains`.
 fn balance_board(gains: control::GainShadow) -> OrchestratorState {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -1018,7 +1059,7 @@ fn level_sample() -> imu::Sample {
 
 /// Walk a configured-IMU board to RUN on healthy reads.
 fn configured_to_run() -> OrchestratorState {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         0,
         0,
         0,
@@ -1047,7 +1088,7 @@ fn configured_to_run() -> OrchestratorState {
 /// A boot state with the two IMU booleans set independently: `configured` is the bring-up
 /// outcome and `staged` is whether the layout ASKED for an IMU at all.
 fn imu_board(configured: bool, staged: bool) -> OrchestratorState {
-    OrchestratorState::new(
+    built(
         0,
         0,
         0,
@@ -1094,7 +1135,7 @@ fn the_flags_byte_separates_an_unstaged_board_from_a_failed_imu_bringup() {
 
 #[test]
 fn imu_live_tracks_read_success() {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         0,
         0,
         0,
@@ -1142,7 +1183,7 @@ fn a_failed_read_holds_the_filter_not_zeros() {
     // The core P0-1 fix: a missing sample HOLDS the attitude (skips the update) instead of
     // integrating the zero sample toward level. Freezing at the last-good angle is only safe
     // because the loss fault (below) disengages torque; the filter must never be walked to zero.
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         0,
         0,
         0,
@@ -1223,7 +1264,7 @@ fn imu_loss_asserts_after_threshold_and_forces_shutdown() {
 
 #[test]
 fn imu_loss_breaker_gates_the_read_on_the_probe_cadence() {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         0,
         0,
         0,
@@ -1309,7 +1350,7 @@ fn imu_loss_recovers_after_a_clean_stream_and_reenters() {
 fn unconfigured_board_never_loses_imu() {
     // The master (no IMU configured): a None sample every tick is ABSENCE, not loss. The mode
     // machine stays healthy and the retry breaker never engages.
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         0,
         0,
         0,
@@ -1476,7 +1517,7 @@ const BENCH_CV: u16 = 3600;
 /// A balance board (CONTROL_MODE = 1, IMU configured, sensing a known battery word) walked to RUN
 /// with pads down, fed `sample`.
 fn balance_to_run(sample: &imu::Sample) -> OrchestratorState {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -1571,7 +1612,7 @@ fn the_gating_row_ignores_the_attitude_configs_sign_map() {
     let mut cfg = attitude::Config::default();
     cfg.accel_sign[UP_AXIS] = -1;
     let level = level_sample_at(8192);
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -1789,7 +1830,7 @@ fn the_rider_level_does_not_gate_throttle_mode_engagement() {
 #[test]
 fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     // CONTROL_MODE = 1 (Balance) without a configured IMU: the boot seam demotes with the fault.
-    let s = OrchestratorState::new(
+    let s = built(
         1,
         0,
         0,
@@ -1810,7 +1851,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     assert!(obs.mode_fault);
 
     // With the IMU configured, Balance holds and no fault raises.
-    let s = OrchestratorState::new(
+    let s = built(
         1,
         0,
         0,
@@ -1830,7 +1871,7 @@ fn imu_absent_balance_demotes_to_throttle_with_mode_fault() {
     assert!(!s.obs().mode_fault);
 
     // The default byte (0) is Throttle on any board, no fault.
-    let s = OrchestratorState::new(
+    let s = built(
         0,
         0,
         0,
@@ -1912,7 +1953,7 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
     // The balance assembly end to end: RUN + rider (pads) + open gate + a steer drive; the FSM
     // walks IDLE -> ARMING -> RUN sub-states, the torque tracks the balance law's word and
     // never exceeds the soft-start envelope (|torque| <= 200/tick * ticks-since-engage).
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -2003,7 +2044,7 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
     // over-current only), so it drives the mode machine RUN -> SHUTDOWN -> OFF while leaving the
     // engagement sub-state at RUN and the envelope at its cap. The OFF pass resets the machine,
     // so the next entry to RUN starts from IDLE and pays the soft-start ramp again.
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -2200,7 +2241,7 @@ fn a_turning_wheel_counts_the_step_off_latch_outside_run() {
 /// `ArmStep::SetMoe` is the last arm step.
 #[test]
 fn the_arm_time_mode_install_applies_on_the_pass_that_grants_the_allowance() {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         0,
         0,
         0,
@@ -2499,7 +2540,7 @@ fn the_cyclic_payload_carries_the_window_and_the_boards_identity() {
 fn peer_rider_flag_reaches_the_engage_gate() {
     // The cyclic rider flag is a consumption-side fold: a board with NO local pads engages the
     // balance machine once its peer reports a rider.
-    let mut b = OrchestratorState::new(
+    let mut b = built(
         1,
         0,
         0,
@@ -2544,7 +2585,7 @@ fn peer_wheel_speed_reaches_ref_36_in_the_sub2_reference() {
     // The engagement blend's peer-speed input (`ref_36`): on the orientation != 0 path the
     // sub-2 reference is (7*local - 6*peer)*50/100 with local = 0 and pitch rate 0, so the
     // torque setpoint lands on exactly -(6*peer)/2: the peer word observably drives the output.
-    let mut b = OrchestratorState::new(
+    let mut b = built(
         1,
         0,
         0,
@@ -2920,7 +2961,7 @@ fn obs_gating_row_goes_negative_on_an_inverted_deck() {
     // accel-sign-map check. An inverted deck (or an inverted sign map, which is
     // indistinguishable from the row's point of view) reads NEGATIVE.
     let inverted = level_sample_at(-8192);
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -2963,7 +3004,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
         temp_centi_degc: 2500,
         still: false,
     };
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -2997,7 +3038,7 @@ fn pre_env_torque_is_live_while_the_machine_is_disengaged() {
     );
     // And it tracks the lean's SIGN, which is what makes the shadow readable by hand.
     let leaned_forward = s.obs().pre_env_torque;
-    let mut back = OrchestratorState::new(
+    let mut back = built(
         1,
         0,
         0,
@@ -3270,7 +3311,7 @@ fn the_cyclic_fault_byte_is_this_passes_level_mask() {
 #[test]
 fn ev_config_follows_the_boot_status_and_gates_nothing() {
     for config_fault in [false, true] {
-        let mut s = OrchestratorState::new(
+        let mut s = built(
             0,
             0,
             0,
@@ -3634,14 +3675,14 @@ fn sample_with_gy_counts(gy: i16) -> imu::Sample {
         gyro_bias: [0; 3],
         roles: imu::DEFAULT_ROLES,
     };
-    imu::Imu::new(imu::MPU6050, cfg).decode(&buf)
+    imu::Imu::new(cfg).decode(&buf)
 }
 
 #[test]
 fn the_pitch_rate_word_is_rad_per_s_times_10000() {
     // (j) point 4: stock's @0x9c word is f2iz(gy * 0.000266316114 * 10000), rad/s x 10000.
     // 1 rad/s gives 10000 (before (j) the word was the raw count, a 2.66x smaller unit).
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -3692,7 +3733,7 @@ fn the_pitch_rate_word_is_rad_per_s_times_10000() {
 /// can present a larger rate word to the ramp.
 #[test]
 fn the_ramp_rate_bound_is_the_decoded_gyro_full_scale() {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -3848,7 +3889,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
         store::BOARD_BATTERY_CAL.at(0).default(),
         store::BOARD_BATTERY_CAL.at(1).default(),
     );
-    let mut m = OrchestratorState::new(
+    let mut m = built(
         0,
         0,
         0,
@@ -3886,7 +3927,7 @@ fn a_sensing_master_ignores_its_slaves_word() {
 /// its word UNKNOWN, and it still does not take its peer's word.
 #[test]
 fn a_sensing_board_with_no_conversions_stays_unknown() {
-    let mut m = OrchestratorState::new(
+    let mut m = built(
         0,
         0,
         0,
@@ -3943,7 +3984,7 @@ fn a_non_sensing_slave_relays_its_masters_word() {
 #[test]
 fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
     let level = level_sample_at(8192);
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -3980,7 +4021,7 @@ fn an_unknown_battery_blocks_balance_engage_and_zeroes_the_shadow() {
         temp_centi_degc: 2500,
         still: false,
     };
-    let mut d = OrchestratorState::new(
+    let mut d = built(
         1,
         0,
         0,
@@ -4064,7 +4105,7 @@ fn policy_board(
     battery_floor: i16,
     vbatt: Option<battery::VbattCal>,
 ) -> OrchestratorState {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -4425,7 +4466,7 @@ fn throttle_engagement_is_identical_at_either_rider_requirement() {
     // the same ticks and command the same torque. The gain set the field used to move went with
     // the PID profiles (`specs/state-feedback.md` section 5).
     let mk = |byte: u8| {
-        OrchestratorState::new(
+        built(
             0,
             0,
             0,
@@ -4552,7 +4593,7 @@ fn a_run_started_above_the_floor_is_not_ended_by_the_word_falling_under_it() {
 /// Throttle mode never consults the floor: a floor above any reachable word still engages.
 #[test]
 fn the_battery_floor_does_not_gate_a_throttle_engage() {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         0,
         0,
         0,
@@ -4598,7 +4639,7 @@ fn the_law_divides_by_the_nominal_pack_in_torque_mode_and_by_the_battery_otherwi
 /// 50 ticks gently tilted. The law is live disarmed and every term but the pitch term is zero
 /// (no gyro rate, a still wheel, no reference outside RUN), so the word is `term_p`.
 fn torque_mode_board(vbatt: Option<u16>, torque_is_current: bool) -> OrchestratorState {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         0,
@@ -4708,7 +4749,7 @@ fn the_engage_floor_reads_the_battery_word_in_torque_mode_too() {
 /// A rigid-frame board: the LEADER when `imu` (a sensing board reading a known battery word), the
 /// FOLLOWER when not. Rider requirement waived, as the rover stages it.
 fn rigid_board(imu: bool) -> OrchestratorState {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         1,
         0,
@@ -5303,7 +5344,7 @@ fn a_pivoting_board_ignores_its_peers_fault_mask() {
 /// A rigid LEADER staged with a side and a turn bound: `side_right` is the rover's master on the
 /// right wall, and the turn is the `CONTROL_DRIVE_TURN` pair through its seam.
 fn turning_leader(side_right: bool, turn: control::DriveTurn) -> OrchestratorState {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         1,
         side_right as u8,
@@ -5998,13 +6039,13 @@ fn the_positions_are_published_while_disarmed() {
 
 /// The start gains with the stick live: `speed_max` 80 (1.4 m/s at full stick), `speed_slew` 41.
 fn sf_driving() -> control::GainShadow {
-    control::GainShadow::of_stored([3491, 4002, 197, 926, 80, 41], control::DEFAULT_GAIN_MAX)
+    control::GainShadow::of_stored([3491, 4002, 197, 926, 80, 41])
 }
 
 /// A pivoting balance board on side byte `side` with `gains`, pads down and power held, walked on
 /// a level 1 g sample until the engagement machine is in RUN.
 fn sf_run_board(side: u8, gains: control::GainShadow) -> OrchestratorState {
-    let mut s = OrchestratorState::new(
+    let mut s = built(
         1,
         0,
         side,
@@ -6309,7 +6350,7 @@ fn a_live_tune_reaches_the_terms_and_the_lane_takes_exactly_its_keys() {
 /// into `0..=450`, the `side_byte` pattern.
 #[test]
 fn the_position_clamp_goes_through_its_seam_at_boot_and_at_the_arm() {
-    let s = OrchestratorState::new(
+    let s = built(
         1,
         0,
         0,

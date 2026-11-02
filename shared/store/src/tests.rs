@@ -1029,17 +1029,15 @@ mod dynamic {
             ]
         };
         let g = g4(CONTROL_SF_GAINS);
-        let mut shadow = control::GainShadow::of_stored(
-            [
-                g[0],
-                g[1],
-                g[2],
-                g[3],
-                s.get(CONTROL_REFERENCE.at(0)),
-                s.get(CONTROL_REFERENCE.at(1)),
-            ],
-            g4(CONTROL_GAIN_MAX),
-        );
+        let mut shadow = control::GainShadow::of_stored([
+            g[0],
+            g[1],
+            g[2],
+            g[3],
+            s.get(CONTROL_REFERENCE.at(0)),
+            s.get(CONTROL_REFERENCE.at(1)),
+        ]);
+        shadow.re_apply_max(g4(CONTROL_GAIN_MAX));
         assert_eq!(shadow.gains()[0], 3000, "3491 clamps to the stored maximum");
         assert_eq!(
             shadow.set(control::SF_GAINS_FIELD, 0, 3001),
@@ -1079,7 +1077,7 @@ mod dynamic {
         let mut s = Store::mount(&mut f).unwrap();
         assert_eq!(IMU_AXIS_ROLE.id(), 0x16);
         // Nothing staged: the compiled frame, the identity roles.
-        let unstaged = read(&s).unwrap();
+        let unstaged = read(&s);
         assert_eq!(unstaged.roles, imu::DEFAULT_ROLES);
         assert_eq!(unstaged.sign, imu::Config::default().sign);
 
@@ -1090,14 +1088,14 @@ mod dynamic {
         s.set_value(key(0x14, 0), Value::I32(5)).unwrap();
         s.set_value(key(0x16, 0), Value::U8(1)).unwrap();
         s.set_value(key(0x16, 1), Value::U8(3)).unwrap();
-        let cfg = read(&s).unwrap();
+        let cfg = read(&s);
         assert_eq!(cfg.roles, [1, 3]);
         assert_eq!(cfg.sign, [1; 6]);
         assert_eq!(cfg.gyro_bias, [5, 0, 0]);
         let mut buf = [0u8; imu::BURST_LEN];
         buf[0..2].copy_from_slice(&8192i16.to_be_bytes()); // +1 g on chip X
         buf[8..10].copy_from_slice(&105i16.to_be_bytes()); // a rate on chip X
-        let sample = imu::Imu::new(imu::MPU6050, cfg).decode(&buf);
+        let sample = imu::Imu::new(cfg).decode(&buf);
         assert_eq!(sample.accel_raw, [0, 0, 8192], "gravity on body Z");
         assert_eq!(
             sample.gyro_raw,
@@ -1105,9 +1103,14 @@ mod dynamic {
             "the chip-X bias rides to body Z"
         );
 
-        // A repeated role is refused, not staged.
+        // A repeated role is staged as stored; the frame check before the write is what refuses it
+        // (`specs/config-read-once.md` section 4).
         s.set_value(key(0x16, 1), Value::U8(1)).unwrap();
-        assert_eq!(read(&s).unwrap_err(), imu::FrameError::Roles);
+        assert_eq!(read(&s).roles, [1, 1]);
+        assert_eq!(
+            imu::Config::frame_error([1; 3], [1, 1]),
+            Some(imu::FrameError::Roles)
+        );
     }
 
     /// The `CONTROL_RIDER_REQUIRED` seam end to end (`specs/control.md` (i)): an erased board reads

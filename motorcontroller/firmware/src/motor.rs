@@ -418,7 +418,7 @@ pub fn motor_fault_level(
 /// (`offset - 2*sample` over the left-aligned injected word, so one 12-bit ADC LSB of deviation is
 /// 16 counts and the sensor's full scale is +-32767 counts); nothing is rescaled, the limit is
 /// converted INTO it. The scale itself is per-board data, read at boot from
-/// `store::MOTOR_CURRENT_CAL` (0x67) into `board::MotorPlan` and carried into [`limit_counts`]:
+/// `store::MOTOR_CURRENT_CAL` (0x4C) by the arm row and carried into [`limit_counts`]:
 /// it is a property of the shunt and amplifier chain fitted, not a constant
 /// (`specs/motor-integration.md`, "The current-sense calibration").
 ///
@@ -618,7 +618,7 @@ pub fn noise_floor_counts(stored: u16) -> i16 {
 /// value is bounded here, never refused, and there is nowhere at a boot seam to refuse it to.
 ///
 /// **Two of the three inputs are this board's own measured facts, not constants.** `cal` is its
-/// counts per amp (`store::MOTOR_CURRENT_CAL`, carried on `board::MotorPlan`) and `noise_floor` is
+/// counts per amp (`store::MOTOR_CURRENT_CAL`, read with the arm row) and `noise_floor` is
 /// its sense chain's rest noise (`store::MOTOR_NOISE_FLOOR`, carried on [`BootFixed`]); this is the
 /// boot seam that clamps both, because the store validates type only, so a hand-poked out-of-range
 /// flash value cannot reach the comparison.
@@ -1354,7 +1354,7 @@ pub fn init_fault_bits(cal: CalOutcome) -> u32 {
 /// the proof that the bring-up never energizes the bridge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BringUpStep {
-    /// Enable the gate set's advanced-timer peripheral clock (`GateSet::timer`: TIMER0, or TIMER7
+    /// Enable the gate set's advanced-timer peripheral clock (the stored `gate.timer`: TIMER0, or TIMER7
     /// on a second motor). Load-bearing FIRST: an unclocked GD32 advanced timer
     /// silently ignores register writes and reads back zero (bench-proven 2026-07-26).
     EnableTimerClock,
@@ -1452,7 +1452,7 @@ pub fn requested_method(method_byte: u8) -> commutation::CommutationMethod {
 /// honoured on any brought-up motor. FOC is honoured only where the board has phase current to
 /// close a loop ON, and that whole fact is [`BootFixed::accepted_offsets`]: it can only be `Some`
 /// on a board that declares `motor.current_sense` (0x66), wired the two phase pins the declaration
-/// is held to (`crate::layout::MotorPlan::phase_current`), and whose quiet-bridge calibration
+/// is held to (`crate::layout::Motor::phase`), and whose quiet-bridge calibration
 /// was ACCEPTED by `commutation::foc::PhaseOffsets`. A `Foc` request without it is demoted to
 /// six-step and raises [`FAULT_METHOD`] ([`method_fault_bits`]), the way a board with no IMU is
 /// demoted out of Balance rather than balancing on no attitude (`specs/commutation.md`,
@@ -1564,9 +1564,8 @@ pub struct BootFixed {
     pub accepted_offsets: Option<commutation::foc::PhaseOffsets>,
 }
 
-/// The drive direction as the commutation crate names it: `reversed` is `board::MotorPlan::
-/// direction` at boot and the decoded `motor.direction` byte at every arm
-/// ([`requested_direction`]). It enters the six-step decode ([`six_step_records`]), and that
+/// The drive direction as the commutation crate names it: `reversed` is the decoded
+/// `motor.direction` byte the arm row installs, at boot and at every arm ([`requested_direction`]). It enters the six-step decode ([`six_step_records`]), and that
 /// decode is what the dispatch installs (`Commutator::new` at boot, `Commutator::switch_method`
 /// at every arm), so sine and FOC turn a reversed board's wheel the way its six-step does
 /// (`specs/commutation.md`, "The alignment every method consumes").
@@ -1580,7 +1579,7 @@ pub fn drive_direction(reversed: bool) -> commutation::Direction {
 }
 
 /// Decode the `MOTOR_DIRECTION` (0x62) store byte at the arm path: `0 = Forward`, nonzero =
-/// `Reverse`, the field's own rule (`store::MOTOR_DIRECTION`), the same one `layout::read_motor`
+/// `Reverse`, the field's own rule (`store::MOTOR_DIRECTION`), the same one the arm row
 /// applies to the boot plan's copy. A value-row input, re-read at every arm ([`rederive`]).
 #[inline]
 pub fn requested_direction(direction_byte: u8) -> commutation::Direction {
@@ -1688,6 +1687,10 @@ pub struct Rederived {
     /// (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the direction gate): as a boot
     /// fact, writing the field and arming changed nothing and only a reset reversed the wheel.
     pub decode: commutation::sixstep::SixStep,
+    /// [`FAULT_METHOD`] when the method that runs is not the one stored ([`method_fault_bits`]),
+    /// else 0: installed into the ISR's fault accumulator with the records, so the demotion fault
+    /// follows the method the board runs, from the boot's first install on.
+    pub method_fault: u32,
 }
 
 /// Re-derive the motor's VALUE row from freshly read store values plus the boot-fixed decode facts.
@@ -1716,7 +1719,7 @@ pub struct Rederived {
 /// the injected group depends on the method choice. The group's rank list comes from
 /// [`injected_ranks`], which takes the plan's phase-current channels and the battery channel and
 /// has no method argument at all, and programming it is a BRING-UP step
-/// ([`BringUpStep::ConfigureInjectedGroup`]) driven by `plan.phase_current` and `plan.vbatt` alone.
+/// ([`BringUpStep::ConfigureInjectedGroup`]) driven by the stored phase pair and battery input alone.
 /// All three arms share that one group: the calibration is unconditional and the current limit
 /// reads both sensed phases every period whatever runs, so an arm that switches to FOC starts
 /// CONSUMING samples the ISR was already taking rather than asking for different ones. A method
@@ -1744,12 +1747,14 @@ pub fn rederive(
         commutation::sixstep::SixStep::new(requested_direction(direction_byte), align_offset_byte);
     let limit = limit_counts(current_limit_ma, current_cal, boot.noise_floor);
     let full_scale = full_scale_counts(limit, boot.noise_floor);
-    let records = method_records(requested_method(method_byte), boot, decode, full_scale);
+    let requested = requested_method(method_byte);
+    let records = method_records(requested, boot, decode, full_scale);
     Rederived {
         method: records.method().to_u8(),
         limit_counts: limit,
         records,
         decode,
+        method_fault: method_fault_bits(requested, boot),
     }
 }
 
@@ -1796,7 +1801,7 @@ pub use hw::{bring_up, period_isr_hz};
 #[cfg(target_os = "none")]
 pub mod hw {
     use super::*;
-    use crate::layout::{AdcInput, GateSet, MotorPlan};
+    use crate::layout::{Motor, Pin3};
     use commutation::foc::PhaseOffsets;
     use commutation::Commutator;
     use core::ptr::addr_of_mut;
@@ -1806,8 +1811,8 @@ pub mod hw {
     };
     use hal::interrupt;
     use hal::{
-        clock, irq, Chip, InjectedAdcController, InjectedHandle, InputGroup, PeriphLabel,
-        PwmHandle, PwmTimer, TriggeredAdc,
+        clock, irq, Chip, InjectedAdcController, InjectedHandle, InputGroup, PeriphLabel, PinAf,
+        PinId, PwmHandle, PwmTimer, TriggeredAdc,
     };
     use heapless::Vec;
 
@@ -1825,7 +1830,7 @@ pub mod hw {
     /// DERIVED from `board::DEAD_TIME_DTS_DIV`, the one owner of that unit, rather than written
     /// here as `ClockDiv::Div2`. `board::DEAD_TIME_MIN_DTG` converts the fleet's 500 ns reference
     /// through the same number to get its floor, so a divider change moves the floor and the motor
-    /// bring-up (`layout::read_motor`) refuses a staged code that has become too short, instead of
+    /// CLI refuses to write a code that has become too short, instead of
     /// running it as a shorter dead time than it was staged for.
     /// The injected group's ADC clock divider as the HAL's enum, DERIVED from [`ADC_CLOCK_DIV`]
     /// (the one owner of the number, which the sample hold's threshold is derived from too) so
@@ -1971,8 +1976,9 @@ pub mod hw {
     /// `Commutator::switch_method`. `false` on a board with no runtime (which is unarmable anyway,
     /// so the arm is refused).
     ///
-    /// **Those three fields and nothing else.** It does not touch `offsets`, `base_flags`,
-    /// `faults`, [`FAULT`] or [`OBS_CAL`], and [`Rederived`] carries no field that could. The limit
+    /// **Those three fields and the method fault bit, nothing else.** It does not touch `offsets`,
+    /// `base_flags`, [`FAULT`] or [`OBS_CAL`], and of `faults` only [`FAULT_METHOD`], which the ISR
+    /// publishes into [`FAULT`] at its next period. The limit
     /// goes in through [`CurrentLimit::reconfigure`] rather than as a built record, so the
     /// boot-cumulative trip count the ISR publishes survives an arm (see that seam for the split).
     /// The records and the direction go through `switch_method` precisely because that seam
@@ -2052,6 +2058,7 @@ pub mod hw {
                     m.method = r.method;
                     m.current.reconfigure(r.limit_counts);
                     m.commutator.switch_method(r.records, r.decode);
+                    m.faults = (m.faults & !FAULT_METHOD) | r.method_fault;
                     true
                 }
                 None => false,
@@ -2081,7 +2088,8 @@ pub mod hw {
         pub timer: PwmTimer,
     }
 
-    /// Bring one motor up from its plan (`crate::layout::read_motor`), disarmed (`BRING_UP_STEPS`, in order).
+    /// Bring motor 0 up from its stored configuration (`crate::layout::read`), disarmed
+    /// (`BRING_UP_STEPS`, in order).
     ///
     /// Returns the summary on success, or the step that stopped it. Nothing here writes MOE: the
     /// arming gate is not built, not held, and not reachable from this module. The summary carries
@@ -2089,23 +2097,22 @@ pub mod hw {
     /// board becomes armable at all.
     /// `period_hz` is the rate this bring-up's period ISR will run at ([`period_isr_hz`] of the
     /// configured timer clock). The commutator's hall debounce window is derived from it.
-    /// `current_limit_ma` is the boot-read `MOTOR_CURRENT_LIMIT`, converted here by
-    /// [`limit_counts`] against the plan's own `current_cal` into the ISR's record. A `CONFIG_WRITE`
-    /// of either applies at the next ARM, which re-derives both through the same owners and
-    /// installs the result (`specs/integration.md`, "When a stored value takes effect: the arm-time
-    /// re-read"); this boot read is the first value the board runs on, not the only one.
-    /// `noise_floor` is the boot-read `MOTOR_NOISE_FLOOR` at this motor's index, the third input to
-    /// that conversion and the only one of the three that is BOOT-read rather than re-read at every
-    /// arm: it rides [`BootFixed`] from here so both paths convert against one floor.
-    /// `vbatt` is the plan's battery-sense input: `Some` adds the battery rank to the injected
-    /// group (rank 2, after the two phase ranks) and puts its pin in analog mode beside them.
+    /// `noise_floor` is the boot-read `MOTOR_NOISE_FLOOR` at this motor's index, the one input to the
+    /// limit conversion that is BOOT-read: it rides [`BootFixed`] from here so every install
+    /// converts against one floor.
+    /// `vbatt` is the stored battery-sense input with its ADC channel: `Some` adds the battery rank
+    /// to the injected group (rank 2, after the two phase ranks) and puts its pin in analog mode
+    /// beside them.
+    ///
+    /// The method, the limit, the direction and the align offset are the arm row's, which the
+    /// boot installs right after this through the same install every arm uses
+    /// (`specs/config-read-once.md` section 5). Until then the records are six-step, forward,
+    /// offset 0, at the floor's limit, on a bridge MOE holds off.
     pub fn bring_up(
         chip: &Chip,
-        plan: &MotorPlan,
-        vbatt: Option<AdcInput>,
-        method_byte: u8,
+        motor: Option<&Motor>,
+        vbatt: Option<Pin3>,
         period_hz: u32,
-        current_limit_ma: u32,
         noise_floor: u16,
     ) -> Result<MotorRuntimeSummary, MotorSkip> {
         // `MOTOR` lives in `.uninit` (see the static): give it the `None` its initializer names
@@ -2114,13 +2121,10 @@ pub mod hw {
         // SAFETY: the boot thread, before the period vector is registered or unmasked; no
         // reference formed.
         unsafe { addr_of_mut!(MOTOR).write(None) };
-        // Step 1 of the spec's list, before the ordered steps: refuse an absent layout. A motor
-        // with no gate set or no hall set is absent, which is a valid board state, not a fault.
-        let (gates, halls) = match (plan.gates, plan.halls) {
-            (Some(g), Some(h)) => (g, h),
-            _ => return Err(MotorSkip::Absent),
-        };
-        let phase = plan.phase_current.ok_or(MotorSkip::NoCurrentSense)?;
+        // Step 1 of the spec's list, before the ordered steps: an absent motor (its halls, gates
+        // or gate timer not stored) is a valid board state, not a fault.
+        let m = motor.ok_or(MotorSkip::Absent)?;
+        let phase = m.phase.ok_or(MotorSkip::NoCurrentSense)?;
         // The advanced timer this motor's gate set belongs to, taken from the VALIDATED model
         // rather than written as a literal: `board::Capabilities::gate_set` derived the index from
         // the six gate pins, and the 12-FET's second motor is TIMER7. One resolution, one owner
@@ -2130,11 +2134,10 @@ pub mod hw {
         // gets its label and stops later, at `ConfigureInjectedGroup`, where the ADC's trigger mux
         // refuses anything but TIMER0 (see [`gate_timer_label`]). Either way the motor fails loudly
         // instead of driving TIMER0's registers under another timer's name.
-        let timer_label = gate_timer_label(gates.timer)
+        let timer_label = gate_timer_label(m.timer)
             .ok_or(MotorSkip::StepFailed(BringUpStep::EnableTimerClock))?;
-        // The policy input, read once. What actually runs is the capability gate's verdict,
-        // applied at `SelectMethodAndInstall`.
-        let requested = requested_method(method_byte);
+        // Six-step until the arm row's install, which follows this bring-up at boot.
+        let requested = commutation::CommutationMethod::SixStep;
 
         // The one configured timer object, built by `ConfigureTimer` and reused by every later
         // step that touches the timer (the trigger channel, the counter start, the per-cycle
@@ -2158,7 +2161,7 @@ pub mod hw {
                 }
                 BringUpStep::ConfigureTimer => {
                     timer = Some(
-                        PwmTimer::configure(chip, &timer_config(&gates, timer_label))
+                        PwmTimer::configure(chip, &timer_config(m.dead_time, timer_label))
                             .map_err(|_| failed(step))?,
                     );
                 }
@@ -2177,9 +2180,11 @@ pub mod hw {
                     );
                 }
                 BringUpStep::RouteGatePins => {
-                    for pin in gates.hi.iter().chain(gates.lo.iter()) {
-                        chip.route_advanced_pwm_pin(pin.packed())
-                            .map_err(|_| failed(step))?;
+                    // The GD32F10x routes the timer by its AFIO remap, the stored one.
+                    #[cfg(feature = "gd32f103c8")]
+                    hal::afio::remap(timer_label, m.remap);
+                    for [port, pin, af] in m.gates {
+                        chip.gate_pin(PinAf { port, pin, af });
                     }
                 }
                 BringUpStep::EnableAdcClock => {
@@ -2190,14 +2195,11 @@ pub mod hw {
                 BringUpStep::ConfigurePhasePins => {
                     // The battery-sense pin rides with the phase pins: every analog input the
                     // injected group converts is put in analog mode by this one step.
-                    for pin in phase.pins.iter().chain(vbatt.as_ref().map(|v| &v.pin)) {
-                        let port = match pin.port() {
-                            0 => PeriphLabel::Gpioa,
-                            1 => PeriphLabel::Gpiob,
-                            2 => PeriphLabel::Gpioc,
-                            _ => return Err(failed(step)),
-                        };
-                        chip.analog_pin(port, pin.pin()).map_err(|_| failed(step))?;
+                    for [port, pin, _] in phase.iter().chain(vbatt.as_ref()) {
+                        chip.analog_pin(PinId {
+                            port: *port,
+                            pin: *pin,
+                        });
                     }
                 }
                 BringUpStep::ConfigureInjectedGroup => {
@@ -2205,7 +2207,7 @@ pub mod hw {
                         .configure(
                             chip,
                             &injected_config(
-                                &injected_ranks(phase.channels, vbatt.map(|v| v.channel)),
+                                &injected_ranks([phase[0][2], phase[1][2]], vbatt.map(|v| v[2])),
                                 timer_label,
                             ),
                         )
@@ -2265,9 +2267,7 @@ pub mod hw {
                         (Some(t), Some(i), Some(c)) => (t.handle(), i, c),
                         _ => return Err(failed(step)),
                     };
-                    let group = chip
-                        .input_group([halls.a.packed(), halls.b.packed(), halls.c.packed()])
-                        .map_err(|_| failed(step))?;
+                    let group = chip.input_group(m.halls.map(|[port, pin]| PinId { port, pin }));
                     // The boot-fixed facts, kept on the runtime so the arm-time re-derivation
                     // rebuilds the records from the SAME floor and accepted zeros rather than
                     // re-measuring the bridge (`specs/integration.md`, the arm-time re-read).
@@ -2275,17 +2275,10 @@ pub mod hw {
                         noise_floor,
                         accepted_offsets: accepted,
                     };
-                    // The plan's direction and align offset are the boot's first values of
-                    // `motor.direction` and `motor.align_offset`, read by `layout::read_motor` at the
-                    // same moment as the method byte; every arm re-reads both fields and installs
-                    // them again (`rederive`).
-                    let decode = commutation::sixstep::SixStep::new(
-                        drive_direction(plan.direction),
-                        plan.align_offset,
-                    );
-                    // The boot's soft limit, and the FOC reference scale derived from it, by the
-                    // same owners the arm-time `rederive` uses.
-                    let limit = limit_counts(current_limit_ma, plan.current_cal, boot.noise_floor);
+                    // Forward, offset 0, and the floor's limit until the arm row's install.
+                    let decode =
+                        commutation::sixstep::SixStep::new(commutation::Direction::Forward, 0);
+                    let limit = noise_floor_counts(boot.noise_floor);
                     // One construction shape for the records, shared with `motor::rederive`, and
                     // the method that runs is the records' own: a demoted request cannot publish
                     // the method it asked for.
@@ -2309,7 +2302,7 @@ pub mod hw {
                     // init fault the ISR did not know about would be erased on the first entry.
                     // Seeding it keeps the ISR the sole writer of `FAULT` after the unmask while
                     // still carrying a fault raised before it.
-                    let init_faults = init_fault_bits(cal) | method_fault_bits(requested, boot);
+                    let init_faults = init_fault_bits(cal);
                     FAULT.store(init_faults, Ordering::Relaxed);
                     // SAFETY: the one write, on the boot thread, BEFORE the period vector is
                     // unmasked (the next-but-one step), so no ISR can observe it half-built.
@@ -2337,8 +2330,7 @@ pub mod hw {
                     // (`specs/foc-torque.md` section 14): stored once, here, so the derivation
                     // runs against the staged `motor.dead_time` the timer was just configured
                     // with, and the knob keeps whatever a bench session writes over it after.
-                    FOC_HOLD_COMPARE
-                        .store(hold_compare_max(gates.dead_time) as u32, Ordering::Relaxed);
+                    FOC_HOLD_COMPARE.store(hold_compare_max(m.dead_time) as u32, Ordering::Relaxed);
                     OBS_STATE.store(
                         pack_obs_state(0, [false; 3], method.to_u8(), base_flags),
                         Ordering::Relaxed,
@@ -2440,9 +2432,9 @@ pub mod hw {
         Some(CalVerdict::Refused(blocks[CAL_BLOCKS - 1]))
     }
 
-    /// The advanced-timer label behind a [`crate::layout::GateSet::timer`] index: the ONE place
-    /// that index becomes a HAL label (index 0 = TIMER0, 1 = TIMER7/TIM8, the numbering the boot's
-    /// `pincap::gate_set` mapping hands `layout::read_motor`). `None` for anything else, which is a model
+    /// The advanced-timer label behind the stored `gate.timer` ([`crate::layout::Motor::timer`]):
+    /// the ONE place that number becomes a HAL label (`0` = TIMER0, `7` = TIMER7/TIM8, the HAL's
+    /// label numbers). `None` for anything else, which is a model
     /// mismatch rather than a board state: the fleet's parts carry at most two advanced timers.
     ///
     /// A `Timer7` gate set resolves its label here and then FAILS the bring-up at
@@ -2457,7 +2449,7 @@ pub mod hw {
     fn gate_timer_label(timer: u8) -> Option<PeriphLabel> {
         match timer {
             0 => Some(PeriphLabel::Timer0),
-            1 => Some(PeriphLabel::Timer7),
+            7 => Some(PeriphLabel::Timer7),
             _ => None,
         }
     }
@@ -2466,10 +2458,8 @@ pub mod hw {
     /// `plan-hotpath-readiness.md` section 1's reference column, so the step list and the stage-2
     /// golden agree by construction). `timer` is the label [`gate_timer_label`] derived from this
     /// motor's validated gate set, never a literal.
-    fn timer_config(gates: &GateSet, timer: PeriphLabel) -> PwmConfig {
-        let ch = |i: usize| PwmChannelConfig {
-            high: gates.hi[i].packed(),
-            low: gates.lo[i].packed(),
+    fn timer_config(dead_time: u8, timer: PeriphLabel) -> PwmConfig {
+        let ch = |_: usize| PwmChannelConfig {
             // The complementary (low) side is inverted, active-low: the reference's polarity.
             polarity: true,
             // Idle levels: N-side only high (the golden's CTL1 0x2A20), so a disarmed bridge idles
@@ -2485,7 +2475,7 @@ pub mod hw {
             // `period_isr_hz` derives that rate from these same two constants.
             prescaler: PRESCALER,
             // Per-board data, never a crate constant (`specs/commutation.md`).
-            dead_time: gates.dead_time,
+            dead_time,
             // Stock parity: the hardware break input is deliberately disabled (over-current
             // protection is software's, out of scope here; the bench current limit is the cap).
             brk: BreakConfig {

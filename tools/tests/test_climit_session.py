@@ -109,7 +109,7 @@ class Parsers(unittest.TestCase):
         w[27], w[28] = 0x00000000, 0x00000003  # latch-A count 3
         w[31] = 0x012804B0          # peak 1200, chopped 40, trips 1
         w[32] = 2497
-        w[33] = 0x00840203          # 3 re-read refusals, 2 confirm, cause = a refused role pair
+        w[33] = 0x00000200          # 2 confirm refusals
         w[34] = 7                   # 7 mailbox frames dropped this boot
         m = [0] * SPAN
         m[OFFS["DEMAND"]] = 3000
@@ -120,8 +120,7 @@ class Parsers(unittest.TestCase):
         self.assertEqual((s["fault"], s["dwell"], s["speed"]), (4, 5, -90))
         self.assertEqual((s["peak"], s["chopped"], s["trips"], s["latch_a"]), (1200, 40, 1, 3))
         self.assertEqual((s["battery"], s["demand"], s["label"]), (2497, 3000, "lbl"))
-        self.assertEqual((s["reread_refusals"], s["confirm_refusals"]), (3, 2))
-        self.assertIn("imu.axis_role", s["refusal_cause"])
+        self.assertEqual(s["confirm_refusals"], 2)
         self.assertEqual(s["mailbox_drops"], 7)
 
     def test_mailbox_drops_round_trip(self):
@@ -139,17 +138,10 @@ class Parsers(unittest.TestCase):
         self.assertEqual((s["chopped"], s["trips"], s["duty_on"], s["latch_a"]), (64, 2, 1956, 5))
 
     def test_decode_arm_refusals(self):
-        """CTRL_OBS word 33 (motorcontroller/firmware/src/main.rs `arm_refusals` + `imu_frame_cause_byte`):
-        the two per-boot counts in their own byte lanes, and the two frame checks the cause byte
-        can name."""
-        self.assertEqual(swdobs.decode_arm_refusals(0), (0, 0, "no frame refusal"))
-        n_re, n_cf, cause = swdobs.decode_arm_refusals(0x0080_0201)
-        self.assertEqual((n_re, n_cf), (1, 2))
-        self.assertIn("axis_sign", cause)
-        self.assertIn("sign triple", cause)
-        self.assertIn("axis_role", swdobs.decode_arm_refusals(0x0084_0001)[2])
-        # The saturated counts the firmware publishes after 255 refusals, read as absolutes.
-        self.assertEqual(swdobs.decode_arm_refusals(0x0084_FFFF)[:2], (255, 255))
+        """CTRL_OBS word 33: the ConfirmPeriodsLive count in bits 8..15."""
+        self.assertEqual(swdobs.decode_arm_refusals(0), 0)
+        self.assertEqual(swdobs.decode_arm_refusals(0x0000_0200), 2)
+        self.assertEqual(swdobs.decode_arm_refusals(0x0000_FF00), 255)
 
     def test_tear_guard(self):
         a = cs.encode_ctrl_obs({"tick": 100})
@@ -362,23 +354,18 @@ class Verdicts(unittest.TestCase):
         self.assertIn("rest floor", cs.soak_abort(series(5, mode=RUN, moe=1, peak=2500), 1300))
         self.assertIn("dropped", cs.soak_abort(series(5, mode=OFF), 1300))
 
-    def test_a_refused_arm_names_the_refusal_and_its_cause(self):
-        """A refused arm is the one failure whose cause is NOT in the state read: the re-read
-        refusal clears on the OFF pass, so by the time the tool gives up, the board is back to
-        looking un-engaged. The counts and the cause byte are what is left of it (CTRL_OBS word 33),
-        so they go in the detail the session reports and records."""
-        refused = series(10, mode=OFF, reread_refusals=1, refusal_cause=0x84)
+    def test_a_refused_arm_names_the_confirm_count(self):
+        """A refused arm's count is what is left of it in CTRL_OBS word 33, so it goes in the
+        detail the session reports and records."""
+        refused = series(10, mode=OFF, confirm_refusals=1)
         before = series(2, mode=OFF)
         ok, detail = cs.arm_ok(before + refused, 0.0)
         self.assertFalse(ok)
-        self.assertIn("re-read 1", detail)
-        self.assertIn("+1 re-read, +0 confirm during the attempt", detail)
-        self.assertIn("imu.axis_role", detail)
-        # A board that simply was not engaged says so, with no cause invented for it.
+        self.assertIn("confirm 1", detail)
+        self.assertIn("+1 confirm during the attempt", detail)
         ok, detail = cs.arm_ok(series(10, mode=OFF), 0.0)
         self.assertFalse(ok)
-        self.assertIn("re-read 0, confirm 0", detail)
-        self.assertNotIn("cause", detail)
+        self.assertIn("confirm 0", detail)
 
     def test_a_soak_is_judged_on_its_p90_not_a_noise_extreme(self):
         """The real distribution from 2026-10-09: an armed, undemanded soak at the rest floor with

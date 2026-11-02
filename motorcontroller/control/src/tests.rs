@@ -1349,33 +1349,33 @@ fn the_tune_seam_owns_the_allowlist_and_the_ranges() {
 
 #[test]
 fn a_stored_value_outside_its_range_is_clamped_before_it_reaches_the_law() {
-    let s = GainShadow::of_stored(
-        row([-5, 30000, 2500, 300], [-1, 0]),
-        [20000, 20000, 2000, 10000],
-    );
+    let mut s = GainShadow::of_stored(row([-5, 30000, 2500, 300], [-1, 0]));
+    s.re_apply_max([20000, 20000, 2000, 10000]);
     assert_eq!(s.gains(), [0, 20000, 2000, 300]);
     assert_eq!(s.reference(), [0, 1], "speed_slew floors at 1");
-    let s = GainShadow::of_stored(row([0; 4], [600, 5000]), DEFAULT_GAIN_MAX);
+    let s = GainShadow::of_stored(row([0; 4], [600, 5000]));
     assert_eq!(s.reference(), REFERENCE_MAX);
 }
 
 #[test]
 fn a_stored_maximum_bounds_the_boot_clamp_the_lane_and_the_reconcile() {
     let max = [1000, 900, 50, 40];
-    let mut s = GainShadow::of_stored(row([3491, 4002, 197, 926], [80, 41]), max);
+    let mut s = GainShadow::of_stored(row([3491, 4002, 197, 926], [80, 41]));
+    s.re_apply_max(max);
     assert_eq!(s.gains(), max, "the boot clamp");
     assert_eq!(s.set(SF_GAINS_FIELD, 2, 51), Err(TuneError::OutOfRange));
     assert_eq!(s.set(SF_GAINS_FIELD, 2, 50), Ok(()));
     s.reconcile(row([3491, 10, 197, 926], [80, 41]));
     assert_eq!(s.gains(), [1000, 10, 50, 40], "the reconcile clamps too");
     // A negative maximum reads as zero rather than an empty range.
-    let s = GainShadow::of_stored(row([5; 4], [0, 41]), [-1, 5, 5, 5]);
+    let mut s = GainShadow::of_stored(row([5; 4], [0, 41]));
+    s.re_apply_max([-1, 5, 5, 5]);
     assert_eq!(s.gains(), [0, 5, 5, 5]);
 }
 
 #[test]
 fn the_arm_time_maxima_re_apply_clamps_live_and_leaves_stored_as_read() {
-    let mut s = GainShadow::of_stored(row([3491, 4002, 197, 926], [80, 41]), DEFAULT_GAIN_MAX);
+    let mut s = GainShadow::of_stored(row([3491, 4002, 197, 926], [80, 41]));
     s.set(SF_GAINS_FIELD, 0, 5000).unwrap();
     s.re_apply_max([4000, 20000, 100, 10000]);
     assert_eq!(s.gains(), [4000, 4002, 100, 926]);
@@ -1398,7 +1398,7 @@ fn the_arm_time_maxima_re_apply_clamps_live_and_leaves_stored_as_read() {
 
 #[test]
 fn a_reconcile_follows_flash_only_where_flash_moved() {
-    let mut s = GainShadow::of_stored(row([3491, 4002, 197, 926], [80, 41]), DEFAULT_GAIN_MAX);
+    let mut s = GainShadow::of_stored(row([3491, 4002, 197, 926], [80, 41]));
     s.set(SF_GAINS_FIELD, 0, 3600).unwrap();
     s.set(REFERENCE_FIELD, 1, 60).unwrap();
     // A save of an unrelated field re-reads the same flash: the live tunes stay.

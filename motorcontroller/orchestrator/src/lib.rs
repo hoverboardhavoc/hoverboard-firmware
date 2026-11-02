@@ -806,56 +806,40 @@ pub struct BoardIdentity {
 }
 
 impl OrchestratorState {
-    /// A fresh orchestrator: mode OFF, empty inbox, idle inputs, identity attitude, and the
-    /// control dispatch through its boot seam (`ControlDispatch::new(CONTROL_MODE byte,
-    /// CONTROL_FRAME byte, imu_configured, CONTROL_RIDER_REQUIRED byte, BOARD_BATTERY_FLOOR)`:
-    /// the resolution table of `specs/rover-one-imu.md` section 2, where pivoting Balance
-    /// demotes to Throttle with the mode fault when the IMU is absent and rigid Balance leads
-    /// with one and follows without). `imu_configured` comes from the boot path (plan-present AND probe-ok);
-    /// `imu_staged` is the staged `imu.model` being nonzero (the boot reads it)
-    /// and is published only, so the observation block can tell an unstaged board from a failed bring-up;
-    /// `attitude_cfg` is the per-board attitude calibration (the reference defaults on an
-    /// uncalibrated board). `vbatt_cal` is the battery-sense calibration where the plan carries
-    /// `board.battery.pin` (`None` = the board does not sense). `pos_clamp` is the stored
-    /// `CONTROL_POS_CLAMP` word (`specs/state-feedback.md` section 4), clamped by
-    /// `control::sf::pos_clamp` into the control section.
-    /// `rider_required_byte` is the `CONTROL_RIDER_REQUIRED` byte (`specs/control.md` (i); the
-    /// default 1 keeps the balance rider gate, 0 waives it), decoded by the same boot seam.
-    /// `battery_floor` is the `BOARD_BATTERY_FLOOR` word (`specs/sensing-and-safety.md`, "The
-    /// low-battery floor": centivolts, `<= 0` = none), carried into the same dispatch.
-    /// `identity` is what this board says about itself for the life of the boot
+    /// A fresh orchestrator: mode OFF, empty inbox, idle inputs, identity attitude, and the control
+    /// section on the registered defaults of the arm row. The firmware's arm-row read installs the
+    /// stored values through [`dispatch::re_apply_control_values`] before the first tick and again
+    /// at every arm (`specs/config-read-once.md` section 5), so the boot reads none of them here.
+    /// `imu_configured` comes from the boot path (stored AND probe-ok); `imu_staged` is whether
+    /// the IMU group is stored (`imu.i2c` and both pins), published only, so the observation block
+    /// can tell an unstaged board from a failed bring-up; `attitude_cfg` is the per-board attitude
+    /// calibration (the reference defaults on an uncalibrated board). `vbatt_cal` is the
+    /// battery-sense calibration where the board stores `battery_sense.pin` (`None` = the board does
+    /// not sense). `identity` is what this board says about itself for the life of the boot
     /// ([`BoardIdentity`]: the boot tag and the detected part), a constructor input because both
     /// halves are fixed before the first tick and neither is ever recomputed.
-    ///
-    /// The argument list is the boot reads one for one (the firmware's `init_shell` precedent);
-    /// bundling them into a struct for the lint would be a type with this one constructor.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        control_mode_byte: u8,
-        frame_byte: u8,
-        side_byte: u8,
         imu_configured: bool,
         imu_staged: bool,
         attitude_cfg: attitude::Config,
         gains: control::GainShadow,
         vbatt_cal: Option<battery::VbattCal>,
-        pos_clamp: i16,
-        drive_turn: control::DriveTurn,
-        rider_required_byte: u8,
-        battery_floor: i16,
         identity: BoardIdentity,
         machine: Machine,
     ) -> Self {
         let (ctl, block) = new_ctl(
-            control_mode_byte,
-            frame_byte,
-            side_byte,
+            store::CONTROL_MODE.default(),
+            store::CONTROL_FRAME.default(),
+            store::CONTROL_SIDE.default(),
             imu_configured,
             gains,
-            pos_clamp,
-            drive_turn,
-            rider_required_byte,
-            battery_floor,
+            store::CONTROL_POS_CLAMP.default(),
+            control::DriveTurn::new(
+                store::CONTROL_DRIVE_TURN.at(0).default(),
+                store::CONTROL_DRIVE_TURN.at(1).default(),
+            ),
+            store::CONTROL_RIDER_REQUIRED.default(),
+            store::BOARD_BATTERY_FLOOR.default(),
         );
         OrchestratorState {
             mahony: attitude::Mahony::new(attitude_cfg),

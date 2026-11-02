@@ -245,7 +245,7 @@ def vbatt_cal_slope(volts_per_count):
 #: He expresses the IMU bus as a pair FLAG (`I2C_PB6PB7`, `I2C_PB8PB9`) rather than as pins, and
 #: `defines_2-1-20.h`'s own comment says the IMU needs soldering to the tiny module on PB6/PB7,
 #: which is also where `USART0` can live. The flag is therefore a claim about a SOLDERABLE OPTION
-#: and not a fitted bus, so the presets leave `imu.scl`, `imu.sda` and `imu.model` ABSENT
+#: and not a fitted bus, so the presets leave `imu.scl`, `imu.sda` and `imu.i2c` ABSENT
 #: rather than asserting them, and say so in the preset.
 #:
 #: Two more reasons it would be wrong to assert them. Our IMU group is all-or-none (both pins plus a
@@ -324,7 +324,7 @@ FIELDS = [
     {"id": 0x10, "key": "rx", "kind": "link", "half": "rx"},
     {"id": 0x11, "key": "imu.scl", "kind": "decision3"},
     {"id": 0x12, "key": "imu.sda", "kind": "decision3"},
-    {"id": 0x13, "key": "imu.model", "kind": "decision3"},
+    {"id": 0x13, "key": "imu.i2c", "kind": "decision3"},
     {"id": 0x18, "key": "battery_sense.cal", "kind": "vbatt_cal", "frm": "ADC_BATTERY_VOLT"},
     {"id": 0x40, "key": "hall.a", "kind": "pin", "frm": "HALL_A", "motor": 0},
     {"id": 0x41, "key": "hall.b", "kind": "pin", "frm": "HALL_B", "motor": 0},
@@ -921,7 +921,7 @@ def layout_notes(values, target, pairs):
         "battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave "
         "takes the pack over the link), and its phase-sense pins may differ from the master's.",
         "The IMU is absent by decision, not by omission: see the absent entries for "
-        "imu.scl, imu.sda and imu.model.",
+        "imu.scl, imu.sda and imu.i2c.",
     ]
     if any(values.get(k) is not None for k in ("I2C_PB6PB7", "I2C_PB8PB9", "I2C0_SCL")):
         notes.append(
@@ -1251,7 +1251,7 @@ def decision_record():
         },
         {
             "decision": "the IMU bus",
-            "settled": "imu.scl, imu.sda and imu.model are left ABSENT",
+            "settled": "imu.scl, imu.sda and imu.i2c are left ABSENT",
             "oracle": (
                 "he states the bus as a pair flag (I2C_PB6PB7, I2C_PB8PB9) and his own comment on "
                 "2.1.20 says the IMU needs soldering to the tiny module on PB6/PB7, which is also "

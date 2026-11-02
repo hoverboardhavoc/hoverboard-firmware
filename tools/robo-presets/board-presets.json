@@ -16,7 +16,7 @@
       "consequence": "the group is all-or-none, so the model goes absent with the pins; PB8/PB9 is not a hardware-I2C pair our capability table answers at all; and the model is a fact about the part soldered on, which no layout file carries",
       "decision": "the IMU bus",
       "oracle": "he states the bus as a pair flag (I2C_PB6PB7, I2C_PB8PB9) and his own comment on 2.1.20 says the IMU needs soldering to the tiny module on PB6/PB7, which is also where USART0 can live, so the flag is a solderable option and not a fitted bus",
-      "settled": "imu.scl, imu.sda and imu.model are left ABSENT"
+      "settled": "imu.scl, imu.sda and imu.i2c are left ABSENT"
     },
     {
       "consequence": "a preset with no dead time leaves every gated board's motor down at boot, recorded in its boot report as a dead time below the floor. This is HIS single global figure, not per-board data: the bench boards' own silicon-proven value is 25",
@@ -81,7 +81,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -277,7 +277,7 @@
       "name": "RoboDurden 2.1.1",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-1.h",
@@ -368,7 +368,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -557,7 +557,7 @@
       "name": "RoboDurden 2.1.2",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-2.h",
       "target": 1,
@@ -666,7 +666,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -829,7 +829,7 @@
       "name": "RoboDurden 2.1.3",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-3.h",
       "target": 1,
@@ -902,7 +902,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         }
       ],
@@ -1088,7 +1088,7 @@
       "name": "RoboDurden 2.1.4",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-4.h",
       "target": 1,
@@ -1169,7 +1169,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -1358,7 +1358,7 @@
       "name": "RoboDurden 2.1.5",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-5.h",
       "target": 1,
@@ -1430,7 +1430,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -1614,7 +1614,7 @@
       "name": "RoboDurden 2.1.6",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-6.h",
       "target": 1,
@@ -1684,7 +1684,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -1884,7 +1884,7 @@
       "name": "RoboDurden 2.1.7.0",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-7.h",
@@ -1959,7 +1959,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -2152,7 +2152,7 @@
       "name": "RoboDurden 2.1.7.1",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-7.h",
@@ -2217,7 +2217,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -2417,7 +2417,7 @@
       "name": "RoboDurden 2.1.8",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER, LED_GREEN, LED_ORANGE, LED_RED."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-8.h",
@@ -2493,7 +2493,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -2691,7 +2691,7 @@
       "name": "RoboDurden 2.1.9",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "pads.a is UNKNOWN (his file marks this pin TODO_PIN: he does not know it). It carries no value, never a guess.",
         "pads.b is UNKNOWN (his file marks this pin TODO_PIN: he does not know it). It carries no value, never a guess.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
@@ -2754,7 +2754,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -2952,7 +2952,7 @@
       "name": "RoboDurden 2.1.10",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-10.h",
       "target": 1,
@@ -3012,7 +3012,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         }
       ],
@@ -3214,7 +3214,7 @@
       "name": "RoboDurden 2.1.11",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-11.h",
       "target": 1,
@@ -3288,7 +3288,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -3484,7 +3484,7 @@
       "name": "RoboDurden 2.1.12",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-12.h",
@@ -3555,7 +3555,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -3751,7 +3751,7 @@
       "name": "RoboDurden 2.1.13",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-13.h",
@@ -3842,7 +3842,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -4038,7 +4038,7 @@
       "name": "RoboDurden 2.1.14",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-14.h",
@@ -4134,7 +4134,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -4293,7 +4293,7 @@
       "name": "RoboDurden 2.1.15",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-15.h",
@@ -4349,7 +4349,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -4545,7 +4545,7 @@
       "name": "RoboDurden 2.1.16",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "Role-dependent board facts: a SLAVE board of this layout differs in BUZZER."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-16.h",
@@ -4621,7 +4621,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -4817,7 +4817,7 @@
       "name": "RoboDurden 2.1.18",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-18.h",
       "target": 1,
@@ -4870,7 +4870,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         }
       ],
@@ -5086,7 +5086,7 @@
       "name": "RoboDurden 2.1.20",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "His layout DOES state an IMU bus, as a solderable pair flag. It is still carried as absent: the flag is a claim about an option, and PB6/PB7 is also where USART0 can live.",
         "This preset stages his USART0 on PB6/PB7 as link 1, the pins his I2C_PB6PB7 option uses: a board with the IMU fitted there clears that link first."
       ],
@@ -5153,7 +5153,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -5342,7 +5342,7 @@
       "name": "RoboDurden 2.1.22",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-22.h",
       "target": 1,
@@ -5429,7 +5429,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -5611,7 +5611,7 @@
       "name": "RoboDurden 2.1.28",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-1-28.h",
       "target": 1,
@@ -5656,7 +5656,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -5856,7 +5856,7 @@
       "name": "RoboDurden 2.2.1",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-1.h",
       "target": 2,
@@ -6049,7 +6049,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -6228,7 +6228,7 @@
       "name": "RoboDurden 2.2.3",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "His layout DOES state an IMU bus, as a solderable pair flag. It is still carried as absent: the flag is a claim about an option, and PB6/PB7 is also where USART0 can live.",
         "His layout says this board may carry an STM32F103 rather than a GD32F103."
       ],
@@ -6302,7 +6302,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -6498,7 +6498,7 @@
       "name": "RoboDurden 2.2.6",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-6.h",
       "target": 2,
@@ -6566,7 +6566,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -6750,7 +6750,7 @@
       "name": "RoboDurden 2.2.7-left",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "This is a DUAL-MOTOR board, and his file expresses its two motors as ALTERNATIVES under one MOTOR_LEFT switch rather than as a second named gate set, so each of the two presets carries one motor as motor 0 and neither populates our motor-1 field set. Merging them would be our invention rather than his record: the two halves also differ in facts we do not model (his DC-bus shunt and break input per side), and nothing on the bench exercises a two-motor preset."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-7.h",
@@ -6826,7 +6826,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         },
         {
@@ -7010,7 +7010,7 @@
       "name": "RoboDurden 2.2.7-right",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model.",
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c.",
         "This is a DUAL-MOTOR board, and his file expresses its two motors as ALTERNATIVES under one MOTOR_LEFT switch rather than as a second named gate set, so each of the two presets carries one motor as motor 0 and neither populates our motor-1 field set. Merging them would be our invention rather than his record: the two halves also differ in facts we do not model (his DC-bus shunt and break input per side), and nothing on the bench exercises a two-motor preset."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-7.h",
@@ -7062,7 +7062,7 @@
         {
           "id": "0x13",
           "index": 0,
-          "key": "imu.model",
+          "key": "imu.i2c",
           "reason": "his layout states the IMU bus as a solderable pair flag, not a fitted bus, and the IMU model is a fact about the part soldered on that no layout file carries: staged by hand or by a per-board preset instead"
         }
       ],
@@ -7278,7 +7278,7 @@
       "name": "RoboDurden 2.2.20",
       "notes": [
         "Extracted in the MASTER-or-single posture. A SLAVE board of this layout drops battery_sense.pin and battery_sense.cal (battery sense is master-only on this hardware; the slave takes the pack over the link), and its phase-sense pins may differ from the master's.",
-        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.model."
+        "The IMU is absent by decision, not by omission: see the absent entries for imu.scl, imu.sda and imu.i2c."
       ],
       "source_file": "HoverBoardGigaDevice/Inc/defines/defines_2-2-20.h",
       "target": 2,
