@@ -1,0 +1,46 @@
+# Mode: final_state, narrowed with assert_only to GPIOA's CRL and AFRL. The HAL routes UART pins only
+# inside Usart::new, TX and RX together. End state over the floating-input reset:
+#   CRL  = 0x44444B44 (PA2: AF push-pull at 50 MHz; PA3: floating input, its reset nibble)
+#   AFRL = 0x00001100 (AF1 at PA2 and PA3)
+description = """
+The routing of UART2 on the MM32SPIN05, TX = PA2 and RX = PA3, both at AF1 (datasheet table 6): TX AF
+push-pull at 50 MHz, RX a floating input with its AF selected, the arrangement of LibSamples'
+CONSOLE_Init sample.
+
+Vendor: GPIO_PinAFConfig(GPIOA, 2 and 3, GPIO_AF_1); GPIO_Init(PA2, AF_PP, 50 MHz);
+        GPIO_Init(PA3, FLOATING).
+HAL: Usart::new(Usart1, (PA2, PA3), 115200) (Usart1 is the HAL's label for UART2).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = [
+    "<GPIOA_BASE>+0x00",
+    "<GPIOA_BASE>+0x20",
+]
+
+[vendor]
+body = '''
+    GPIO_InitTypeDef g;
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource2, GPIO_AF_1);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource3, GPIO_AF_1);
+    g.GPIO_Pin   = GPIO_Pin_2;
+    g.GPIO_Speed = GPIO_Speed_50MHz;
+    g.GPIO_Mode  = GPIO_Mode_AF_PP;
+    GPIO_Init(GPIOA, &g);
+    g.GPIO_Pin   = GPIO_Pin_3;
+    g.GPIO_Mode  = GPIO_Mode_FLOATING;
+    GPIO_Init(GPIOA, &g);
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let pins = (chip.pin(0x02).unwrap(), chip.pin(0x03).unwrap()); // TX PA2, RX PA3
+        Usart::new(&chip, &ClockConfig::REFERENCE_72M_HSI, PeriphLabel::Usart1, pins, 115_200)
+            .unwrap();
+    }
+'''

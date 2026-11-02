@@ -8,24 +8,28 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-/// A GigaDevice standard-peripheral-library family: one vendor oracle, one or more HAL chips.
+/// A vendor-library family: one vendor oracle, one or more HAL chips. The two GigaDevice families
+/// take GigaDevice's standard peripheral libraries; the MM32SPIN05 takes MindMotion's LibSamples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Family {
     /// GD32F10x (the F103 mainboards).
     Gd32f10x,
     /// GD32F1x0 (the F130 boards).
     Gd32f1x0,
+    /// MindMotion MM32SPIN05 (the Gen2.4.2 boards), a Cortex-M0.
+    Mm32spin05,
 }
 
 impl Family {
     /// Every family, in report order.
-    pub const ALL: [Family; 2] = [Family::Gd32f10x, Family::Gd32f1x0];
+    pub const ALL: [Family; 3] = [Family::Gd32f10x, Family::Gd32f1x0, Family::Mm32spin05];
 
     /// The family's name, as vector files and `targets/` spell it.
     pub fn name(self) -> &'static str {
         match self {
             Family::Gd32f10x => "gd32f10x",
             Family::Gd32f1x0 => "gd32f1x0",
+            Family::Mm32spin05 => "mm32spin05",
         }
     }
 
@@ -34,7 +38,13 @@ impl Family {
         Family::ALL
             .into_iter()
             .find(|f| f.name() == name)
-            .ok_or_else(|| format!("unknown family {name:?} (gd32f10x or gd32f1x0)"))
+            .ok_or_else(|| format!("unknown family {name:?} (gd32f10x, gd32f1x0 or mm32spin05)"))
+    }
+
+    /// Whether the family's cores are Cortex-M0 (thumbv6m): the HAL image is built for that target
+    /// and the emulator runs the M0 model, so an instruction the part lacks faults.
+    pub fn cortex_m0(self) -> bool {
+        matches!(self, Family::Mm32spin05)
     }
 
     /// The HAL chip features a vector of this family runs against. Both F103 parts share every
@@ -44,6 +54,7 @@ impl Family {
         match self {
             Family::Gd32f10x => &["gd32f103c8", "gd32f103rc"],
             Family::Gd32f1x0 => &["gd32f130c8"],
+            Family::Mm32spin05 => &["mm32spin05"],
         }
     }
 }
@@ -341,7 +352,12 @@ size = 0x400
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         for family in Family::ALL {
             let t = Target::load(dir, family).unwrap();
-            assert!(t.block_named("RCU_BASE").is_ok(), "{family:?}");
+            // GigaDevice calls the clock block the RCU, MindMotion the RCC.
+            let clock = match family {
+                Family::Mm32spin05 => "RCC_BASE",
+                Family::Gd32f10x | Family::Gd32f1x0 => "RCU_BASE",
+            };
+            assert!(t.block_named(clock).is_ok(), "{family:?}");
         }
     }
 }

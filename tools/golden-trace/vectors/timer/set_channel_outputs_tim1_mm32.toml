@@ -1,0 +1,100 @@
+# Mode: final_state, narrowed with assert_only to CCER, the register set_channel_outputs writes. After
+# the bring-up each pair holds CCxE | CCxNE | CCxNP = 0xD; disabling CH2 clears its CC2E and CC2NE and
+# keeps the CC2NP polarity bit. End state for [CH1 on, CH2 off, CH3 on]:
+#   CCER = 0x00000D8D
+description = """
+The per-channel output gating of TIM1 on the MM32SPIN05: after the bring-up, the PWM handle's
+set_channel_outputs([true, false, true]) turns off CH2's main and complementary outputs and leaves
+CH1 and CH3 on. This is the handle's channel gate, not the MOE arm gate.
+
+Vendor: the bring-up of pwm_bringup_tim1_mm32, then TIM_CCxCmd(CH2, Disable) and
+        TIM_CCxNCmd(CH2, Disable).
+HAL: PwmTimer::configure(...) as pwm_bringup_tim1_mm32, then
+     handle().set_channel_outputs([true, false, true]).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = ["<TIM1_BASE>+0x20"]
+
+[vendor]
+body = '''
+    TIM_TimeBaseInitTypeDef tb;
+    tb.TIM_Prescaler         = 0;
+    tb.TIM_CounterMode       = TIM_CounterMode_CenterAligned2;
+    tb.TIM_Period            = 2250;
+    tb.TIM_ClockDivision     = TIM_CKD_DIV2;
+    tb.TIM_RepetitionCounter = 0;
+    TIM_TimeBaseInit(TIM1, &tb);
+
+    TIM_OCInitTypeDef oc;
+    oc.TIM_OCMode       = TIM_OCMode_PWM1;
+    oc.TIM_OutputState  = TIM_OutputState_Enable;
+    oc.TIM_OutputNState = TIM_OutputNState_Enable;
+    oc.TIM_Pulse        = 0;
+    oc.TIM_OCPolarity   = TIM_OCPolarity_High;
+    oc.TIM_OCNPolarity  = TIM_OCNPolarity_Low;     /* inverted low side */
+    oc.TIM_OCIdleState  = TIM_OCIdleState_Set;     /* safe idle */
+    oc.TIM_OCNIdleState = TIM_OCNIdleState_Set;
+    TIM_OC1Init(TIM1, &oc);
+    TIM_OC1PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC2Init(TIM1, &oc);
+    TIM_OC2PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC3Init(TIM1, &oc);
+    TIM_OC3PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_ARRPreloadConfig(TIM1, ENABLE);
+
+    TIM_BDTRInitTypeDef bd;
+    bd.TIM_OSSRState       = TIM_OSSRState_Enable;
+    bd.TIM_OSSIState       = TIM_OSSIState_Enable;
+    bd.TIM_LOCKLevel       = TIM_LOCKLevel_OFF;
+    bd.TIM_DeadTime        = 0x1C;
+    bd.TIM_Break           = TIM_Break_Disable;
+    bd.TIM_BreakPolarity   = TIM_BreakPolarity_Low;
+    bd.TIM_AutomaticOutput = TIM_AutomaticOutput_Disable;
+    TIM_BDTRConfig(TIM1, &bd);
+    /* no TIM_CtrlPWMOutputs: MOE stays off */
+    TIM_CCxCmd(TIM1, TIM_Channel_2, TIM_CCx_Disable);
+    TIM_CCxNCmd(TIM1, TIM_Channel_2, TIM_CCxN_Disable);
+'''
+
+[hal]
+body = '''
+    use hal::config::{
+        BreakConfig, ClockDiv, OcMode, PwmAlign, PwmChannelConfig, PwmConfig, TrgoSource,
+    };
+    use hal::{Chip, PeriphLabel, PwmTimer};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        // Low side inverted (the vendor's OCN polarity low), both outputs idling high.
+        let pair = |high, low| PwmChannelConfig {
+            high,
+            low,
+            polarity: true,
+            idle_high: true,
+            idle_high_n: true,
+        };
+        let cfg = PwmConfig {
+            timer: PeriphLabel::Timer0,
+            channels: [pair(0x08, 0x1D), pair(0x09, 0x1E), pair(0x0A, 0x1F)],
+            period: 2250,
+            prescaler: 0,
+            dead_time: 0x1C,
+            brk: BreakConfig {
+                enabled: false,
+                level: false,
+            },
+            trigger_compare: 2249,
+            align: PwmAlign::Center2,
+            arse: true,
+            trigger_oc_mode: OcMode::Pwm0,
+            trigger_ch_enable: false,
+            crep: 0,
+            ckdiv: ClockDiv::Div2,
+            trgo_src: TrgoSource::Update,
+        };
+        let timer = PwmTimer::configure(&chip, &cfg).unwrap();
+        timer.handle().set_channel_outputs([true, false, true]);
+    }
+'''

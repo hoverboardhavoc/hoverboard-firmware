@@ -1,0 +1,32 @@
+# Mode: register_writes. Two read-modify-writes of DBGMCU_CR in the same order on both sides:
+#   W4 CR = 0x00000400 (TIM1_STOP, bit 10)
+#   W4 CR = 0x00000500 (IWDG_STOP, bit 8, over it)
+# The MM32's debug control is DBGMCU_CR at 0x4001_3404 (reg_dbg.h), not the GD32's DBG_CTL0 at
+# 0xE004_2004; the bits sit at the same positions. Bits 2:0 (SLEEP, STOP, STANDBY: the hold that
+# keeps SWD attachable across a sleep) are not written: nothing in the HAL sleeps, and it has no
+# call that sets them.
+description = """
+The debug holds on the MM32SPIN05: TIM1's counter and the independent watchdog stopped while the core
+is halted by a debugger, so a halt freezes the PWM and does not let the watchdog reset the part.
+
+Vendor: DBGMCU_Configure(DBGMCU_CR_TIM1_STOP, ENABLE); DBGMCU_Configure(DBGMCU_CR_IWDG_STOP, ENABLE).
+HAL: debug_hold_timer0(); FreeWatchdog::freeze_on_debug_halt().
+"""
+family = "mm32spin05"
+mode = "register_writes"
+
+[vendor]
+body = '''
+    DBGMCU_Configure(DBGMCU_CR_TIM1_STOP, ENABLE);
+    DBGMCU_Configure(DBGMCU_CR_IWDG_STOP, ENABLE);
+'''
+
+[hal]
+body = '''
+    use hal::FreeWatchdog;
+
+    pub fn body() {
+        hal::debug_hold_timer0();
+        FreeWatchdog::freeze_on_debug_halt();
+    }
+'''

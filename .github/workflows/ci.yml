@@ -25,8 +25,9 @@ name: CI
 #   - run the Tier-2 Unicorn emulator tests (the dummy + store images), plus clippy over the
 #     emulator-runner (it lives in that job because its unicorn build needs cmake),
 #   - run the golden register traces (tools/golden-trace, specs/hal.md section 8.1): rebuild every
-#     vendor trace from third_party/gd32-spl and require the checked-in files byte for byte, then
-#     compare every HAL trace against them, plus the harness's tests and clippy,
+#     vendor trace from third_party/gd32-spl and from MindMotion's LibSamples (fetched and verified
+#     by tools/fetch-vendor.sh, cached by its hash) and require the checked-in files byte for byte,
+#     then compare every HAL trace against them, plus the harness's tests and clippy,
 #   - run the Kotlin protocol mirror's drift gate: it reads the Rust as text and compares it to
 #     shared/protocol-kotlin's mirror of the wire protocol,
 #   - run the remote app's unit tests (both variants) and detekt. That job and the drift gate are
@@ -1196,7 +1197,7 @@ jobs:
   # unicorn dep is the cmake-built native lib emulator-runner uses, so this job installs cmake too
   # and carries golden-trace's clippy (the lint job covers its rustfmt).
   golden-traces:
-    name: Golden register traces (vendor SPL vs HAL)
+    name: Golden register traces (vendor libraries vs HAL)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1207,11 +1208,12 @@ jobs:
         with:
           path: hoverboard-firmware
 
-      - name: Install Rust (pinned nightly) + host and thumbv7m targets + clippy
+      # thumbv6m for the MM32SPIN05's HAL image (a Cortex-M0), thumbv7m for the GD32 parts'.
+      - name: Install Rust (pinned nightly) + host, thumbv7m and thumbv6m targets + clippy
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-20
-          targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi
+          targets: x86_64-unknown-linux-gnu, thumbv7m-none-eabi, thumbv6m-none-eabi
           components: rustfmt, clippy, rust-src
 
       - name: Install build tools for Unicorn (cmake + pkg-config)
@@ -1221,6 +1223,19 @@ jobs:
         uses: carlosperate/arm-none-eabi-gcc-action@v1
         with:
           release: "15.2.Rel1"
+
+      # MindMotion's LibSamples is not redistributable, so it is not in the repository:
+      # tools/fetch-vendor.sh downloads it into third_party/.cache/, checks its SHA-256 and unpacks
+      # it. The cache key is that hash, so a cached zip is the verified one (the script checks it
+      # again before unpacking either way).
+      - name: Cache MindMotion LibSamples (keyed by its SHA-256)
+        uses: actions/cache@v4
+        with:
+          path: hoverboard-firmware/third_party/.cache
+          key: mm32-libsamples-eb294c20129a474daf6295e03f42667f14c4826b1639c2afbf3bad3c2e4a8cbd
+
+      - name: Fetch and verify MindMotion LibSamples (the MM32SPIN05 oracle)
+        run: ./tools/fetch-vendor.sh
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2

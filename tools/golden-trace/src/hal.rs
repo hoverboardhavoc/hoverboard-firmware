@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The HAL side: every vector body for one chip, compiled into one thumbv7m image against
-//! `motorcontroller/hal` with that chip's feature.
+//! The HAL side: every vector body for one chip, compiled into one image against
+//! `motorcontroller/hal` with that chip's feature, for the chip's target (thumbv7m for the GD32
+//! parts, thumbv6m for the Cortex-M0 MM32SPIN05).
 //!
 //! The image is a generated crate under the build directory: each vector body becomes a module, and
 //! an exported `gt_<area>__<name>` function calls its `body()`. It links like an image does
@@ -11,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::target::Family;
 use crate::vector::{HalSide, Vector};
 
 /// The entry function of a vector in the HAL image.
@@ -96,11 +98,22 @@ fn write_if_changed(path: &Path, text: &str) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Build the HAL image for `chip` holding every vector in `vectors` that has a HAL body, and return
-/// the ELF's path.
+/// The Rust target a family's images are built for: thumbv6m for a Cortex-M0 family (the
+/// MM32SPIN05), thumbv7m for the Cortex-M3 GD32 parts.
+pub fn target_triple(family: Family) -> &'static str {
+    if family.cortex_m0() {
+        "thumbv6m-none-eabi"
+    } else {
+        "thumbv7m-none-eabi"
+    }
+}
+
+/// Build the HAL image for `chip` (of `family`) holding every vector in `vectors` that has a HAL
+/// body, and return the ELF's path.
 pub fn build(
     repo: &Path,
     build: &Path,
+    family: Family,
     chip: &str,
     vectors: &[&Vector],
 ) -> Result<PathBuf, String> {
@@ -117,9 +130,10 @@ pub fn build(
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let target_dir = build.join("cargo");
+    let triple = target_triple(family);
     let out = Command::new(&cargo)
         .current_dir(&crate_dir)
-        .args(["build", "--release", "--target", "thumbv7m-none-eabi"])
+        .args(["build", "--release", "--target", triple])
         .env("CARGO_TARGET_DIR", &target_dir)
         .output()
         .map_err(|e| format!("{cargo}: {e}"))?;
@@ -130,6 +144,7 @@ pub fn build(
         ));
     }
     Ok(target_dir
-        .join("thumbv7m-none-eabi/release")
+        .join(triple)
+        .join("release")
         .join(format!("golden-trace-hal-{chip}")))
 }

@@ -1,0 +1,92 @@
+# Mode: with_polling, narrowed with assert_only to TAR, DR, RAWISR, ENR and SR: the address, the data
+# commands, the end-of-transfer handshake and the polls. The bring-up's register values are compared
+# by bringup_i2c1_400k_mm32.
+#
+# SR (0x70) reads 0x0000000E on every read (TFNF | TFE | RFNE): the transmit FIFO drained and a
+# received byte waiting, so each of the vendor's polls is satisfied on its first read. RAWISR
+# (0x34) reads 0x00000200 (STOP_DET). DR (0x10) reads 0x002E, the WHO_AM_I the bench IMU answers
+# (specs/bench-work/mm32/README.md). The flags are the ones the vendor body polls, not a silicon
+# capture.
+#
+# LibSamples' sequence, which the HAL's must match or the difference must be argued here: the target
+# address is written with I2C1 disabled (I2C_Cmd(DISABLE), TAR, I2C_Cmd(ENABLE)); the register
+# pointer is a DR write and a TFE poll; the read is DR = CMD (a read command), an RFNE poll and a DR
+# read; and LibSamples' "STOP" (I2C_GenerateSTOP) is a transfer ABORT: ENR |= ABORT, a poll until it
+# clears, then a read of the TX_ABRT clear register; then a STOP_DET poll on RAWISR.
+description = """
+The IMU's WHO_AM_I read on the MM32SPIN05: write the register pointer 0x75 to address 0x69 (the
+master board's MPU-6050 clone), read one byte, end the transfer.
+
+Vendor: the bring-up of bringup_i2c1_400k_mm32, then the target address set with the block
+        disabled (I2C_Cmd / I2C_Send7bitAddress / I2C_Cmd), I2C_SendData(0x75), wait TFE,
+        I2C_ReadCmd, wait RFNE, I2C_ReceiveData, I2C_GenerateSTOP, wait STOP_DET, the order of
+        LibSamples' I2C_EEPROM_Polling sample.
+HAL: I2c::new(...) as bringup_i2c1_400k_mm32, then write_read(0x69, &[0x75], &mut [0; 1]).
+"""
+family = "mm32spin05"
+mode = "with_polling"
+assert_only = [
+    "<I2C1_BASE>+0x04",
+    "<I2C1_BASE>+0x10",
+    "<I2C1_BASE>+0x34",
+    "<I2C1_BASE>+0x6C..0x70",
+]
+
+# The running 72 MHz tree, not reset: I2C_Init derives its SCL counts from RCC_GetPCLK1Freq, which
+# reads RCC_CR (bit 20, the HSI's 72 MHz output) and RCC_CFGR (SWS = HSI, HPRE / 1, PPRE1 / 1). That
+# is the tree clock/tree_72m_hsi_mm32 ends in: PCLK1 = 72 MHz (see that vector for why APB1 is / 1).
+[reset_overrides]
+"<RCC_BASE>+0x00" = 0x0010_0003
+"<RCC_BASE>+0x04" = 0x0000_000A
+
+[read_responses]
+"<I2C1_BASE>+0x70" = 0x0000_000E
+"<I2C1_BASE>+0x34" = 0x0000_0200
+"<I2C1_BASE>+0x10" = 0x0000_002E
+
+[vendor]
+body = '''
+    I2C_InitTypeDef s;
+    I2C_StructInit(&s);
+    s.Mode       = I2C_CR_MASTER;
+    s.OwnAddress = 0;
+    s.Speed      = I2C_CR_FAST;
+    s.ClockSpeed = 400000;
+    I2C_Init(I2C1, &s);
+    I2C_Cmd(I2C1, ENABLE);
+
+    I2C_Cmd(I2C1, DISABLE);
+    I2C_Send7bitAddress(I2C1, 0x69U << 1, I2C_Direction_Transmitter);
+    I2C_Cmd(I2C1, ENABLE);
+
+    I2C_SendData(I2C1, 0x75U);
+    while(I2C_GetFlagStatus(I2C1, I2C_STATUS_FLAG_TFE) == RESET){}
+    I2C_ReadCmd(I2C1);
+    while(I2C_GetFlagStatus(I2C1, I2C_STATUS_FLAG_RFNE) == RESET){}
+    (void)I2C_ReceiveData(I2C1);
+    I2C_GenerateSTOP(I2C1, ENABLE);
+    while(I2C_GetITStatus(I2C1, I2C_IT_STOP_DET) == RESET){}
+'''
+
+[hal]
+body = '''
+    use embedded_hal::i2c::I2c as _;
+    use hal::{Chip, ClockConfig, I2c, I2cMode, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let pins = (chip.pin(0x31).unwrap(), chip.pin(0x30).unwrap()); // SCL PD1, SDA PD0
+        let i2c = I2c::new(
+            &chip,
+            &ClockConfig::REFERENCE_72M_HSI,
+            PeriphLabel::I2c0,
+            pins,
+            I2cMode::fast(400_000, hal::i2c::FastDuty::Two),
+        )
+        .unwrap();
+        let mut i2c = i2c;
+        let mut who = [0u8; 1];
+        i2c.write_read(0x69, &[0x75], &mut who).unwrap();
+    }
+'''

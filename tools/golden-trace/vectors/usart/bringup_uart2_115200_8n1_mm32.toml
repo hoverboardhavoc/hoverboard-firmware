@@ -1,0 +1,56 @@
+# Mode: final_state, narrowed with assert_only to the UART2 block. UART_Init is a MODIFY_REG per
+# field; the HAL's write count is free. End state, from the vendor trace:
+#   CCR = CHAR 8 bit (3 << 4), one stop bit, no parity
+#   GCR = TX | RX | UART (the block enable, bit 0)
+#   BRR = 39, FRA = 1: PCLK1 / baud = 72,000,000 / 115,200 = 625 = 39 * 16 + 1, the MM32's
+#         integer-and-fraction divider (no oversampling choice on this UART)
+description = """
+UART2 brought up at 115,200 8N1 on the MM32SPIN05: MindMotion's own UART model (GCR / CCR / BRR / FRA,
+not an STM32 USART), the baud from PCLK1 at 72 MHz, transmit and receive enabled, no flow control.
+
+Vendor: UART_StructInit; UART_Init(UART2, { 115200, 8 bit, 1 stop, no parity, no flow, RX | TX });
+        UART_Cmd(ENABLE), LibSamples' CONSOLE_Init.
+HAL: Usart::bring_up(&chip, &REFERENCE_72M_HSI, &UsartConfig { Usart1 (UART2), 115200, 8N1, By16 }).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = ["<UART2_BASE>"]
+
+# The running 72 MHz tree, not reset: UART_Init derives BRR and FRA from RCC_GetPCLK1Freq (UART2) or
+# RCC_GetPCLK2Freq (UART1), which read RCC_CR (bit 20, the HSI's 72 MHz output) and RCC_CFGR (SWS =
+# HSI, every prescaler / 1). That is the tree clock/tree_72m_hsi_mm32 ends in.
+[reset_overrides]
+"<RCC_BASE>+0x00" = 0x0010_0003
+"<RCC_BASE>+0x04" = 0x0000_000A
+
+[vendor]
+body = '''
+    UART_InitTypeDef s;
+    UART_StructInit(&s);
+    s.BaudRate      = 115200;
+    s.WordLength    = UART_WordLength_8b;
+    s.StopBits      = UART_StopBits_1;
+    s.Parity        = UART_Parity_No;
+    s.HWFlowControl = UART_HWFlowControl_None;
+    s.Mode          = UART_GCR_RX | UART_GCR_TX;
+    UART_Init(UART2, &s);
+    UART_Cmd(UART2, ENABLE);
+'''
+
+[hal]
+body = '''
+    use hal::config::{Oversampling, UsartConfig, UsartFrame};
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let cfg = UsartConfig {
+            usart: PeriphLabel::Usart1,
+            baud: 115_200,
+            frame: UsartFrame::EIGHT_N_ONE,
+            oversampling: Oversampling::By16,
+        };
+        let _usart = Usart::bring_up(&chip, &ClockConfig::REFERENCE_72M_HSI, &cfg).unwrap();
+    }
+'''

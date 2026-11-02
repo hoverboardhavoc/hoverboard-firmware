@@ -1,0 +1,130 @@
+# The MM32SPIN05 peripheral blocks the vectors touch, as MindMotion's LibSamples V1.13 headers place
+# them (third_party/mm32-libsamples/LibSamples_MM32SPIN0x_q_V1.13/Device/MM32SPIN0x_q/Include:
+# reg_common.h bus bases plus the per-peripheral reg_<periph>.h). Register names are the headers'
+# (the STM32-style ones where a header carries both spellings). See gd32f10x.toml for what the
+# fields mean and why the table is taken from the vendor side.
+#
+# Reset seeds are given only where a run would otherwise mislead; everything else starts at 0. The
+# MM32SPIN0x reference manual is not in the repository, so a seed below is either a silicon reading
+# (specs/bench-work/mm32/README.md) or the state the core is in when any code runs, and says which.
+
+# Port reset: every pin a floating input (CNF/MODE nibble 0b0100), the F1-style reset the CRL/CRH
+# model shares with the GD32F10x. The SWD pins' (PA13/PA14) own reset modes are not seeded: no
+# vector configures port A's high half, and the reset value is not known from a source here.
+[blocks.GPIOA_BASE]
+base = 0x4800_0000
+size = 0x400
+registers = { "0x00" = "CRL", "0x04" = "CRH", "0x08" = "IDR", "0x0C" = "ODR", "0x10" = "BSRR", "0x14" = "BRR", "0x18" = "LCKR", "0x20" = "AFRL", "0x24" = "AFRH" }
+reset = { "0x00" = 0x4444_4444, "0x04" = 0x4444_4444 }
+
+[blocks.GPIOB_BASE]
+base = 0x4800_0400
+size = 0x400
+registers = { "0x00" = "CRL", "0x04" = "CRH", "0x08" = "IDR", "0x0C" = "ODR", "0x10" = "BSRR", "0x14" = "BRR", "0x18" = "LCKR", "0x20" = "AFRL", "0x24" = "AFRH" }
+reset = { "0x00" = 0x4444_4444, "0x04" = 0x4444_4444 }
+
+[blocks.GPIOC_BASE]
+base = 0x4800_0800
+size = 0x400
+registers = { "0x00" = "CRL", "0x04" = "CRH", "0x08" = "IDR", "0x0C" = "ODR", "0x10" = "BSRR", "0x14" = "BRR", "0x18" = "LCKR", "0x20" = "AFRL", "0x24" = "AFRH" }
+reset = { "0x00" = 0x4444_4444, "0x04" = 0x4444_4444 }
+
+[blocks.GPIOD_BASE]
+base = 0x4800_0C00
+size = 0x400
+registers = { "0x00" = "CRL", "0x04" = "CRH", "0x08" = "IDR", "0x0C" = "ODR", "0x10" = "BSRR", "0x14" = "BRR", "0x18" = "LCKR", "0x20" = "AFRL", "0x24" = "AFRH" }
+reset = { "0x00" = 0x4444_4444, "0x04" = 0x4444_4444 }
+
+[blocks.IWDG_BASE]
+base = 0x4000_3000
+size = 0x400
+registers = { "0x00" = "KR", "0x04" = "PR", "0x08" = "RLR", "0x0C" = "SR", "0x10" = "CR" }
+
+[blocks.UART2_BASE]
+base = 0x4000_4400
+size = 0x400
+registers = { "0x00" = "TDR", "0x04" = "RDR", "0x08" = "CSR", "0x0C" = "ISR", "0x10" = "IER", "0x14" = "ICR", "0x18" = "GCR", "0x1C" = "CCR", "0x20" = "BRR", "0x24" = "FRA", "0x28" = "RXAR", "0x2C" = "RXMR", "0x30" = "SCR" }
+
+# The DesignWare-style I2C (reg_i2c.h). Every register up to ENR (0x6C) is a 16-bit field in the
+# vendor's struct, so LibSamples accesses them with half-word loads and stores; the comparison is
+# width-strict. ENR.ABORT (bit 1) is a command the block clears when the abort completes, so the
+# emulator completes it at once (LibSamples' I2C_GenerateSTOP polls it).
+[blocks.I2C1_BASE]
+base = 0x4000_5400
+size = 0x400
+registers = { "0x00" = "CR", "0x04" = "TAR", "0x08" = "SAR", "0x10" = "DR", "0x14" = "SSHR", "0x18" = "SSLR", "0x1C" = "FSHR", "0x20" = "FSLR", "0x2C" = "ISR", "0x30" = "IMR", "0x34" = "RAWISR", "0x38" = "RXTLR", "0x3C" = "TXTLR", "0x40" = "ICR", "0x44" = "RX_UNDER", "0x48" = "RX_OVER", "0x4C" = "TX_OVER", "0x50" = "RD_REQ", "0x54" = "TX_ABRT", "0x58" = "RX_DONE", "0x5C" = "ACTIV", "0x60" = "STOP", "0x64" = "START", "0x68" = "GC", "0x6C" = "ENR", "0x70" = "SR", "0x74" = "TXFLR", "0x78" = "RXFLR", "0x7C" = "HOLD", "0x88" = "DMA", "0x94" = "SETUP", "0x98" = "GCR" }
+self_clearing = { "0x6C" = 0x0002 }
+
+[blocks.ADC1_BASE]
+base = 0x4001_2400
+size = 0x400
+registers = { "0x00" = "ADDATA", "0x04" = "ADCFG", "0x08" = "ADCR", "0x0C" = "ADCHS", "0x10" = "ADCMPR", "0x14" = "ADSTA", "0x18" = "ADDR0", "0x1C" = "ADDR1", "0x20" = "ADDR2", "0x24" = "ADDR3", "0x28" = "ADDR4", "0x2C" = "ADDR5", "0x30" = "ADDR6", "0x34" = "ADDR7", "0x38" = "ADDR8", "0x3C" = "ADDR9", "0x40" = "ADDR10", "0x44" = "ADDR11", "0x4C" = "ADDR13", "0x50" = "ADDR14", "0x54" = "ADDR15", "0x58" = "SREXT" }
+
+[blocks.TIM1_BASE]
+base = 0x4001_2C00
+size = 0x400
+registers = { "0x00" = "CR1", "0x04" = "CR2", "0x08" = "SMCR", "0x0C" = "DIER", "0x10" = "SR", "0x14" = "EGR", "0x18" = "CCMR1", "0x1C" = "CCMR2", "0x20" = "CCER", "0x24" = "CNT", "0x28" = "PSC", "0x2C" = "ARR", "0x30" = "RCR", "0x34" = "CCR1", "0x38" = "CCR2", "0x3C" = "CCR3", "0x40" = "CCR4", "0x44" = "BDTR", "0x48" = "DCR", "0x4C" = "DMAR", "0x54" = "CCMR3", "0x58" = "CCR5" }
+
+# DBGMCU: IDCODE is the silicon reading on the bench board (0xCC4460B1, the MM32SPIN05 die); the
+# vendor's 72 MHz HSI sequence reads it to pick its trim path.
+[blocks.DBGMCU_BASE]
+base = 0x4001_3400
+size = 0x400
+registers = { "0x00" = "IDCODE", "0x04" = "CR" }
+reset = { "0x00" = 0xCC44_60B1 }
+
+[blocks.UART1_BASE]
+base = 0x4001_3800
+size = 0x400
+registers = { "0x00" = "TDR", "0x04" = "RDR", "0x08" = "CSR", "0x0C" = "ISR", "0x10" = "IER", "0x14" = "ICR", "0x18" = "GCR", "0x1C" = "CCR", "0x20" = "BRR", "0x24" = "FRA", "0x28" = "RXAR", "0x2C" = "RXMR", "0x30" = "SCR" }
+
+# DMA1: the interrupt status and clear registers, then channel n (1..5) at 0x08 + 20 (n - 1).
+[blocks.DMA1_BASE]
+base = 0x4002_0000
+size = 0x400
+registers = { "0x00" = "ISR", "0x04" = "IFCR", "0x08" = "CCR1", "0x0C" = "CNDTR1", "0x10" = "CPAR1", "0x14" = "CMAR1", "0x1C" = "CCR2", "0x20" = "CNDTR2", "0x24" = "CPAR2", "0x28" = "CMAR2", "0x30" = "CCR3", "0x34" = "CNDTR3", "0x38" = "CPAR3", "0x3C" = "CMAR3", "0x44" = "CCR4", "0x48" = "CNDTR4", "0x4C" = "CPAR4", "0x50" = "CMAR4", "0x58" = "CCR5", "0x5C" = "CNDTR5", "0x60" = "CPAR5", "0x64" = "CMAR5" }
+
+# RCC: CR seeded with HSION | HSIRDY, the state the core is in whenever code runs (it runs from the
+# HSI out of reset). AHBENR seeded with the SRAM and FLITF clocks on (bits 2 and 4), the reset value
+# of the STM32-style AHBENR these bits copy; a read-modify-write that clobbered them would show in a
+# final state. CFGR from reset (SW = HSI, no prescaler): 0.
+[blocks.RCC_BASE]
+base = 0x4002_1000
+size = 0x400
+registers = { "0x00" = "CR", "0x04" = "CFGR", "0x08" = "CIR", "0x0C" = "APB2RSTR", "0x10" = "APB1RSTR", "0x14" = "AHBENR", "0x18" = "APB2ENR", "0x1C" = "APB1ENR", "0x24" = "CSR", "0x28" = "AHBRSTR", "0x40" = "SYSCFGR" }
+reset = { "0x00" = 0x0000_0003, "0x14" = 0x0000_0014 }
+
+# FLASH: CR seeded with LOCK (bit 7), its reset value: the controller is locked until the key
+# sequence, so a program or erase that skips the unlock shows in the trace's reads.
+[blocks.FLASH_BASE]
+base = 0x4002_2000
+size = 0x400
+registers = { "0x00" = "ACR", "0x04" = "KEYR", "0x08" = "OPTKEYR", "0x0C" = "SR", "0x10" = "CR", "0x14" = "AR", "0x1C" = "OBR", "0x20" = "WRPR" }
+reset = { "0x10" = 0x0000_0080 }
+
+# The system control block's CPUID: the silicon reading on the bench board (0x410CC200, a
+# Cortex-M0 r0p0). The vendor's 72 MHz HSI sequence reads it with DBGMCU IDCODE.
+[blocks.SCB_BASE]
+base = 0xE000_ED00
+size = 0x100
+registers = { "0x00" = "CPUID", "0x04" = "ICSR", "0x08" = "VTOR", "0x0C" = "AIRCR", "0x10" = "SCR", "0x14" = "CCR", "0x1C" = "SHPR2", "0x20" = "SHPR3" }
+reset = { "0x00" = 0x410C_C200 }
+
+# The factory words in system memory (not a peripheral: the emulator maps it but records no access).
+# 0x1FFF_F7E8: the unique ID, the bench board's reading (specs/bench-work/mm32/README.md). The
+# half-word at 0x1FFF_F7FA is the HSI trim LibSamples' SetSysClockTo72_HSI copies into RCC_CR
+# 15:8; its silicon value is not known here, so it is seeded with the marker 0x002A (low byte not
+# 0xFF, the vendor's "low byte" path), and a trace shows it as 0x2A00 in CR.
+[blocks.SYSMEM]
+base = 0x1FFF_F400
+size = 0xC00
+registers = { "0x3E8" = "UID0", "0x3EC" = "UID1", "0x3F0" = "UID2", "0x3F8" = "TRIM" }
+reset = { "0x3E8" = 0x09F1_5F5F, "0x3EC" = 0x0075_7C37, "0x3F0" = 0x4D4D_3200, "0x3F8" = 0x002A_0000 }
+
+# The MM32's first store page (0x0800_7800, 32 KiB less two 1 KiB pages), named so a flash vector can
+# seed it erased (the HAL checks a target half-word reads 0xFFFF before it programs). Main flash is
+# outside the hooked windows: neither the HAL's erased-check loads nor the program's half-word store
+# into flash appear in a trace; only the controller's registers do.
+[blocks.STORE_PAGE0]
+base = 0x0800_7800
+size = 0x400

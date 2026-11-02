@@ -1,0 +1,29 @@
+# Mode: register_writes. One read-modify-write of APB2ENR on both sides:
+#   W4 APB2ENR = 0x00000200 (ADC1, bit 9)
+# The MM32's ADC clock divider is the ADC's own ADCFG.PRE field, not an RCC field (the GD32s set
+# theirs in the RCU's CFG0 here), so the enable is the one write; the divider is the ADC bring-up's.
+description = """
+The ADC clock enable on the MM32SPIN05: ADC1 on APB2ENR bit 9 (reg_rcc.h RCC_APB2ENR_ADC1).
+
+Vendor: RCC_APB2PeriphClockCmd(RCC_APB2ENR_ADC1, ENABLE).
+HAL: clock::enable_adc(rcu, ClockPath, Adc0) (the HAL's label for the MM32's one ADC, at 0x4001_2400).
+"""
+family = "mm32spin05"
+mode = "register_writes"
+
+[vendor]
+body = '''
+    RCC_APB2PeriphClockCmd(RCC_APB2ENR_ADC1, ENABLE);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let rcu = chip.rcu_base().unwrap();
+        clock::enable_adc(rcu, chip.clock(), PeriphLabel::Adc0).unwrap();
+    }
+'''

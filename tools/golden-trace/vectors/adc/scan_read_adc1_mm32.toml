@@ -1,0 +1,76 @@
+# Mode: with_polling, narrowed with assert_only to ADSTA and the two data registers: the per-period
+# "wait, read, clear" the period ISR runs after the bring-up of scan_bringup_adc1_mm32 (both sides
+# repeat that bring-up, compared there).
+#
+# ADSTA (0x14) reads 0x00000000 (ADIF clear), then 0x00000001 (ADIF set: the scan finished).
+# ADDR2 (0x20) and ADDR6 (0x30) read two left-aligned phase-current counts with the data-valid bit
+# (21), 0x0020A000 and 0x0020B000 (placeholders, not a silicon capture). The clear is LibSamples'
+# ADC_ClearFlag: a plain write of ADIF to ADSTA (write 1 to clear).
+description = """
+The scan group's "wait, read, clear" on the MM32SPIN05: wait for ADIF, read ADDR2 and ADDR6 (the two
+phase currents, in the configured channel order), then clear ADIF. A read before ADIF fails.
+
+Vendor: the bring-up of scan_bringup_adc1_mm32; wait ADC_GetFlagStatus(ADC_IT_EOC); read
+        ADC1->ADDR2 and ADC1->ADDR6; ADC_ClearFlag(ADC_IT_EOC).
+HAL: the bring-up, then on the handle: wait eoic(); read_injected(); clear_eoic().
+"""
+family = "mm32spin05"
+mode = "with_polling"
+assert_only = [
+    "<ADC1_BASE>+0x14",
+    "<ADC1_BASE>+0x20",
+    "<ADC1_BASE>+0x30",
+]
+
+[read_responses]
+"<ADC1_BASE>+0x14" = [0x0000_0000, 0x0000_0001]
+"<ADC1_BASE>+0x20" = 0x0020_A000
+"<ADC1_BASE>+0x30" = 0x0020_B000
+
+[vendor]
+body = '''
+    ADC_InitTypeDef a;
+    ADC_StructInit(&a);
+    a.ADC_Resolution       = ADC_Resolution_12b;
+    a.ADC_PRESCARE         = ADC_PCLK2_PRESCARE_6;
+    a.ADC_Mode             = ADC_Mode_Scan;
+    a.ADC_ExternalTrigConv = ADC1_ExternalTrigConv_T1_TRIG;
+    a.ADC_DataAlign        = ADC_DataAlign_Left;
+    ADC_Init(ADC1, &a);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_2, 0, ADC_Samctl_7_5);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_6, 0, ADC_Samctl_7_5);
+    ADC_ITConfig(ADC1, ADC_IT_EOC, ENABLE);
+    ADC_ExternalTrigConvCmd(ADC1, ENABLE);
+    ADC_Cmd(ADC1, ENABLE);
+
+    while(RESET == ADC_GetFlagStatus(ADC1, ADC_IT_EOC)){}
+    (void)ADC1->ADDR2;
+    (void)ADC1->ADDR6;
+    ADC_ClearFlag(ADC1, ADC_IT_EOC);
+'''
+
+[hal]
+body = '''
+    use hal::config::{AdcClockDiv, InjectedAdcConfig, InjectedChannel, TimerTriggerLink};
+    use hal::{Chip, InjectedAdcController, PeriphLabel, TriggeredAdc};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let mut channels = heapless::Vec::new();
+        channels.push(InjectedChannel { channel: 2, sample_time: 1 }).unwrap();
+        channels.push(InjectedChannel { channel: 6, sample_time: 1 }).unwrap();
+        let cfg = InjectedAdcConfig {
+            adc: PeriphLabel::Adc0,
+            channels,
+            left_aligned: true,
+            trigger_timer: PeriphLabel::Timer0,
+            trigger_link: TimerTriggerLink::Trgo,
+            clock_div: AdcClockDiv::Div6,
+        };
+        let h = InjectedAdcController::new().configure(&chip, &cfg).unwrap();
+        while !h.eoic() {}
+        h.read_injected();
+        h.clear_eoic();
+    }
+'''

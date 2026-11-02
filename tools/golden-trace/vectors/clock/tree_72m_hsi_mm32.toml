@@ -1,0 +1,53 @@
+# Mode: final_state, narrowed with assert_only to RCC_CR, RCC_CFGR and FLASH_ACR: the tree. The
+# vendor function also reads SCB CPUID and DBGMCU IDCODE to pick its trim path (both seeded with the
+# bench board's readings, so it takes the MM32SPIN05 "q" branch); those reads are outside the
+# comparison.
+#
+# The CFGR polls read with the OR form: SWS = HSI (0b10 at 3:2) on every read.
+#
+# Written up from the vendor trace, the sequence SetSysClockTo72_HSI makes:
+#   CR   |= HSION, poll HSIRDY; CR |= bit 20 (the HSI's 72 MHz output); CR &= ~bit 2
+#   CFGR  = PPRE1 bit 2 (APB1 / 2); ACR = LATENCY 2 | PRFTBE; CFGR |= HPRE / 4
+#   CR    = trim << 8 | (CR & 0xFFFF00FF) | 0xF8, the trim from the half-word at 0x1FFF_F7FA
+#   CFGR |= SW = HSI, poll SWS = HSI; then HPRE stepped / 2, / 1
+# The two HPRE steps go through an `unsigned char`, so each writes CFGR back from its low byte only:
+# PPRE1 (10:8) is cleared and the tree ends with APB1 = HCLK, 72 MHz, where the first CFGR write
+# had set APB1 / 2.
+description = """
+The 72 MHz system clock on the MM32SPIN05: the HSI's 72 MHz output (the part has no PLL), two flash
+wait states with the prefetch buffer, AHB / 1, the factory HSI trim copied into RCC_CR, and the
+switch to the HSI with its read-back confirm.
+
+Vendor: SetSysClockTo72_HSI() from LibSamples' system_mm32spin0x_q.c (the static function
+SystemInit calls with SYSCLK_HSI_72MHz, the file's default), called from a body that includes the
+file. SystemInit's own reset of the RCC fields before it is not part of the tree.
+HAL: clock::configure_tree(&chip, &ClockConfig::REFERENCE_72M_HSI).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = [
+    "<RCC_BASE>+0x00..0x04",
+    "<FLASH_BASE>+0x00",
+]
+
+[read_responses]
+"<RCC_BASE>+0x04" = { or = 0x0000_0008 }
+
+[vendor]
+prelude = '''
+#include "system_mm32spin0x_q.c"
+'''
+body = '''
+    SetSysClockTo72_HSI();
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, ClockConfig};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        clock::configure_tree(&chip, &ClockConfig::REFERENCE_72M_HSI).unwrap();
+    }
+'''

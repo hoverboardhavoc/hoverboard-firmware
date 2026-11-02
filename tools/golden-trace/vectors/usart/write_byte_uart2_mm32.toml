@@ -1,0 +1,66 @@
+# Mode: with_polling, narrowed with assert_only to TDR and CSR: the transmit handshake. The bring-up
+# before it is compared by bringup_uart2_115200_8n1_mm32.
+#
+# CSR (0x08) reads 0x00 (busy), then 0x09 (TXEPT, bit 3, and TXC, bit 0), so the poll spins once.
+# The flags are the ones the vendor body polls, not a silicon capture.
+description = """
+One byte sent with polling on UART2 of the MM32SPIN05, the order of LibSamples' UART_Polling sample:
+write TDR, then wait for TXEPT (the transmit buffer and shift register empty). There is no wait
+before the write in the vendor's sequence.
+
+Vendor: the bring-up of bringup_uart2_115200_8n1_mm32, then UART_SendData(0x41); wait
+        UART_FLAG_TXEPT.
+HAL: Usart::bring_up(...) then write_byte(0x41).
+"""
+family = "mm32spin05"
+mode = "with_polling"
+assert_only = [
+    "<UART2_BASE>+0x00",
+    "<UART2_BASE>+0x08",
+]
+
+# The running 72 MHz tree, not reset: UART_Init derives BRR and FRA from RCC_GetPCLK1Freq (UART2) or
+# RCC_GetPCLK2Freq (UART1), which read RCC_CR (bit 20, the HSI's 72 MHz output) and RCC_CFGR (SWS =
+# HSI, every prescaler / 1). That is the tree clock/tree_72m_hsi_mm32 ends in.
+[reset_overrides]
+"<RCC_BASE>+0x00" = 0x0010_0003
+"<RCC_BASE>+0x04" = 0x0000_000A
+
+[read_responses]
+"<UART2_BASE>+0x08" = [0x00, 0x09]
+
+[vendor]
+body = '''
+    UART_InitTypeDef s;
+    UART_StructInit(&s);
+    s.BaudRate      = 115200;
+    s.WordLength    = UART_WordLength_8b;
+    s.StopBits      = UART_StopBits_1;
+    s.Parity        = UART_Parity_No;
+    s.HWFlowControl = UART_HWFlowControl_None;
+    s.Mode          = UART_GCR_RX | UART_GCR_TX;
+    UART_Init(UART2, &s);
+    UART_Cmd(UART2, ENABLE);
+
+    UART_SendData(UART2, 0x41U);
+    while(!UART_GetFlagStatus(UART2, UART_FLAG_TXEPT)){}
+'''
+
+[hal]
+body = '''
+    use hal::config::{Oversampling, UsartConfig, UsartFrame};
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let cfg = UsartConfig {
+            usart: PeriphLabel::Usart1,
+            baud: 115_200,
+            frame: UsartFrame::EIGHT_N_ONE,
+            oversampling: Oversampling::By16,
+        };
+        let usart = Usart::bring_up(&chip, &ClockConfig::REFERENCE_72M_HSI, &cfg).unwrap();
+        usart.write_byte(0x41);
+    }
+'''

@@ -1,0 +1,49 @@
+# Mode: with_polling over the ADC1 block less ADCFG and ADCHS: the conversion itself. The vendor
+# selects the channel again with ADC_RegularChannelConfig (ADCHS and the shared SAMCTL), which the
+# HAL's read need not repeat when configure_single set them (bringup_adc1_vrefint_mm32 compares
+# that).
+#
+# ADSTA (0x14) reads 0x00000000 (ADIF clear, busy), then 0x00000001 (ADIF set). ADDR15 (0x54) reads
+# 0x002005D2, the data-valid bit and about 1.2 V on a 3.3 V reference (a placeholder, not a silicon
+# capture).
+description = """
+One software-started conversion of VREFINT (channel 15) and its result on the MM32SPIN05: clear
+ADIF, start (ADCR.ADST), wait for ADIF, read the channel's own data register ADDR15, clear ADIF. A
+read before ADIF fails.
+
+Vendor: ADC_ClearFlag(EOC); ADC_RegularChannelConfig(channel 15, 239.5); ADC_SoftwareStartConvCmd;
+        wait ADC_GetFlagStatus(EOC); read ADC1->ADDR15; ADC_ClearFlag(EOC).
+HAL: chip.adc() then read_channel(15).
+"""
+family = "mm32spin05"
+mode = "with_polling"
+ignore = [
+    "<ADC1_BASE>+0x04",
+    "<ADC1_BASE>+0x0C",
+]
+
+[read_responses]
+"<ADC1_BASE>+0x14" = [0x0000_0000, 0x0000_0001]
+"<ADC1_BASE>+0x54" = 0x0020_05D2
+
+[vendor]
+body = '''
+    ADC_ClearFlag(ADC1, ADC_IT_EOC);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_Vrefint, 0, ADC_Samctl_239_5);
+    ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+    while(RESET == ADC_GetFlagStatus(ADC1, ADC_IT_EOC)){}
+    (void)ADC1->ADDR15;
+    ADC_ClearFlag(ADC1, ADC_IT_EOC);
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.read_channel(15).unwrap();
+    }
+'''

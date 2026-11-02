@@ -1,0 +1,45 @@
+# Mode: register_writes over the FLASH block (the writes in order, not the reads: LibSamples'
+# FLASH_GetStatus reads SR up to three times per poll, once per flag it tests: BSY, PGERR,
+# WRPRTERR). Both sides: the key pair (the controller is locked at reset, FLASH_CR = LOCK,
+# seeded), CR |= PER, AR = the page, CR |= STRT, the busy poll, CR = 0 (the vendor clears PER this
+# way), the sticky flags cleared with a write of EOP | WRPRTERR | PGERR, and CR |= LOCK.
+#
+# SR (0x0C) reads 0x00000020 (EOP, BSY clear) on every read, so the operation completes on the first
+# poll. LibSamples' FLASH_WaitForLastOperation spins a 255-count delay loop between SR reads; that
+# loop touches no register and is not in the trace.
+#
+# The MM32 controller needs FLASH_AR holding the target address before STRT for OPTER and MER
+# (specs/bench-work/mm32/README.md); for a page erase AR is the page, as on the GD32 parts, and
+# FLASH_ErasePage writes it after PER and before STRT.
+description = """
+One flash page erased on the MM32SPIN05, the store's first page at 0x0800_7800: unlock, PER, the
+page address in FLASH_AR, STRT, wait not busy, clear PER and the flags, lock.
+
+Vendor: FLASH_Unlock(); FLASH_ErasePage(0x08007800); FLASH_Lock().
+HAL: Fmc::new(&chip).erase_page(0x0800_7800).
+"""
+family = "mm32spin05"
+mode = "register_writes"
+assert_only = ["<FLASH_BASE>"]
+
+[read_responses]
+"<FLASH_BASE>+0x0C" = 0x0000_0020
+
+[vendor]
+body = '''
+    FLASH_Unlock();
+    (void)FLASH_ErasePage(0x08007800U);
+    FLASH_Lock();
+'''
+
+[hal]
+body = '''
+    use hal::fmc::Fmc;
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        Fmc::new(&chip).erase_page(0x0800_7800).unwrap();
+    }
+'''
