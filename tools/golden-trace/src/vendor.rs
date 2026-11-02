@@ -131,7 +131,8 @@ fn layout(family: Family) -> Layout {
                 "MM32SPIN0x_q/Source",
                 "CMSIS/KEIL_Core",
             ],
-            harness_includes: false,
+            // vendor/mm32spin05/hal_EXTI.H: the case shim for hal_syscfg.h's include.
+            harness_includes: true,
             header: "hal_conf.h",
             cflags: CFLAGS_M0,
         },
