@@ -4,8 +4,8 @@
   "boards": {
     "000000000000000000000000": {
       "device": { "name": "12-FET" },
-      "power": { "self_hold": {"port":"A","pin":5}, "button": {"port":"A","pin":1} },
-      "active_high": 7,
+      "power": { "self_hold": {"port":"A","pin":5} },
+      "active_high": 6,
       "buzzer": {"port":"A","pin":4},
       "leds": { "green": {"port":"B","pin":2} },
       "battery_sense": { "pin": {"port":"C","pin":2,"adc":12}, "cal": [26609, 0] },
