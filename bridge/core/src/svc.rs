@@ -22,7 +22,7 @@ use crate::swd::SwdPins;
 use crate::target::{self, TargetError};
 use crate::update::{Step, Update};
 
-/// The flash transfer buffer: one image, everything below the store.
+/// The flash transfer buffer: one image of up to [`MAX_IMAGE`] bytes, the cap on every row's limit.
 pub type ImageBuffer = BulkRx<MAX_IMAGE>;
 
 /// What the bridge reports about itself that does not change while it runs.

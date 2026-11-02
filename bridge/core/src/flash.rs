@@ -12,7 +12,8 @@
 //!    the core, and only a reset stops what the firmware left running (its free watchdog, which
 //!    the hold freezes only while halted, its DMA, its interrupts).
 //! 2. Unlock the flash controller.
-//! 3. Erase each 1 KB page the image covers, page 0 last.
+//! 3. Erase each page the image covers (the row's page: 1 KiB, or 2 KiB on the GD32F103RC), page
+//!    0 last.
 //! 4. Program through the RAM loader ([`crate::loader`]): one run for pages 1 and up, then one for
 //!    page 0, each ascending. Ascending order is required on the F1x0 (programming the halfword at
 //!    a 4-byte-aligned address closes the halfword below it until the next erase); page 0 last
@@ -34,20 +35,11 @@ use crate::target::{self, PortError, TargetError, RDP_OFF};
 
 /// Main flash base.
 pub const FLASH_BASE: u32 = part::FLASH_BASE;
-/// The erase page, the same on every row.
-pub const PAGE: u32 = 1024;
-const _: () = {
-    let mut i = 0;
-    while i < part::PARTS.len() {
-        assert!(part::PARTS[i].page == PAGE);
-        i += 1;
-    }
-};
-/// The largest image any row takes (63,488 B, the 64 KiB rows' link limit): the image buffer's
-/// size. A part's own limit is [`Part::max_image`], everything below its store; the job and
-/// `FLASH_BEGIN` check that one. The 12-FET's store address is an open question
-/// (`specs/hoverboard-bridge.md`, "Open questions"), so its 256 KiB part is in no row and refused.
-pub const MAX_IMAGE: usize = part::MAX_IMAGE;
+/// The image buffer's size ([`part::IMAGE_BUFFER`]). A part's own limit is [`Part::max_image`],
+/// everything below its store capped at this; the job and `FLASH_BEGIN` check that one.
+pub const MAX_IMAGE: usize = part::IMAGE_BUFFER;
+/// The verify's read per job step.
+const VERIFY_CHUNK: u32 = 1024;
 
 const FMC_KEY: u32 = 0x4002_2004;
 const FMC_OBKEY: u32 = 0x4002_2008;
@@ -169,7 +161,8 @@ pub fn check_range(len: usize) -> Result<(), FlashError> {
     Ok(())
 }
 
-/// Refuse an image that is empty or reaches `part`'s store.
+/// Refuse an image that is empty, reaches `part`'s store, or is larger than the image buffer
+/// ([`Part::max_image`]).
 pub fn check_image(part: &Part, len: usize) -> Result<(), FlashError> {
     if len == 0 || len > part.max_image() {
         return Err(FlashError::StoreRange);
@@ -325,7 +318,6 @@ pub enum Finish {
 /// One board flash, run in bounded pieces.
 pub struct FlashJob {
     len: u32,
-    pages: u32,
     finish: Finish,
     step: Step,
     /// The part's row, from the identify in [`Step::Prepare`]; `None` before it.
@@ -339,7 +331,6 @@ impl FlashJob {
         check_range(len)?;
         Ok(FlashJob {
             len: len as u32,
-            pages: (len as u32).div_ceil(PAGE),
             finish,
             step: Step::Prepare,
             part: None,
@@ -351,28 +342,31 @@ impl FlashJob {
         self.part.ok_or(FlashError::UnsupportedPart)
     }
 
-    /// The `i`-th page in the job's order: 1, 2, .. last, then 0.
-    fn page(&self, i: u32) -> u32 {
-        if i + 1 < self.pages {
-            i + 1
-        } else {
-            0
-        }
+    /// The pages the image covers, in the part's page.
+    fn pages(&self, part: &Part) -> u32 {
+        self.len.div_ceil(part.page)
+    }
+
+    /// The `i`-th page's address in the job's order: page 1, 2, .. last, then page 0.
+    fn page(&self, part: &Part, i: u32) -> u32 {
+        let p = if i + 1 < self.pages(part) { i + 1 } else { 0 };
+        FLASH_BASE + p * part.page
     }
 
     /// The `k`-th loader run: (flash address, offset in the image, length). Pages 1 and up first,
     /// then page 0.
-    fn segment(&self, k: u32) -> Option<(u32, u32, u32)> {
-        match (self.pages > 1, k) {
-            (true, 0) => Some((FLASH_BASE + PAGE, PAGE, self.len - PAGE)),
-            (true, 1) => Some((FLASH_BASE, 0, PAGE)),
+    fn segment(&self, part: &Part, k: u32) -> Option<(u32, u32, u32)> {
+        let page = part.page;
+        match (self.pages(part) > 1, k) {
+            (true, 0) => Some((FLASH_BASE + page, page, self.len - page)),
+            (true, 1) => Some((FLASH_BASE, 0, page)),
             (false, 0) => Some((FLASH_BASE, 0, self.len)),
             _ => None,
         }
     }
 
     fn start_segment<P: SwdPins>(&mut self, swd: &mut Swd<P>, seg: u32) -> Result<(), FlashError> {
-        let (addr, _, len) = self.segment(seg).ok_or(FlashError::Loader)?;
+        let (addr, _, len) = self.segment(self.part()?, seg).ok_or(FlashError::Loader)?;
         let run = start_run(swd, self.part()?, addr, len)?;
         self.step = Step::Program {
             seg,
@@ -408,15 +402,17 @@ impl FlashJob {
                 Event::Progress(Stage::Erasing, 0)
             }
             Step::Erase(i) => {
-                erase_page(swd, self.part()?, FLASH_BASE + self.page(i) * PAGE)?;
+                let part = self.part()?;
+                erase_page(swd, part, self.page(part, i))?;
                 let done = i + 1;
-                self.step = if done == self.pages {
+                let pages = self.pages(part);
+                self.step = if done == pages {
                     Step::Load
                 } else {
                     Step::Erase(done)
                 };
-                let bytes = (done * PAGE).min(self.len);
-                if done == self.pages {
+                let bytes = (done * part.page).min(self.len);
+                if done == pages {
                     Event::Progress(Stage::Programming, 0)
                 } else {
                     Event::Progress(Stage::Erasing, bytes)
@@ -432,11 +428,12 @@ impl FlashJob {
                 mut run,
                 moved_us,
             } => {
-                let (_, off, len) = self.segment(seg).ok_or(FlashError::Loader)?;
+                let part = self.part()?;
+                let (_, off, len) = self.segment(part, seg).ok_or(FlashError::Loader)?;
                 let data = &image[off as usize..(off + len) as usize];
                 let now = swd.now_us();
                 // Bytes fed before this segment: the first segment's, when this is page 0.
-                let before = if seg == 0 { 0 } else { self.len - PAGE };
+                let before = if seg == 0 { 0 } else { self.len - part.page };
                 let poll = run.poll(swd, data)?;
                 self.step = Step::Program {
                     seg,
@@ -454,7 +451,7 @@ impl FlashJob {
                     }
                     Poll::Done(o) => {
                         run_result(&run, o)?;
-                        if self.segment(seg + 1).is_some() {
+                        if self.segment(part, seg + 1).is_some() {
                             self.start_segment(swd, seg + 1)?;
                             Event::Pending
                         } else {
@@ -466,8 +463,8 @@ impl FlashJob {
                 }
             }
             Step::Verify(off) => {
-                let n = (PAGE).min(self.len - off) as usize;
-                let mut words = [0u32; (PAGE / 4) as usize];
+                let n = VERIFY_CHUNK.min(self.len - off) as usize;
+                let mut words = [0u32; (VERIFY_CHUNK / 4) as usize];
                 let nw = n.div_ceil(4);
                 swd.read_words(FLASH_BASE + off, &mut words[..nw])?;
                 for (k, w) in words[..nw].iter().enumerate() {
@@ -522,8 +519,9 @@ fn restart<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
 /// Erase the store (`specs/hoverboard-bridge.md`, "Erasing the store"): the one operation that
 /// reaches the store's pages, for a store change that reuses ids. The flash job's steps in its
 /// order: [`check_part`] (refused on a protected part or one in no row), reset and
-/// halt (refused while the disarm does not take), unlock, erase the two pages, lock; then read both
-/// pages back, every word `0xFFFF_FFFF` or [`FlashError::NotErased`] with the first other address;
+/// halt (refused while the disarm does not take), unlock, erase the two pages (of the row's page
+/// size), lock; then read both pages back, every word `0xFFFF_FFFF` or [`FlashError::NotErased`]
+/// with the first other address;
 /// then reset and release. On an error the core is left halted and the controller locked, as a
 /// failed flash leaves it. The board boots on registry defaults: no address, no link pins, no
 /// odometer total.
@@ -534,16 +532,16 @@ pub fn erase_store<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
     unlock(swd)?;
     let erased = store
         .clone()
-        .step_by(PAGE as usize)
+        .step_by(part.page as usize)
         .try_for_each(|page| erase(swd, page));
     lock(swd)?;
     erased?;
-    let mut words = [0u32; (PAGE / 4) as usize];
-    for page in store.step_by(PAGE as usize) {
-        swd.read_words(page, &mut words)?;
+    let mut words = [0u32; (VERIFY_CHUNK / 4) as usize];
+    for at in store.step_by(VERIFY_CHUNK as usize) {
+        swd.read_words(at, &mut words)?;
         if let Some(k) = words.iter().position(|&w| w != 0xFFFF_FFFF) {
             return Err(FlashError::NotErased {
-                addr: page + 4 * k as u32,
+                addr: at + 4 * k as u32,
             });
         }
     }

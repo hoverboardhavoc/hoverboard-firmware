@@ -4,7 +4,9 @@
 //!
 //! **Every operation that halts goes through [`disarm`] first**, here, in the one module that
 //! halts: a halt freezes timer 0 with its outputs at their last level, so a phase can sit at 100%
-//! duty (`tools/swd-disarm-halt.sh` carries the standing rule and the incident).
+//! duty (`tools/swd-disarm-halt.sh` carries the standing rule and the incident). The disarm clears
+//! every advanced timer of the part's row: timer 0's, and timer 7's on the GD32F103RC
+//! ([`part::Part::timers`]).
 
 use espsvc::{TargetId, FAMILY_F10X, FAMILY_F1X0, FAMILY_UNSUPPORTED};
 
@@ -38,7 +40,7 @@ const S_REGRDY: u32 = 1 << 16;
 const REG_POLLS: u32 = 16;
 /// Timer 0 `CCHP`; `MOE` is bit 15. The MM32's TIM1 `BDTR` is at the same address with `MOE` at
 /// the same bit (MindMotion `reg_tim.h`).
-pub const CCHP: u32 = 0x4001_2C44;
+pub const CCHP: u32 = part::TIMER0_CCHP;
 const MOE: u32 = 1 << 15;
 const DBGKEY: u32 = 0xA05F_0000;
 const C_DEBUGEN: u32 = 1;
@@ -186,7 +188,9 @@ pub fn ensure_connected_background<P: SwdPins>(swd: &mut Swd<P>) -> Result<u32, 
 ///   set; `user` is `0xFF` (unreadable while protected, and the clear does not restore it);
 /// - on a Cortex-M3, a GD32: the debug MCU ID, the option bytes, the flash size, [`CCHP`], then
 ///   the UID by family. The debug MCU ID does not tell the families apart (it reads `0x13030410`
-///   on both); the UID's location does: `0x1FFF_F7E8` reads all ones on an F1x0;
+///   on both); the UID's location does: `0x1FFF_F7E8` reads all ones on an F1x0. Last, when the
+///   family and flash size name a row with a second advanced timer (the GD32F103RC), that timer's
+///   `CCHP` for `armed`: it is read only once the row is known;
 /// - on any other core, or a Cortex-M0 in no row: nothing more, [`FAMILY_UNSUPPORTED`], with
 ///   `cpuid`, `mcu_id` (the M0's ID register, else 0) and `dpidr` filled and the rest 0.
 ///
@@ -228,13 +232,11 @@ fn identify_gd32<P: SwdPins>(
     let mcu_id = swd.read_word(DBGMCU_ID)?;
     let ob = swd.read_word(OPTION_BYTES)?;
     let flash_kib = swd.read_word(FLASH_SIZE)? as u16;
-    let armed = swd.read_word(CCHP)? & MOE != 0;
-    let probe = swd.read_word(UID_F10X)?;
-    let (family, uid_addr) = if probe == 0xFFFF_FFFF {
-        (FAMILY_F1X0, UID_F1X0)
-    } else {
-        (FAMILY_F10X, UID_F10X)
-    };
+    let mut armed = swd.read_word(CCHP)? & MOE != 0;
+    let (family, uid_addr) = gd32_family(swd)?;
+    if let Some(row) = part::lookup(family, flash_kib) {
+        armed |= any_armed(swd, &row.timers[1..])?;
+    }
     Ok(TargetId {
         dpidr,
         mcu_id,
@@ -259,7 +261,7 @@ fn identify_mm32<P: SwdPins>(
     row: &part::Part,
 ) -> Result<TargetId, SwdError> {
     let obr = swd.read_word(MM32_FLASH_OBR)?;
-    let armed = swd.read_word(CCHP)? & MOE != 0;
+    let armed = any_armed(swd, row.timers)?;
     Ok(TargetId {
         dpidr,
         mcu_id,
@@ -278,6 +280,16 @@ fn identify_mm32<P: SwdPins>(
     })
 }
 
+/// The GD32 family and its UID's address, by the UID probe: `0x1FFF_F7E8` reads all ones on an
+/// F1x0.
+fn gd32_family<P: SwdPins>(swd: &mut Swd<P>) -> Result<(u8, u32), SwdError> {
+    Ok(if swd.read_word(UID_F10X)? == 0xFFFF_FFFF {
+        (FAMILY_F1X0, UID_F1X0)
+    } else {
+        (FAMILY_F10X, UID_F10X)
+    })
+}
+
 fn read_uid<P: SwdPins>(swd: &mut Swd<P>, addr: u32) -> Result<[u8; 12], SwdError> {
     let mut words = [0u32; 3];
     swd.read_words(addr, &mut words)?;
@@ -288,41 +300,108 @@ fn read_uid<P: SwdPins>(swd: &mut Swd<P>, addr: u32) -> Result<[u8; 12], SwdErro
     Ok(uid)
 }
 
-/// Is timer 0's `MOE` set (the bridge can switch)?
-pub fn armed<P: SwdPins>(swd: &mut Swd<P>) -> Result<bool, SwdError> {
-    Ok(swd.read_word(CCHP)? & MOE != 0)
+/// The part on the line as a halt sees it, picked per call (`specs/bridge-chip-support.md`,
+/// section 4, "Where the row comes from on a halt"): its debug hold, and the advanced timers the
+/// disarm clears. Nothing is kept between calls, so a halt after a board swap uses the new board's.
+#[derive(Debug, Clone, Copy)]
+struct Line {
+    /// `None` on an unsupported part.
+    hold: Option<part::Hold>,
+    /// The row's timers; timer 0's alone on a part in no row.
+    timers: &'static [u32],
 }
 
-/// Write `CCHP` with `MOE` cleared and read it back. Still set is [`TargetError::Armed`].
-pub fn disarm<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
-    let v = swd.read_word(CCHP)?;
-    if v & MOE != 0 {
-        swd.write_word(CCHP, v & !MOE)?;
+/// Pick [`Line`]: `CPUID`; on a Cortex-M3 the flash size register and the UID probe, the two reads
+/// `identify` names a GD32's row by, so a second timer is read only on a row that has one; on a
+/// Cortex-M0 the ID register.
+fn line<P: SwdPins>(swd: &mut Swd<P>) -> Result<Line, SwdError> {
+    let timers = |row: Option<&'static part::Part>| row.map_or(part::TIMER0_ONLY, |p| p.timers);
+    Ok(match part::partno(swd.read_word(CPUID)?) {
+        part::PARTNO_M3 => {
+            let flash_kib = swd.read_word(FLASH_SIZE)? as u16;
+            let (family, _) = gd32_family(swd)?;
+            Line {
+                hold: Some(part::M3_DEBUG.hold()),
+                timers: timers(part::lookup(family, flash_kib)),
+            }
+        }
+        part::PARTNO_M0 => {
+            let row = part::m0(swd.read_word(part::M0_ID)?);
+            Line {
+                hold: row.map(|p| p.hold()),
+                timers: timers(row),
+            }
+        }
+        _ => Line {
+            hold: None,
+            timers: part::TIMER0_ONLY,
+        },
+    })
+}
+
+/// Is any of `timers`' `MOE` set?
+fn any_armed<P: SwdPins>(swd: &mut Swd<P>, timers: &[u32]) -> Result<bool, SwdError> {
+    for &t in timers {
+        if swd.read_word(t)? & MOE != 0 {
+            return Ok(true);
+        }
     }
-    if swd.read_word(CCHP)? & MOE != 0 {
+    Ok(false)
+}
+
+/// Is any advanced timer's `MOE` set (the bridge can switch)? Timer 0's, and timer 7's on the
+/// GD32F103RC.
+pub fn armed<P: SwdPins>(swd: &mut Swd<P>) -> Result<bool, SwdError> {
+    let l = line(swd)?;
+    any_armed(swd, l.timers)
+}
+
+/// Clear `MOE` in `cchp` if it is set; whether it was.
+fn clear_moe<P: SwdPins>(swd: &mut Swd<P>, cchp: u32) -> Result<bool, SwdError> {
+    let v = swd.read_word(cchp)?;
+    if v & MOE == 0 {
+        return Ok(false);
+    }
+    swd.write_word(cchp, v & !MOE)?;
+    Ok(true)
+}
+
+/// Write each of `timers`' `CCHP` with `MOE` cleared and read them back. One still set is
+/// [`TargetError::Armed`].
+fn disarm_timers<P: SwdPins>(swd: &mut Swd<P>, timers: &[u32]) -> Result<(), TargetError> {
+    for &t in timers {
+        clear_moe(swd, t)?;
+    }
+    if any_armed(swd, timers)? {
         return Err(TargetError::Armed);
     }
     Ok(())
 }
 
-/// The debug hold of the part on the line, picked per call (`specs/bridge-chip-support.md`,
-/// section 4, "Where the row comes from on a halt"): `CPUID`, and on a Cortex-M0 the ID register.
-/// `None` on an unsupported part. Nothing is kept between calls, so a halt after a board swap
-/// uses the new board's hold.
-pub fn hold<P: SwdPins>(swd: &mut Swd<P>) -> Result<Option<part::Hold>, SwdError> {
-    Ok(match part::partno(swd.read_word(CPUID)?) {
-        part::PARTNO_M3 => Some(part::M3_DEBUG.hold()),
-        part::PARTNO_M0 => part::m0(swd.read_word(part::M0_ID)?).map(|p| p.hold()),
-        _ => None,
-    })
+/// Clear `MOE` on every advanced timer of the part and read it back: timer 0's, and timer 7's on
+/// the GD32F103RC. Still set is [`TargetError::Armed`].
+pub fn disarm<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
+    let l = line(swd)?;
+    disarm_timers(swd, l.timers)
 }
 
-/// Set the part's debug hold (the free watchdog and timer 0 frozen while halted): `DBG_CTL0` at
-/// `0xE004_2004` on a GD32, `DBGMCU_CR` at `0x4001_3404` on the MM32SPIN05, nothing on an
-/// unsupported part ([`hold`]). Set again before every halt: the register resets at power-on,
-/// and the bridge cannot tell whether the board has been power-cycled since.
+/// The debug hold of the part on the line, picked per call by [`Line`]'s reads. `None` on an
+/// unsupported part.
+pub fn hold<P: SwdPins>(swd: &mut Swd<P>) -> Result<Option<part::Hold>, SwdError> {
+    Ok(line(swd)?.hold)
+}
+
+/// Set the part's debug hold (the free watchdog and the advanced timers frozen while halted):
+/// `DBG_CTL0` at `0xE004_2004` on a GD32, `DBGMCU_CR` at `0x4001_3404` on the MM32SPIN05, nothing
+/// on an unsupported part ([`hold`]). Set again before every halt: the register resets at
+/// power-on, and the bridge cannot tell whether the board has been power-cycled since.
 pub fn debug_hold<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), SwdError> {
-    let Some(h) = hold(swd)? else {
+    let h = hold(swd)?;
+    set_hold(swd, h)
+}
+
+fn set_hold<P: SwdPins>(swd: &mut Swd<P>, h: Option<part::Hold>) -> Result<(), SwdError> {
+    let Some(h) = h else {
         return Ok(());
     };
     let v = swd.read_word(h.addr)?;
@@ -343,21 +422,23 @@ fn wait_halted<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
 
 /// Disarm, set the debug hold, halt (`DHCSR` = `0xA05F0003`), poll `S_HALT`.
 pub fn halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
-    disarm(swd)?;
-    debug_hold(swd)?;
+    let l = line(swd)?;
+    disarm_timers(swd, l.timers)?;
+    set_hold(swd, l.hold)?;
     swd.write_word(DHCSR, DBGKEY | C_DEBUGEN | C_HALT)?;
     wait_halted(swd)?;
     // A firmware that set `MOE` again between the disarm and the halt is caught here, where
     // nothing can set it again.
-    disarm(swd)
+    disarm_timers(swd, l.timers)
 }
 
 /// Disarm, set the debug hold, and step one instruction with interrupts masked: `C_MASKINTS` is
 /// set while the core is still halted, then `DHCSR` = `0xA05F000D` (`C_STEP | C_MASKINTS`). The
 /// core halts again after the instruction; [`unmask`] clears the mask before the next resume.
 pub fn step<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
-    disarm(swd)?;
-    debug_hold(swd)?;
+    let l = line(swd)?;
+    disarm_timers(swd, l.timers)?;
+    set_hold(swd, l.hold)?;
     swd.write_word(DHCSR, DBGKEY | C_DEBUGEN | C_HALT | C_MASKINTS)?;
     swd.write_word(DHCSR, DBGKEY | C_DEBUGEN | C_MASKINTS | C_STEP)?;
     Ok(())
@@ -375,30 +456,37 @@ pub enum HaltPoll {
     /// The core runs.
     Running,
     /// The core is halted. `moe_clear_us` is the time from the `DHCSR` read that saw the halt to
-    /// the `CCHP` write that cleared `MOE`, when `MOE` was set.
+    /// the last `CCHP` write that cleared a `MOE`, when one was set.
     Halted {
-        /// Microseconds from the halt observed to `MOE` cleared; `None` when it was clear.
+        /// Microseconds from the halt observed to the last `MOE` cleared; `None` when every one
+        /// was clear.
         moe_clear_us: Option<u32>,
     },
 }
 
 /// The armed-breakpoint rule (`specs/hoverboard-bridge.md`, "A breakpoint hit on an armed
-/// board"): read `DHCSR`, and when the core is halted read `CCHP` at once and clear `MOE` if it is
-/// set. A breakpoint halts the core with timer 0 frozen and its outputs held; this takes the motor
-/// off for the rest of the halt, and the board needs re-arming after the resume.
+/// board"): read `DHCSR`, and when the core is halted read timer 0's `CCHP` at once and clear
+/// `MOE` if it is set, then pick the part ([`Line`]) and do the same on its other advanced timers
+/// (timer 7 on the GD32F103RC). A breakpoint halts the core with the timers frozen and their
+/// outputs held; this takes the motors off for the rest of the halt, and the board needs
+/// re-arming after the resume.
 pub fn poll_halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<HaltPoll, SwdError> {
     if swd.read_word(DHCSR)? & S_HALT == 0 {
         return Ok(HaltPoll::Running);
     }
     let seen = swd.now_us();
-    let v = swd.read_word(CCHP)?;
-    if v & MOE == 0 {
-        return Ok(HaltPoll::Halted { moe_clear_us: None });
+    let mut cleared = None;
+    if clear_moe(swd, CCHP)? {
+        cleared = Some(swd.now_us());
     }
-    swd.write_word(CCHP, v & !MOE)?;
-    let us = swd.now_us().saturating_sub(seen).min(u32::MAX as u64) as u32;
+    let l = line(swd)?;
+    for &t in &l.timers[1..] {
+        if clear_moe(swd, t)? {
+            cleared = Some(swd.now_us());
+        }
+    }
     Ok(HaltPoll::Halted {
-        moe_clear_us: Some(us),
+        moe_clear_us: cleared.map(|t| t.saturating_sub(seen).min(u32::MAX as u64) as u32),
     })
 }
 
@@ -520,8 +608,9 @@ pub fn reset<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), SwdError> {
 /// vector, poll `S_HALT`, clear the vector catch. A core already halted (the RAM loader at its
 /// `bkpt`) stays halted until the reset rather than running on.
 pub fn reset_halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
-    disarm(swd)?;
-    debug_hold(swd)?;
+    let l = line(swd)?;
+    disarm_timers(swd, l.timers)?;
+    set_hold(swd, l.hold)?;
     let hold = if halted(swd)? { C_HALT } else { 0 };
     swd.write_word(DHCSR, DBGKEY | C_DEBUGEN | hold)?;
     let demcr = swd.read_word(DEMCR)?;
@@ -530,7 +619,7 @@ pub fn reset_halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
     let halted = wait_halted(swd);
     swd.write_word(DEMCR, demcr & !VC_CORERESET)?;
     halted?;
-    disarm(swd)
+    disarm_timers(swd, l.timers)
 }
 
 /// Clear `C_DEBUGEN` and leave the core running.

@@ -611,6 +611,15 @@ fn serve_machine_over_tcp(listener: TcpListener, store: Vec<u16>, connections: u
     serve_machine_with(listener, store, connections, |_| {})
 }
 
+/// [`serve_machine_over_tcp`] with the master a part of `part`'s row, its store pages erased.
+fn serve_part_over_tcp(
+    listener: TcpListener,
+    part: &'static hoverboard_bridge_core::part::Part,
+    connections: usize,
+) -> Master {
+    serve(listener, part, None, connections, |_| {})
+}
+
 /// What [`serve_machine_with`] does to the master's GD32 before serving.
 type Prep = fn(&mut Gd32);
 
@@ -619,6 +628,19 @@ type Prep = fn(&mut Gd32);
 fn serve_machine_with(
     listener: TcpListener,
     store: Vec<u16>,
+    connections: usize,
+    prep: Prep,
+) -> Master {
+    let f130 = &hoverboard_bridge_core::part::GD32F130C8;
+    serve(listener, f130, Some(store), connections, prep)
+}
+
+/// The machine of [`serve_machine_with`], its master a part of `part`'s row, with `store` written
+/// to its store pages when given.
+fn serve(
+    listener: TcpListener,
+    part: &'static hoverboard_bridge_core::part::Part,
+    store: Option<Vec<u16>>,
     connections: usize,
     prep: Prep,
 ) -> Master {
@@ -634,8 +656,11 @@ fn serve_machine_with(
         Box::leak(Box::new(Update::new())),
         SimPlatform::new(),
     );
-    let mut m = Machine::new(flash, svc);
-    m.port.swd().pins().bus.flash[31 * 1024..].copy_from_slice(&store);
+    let mut m = Machine::of(flash, svc, part);
+    if let Some(store) = store {
+        let at = ((part.store_start() - 0x0800_0000) / 2) as usize;
+        m.port.swd().pins().bus.flash[at..].copy_from_slice(&store);
+    }
     prep(&mut m.port.swd().pins().bus);
     for _ in 0..connections {
         let (mut sock, _) = listener.accept().unwrap();
@@ -829,19 +854,20 @@ fn the_binary_flashes_the_image_a_bundle_holds_for_the_chip() {
 fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     use hoverboard_cli::bundle::{BoardTarget, Family as F, Target};
     let img = image(1024);
+    // A 128 KiB GD32F103 is in no row of the bridge's part table.
     let path = bundle_file(
-        "bundle-256k.hbfw",
+        "bundle-128k.hbfw",
         &img,
         Some(vec![Target::Board(BoardTarget {
             family: F::Gd32f10x,
-            flash_kib: 256,
+            flash_kib: 128,
         })]),
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let prep: Prep = |g| {
         g.family = Family::F10x;
-        g.flash_kib = 256;
+        g.flash_kib = 128;
     };
     let server =
         std::thread::spawn(move || serve_machine_with(listener, vec![0xFFFF; 1024], 2, prep));
@@ -850,7 +876,7 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &path, "--yes"], limit);
     assert!(!ok);
     assert!(
-        err.contains("would refuse a gd32f10x 256 KiB part"),
+        err.contains("would refuse a gd32f10x 128 KiB part"),
         "{err}"
     );
     // The chip is not the image's: refused naming both.
@@ -858,13 +884,44 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &other, "--yes"], limit);
     assert!(!ok);
     assert!(
-        err.contains("no board image in the bundle is for the chip (gd32f10x 256 KiB)"),
+        err.contains("no board image in the bundle is for the chip (gd32f10x 128 KiB)"),
         "{err}"
     );
     let g = server.join().unwrap();
     // Nothing streamed: the master still runs the image the simulated machine boots.
     assert!(g.booted);
     assert_ne!(&g.bytes[..img.len()], &img[..]);
+}
+
+#[test]
+fn board_update_flashes_the_12_fets_gd32f103rc_through_its_bridge() {
+    // `specs/twelve-fet.md` section 3.4: TARGET_ID reports gd32f10x 256 KiB, the bundle's image for
+    // that chip is chosen, and the bridge flashes it in the row's 2 KiB pages and boots it.
+    use hoverboard_cli::bundle::{BoardTarget, Family as F, Target};
+    let rc = &hoverboard_bridge_core::part::GD32F103RC;
+    let img = image(5 * 1024 + 11);
+    let path = bundle_file(
+        "bundle-rc.hbfw",
+        &img,
+        Some(vec![Target::Board(BoardTarget {
+            family: F::Gd32f10x,
+            flash_kib: 256,
+        })]),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || serve_part_over_tcp(listener, rc, 1));
+    let tcp = format!("--tcp={addr}");
+    let (ok, out, err) = cli(
+        &[&tcp, "board", "update", "0x01", &path, "--yes"],
+        Duration::from_secs(60),
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("for the chip (gd32f10x 256 KiB)"), "{out}");
+    assert!(out.contains("\nbooted"), "{out}");
+    let g = server.join().unwrap();
+    assert_eq!(&g.bytes[..img.len()], &img[..]);
+    assert!(g.booted, "booted");
 }
 
 #[test]

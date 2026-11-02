@@ -540,7 +540,8 @@ pub const MM32_ID: u32 = 0xCC44_60B1;
 /// The MM32's debug port ID.
 pub const DPIDR_M0: u32 = 0x0BB1_1477;
 const FMC: u32 = 0x4002_2000;
-const CCHP: u32 = 0x4001_2C44;
+const CCHP: u32 = crate::part::TIMER0_CCHP;
+const CCHP7: u32 = crate::part::TIMER7_CCHP;
 const MOE: u32 = 1 << 15;
 /// The model's flash patch code comparators (a Cortex-M3 has six).
 pub const SIM_FPB: usize = 6;
@@ -618,13 +619,16 @@ pub struct Gd32 {
     pub dbg_ctl0: u32,
     /// Timer 0 `CCHP`.
     pub cchp: u32,
-    /// `MOE` cannot be cleared (a board whose disarm write does not take).
+    /// Timer 7 `CCHP`, on a row that lists it (the GD32F103RC); on any other the address decodes
+    /// to nothing.
+    pub cchp7: u32,
+    /// `MOE` cannot be cleared on either timer (a board whose disarm write does not take).
     pub moe_stuck: bool,
     /// System resets since the model was built.
     pub resets: u32,
     /// The flash size register, KiB.
     pub flash_kib: u16,
-    /// Bus writes into the store's pages (the last 2 KB), which the tool must never make.
+    /// Bus writes into the store's pages (the last two), which the tool must never make.
     pub store_writes: u32,
     /// The core registers `DCRSR` selects (`r0`..`r15`, `xPSR`, `MSP`, `PSP`, a gap, then
     /// `CONTROL`, `FAULTMASK`, `BASEPRI` and `PRIMASK` in one word).
@@ -707,6 +711,7 @@ impl Gd32 {
             demcr: 0,
             dbg_ctl0: 0,
             cchp: 0,
+            cchp7: 0,
             moe_stuck: false,
             resets: 0,
             flash_kib: part.flash_kib,
@@ -807,6 +812,7 @@ impl Gd32 {
         self.stat = 0;
         self.busy_polls = 0;
         self.cchp = 0;
+        self.cchp7 = 0;
         self.loader = None;
         self.halted = self.debugen && self.demcr & 1 != 0;
         // The core starts from the vector table: the stack pointer, the reset handler, Thumb.
@@ -850,12 +856,16 @@ impl Gd32 {
                 return;
             }
             if v & CTL_PER != 0 {
-                let page = (self.addr.wrapping_sub(FLASH_BASE) / 1024) as usize;
-                if page < (self.flash_len / 1024) as usize {
-                    if page * 512 >= self.store_half() {
+                // The page holding `addr`, in the row's page size; an address inside a page
+                // erases the whole page, as the FMC does.
+                let page_len = self.part.page;
+                let page = (self.addr.wrapping_sub(FLASH_BASE) / page_len) as usize;
+                if page < (self.flash_len / page_len) as usize {
+                    let halves = (page_len / 2) as usize;
+                    if page * halves >= self.store_half() {
                         self.store_writes += 1;
                     }
-                    let r = page * 512..page * 512 + 512;
+                    let r = page * halves..(page + 1) * halves;
                     self.flash[r.clone()].fill(0xFFFF);
                     self.closed[r].fill(false);
                 }
@@ -910,7 +920,10 @@ impl Gd32 {
             self.stat |= STAT_PGERR;
         } else {
             self.flash[i] &= val;
-            if self.family == Family::F1x0 && addr.is_multiple_of(4) && !addr.is_multiple_of(1024) {
+            if self.family == Family::F1x0
+                && addr.is_multiple_of(4)
+                && !addr.is_multiple_of(self.part.page)
+            {
                 self.closed[i - 1] = true;
             }
         }
@@ -1060,6 +1073,11 @@ impl Gd32 {
         hit
     }
 
+    /// The part has timer 7 (the GD32F103RC).
+    fn has_timer7(&self) -> bool {
+        self.part.timers.contains(&CCHP7)
+    }
+
     fn uid_base(&self) -> u32 {
         match self.family {
             Family::F10x | Family::Mm32Spin05 => 0x1FFF_F7E8,
@@ -1169,7 +1187,9 @@ impl Gd32 {
             0x4002_2010 => self.ctl | if self.locked { CTL_LK } else { 0 },
             0x4002_2014 => self.addr,
             CCHP => self.cchp,
-            0xE004_2000 => 0x1303_0410,
+            CCHP7 if self.has_timer7() => self.cchp7,
+            // `DBG_ID`: device id 0x414 on the high-density GD32F103RC, 0x410 on the other GD32s.
+            0xE004_2000 => 0x1303_0000 | if self.has_timer7() { 0x414 } else { 0x410 },
             0xE004_2004 => self.dbg_ctl0,
             0xE000_ED00 => self.cpuid,
             0xE000_EDF0 => {
@@ -1276,6 +1296,14 @@ impl Gd32 {
             (CCHP, 4) => {
                 self.cchp = if self.moe_stuck {
                     val | (self.cchp & MOE)
+                } else {
+                    val
+                };
+                true
+            }
+            (CCHP7, 4) if self.has_timer7() => {
+                self.cchp7 = if self.moe_stuck {
+                    val | (self.cchp7 & MOE)
                 } else {
                     val
                 };
@@ -1657,7 +1685,15 @@ impl SimBoard {
 
 /// An F1x0 running firmware with its mailbox header up, and the bridge's port attached to it.
 pub fn running_board() -> (crate::mailbox::MailboxPort<SimPins<Gd32>>, Firmware) {
-    let mut s = board(Family::F1x0, Inject::default(), 11);
+    running_board_of(Family::F1x0.part())
+}
+
+/// A part of `part`'s row running firmware with its mailbox header up, and the bridge's port
+/// attached to it.
+pub fn running_board_of(
+    part: &'static crate::part::Part,
+) -> (crate::mailbox::MailboxPort<SimPins<Gd32>>, Firmware) {
+    let mut s = board_of(part, Inject::default(), 11);
     let g = &mut s.pins().bus;
     let mut image = vec![0x5Au8; 64];
     image[..8].copy_from_slice(&[0x00, 0x20, 0x00, 0x20, 0x09, 0x01, 0x00, 0x08]);
@@ -1703,9 +1739,18 @@ pub struct Machine<'f> {
 
 impl<'f> Machine<'f> {
     /// A fresh bridge over `flash`, with `svc`, in front of a master holding 0x01 and a slave
-    /// holding 0x02.
+    /// holding 0x02; the master is a GD32F130C8.
     pub fn new(flash: &'f mut RamFlash, svc: crate::svc::Service<'static, SimPlatform>) -> Self {
-        let (port, fw) = running_board();
+        Self::of(flash, svc, Family::F1x0.part())
+    }
+
+    /// [`Machine::new`], with the master a part of `part`'s row.
+    pub fn of(
+        flash: &'f mut RamFlash,
+        svc: crate::svc::Service<'static, SimPlatform>,
+        part: &'static crate::part::Part,
+    ) -> Self {
+        let (port, fw) = running_board_of(part);
         let Ok(store) = store::Store::mount(flash) else {
             panic!("the bridge's store did not mount");
         };

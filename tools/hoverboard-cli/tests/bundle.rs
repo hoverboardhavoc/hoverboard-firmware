@@ -401,23 +401,47 @@ fn a_match_the_bridge_would_refuse_is_refused_naming_the_part() {
         .select(&chip(FAMILY_F1X0, 32), Some("mainboard-gd32f130c6"))
         .unwrap();
     assert_eq!(img.name, "mainboard-gd32f130c6");
-    // The 256 KiB F103 is in no row: an image for it matches, and is refused.
+    // A 128 KiB F103 is in no row: an image for it matches, and is refused.
     let (g103, elf103) = f103();
-    let rc = t(Family::Gd32f10x, 256);
+    let cb = t(Family::Gd32f10x, 128);
     let b = Bundle::open(&bundle_of(vec![(
-        image("mainboard-gd32f103rc", &[rc], &g103, &elf103),
+        image("mainboard-gd32f103cb", &[cb], &g103, &elf103),
         elf103.clone(),
     )]))
     .unwrap();
-    let e = b.select(&chip(FAMILY_F10X, 256), None).unwrap_err();
+    let e = b.select(&chip(FAMILY_F10X, 128), None).unwrap_err();
     assert_eq!(
         e,
         SelectError::BridgeRefuses {
-            name: "mainboard-gd32f103rc".into(),
-            chip: rc,
+            name: "mainboard-gd32f103cb".into(),
+            chip: cb,
         }
     );
-    assert!(e.to_string().contains("gd32f10x 256 KiB part"), "{e}");
+    assert!(e.to_string().contains("gd32f10x 128 KiB part"), "{e}");
+}
+
+#[test]
+fn the_12_fet_takes_the_gd32f103rc_image_by_its_family_and_flash_size() {
+    // `specs/twelve-fet.md` section 3.4: the bridge's part table has the GD32F103RC, so a
+    // `TARGET_ID` of gd32f10x 256 KiB picks its image and is not refused; the 64 KiB F103 still
+    // takes its own.
+    let (g103, elf103) = f103();
+    let rc = t(Family::Gd32f10x, 256);
+    let b = Bundle::open(&bundle_of(vec![
+        (
+            image("mainboard-gd32f103c8", &[F10X_64], &g103, &elf103),
+            elf103.clone(),
+        ),
+        (
+            image("mainboard-gd32f103rc", &[rc], &g103, &elf103),
+            elf103.clone(),
+        ),
+    ]))
+    .unwrap();
+    let (img, matched) = b.select(&chip(FAMILY_F10X, 256), None).unwrap();
+    assert_eq!((img.name.as_str(), matched), ("mainboard-gd32f103rc", rc));
+    let (img, _) = b.select(&chip(FAMILY_F10X, 64), None).unwrap();
+    assert_eq!(img.name, "mainboard-gd32f103c8");
 }
 
 #[test]
