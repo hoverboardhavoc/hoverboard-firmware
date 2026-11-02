@@ -45,37 +45,56 @@
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use orchestrator::{EV_MOTOR_ARM, EV_MOTOR_CAL, EV_MOTOR_HALL, EV_MOTOR_PERIOD};
 
+/// How many motors this image drives: the chip's advanced-timer count (`specs/twelve-fet.md`
+/// section 4.1), 2 on the GD32F103RC and 1 on the GD32F103C8, the GD32F130C8 and the MM32SPIN05.
+/// The one owner of the count: the handoff words below, the bring-up, the period ISR's per-motor
+/// body, the arm and the orchestrator's per-motor state (`OrchestratorState<COUNT>`) are all sized
+/// by it, so a one-motor image carries no second motor's code or words.
+///
+/// `store::MOTORS` is a different number: the range of a wheel key's index, what a file can name.
+/// A motor the chip cannot drive is refused by the CLI's checks before it is written.
+///
+/// The host build has no chip; it takes the larger count, so the host tests reach the two-motor
+/// paths, and the pure functions that depend on the count take it as a parameter.
+#[cfg(target_os = "none")]
+pub const COUNT: usize = hal::descriptor::DESCRIPTOR.adv_timers as usize;
+#[cfg(not(target_os = "none"))]
+pub const COUNT: usize = 2;
+const _: () = assert!(COUNT >= 1 && COUNT <= 2);
+
 // -------------------------------------------------------------------------------------------
-// The handoff words (motor 0). One writer each; `Relaxed` throughout.
+// The handoff words, one per motor (index = motor). One writer each; `Relaxed` throughout. On a
+// one-motor image each is an array of one at the symbol the tools name, the same address and size
+// as the single word it replaces; motor 1's word is at the symbol plus its stride.
 // -------------------------------------------------------------------------------------------
 
 /// The signed drive demand: the +-28500 stock-native torque word, verbatim (`specs/control.md`'s
 /// demand-scale contract: no rescaling anywhere). Written by the 250 Hz control task, read by the
 /// period ISR.
-pub static DEMAND: AtomicI32 = AtomicI32::new(0);
+pub static DEMAND: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// Demand write sequence: bumped by the 250 Hz task on every demand write, so the ISR can tell a
 /// fresh write from a repeated one WITHOUT the writer having to touch a second data word (a demand
 /// that happens to repeat its value is still a fresh write). The ISR's freshness guard counts
 /// periods since this last changed.
 pub static DEMAND_SEQ: AtomicU32 = AtomicU32::new(0);
 /// The wrapping electrical angle (u16 in a u32 cell). Written by the period ISR.
-pub static ANGLE: AtomicU32 = AtomicU32::new(0);
+pub static ANGLE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The signed edge count per 320-period window, raw (the pole-pair fold to speed units is the
 /// Phase-D consumer's). Written by the period ISR.
-pub static SPEED: AtomicI32 = AtomicI32::new(0);
+pub static SPEED: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The period-based wheel rate (`specs/control.md` (o)): the commutator's `rate_q`, the
 /// reciprocal of the periods between two same-direction hall edges in 1/4096 of a count (one
 /// count = one edge per 320-period window, [`SPEED`]'s unit), decaying as `1/t` between edges
 /// and 0 across a reversal. The outer speed loop's measurement; copied into the block beside the
 /// count, published as `CTRL_OBS` word 39. Written by the period ISR.
-pub static WHEEL_RATE_Q12: AtomicI32 = AtomicI32::new(0);
+pub static WHEEL_RATE_Q12: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The wheel's SIGNED edge position (`specs/state-feedback.md` section 3): the commutator's
 /// `pos_edges`, +1 or -1 per counted hall edge in the counter's own sense, never cleared, wrapping.
 /// Copied into the block's `wheel_pos` by the 250 Hz shell beside [`WHEEL_RATE_Q12`]; the cyclic carries
 /// its low 16 bits to the peer. Written by the period ISR.
-pub static POS_EDGES: AtomicI32 = AtomicI32::new(0);
+pub static POS_EDGES: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The free-running period counter: the liveness signal. Written by the period ISR.
-pub static PERIODS: AtomicU32 = AtomicU32::new(0);
+pub static PERIODS: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// This boot's ABSOLUTE hall-edge count, the odometer's raw material (`specs/odometer.md`): the
 /// commutator's own `edges_total`, which adds 1 on every counted edge whichever way the wheel
 /// turned. Written by the period ISR, in the once-per-64-periods branch that already closes the
@@ -83,17 +102,17 @@ pub static PERIODS: AtomicU32 = AtomicU32::new(0);
 ///
 /// It counts THIS BOOT and it wraps. The total a board keeps is this folded as deltas onto the
 /// value its store holds, which is [`crate::odometer::Odometer`]'s job and not this cell's.
-pub static EDGES: AtomicU32 = AtomicU32::new(0);
+pub static EDGES: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Motor fault bits ([`FAULT_HALL`], [`FAULT_DUTY_RANGE`], [`FAULT_DEMAND_STALE`],
 /// [`FAULT_INIT_CAL`], [`FAULT_METHOD`]). Written by the period ISR (sticky within a boot), seeded
 /// by the bring-up with the two bits it can raise before the ISR exists.
-pub static FAULT: AtomicU32 = AtomicU32::new(0);
+pub static FAULT: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The invalid-hall dwell count from the commutator's front end. Written by the period ISR.
-pub static INVALID_DWELL: AtomicU32 = AtomicU32::new(0);
+pub static INVALID_DWELL: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed: `hall_code | enables << 8 | method << 16 | flags << 24`. Written by the
 /// period ISR (the flags' `configured` / `current_sense` / `cal-accepted` bits are set once at
 /// bring-up).
-pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
+pub static OBS_STATE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The MEASURED quiet-bridge phase-current offsets, packed `offset_a | offset_b << 16`
 /// (`specs/motor-integration.md`, bring-up step 9 and silicon stage 3). Written ONCE, by the
 /// calibration step of the bring-up, before the period vector is unmasked; zero on a boot whose
@@ -111,12 +130,12 @@ pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
 /// so a bench read sees WHERE an out-of-window board actually sits rather than only that it was
 /// refused. Acceptance is the [`OBS_CAL_ACCEPTED`] flag; refusal is [`FAULT_INIT_CAL`]; a zero
 /// word with the refusal set means no conversion completed.
-pub static OBS_CAL: AtomicU32 = AtomicU32::new(0);
+pub static OBS_CAL: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The last applied duties, packed `d0 | d1 << 16`. Written by the period ISR.
-pub static OBS_DUTY01: AtomicU32 = AtomicU32::new(0);
+pub static OBS_DUTY01: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The last applied duty 2 plus the electrical angle, packed `d2 | angle << 16`. Written by the
 /// period ISR.
-pub static OBS_DUTY2_ANGLE: AtomicU32 = AtomicU32::new(0);
+pub static OBS_DUTY2_ANGLE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Whether the TIMER0 counter is turning, and therefore whether the period ISR should be firing.
 /// Set by the bring-up's `StartCounter`, on the boot thread, and never written again: the counter
 /// is the hall-edge measurement's clock, owned by the bring-up, and NOTHING in this image stops it
@@ -527,11 +546,11 @@ pub const OVER_CURRENT_TRIP_PERIODS: u32 = 64;
 
 /// The over-current trip count: the period ISR increments it on each trip and is its sole
 /// writer; the 250 Hz task raises the motor-0 fault latch when it sees it change.
-pub static OVER_CURRENT_TRIPS: AtomicU32 = AtomicU32::new(0);
+pub static OVER_CURRENT_TRIPS: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_motor_current`]: the last completed 64-period window's peak
 /// phase-current magnitude, the periods the soft limit floated in it, and the trip count's low
 /// byte. Written by the period ISR at each window boundary (`CTRL_OBS` word 31).
-pub static OBS_CURRENT: AtomicU32 = AtomicU32::new(0);
+pub static OBS_CURRENT: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_motor_mean_duty`]: the MEAN magnitude of the same window
 /// [`OBS_CURRENT`] closes, and the on-duty of the period that closed it
 /// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 13 and 15).
@@ -544,30 +563,30 @@ pub static OBS_CURRENT: AtomicU32 = AtomicU32::new(0);
 ///
 /// Not folded into [`OBS_CURRENT`]: that word's 32 bits are spoken for (peak, chop count, trip
 /// byte), and its layout is `CTRL_OBS` word 31, which is append-only.
-pub static OBS_MEAN_DUTY: AtomicU32 = AtomicU32::new(0);
+pub static OBS_MEAN_DUTY: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the window's MEAN conditioned phase currents, `ia`
 /// low half and `ib` high half, in current counts (`specs/foc-torque.md` section 7, `CTRL_OBS`
 /// word 47). From the same [`CurrentLimit::take_window`] close as [`OBS_CURRENT`], in every method:
 /// the sensed pair the FOC arm's frame is built from, so a bench host can run Clarke and Park over
 /// it at a held rotor's angle whatever method drives (gate O2 does, in sine). Written by the
 /// period ISR at each window boundary.
-pub static OBS_FOC_PHASE: AtomicU32 = AtomicU32::new(0);
+pub static OBS_FOC_PHASE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the FOC arm's window means of the measured currents,
 /// `id` low half and `iq` high half ([`commutation::foc::FocState::take_window`]; `CTRL_OBS` word
 /// 48). Written by the period ISR at each window boundary; 0 while the method is not FOC.
-pub static OBS_FOC_DQ: AtomicU32 = AtomicU32::new(0);
+pub static OBS_FOC_DQ: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the FOC arm's `iq` reference of the period that
 /// closed the window, low half, and the window's mean `vq` after the circular limit, high half
 /// (`CTRL_OBS` word 49). Written by the period ISR at each window boundary; 0 while the method is
 /// not FOC.
-pub static OBS_FOC_REF: AtomicU32 = AtomicU32::new(0);
+pub static OBS_FOC_REF: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_foc_hold`]: the hold word (`specs/foc-torque.md` section 7, round
 /// 3, `CTRL_OBS` word 50): the periods of the closing window on which each sensed phase's sample
 /// was held ([`SampleHold`]), the periods the bridge was floated ([`coast_posture`]), and the
 /// cause byte naming which of the float's three conditions the window saw, whether a period had
 /// both sensed phases held, and the offset calibration's block-pair count and verdict for this
 /// boot. Written by the period ISR at each window boundary, in every method.
-pub static OBS_FOC_HOLD: AtomicU32 = AtomicU32::new(0);
+pub static OBS_FOC_HOLD: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The battery-sense count (`specs/sensing-and-safety.md`, "The battery word", acquisition): the
 /// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
 /// left-aligned datum's unit, bring-up step 9's contract). Written by the period ISR every period,
@@ -1017,7 +1036,8 @@ const _: () = assert!(
 /// `commutation::ARR`, which no compare exceeds: nothing held. The bake rule applies once gate
 /// N2 confirms a value.
 #[no_mangle]
-pub static FOC_HOLD_COMPARE: AtomicU32 = AtomicU32::new(commutation::ARR as u32);
+pub static FOC_HOLD_COMPARE: [AtomicU32; COUNT] =
+    [const { AtomicU32::new(commutation::ARR as u32) }; COUNT];
 
 /// How many consecutive periods a sensed phase may be held before its raw sample is taken again
 /// (`specs/foc-torque.md` section 14, "A hold that does not end"): 1,024 periods, 64 ms, 23
@@ -1778,7 +1798,7 @@ pub fn record_skip(skip: MotorSkip) {
                 .unwrap_or(0xFF) as u8,
         ),
     };
-    OBS_STATE.store(
+    OBS_STATE[0].store(
         pack_obs_state(0, [false; 3], step_index, flag),
         Ordering::Relaxed,
     );
@@ -2246,7 +2266,7 @@ pub mod hw {
                                 // Not an outcome `measure_offsets` returns; read as a refusal.
                                 CalVerdict::Again => (None, (0, 0)),
                             };
-                            OBS_CAL.store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
+                            OBS_CAL[0].store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
                             // The acceptance window's single owner is the commutation crate's
                             // gated newtype, so the check is ITS constructor, never a copy of its
                             // constants here, and what is carried on is the constructor's OUTPUT:
@@ -2303,7 +2323,7 @@ pub mod hw {
                     // Seeding it keeps the ISR the sole writer of `FAULT` after the unmask while
                     // still carrying a fault raised before it.
                     let init_faults = init_fault_bits(cal);
-                    FAULT.store(init_faults, Ordering::Relaxed);
+                    FAULT[0].store(init_faults, Ordering::Relaxed);
                     // SAFETY: the one write, on the boot thread, BEFORE the period vector is
                     // unmasked (the next-but-one step), so no ISR can observe it half-built.
                     unsafe {
@@ -2330,8 +2350,9 @@ pub mod hw {
                     // (`specs/foc-torque.md` section 14): stored once, here, so the derivation
                     // runs against the staged `motor.dead_time` the timer was just configured
                     // with, and the knob keeps whatever a bench session writes over it after.
-                    FOC_HOLD_COMPARE.store(hold_compare_max(m.dead_time) as u32, Ordering::Relaxed);
-                    OBS_STATE.store(
+                    FOC_HOLD_COMPARE[0]
+                        .store(hold_compare_max(m.dead_time) as u32, Ordering::Relaxed);
+                    OBS_STATE[0].store(
                         pack_obs_state(0, [false; 3], method.to_u8(), base_flags),
                         Ordering::Relaxed,
                     );
@@ -2607,7 +2628,7 @@ pub mod hw {
         // the window's sums).
         let current = m.current.step(ia, ib);
         if current.trip {
-            OVER_CURRENT_TRIPS.store(m.current.trips(), Ordering::Relaxed);
+            OVER_CURRENT_TRIPS[0].store(m.current.trips(), Ordering::Relaxed);
         }
         let code = m.halls.read();
         let levels = [code & 1, (code >> 1) & 1, (code >> 2) & 1];
@@ -2620,7 +2641,7 @@ pub mod hw {
         } else {
             m.since_demand = m.since_demand.saturating_add(1);
         }
-        let demand = DEMAND.load(Ordering::Relaxed);
+        let demand = DEMAND[0].load(Ordering::Relaxed);
         let stale = demand_stale(m.since_demand);
         // The posture is decided BEFORE the step, because the FOC arm needs it: all three inputs
         // are known by now, and on a period whose output will float the arm zeroes its two
@@ -2640,7 +2661,7 @@ pub mod hw {
         // (section 14, step 13 of the chain): decided on the duties as computed, since a coasted
         // period floats every leg and its sample is not a shunt reading either way.
         m.hold
-            .arm(duties, FOC_HOLD_COMPARE.load(Ordering::Relaxed) as u16);
+            .arm(duties, FOC_HOLD_COMPARE[0].load(Ordering::Relaxed) as u16);
 
         let applied_enables = if coast {
             // The explicit coast posture: all phases float regardless of method. It cannot be
@@ -2672,7 +2693,7 @@ pub mod hw {
 
         // Publish the handoff + observation words (this ISR is the sole writer of each).
         m.periods = m.periods.wrapping_add(1);
-        PERIODS.store(m.periods, Ordering::Relaxed);
+        PERIODS[0].store(m.periods, Ordering::Relaxed);
         // The current observation: one whole 64-period window per publish, so a 250 Hz reader
         // never sees a half-built peak. The mean and the on-duty ride in the same branch, from
         // the same close, so the three words a consumer compares describe one window and the
@@ -2681,25 +2702,25 @@ pub mod hw {
             // The odometer's edge count rides in this branch for the same reason the current
             // window does: once per 64 periods is 250 Hz, far faster than the service loop that
             // folds it, and the per-period path pays nothing (`specs/odometer.md`).
-            EDGES.store(m.commutator.front().comm.edges_total, Ordering::Relaxed);
+            EDGES[0].store(m.commutator.front().comm.edges_total, Ordering::Relaxed);
             let (current, mean, (mean_a, mean_b)) = m.current.take_window();
-            OBS_CURRENT.store(current, Ordering::Relaxed);
-            OBS_MEAN_DUTY.store(
+            OBS_CURRENT[0].store(current, Ordering::Relaxed);
+            OBS_MEAN_DUTY[0].store(
                 pack_motor_mean_duty(mean, on_duty(duties, applied_enables)),
                 Ordering::Relaxed,
             );
             // The FOC observation (`specs/foc-torque.md` section 7): the phase means in every
             // method, from the close above; the arm's own window closed here too, and zeros where
             // the method keeps none, so a non-FOC board's words 48 and 49 read 0.
-            OBS_FOC_PHASE.store(pack_i16_pair(mean_a, mean_b), Ordering::Relaxed);
+            OBS_FOC_PHASE[0].store(pack_i16_pair(mean_a, mean_b), Ordering::Relaxed);
             let foc = m.commutator.take_foc_window().unwrap_or_default();
-            OBS_FOC_DQ.store(pack_i16_pair(foc.id, foc.iq), Ordering::Relaxed);
-            OBS_FOC_REF.store(pack_i16_pair(foc.iq_ref, foc.vq), Ordering::Relaxed);
+            OBS_FOC_DQ[0].store(pack_i16_pair(foc.id, foc.iq), Ordering::Relaxed);
+            OBS_FOC_REF[0].store(pack_i16_pair(foc.iq_ref, foc.vq), Ordering::Relaxed);
             // The hold word (section 7, word 50): the window's held and floated counts with the
             // causes, closed and restarted here; the calibration bits ride along every close.
             let (held, both) = m.hold.take_window();
             let causes = m.causes | if both { HOLD_CAUSE_BOTH_HELD } else { 0 };
-            OBS_FOC_HOLD.store(pack_foc_hold(held, m.coasted, causes), Ordering::Relaxed);
+            OBS_FOC_HOLD[0].store(pack_foc_hold(held, m.coasted, causes), Ordering::Relaxed);
             m.coasted = 0;
             m.causes &= HOLD_CAL_PAIRS_MASK | HOLD_CAL_DISAGREED;
         }
@@ -2709,22 +2730,22 @@ pub mod hw {
         if comm.hall_fault {
             m.faults |= FAULT_HALL;
         }
-        ANGLE.store(comm.angle as u32, Ordering::Relaxed);
-        SPEED.store(comm.speed, Ordering::Relaxed);
-        WHEEL_RATE_Q12.store(comm.rate_q, Ordering::Relaxed);
-        POS_EDGES.store(comm.pos_edges, Ordering::Relaxed);
-        INVALID_DWELL.store(comm.invalid_dwell, Ordering::Relaxed);
-        FAULT.store(m.faults, Ordering::Relaxed);
+        ANGLE[0].store(comm.angle as u32, Ordering::Relaxed);
+        SPEED[0].store(comm.speed, Ordering::Relaxed);
+        WHEEL_RATE_Q12[0].store(comm.rate_q, Ordering::Relaxed);
+        POS_EDGES[0].store(comm.pos_edges, Ordering::Relaxed);
+        INVALID_DWELL[0].store(comm.invalid_dwell, Ordering::Relaxed);
+        FAULT[0].store(m.faults, Ordering::Relaxed);
         let flags = m.base_flags | if stale { OBS_COASTING } else { 0 };
-        OBS_STATE.store(
+        OBS_STATE[0].store(
             pack_obs_state(comm.prev_any_code, applied_enables, m.method, flags),
             Ordering::Relaxed,
         );
-        OBS_DUTY01.store(
+        OBS_DUTY01[0].store(
             (duties[0] as u32) | ((duties[1] as u32) << 16),
             Ordering::Relaxed,
         );
-        OBS_DUTY2_ANGLE.store(
+        OBS_DUTY2_ANGLE[0].store(
             (duties[2] as u32) | ((comm.angle as u32) << 16),
             Ordering::Relaxed,
         );
@@ -3885,7 +3906,7 @@ mod tests {
     #[test]
     fn skip_reasons_are_distinguishable_in_the_observation() {
         record_skip(MotorSkip::Absent);
-        let w = OBS_STATE.load(Ordering::Relaxed);
+        let w = OBS_STATE[0].load(Ordering::Relaxed);
         assert_eq!(
             (w >> 24) & 0xFF,
             OBS_SKIP_ABSENT >> 4 << 4 >> 4 << 4,
@@ -3894,11 +3915,11 @@ mod tests {
         assert_eq!(w & OBS_CONFIGURED, 0);
 
         record_skip(MotorSkip::NoCurrentSense);
-        let w = OBS_STATE.load(Ordering::Relaxed);
+        let w = OBS_STATE[0].load(Ordering::Relaxed);
         assert_eq!((w >> 24) & 0xFF, OBS_SKIP_NO_SENSE >> 4 << 4 >> 4 << 4);
 
         record_skip(MotorSkip::StepFailed(BringUpStep::ConfigureInjectedGroup));
-        let w = OBS_STATE.load(Ordering::Relaxed);
+        let w = OBS_STATE[0].load(Ordering::Relaxed);
         assert_eq!((w >> 24) & 0xFF, OBS_SKIP_STEP_FAILED);
         assert_eq!(
             (w >> 16) & 0xFF,
@@ -4054,7 +4075,7 @@ mod tests {
         assert_eq!(hold_compare_max(0), 1_996);
         // Until the bring-up derives it the knob holds the period itself, which no compare exceeds.
         assert_eq!(
-            FOC_HOLD_COMPARE.load(Ordering::Relaxed),
+            FOC_HOLD_COMPARE[0].load(Ordering::Relaxed),
             commutation::ARR as u32
         );
     }

@@ -1126,7 +1126,7 @@ mod dynamic {
         {
             let s = Store::mount(&mut f).unwrap();
             assert_eq!(s.get(CONTROL_RIDER_REQUIRED), 1, "default = required");
-            let d = control::ControlDispatch::new(
+            let d = control::ControlDispatch::<1>::new(
                 1,
                 0,
                 0,
@@ -1146,7 +1146,7 @@ mod dynamic {
         }
         let s = Store::mount(&mut f).unwrap();
         assert_eq!(s.get(CONTROL_RIDER_REQUIRED), 0);
-        let d = control::ControlDispatch::new(
+        let d = control::ControlDispatch::<1>::new(
             1,
             0,
             0,
@@ -1183,7 +1183,7 @@ mod dynamic {
         {
             let s = Store::mount(&mut f).unwrap();
             assert_eq!(s.get(CONTROL_FRAME), 0, "default = pivoting");
-            let d = control::ControlDispatch::new(
+            let d = control::ControlDispatch::<1>::new(
                 1,
                 s.get(CONTROL_FRAME),
                 s.get(CONTROL_LEADER),
@@ -1203,7 +1203,7 @@ mod dynamic {
             s.set_value(CONTROL_FRAME.key(), Value::U8(1)).unwrap();
         }
         let resolve = |s: &Store<MockFlash>, imu: bool| {
-            control::ControlDispatch::new(
+            control::ControlDispatch::<1>::new(
                 1,
                 s.get(CONTROL_FRAME),
                 s.get(CONTROL_LEADER),
@@ -1310,7 +1310,7 @@ mod dynamic {
         {
             let s = Store::mount(&mut f).unwrap();
             assert_eq!(s.get(BOARD_BATTERY_FLOOR), 2400, "default");
-            let d = control::ControlDispatch::new(
+            let d = control::ControlDispatch::<1>::new(
                 1,
                 0,
                 0,
@@ -1328,7 +1328,7 @@ mod dynamic {
         }
         let s = Store::mount(&mut f).unwrap();
         assert_eq!(s.get(BOARD_BATTERY_FLOOR), 0);
-        let d = control::ControlDispatch::new(
+        let d = control::ControlDispatch::<1>::new(
             1,
             0,
             0,

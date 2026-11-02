@@ -128,13 +128,15 @@ pub fn select_mode(
     ModeSelection { active, fault }
 }
 
-/// The mode dispatch: the resolved producer, the demotion fault, and the throttle producer's records.
+/// The mode dispatch: the resolved producer, the demotion fault, and the throttle producer's records,
+/// one per motor the board drives (`M`, the firmware's motor count, `specs/twelve-fet.md` section
+/// 4).
 /// The balance producer's record (`SfState`) lives with the orchestrator that runs the law
 /// (spec (g): integration); resetting THEM when the active mode
 /// changes is that layer's duty, which is why [`ControlDispatch::re_apply_values`] reports the
 /// change rather than keeping it to itself.
 #[derive(Clone, Copy, Debug)]
-pub struct ControlDispatch {
+pub struct ControlDispatch<const M: usize> {
     mode: Producer,
     mode_fault: bool,
     /// Whether balance mode requires a rider (`CONTROL_RIDER_REQUIRED`, spec (i)). Set by the boot
@@ -147,9 +149,10 @@ pub struct ControlDispatch {
     /// `specs/sensing-and-safety.md`, "The low-battery floor"); `<= 0` = no floor. Set by the boot
     /// seam beside the rider decision and re-read at every arm with it, the same discipline.
     battery_floor: i16,
-    /// The throttle producer's conditioning records (replaced wholesale when an arm-time re-apply
-    /// changes the active mode, the `switch_method` reset discipline).
-    pub throttle: ThrottleState,
+    /// The throttle producer's conditioning records, one per motor, each fed its own motor's drive
+    /// command (replaced wholesale when an arm-time re-apply changes the active mode, the
+    /// `switch_method` reset discipline).
+    pub throttle: [ThrottleState; M],
 }
 
 /// Decode the `CONTROL_RIDER_REQUIRED` byte (spec (i)): `0` waives the rider requirement, any other
@@ -162,7 +165,7 @@ const fn rider_required_from(byte: u8) -> bool {
     byte != 0
 }
 
-impl ControlDispatch {
+impl<const M: usize> ControlDispatch<M> {
     /// The boot seam: resolve the registered `CONTROL_MODE`, `CONTROL_FRAME` and `CONTROL_LEADER`
     /// bytes against the board's IMU fact ([`select_mode`]), decode the `CONTROL_RIDER_REQUIRED` byte (spec (i): `0`
     /// waives the rider requirement, any other value keeps it, so the default `1` and a corrupt
@@ -183,7 +186,7 @@ impl ControlDispatch {
             mode_fault: sel.fault,
             rider_required: rider_required_from(rider_required_byte),
             battery_floor,
-            throttle: ThrottleState::default(),
+            throttle: [ThrottleState::default(); M],
         }
     }
 
@@ -225,7 +228,7 @@ impl ControlDispatch {
         self.mode = sel.active;
         self.mode_fault = sel.fault;
         if changed {
-            self.throttle = ThrottleState::default();
+            self.throttle = [ThrottleState::default(); M];
         }
         self.rider_required = rider_required_from(rider_required_byte);
         self.battery_floor = battery_floor;
@@ -257,15 +260,17 @@ impl ControlDispatch {
         battery != 0 && (self.battery_floor <= 0 || battery >= self.battery_floor)
     }
 
-    /// One throttle-producer tick (meaningful in [`ControlMode::Throttle`]; the balance mode's
-    /// reference is the state-feedback law's word, which the orchestrator runs).
-    /// The caller feeds the chosen side's `ref_*` into the engagement machine's mirror.
+    /// One throttle-producer tick for motor `motor` (meaningful in [`ControlMode::Throttle`]; the
+    /// balance mode's reference is the state-feedback law's word, which the orchestrator runs), on
+    /// that motor's own conditioning records. The caller feeds the chosen side's `ref_*` into the
+    /// engagement machine. `motor` is below `M`: the caller iterates its motors.
     pub fn throttle_reference(
         &mut self,
+        motor: usize,
         cfg: &ThrottleConfig,
         speed_in: i16,
         steer_in: i16,
     ) -> ThrottleOutput {
-        throttle_tick(cfg, speed_in, steer_in, &mut self.throttle)
+        throttle_tick(cfg, speed_in, steer_in, &mut self.throttle[motor])
     }
 }

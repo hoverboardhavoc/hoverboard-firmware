@@ -571,7 +571,7 @@ mod firmware {
     /// in the same context, so borrows never overlap as long as the loop drops its borrow before
     /// `dispatch()`, which the loop body does by scoping).
     struct Shell {
-        orch: OrchestratorState,
+        orch: OrchestratorState<{ motor::COUNT }>,
         /// The plan-gated IMU bus + driver (`None` = not configured / probe failed: fail-soft).
         i2c: Option<I2c>,
         imu: Option<imu::Imu>,
@@ -1245,9 +1245,10 @@ mod firmware {
             addr_of_mut!((*p).dma_isr_entries)
                 .write_volatile(hal::irq::DMA_RX_ISR_METRIC.entries());
             addr_of_mut!((*p).roll_milli).write_volatile(o.roll_milli_deg);
-            addr_of_mut!((*p).motor_periods).write_volatile(motor::PERIODS.load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_periods)
+                .write_volatile(motor::PERIODS[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).motor_state).write_volatile(
-                motor::OBS_STATE.load(Ordering::Relaxed)
+                motor::OBS_STATE[0].load(Ordering::Relaxed)
                     | if period_live {
                         motor::OBS_PERIOD_LIVE << 24
                     } else {
@@ -1255,22 +1256,22 @@ mod firmware {
                     },
             );
             addr_of_mut!((*p).motor_duty01)
-                .write_volatile(motor::OBS_DUTY01.load(Ordering::Relaxed));
+                .write_volatile(motor::OBS_DUTY01[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).motor_duty2_angle)
-                .write_volatile(motor::OBS_DUTY2_ANGLE.load(Ordering::Relaxed));
+                .write_volatile(motor::OBS_DUTY2_ANGLE[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).motor_fault).write_volatile(
-                motor::FAULT.load(Ordering::Relaxed)
-                    | (motor::INVALID_DWELL.load(Ordering::Relaxed).min(0xFFFF) << 16),
+                motor::FAULT[0].load(Ordering::Relaxed)
+                    | (motor::INVALID_DWELL[0].load(Ordering::Relaxed).min(0xFFFF) << 16),
             );
-            addr_of_mut!((*p).motor_speed).write_volatile(motor::SPEED.load(Ordering::Relaxed));
-            addr_of_mut!((*p).motor_cal).write_volatile(motor::OBS_CAL.load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_speed).write_volatile(motor::SPEED[0].load(Ordering::Relaxed));
+            addr_of_mut!((*p).motor_cal).write_volatile(motor::OBS_CAL[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).gating_field).write_volatile(o.gating_field);
             addr_of_mut!((*p).pre_env_torque).write_volatile(o.pre_env_torque);
             addr_of_mut!((*p).event_counts).write_volatile(o.event_counts);
             addr_of_mut!((*p).retired_29).write_volatile(0);
             addr_of_mut!((*p).stack_margin).write_volatile(sample_stack_margin());
             addr_of_mut!((*p).motor_current)
-                .write_volatile(motor::OBS_CURRENT.load(Ordering::Relaxed));
+                .write_volatile(motor::OBS_CURRENT[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).battery).write_volatile(o.battery as u16 as u32);
             addr_of_mut!((*p).arm_refusals).write_volatile(arm::hw::refusal_obs());
             addr_of_mut!((*p).mailbox_drops).write_volatile(MAILBOX_DROPS.load(Ordering::Relaxed));
@@ -1285,7 +1286,7 @@ mod firmware {
             );
             addr_of_mut!((*p).reset_cause).write_volatile(RESET_CAUSE.load(Ordering::Relaxed));
             addr_of_mut!((*p).motor_rate_q)
-                .write_volatile(motor::WHEEL_RATE_Q12.load(Ordering::Relaxed));
+                .write_volatile(motor::WHEEL_RATE_Q12[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).retired_40).write_volatile(0);
             addr_of_mut!((*p).mailbox_staged).write_volatile(staged.mailbox);
             addr_of_mut!((*p).wheel_pos_own).write_volatile(o.wheel_pos_own);
@@ -1297,12 +1298,13 @@ mod firmware {
             addr_of_mut!((*p).v_ref_q).write_volatile(o.v_ref_q);
             addr_of_mut!((*p).e_x).write_volatile(o.e_x);
             addr_of_mut!((*p).foc_phase_mean)
-                .write_volatile(motor::OBS_FOC_PHASE.load(Ordering::Relaxed));
+                .write_volatile(motor::OBS_FOC_PHASE[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).foc_dq_mean)
-                .write_volatile(motor::OBS_FOC_DQ.load(Ordering::Relaxed));
+                .write_volatile(motor::OBS_FOC_DQ[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).foc_ref_vq)
-                .write_volatile(motor::OBS_FOC_REF.load(Ordering::Relaxed));
-            addr_of_mut!((*p).foc_hold).write_volatile(motor::OBS_FOC_HOLD.load(Ordering::Relaxed));
+                .write_volatile(motor::OBS_FOC_REF[0].load(Ordering::Relaxed));
+            addr_of_mut!((*p).foc_hold)
+                .write_volatile(motor::OBS_FOC_HOLD[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).imu_retries).write_volatile(IMU_RETRIES.load(Ordering::Relaxed));
             addr_of_mut!((*p).pad_51).write_volatile([0; 3]);
         }
@@ -1367,7 +1369,7 @@ mod firmware {
         // it is, so the next SERVED run measures the whole span across the burst rather than a
         // fragment of it, and the hysteresis latch sees one sample per tick as it was designed
         // to.
-        let motor_state = motor::OBS_STATE.load(Ordering::Relaxed);
+        let motor_state = motor::OBS_STATE[0].load(Ordering::Relaxed);
         let motor_configured = motor::obs_configured(motor_state);
         // What the torque word means (`specs/foc-torque.md` section 4): a current while the
         // period ISR runs FOC, so the balance law stops dividing it by the battery. Off the same
@@ -1381,7 +1383,7 @@ mod firmware {
         // while the board is disarmed ("The OFF interlock must read a LIVE speed").
         let motor_running = motor_configured && motor::COUNTER_RUNNING.load(Ordering::Relaxed);
         if served {
-            let periods = motor::PERIODS.load(Ordering::Relaxed);
+            let periods = motor::PERIODS[0].load(Ordering::Relaxed);
             let per_tick = periods.wrapping_sub(shell.last_periods) / dt_ticks;
             shell.last_periods = periods;
             shell.period_live = motor::periods_live(per_tick);
@@ -1389,14 +1391,14 @@ mod firmware {
         }
         shell.orch.motor_fault = motor::motor_fault_level(
             motor_configured,
-            motor::FAULT.load(Ordering::Relaxed),
+            motor::FAULT[0].load(Ordering::Relaxed),
             shell.period_health.loss(),
             arm::hw::refused(),
         );
         // The hard over-current trip: the ISR counts trips, and a change since the last run raises
         // motor 0's fault latch through its seam. The latch consumes the code this same pass and
         // reaches `fault_a` as `latch_a`, so it is NOT folded into the motor-side level above.
-        let trips = motor::OVER_CURRENT_TRIPS.load(Ordering::Relaxed);
+        let trips = motor::OVER_CURRENT_TRIPS[0].load(Ordering::Relaxed);
         if trips != shell.last_trips {
             shell.last_trips = trips;
             shell.orch.raise_over_current(0);
@@ -1421,17 +1423,17 @@ mod firmware {
         //
         // Motor 0's row only: motor 1 has no producer anywhere in this image (the single-motor
         // rule, `crate::motor`'s module header), so its row stays at the constructor's 0.
-        let speed = motor::SPEED.load(Ordering::Relaxed);
+        let speed = motor::SPEED[0].load(Ordering::Relaxed);
         shell.orch.motor_moving = arm::off_inhibit(motor_running, shell.period_live, speed);
         shell.orch.block.wheel_speed[0] = motor::wheel_speed_word(speed);
         // The period-based rate beside it (`specs/control.md` (o)): the state-feedback law's speed
         // measurement, already in the law's own 1/4096-count unit, so there is nothing to narrow
         // and nothing to convert. One load, like the count's.
-        shell.orch.block.wheel_rate_q12 = motor::WHEEL_RATE_Q12.load(Ordering::Relaxed);
+        shell.orch.block.wheel_rate_q12 = motor::WHEEL_RATE_Q12[0].load(Ordering::Relaxed);
         // The signed position beside it (`specs/state-feedback.md` section 3): the law folds it,
         // the cyclic carries its low half to the peer and the observation publishes it mirrored.
         // One load.
-        shell.orch.block.wheel_pos = motor::POS_EDGES.load(Ordering::Relaxed);
+        shell.orch.block.wheel_pos = motor::POS_EDGES[0].load(Ordering::Relaxed);
         // The battery-sense count the period ISR stored (rank 2 of the injected group, already
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
         // (`specs/sensing-and-safety.md`, "The battery word"). Loaded every tick on every board;
@@ -1452,9 +1454,9 @@ mod firmware {
         // the fault word are read the same way), and it is bounded by being a window apart: the
         // alternative, publishing the peak a second time beside the mean, would put one
         // measurement in two cells.
-        let mean_duty = motor::OBS_MEAN_DUTY.load(Ordering::Relaxed);
+        let mean_duty = motor::OBS_MEAN_DUTY[0].load(Ordering::Relaxed);
         shell.orch.phase = orchestrator::PhaseWindow {
-            peak: motor::unpack_peak(motor::OBS_CURRENT.load(Ordering::Relaxed)),
+            peak: motor::unpack_peak(motor::OBS_CURRENT[0].load(Ordering::Relaxed)),
             mean: motor::unpack_mean(mean_duty),
             duty_on: motor::unpack_duty_on(mean_duty),
         };
@@ -1478,7 +1480,12 @@ mod firmware {
         // rescaling anywhere, `specs/control.md`). The sequence bump is what lets the ISR's
         // freshness guard tell a fresh write from a repeated one, so a demand that happens to
         // repeat its value still counts as fresh.
-        motor::DEMAND.store(obs.torque_setpoint as i32, Ordering::Relaxed);
+        //
+        // One word per motor, each the orchestrator's setpoint for that motor, all written before
+        // the one sequence bump, so the ISR sees both demands of a pass as fresh together.
+        for (word, demand) in motor::DEMAND.iter().zip(out.torque_setpoint) {
+            word.store(demand as i32, Ordering::Relaxed);
+        }
         // The Cortex-M0 has no read-modify-write atomics; the control task and the arm sequence
         // (`arm::hw::zero_demand`) run in the one main-thread context, so a load and a store are
         // the whole update there.
@@ -2585,7 +2592,8 @@ mod firmware {
         // The odometer's running total and its write decision (`specs/odometer.md`). It lives
         // here because the write belongs here: the loop is the main thread, it already samples
         // the arm fact, and it is where the OTHER deferred persist waits for a disarmed pass.
-        let mut odo = odometer::Odometer::new(odometer_base, motor::EDGES.load(Ordering::Relaxed));
+        let mut odo =
+            odometer::Odometer::new(odometer_base, motor::EDGES[0].load(Ordering::Relaxed));
         let mut rxbuf = [0u8; PACKET];
         let mut pdu = [0u8; net::walk::MAX_PDU];
         // ONE reusable emissions scratch for every drain site + the probe window (the slice-7
@@ -2770,7 +2778,7 @@ mod firmware {
             //     more: the board is disarmed AND its wheel has stopped, so the 60 ms repack
             //     never falls on a turning wheel. The attempt is recorded either way, so a region
             //     that is genuinely out of space is retried once per ride, not once per pass.
-            odo.fold(motor::EDGES.load(Ordering::Relaxed), armed);
+            odo.fold(motor::EDGES[0].load(Ordering::Relaxed), armed);
             ODOMETER_TOTAL.store(odo.total(), Ordering::Relaxed);
             if let Some(total) = odo.due(armed, at_rest) {
                 // SAFETY: main-thread context, as the ingest borrows above.

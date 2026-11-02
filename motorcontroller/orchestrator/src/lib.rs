@@ -78,12 +78,6 @@ pub use events::{
 };
 pub use machine::{Digests, Machine, N_LINKS};
 
-/// The per-motor breadth of the orchestrator state: the control block's dual-motor shape
-/// (`specs/control.md` (e); one MOE gate + one fault latch per advanced timer). Single-motor
-/// boards simply never enact motor 1's records (the enact seam carries both; the hardware layer
-/// applies the ones its plan configures).
-pub const N_MOTORS: usize = 2;
-
 /// The breadth of the input task's debounce bank: one active-low line, the power button
 /// (`specs/integration.md`, "The input task"). The bank's size IS its line count
 /// ([`inputs::LineBank`]), so this constant is where that count is decided, once, rather than a
@@ -582,7 +576,13 @@ impl LinkInbox {
 /// Everything the task bodies own between passes. The firmware places ONE of these in its static
 /// orchestrator state (main-thread only: the loop and the dispatch callbacks run in the same
 /// context, so there is no concurrent access this round); host tests just hold one on the stack.
-pub struct OrchestratorState {
+///
+/// `M` is the per-motor breadth: one fault latch, one MOE decision, one wheel row and one drive
+/// slot per motor (`specs/control.md` (e); one MOE gate and one fault latch per advanced timer).
+/// The firmware instantiates it with `motor::COUNT`, its chip's advanced-timer count
+/// (`specs/twelve-fet.md` section 4): 2 on the GD32F103RC, 1 on every other part, so a one-motor
+/// image carries no second motor's records at all.
+pub struct OrchestratorState<const M: usize> {
     /// The Mahony attitude filter (pipeline step 2).
     pub mahony: attitude::Mahony,
     /// The latest attitude output (pitch/roll degrees + quaternion).
@@ -614,9 +614,9 @@ pub struct OrchestratorState {
     /// count-to-latch is the stock idle timeout). The fast trip producers (over-current codes,
     /// ext_trip) stay quiescent until the motor era. Cleared whole on any pass whose resulting
     /// mode is OFF (the power-cycle analog; the latch contract's downstream co-writer).
-    pub latches: [FaultLatch; N_MOTORS],
+    pub latches: [FaultLatch; M],
     /// The mode machine (pipeline step 5): the sole MOE owner.
-    pub mode: ModeMachine<N_MOTORS>,
+    pub mode: ModeMachine<M>,
     /// The power-button debouncer (input task): one active-low line.
     pub button: inputs::LineBank<N_BUTTON_LINES>,
     /// The debounced power-button level (the whole hold).
@@ -671,9 +671,9 @@ pub struct OrchestratorState {
     pub enact_shutdowns: u32,
     /// The step-7 control section: the mode dispatch + the balance producer records
     /// ([`dispatch::ControlCtl`]).
-    pub ctl: ControlCtl,
+    pub ctl: ControlCtl<M>,
     /// The RAM control block's words as data ([`dispatch::BlockWords`]; `specs/control.md` (e)).
-    pub block: BlockWords,
+    pub block: BlockWords<M>,
     /// The motor-side fault level (`specs/motor-integration.md`, "the motor-side fault
     /// producers"): the hall dwell fault, period-liveness loss, and a refused offset calibration,
     /// and a held arm refusal, as the set of their `events::EV_MOTOR_*` bits
@@ -805,7 +805,7 @@ pub struct BoardIdentity {
     pub config_fault: bool,
 }
 
-impl OrchestratorState {
+impl<const M: usize> OrchestratorState<M> {
     /// A fresh orchestrator: mode OFF, empty inbox, idle inputs, identity attitude, and the control
     /// section on the registered defaults of the arm row. The firmware's arm-row read installs the
     /// stored values through [`dispatch::re_apply_control_values`] before the first tick and again
@@ -850,7 +850,7 @@ impl OrchestratorState {
             imu_live: false,
             imu_health: ImuHealth::new(),
             inbox: LinkInbox::new(),
-            latches: [FaultLatch::new(); N_MOTORS],
+            latches: [FaultLatch::new(); M],
             mode: ModeMachine::new(),
             button: inputs::LineBank::new(),
             button_pressed: false,
@@ -929,7 +929,7 @@ impl OrchestratorState {
     /// RAM block each pass; host tests read them directly.
     pub fn obs(&self) -> Obs {
         let mut moe_bits = 0u8;
-        for i in 0..N_MOTORS {
+        for i in 0..M {
             if self.mode.moe_allowed(i) {
                 moe_bits |= 1 << i;
             }
@@ -951,7 +951,7 @@ impl OrchestratorState {
             drive_age: self.inbox.drive_age(),
             enact_inits: self.enact_inits,
             enact_shutdowns: self.enact_shutdowns,
-            torque_setpoint: self.ctl.wheel_demand,
+            torque_setpoint: self.ctl.wheel_demand[0],
             sub_state: self.ctl.fsm.sub_state as u8,
             control_mode: self.ctl.dispatch.mode() as u8,
             mode_fault: dispatch::mode_fault_level(self),
@@ -1027,9 +1027,9 @@ pub struct Obs {
     pub enact_inits: u32,
     /// SHUTDOWN safe-down records emitted through the enact seam.
     pub enact_shutdowns: u32,
-    /// The WHEEL demand this pass ([`dispatch::ControlCtl::wheel_demand`]): the engagement
+    /// Motor 0's WHEEL demand this pass ([`dispatch::ControlCtl::wheel_demand`]): the engagement
     /// machine's torque setpoint through the rigid freshness gate, which is what the firmware
-    /// publishes to `motor::DEMAND`. On a pivoting board it is the sole-writer row itself.
+    /// publishes to motor 0's `motor::DEMAND`. On a pivoting board it is the sole-writer row itself.
     pub torque_setpoint: i16,
     /// The engagement machine's sub-state byte (the `a_substate` the latches consume).
     pub sub_state: u8,
@@ -1154,11 +1154,11 @@ fn out_to_milli(deg: base::fixed::Out) -> i32 {
 /// recording with the hardware MOE gate and the method-aware step lists AT THIS SEAM, nothing
 /// else moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ControlOutput {
+pub struct ControlOutput<const M: usize> {
     /// The mode byte after this tick.
     pub mode_byte: u8,
     /// The per-motor MOE-allowed decisions.
-    pub moe: [bool; N_MOTORS],
+    pub moe: [bool; M],
     /// Set on the tick the INIT bring-up must run (the recorded enactment).
     pub init: Option<InitAction>,
     /// Set on the tick the SHUTDOWN safe-down must run (the recorded enactment).
@@ -1167,9 +1167,9 @@ pub struct ControlOutput {
     pub comms_loss: bool,
     /// The IMU-loss fault level this tick (folded into `fault_a`; OBS).
     pub imu_loss: bool,
-    /// The wheel demand this tick (step 7's output: the sole-writer row's value through the rigid
-    /// freshness gate, [`dispatch::ControlCtl::wheel_demand`]).
-    pub torque_setpoint: i16,
+    /// The wheel demands this tick, one per motor (step 7's output: the sole-writer row's value
+    /// through the rigid freshness gate on motor 0, [`dispatch::ControlCtl::wheel_demand`]).
+    pub torque_setpoint: [i16; M],
     /// The engagement sub-state byte after this tick (0 forces a zero setpoint).
     pub sub_state: u8,
     /// This pass resolved to OFF **and** the power request is clear: the once-per-ENGAGE seam, as
@@ -1216,11 +1216,11 @@ pub struct ControlOutput {
 /// everything here that measures TIME (the attitude integration, the link ages, the two emission
 /// cadences) is gated on `dt_ticks > 0` rather than on being called. Everything that counts WORK
 /// (`control_ticks`, the mode machine, the dispatch) still runs on every call.
-pub fn control_task(
-    state: &mut OrchestratorState,
+pub fn control_task<const M: usize>(
+    state: &mut OrchestratorState<M>,
     sample: Option<&imu::Sample>,
     dt_ticks: u32,
-) -> ControlOutput {
+) -> ControlOutput<M> {
     // Did a SysTick tick elapse since the previous call? Every time-measuring step below asks
     // this, and only this, so one catch-up burst cannot age anything.
     let served = dt_ticks > 0;
@@ -1339,8 +1339,10 @@ pub fn control_task(
     // The individual levels are named once here and used TWICE: folded into the aggregates the
     // mode machine consumes, and folded into the O1 attribution mask (`events`). One read per
     // producer, so the counters cannot disagree with the decision they explain.
+    // Motor 1's latch exists only where the image drives a second motor; elsewhere Fault B has no
+    // producer.
     let latch_a = state.latches[0].is_latched();
-    let latch_b = state.latches[1].is_latched();
+    let latch_b = state.latches.get(1).is_some_and(FaultLatch::is_latched);
     // The tilt cutout's producer (`specs/control.md` (l)): the fused attitude words say the
     // machine is past the limit on a tilt axis, on a board whose IMU is configured (the only
     // board on which those words mean anything; a follower or a padless throttle kart has no
@@ -1427,7 +1429,7 @@ pub fn control_task(
     // Step 9 (counters half; the snapshot is `obs()`).
     state.control_ticks = state.control_ticks.wrapping_add(1);
 
-    let mut moe = [false; N_MOTORS];
+    let mut moe = [false; M];
     for (i, m) in moe.iter_mut().enumerate() {
         *m = state.mode.moe_allowed(i);
     }
@@ -1467,7 +1469,7 @@ pub struct InputSample {
 /// One 16 ms input pass (`specs/integration.md`, "The input task"): debounce the button and run
 /// the pads into the rider level. The products land in [`OrchestratorState`] (`button_pressed`,
 /// `pad_field`, `rider_present`) where the 250 Hz pipeline reads them.
-pub fn input_task(state: &mut OrchestratorState, sample: &InputSample) {
+pub fn input_task<const M: usize>(state: &mut OrchestratorState<M>, sample: &InputSample) {
     state
         .button
         .update(if sample.button_asserted { 0b1 } else { 0 });

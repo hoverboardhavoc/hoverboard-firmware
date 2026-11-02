@@ -650,7 +650,7 @@ pub mod hw {
     /// Zero the demand word and bump its sequence, so the ISR sees a FRESH write of zero rather
     /// than an unchanged word its freshness guard would keep ageing.
     fn zero_demand() {
-        motor::DEMAND.store(0, Ordering::Relaxed);
+        motor::DEMAND[0].store(0, Ordering::Relaxed);
         // One context writes the sequence (the main thread, with the control task's publish), so
         // a load and a store are the whole update on the Cortex-M0, which has no fetch_add.
         #[cfg(target_has_atomic = "32")]
@@ -664,10 +664,10 @@ pub mod hw {
 
     /// Watch [`motor::PERIODS`] advance, bounded by [`ARM_CONFIRM_SPINS`].
     fn confirm_periods_live() -> bool {
-        let start = motor::PERIODS.load(Ordering::Relaxed);
+        let start = motor::PERIODS[0].load(Ordering::Relaxed);
         let mut spins = ARM_CONFIRM_SPINS;
         while spins > 0 {
-            if motor::PERIODS.load(Ordering::Relaxed) != start {
+            if motor::PERIODS[0].load(Ordering::Relaxed) != start {
                 return true;
             }
             spins -= 1;
