@@ -243,6 +243,34 @@ object Checks {
 
     private fun refusal(check: Check, key: Key, msg: String) = Refusal(check, key, "${Names.pathOf(key)}: $msg")
 
+    /** Whether every pin of [g] is set (stored or by its fleet default) and its instance stored. */
+    private fun complete(g: Group, state: Map<Key, Value>): Boolean =
+        g.pins.all { (slot, _) -> slot.key in state || slot.def.fleetPin != null } &&
+            (g.instance == null || byteOf(state, g.instance.first) != null)
+
+    /**
+     * The group check for [g] (`checks::check_pins`, "complete or absent"): its refusal when it is
+     * partly stored, else null. A switched group (the IMU's `imu.model`) is all or none with its
+     * switch: on, it needs every key; off (0 or not stored), its keys may be stored or not.
+     */
+    private fun groupRefusal(g: Group, state: Map<Key, Value>): Refusal? {
+        val set = g.pins.map { (slot, _) -> slot.key in state || slot.def.fleetPin != null }
+        val instance = g.instance?.let { (k, _) -> k to byteOf(state, k) }
+        val none = set.none { it } && (instance == null || instance.second == null)
+        val on = g.switch?.let { (byteOf(state, it) ?: 0) != 0 }
+        if (complete(g, state) || on == false || (none && on != true)) return null
+        val missing = g.pins.zip(set).firstOrNull { !it.second }?.first?.first?.key
+            ?: checkNotNull(instance).first
+        return refusal(Check.GROUP, g.pins.first().first.key, "the group is incomplete: ${Names.pathOf(missing)} is not stored")
+    }
+
+    /**
+     * The group check alone, which needs no chip: each group of [state] complete, absent or
+     * switched off. Setup runs it before an `imu.model` write, with the IMU bus as the board
+     * stores it.
+     */
+    fun checkGroups(state: Map<Key, Value>): List<Refusal> = GROUPS.mapNotNull { groupRefusal(it, state) }
+
     /** Every check that needs the chip, on the board as [state] would leave it (`checks::check_pins`). */
     @Suppress("CyclomaticComplexMethod", "LongMethod", "NestedBlockDepth")
     fun checkPins(chip: Chip, state: Map<Key, Value>): List<Refusal> {
@@ -275,25 +303,10 @@ object Checks {
         // Each group: complete or absent, and a complete one routed on this chip.
         val instances = mutableMapOf<Pair<Periph, Int>, Key>()
         for (g in GROUPS) {
-            val set = g.pins.map { (slot, _) -> slot.key in state || slot.def.fleetPin != null }
+            val incomplete = groupRefusal(g, state)
+            if (incomplete != null) out += incomplete
+            if (incomplete != null || !complete(g, state)) continue
             val instance = g.instance?.let { (k, p) -> Triple(k, p, byteOf(state, k)) }
-            val all = set.all { it } && (instance == null || instance.third != null)
-            val none = set.none { it } && (instance == null || instance.third == null)
-            // A switched group: on, it is all or none with its switch, so it needs every key; off,
-            // its keys may be stored or not, and a whole bus is still routed below.
-            val on = g.switch?.let { (byteOf(state, it) ?: 0) != 0 }
-            if (on == false && !all) continue
-            if (none && on != true) continue
-            if (!all) {
-                val missing = g.pins.zip(set).firstOrNull { !it.second }?.first?.first?.key
-                    ?: checkNotNull(instance).first
-                out += refusal(
-                    Check.GROUP,
-                    g.pins.first().first.key,
-                    "the group is incomplete: ${Names.pathOf(missing)} is not stored",
-                )
-                continue
-            }
             var n: Int? = null
             if (instance != null) {
                 val (k, p, stored) = instance

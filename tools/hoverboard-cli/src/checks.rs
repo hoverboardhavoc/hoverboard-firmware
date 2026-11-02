@@ -558,6 +558,15 @@ pub fn check_values(state: &State) -> Vec<Refusal> {
     out
 }
 
+/// The first pin `entries` carry: its `af` form is checked against the chip whether or not the
+/// write changes it ([`check_forms`]).
+pub fn first_pin(entries: &[Entry]) -> Option<Key> {
+    entries.iter().map(|e| e.key).find(|k| {
+        crate::names::row_of(*k)
+            .is_some_and(|r| matches!(r.storage, Type::Pin | Type::PinAf | Type::PinAdc))
+    })
+}
+
 /// Whether writing `key` changes what the pin checks see: a pin, instance, remap, dead-time or
 /// `imu.model` key.
 pub fn needs_chip(key: Key) -> bool {

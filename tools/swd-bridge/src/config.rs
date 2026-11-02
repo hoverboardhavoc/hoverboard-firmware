@@ -4,12 +4,12 @@
 //! `CONFIG_WRITE` payload the wire carries.
 //!
 //! This is the seam the `swd-mailbox-config` bin drives to stage a whole board-layout preset
-//! (packed `port|pin` bytes, `imu.model`, scalars) over the SWD mailbox before a reboot, exactly
-//! as a configurator would push it. Type SAFETY is honored (a value that cannot parse as the
-//! field's registered type is rejected with a clear error), but there is NO board-model semantic
-//! validation here: a duplicate pin, or a gate-capable pin in a LED field, is a well-typed write
-//! that this tool passes through unchanged. The FIRMWARE's boot validator (`motorcontroller/board`) is the
-//! thing under test, so staging a deliberately-invalid layout must succeed at this layer.
+//! (pins as their `Pin`/`PinAf`/`PinAdc` bytes, `imu.model`, scalars) over the SWD mailbox before a
+//! reboot. Type SAFETY is honored (a value that cannot parse as the field's registered type is
+//! rejected with a clear error), but none of the configuration checks run here
+//! (`specs/config-read-once.md` section 4: those are `hoverboard-cli`'s and the app's): a duplicate
+//! pin, or a gate-capable pin in a LED field, is a well-typed write this tool passes through
+//! unchanged, and the firmware brings up what is stored without checking it.
 
 use std::fmt;
 

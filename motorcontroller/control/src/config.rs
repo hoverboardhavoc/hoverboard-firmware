@@ -151,8 +151,9 @@ impl GainShadow {
     /// The shadow of a board whose store carries `flash` (`CONTROL_SF_GAINS` indices 0..3, then
     /// `CONTROL_REFERENCE` indices 0..1), bounded by the compiled maxima until the arm-row read
     /// installs the stored ones ([`GainShadow::re_apply_max`], at boot and at every arm;
-    /// `specs/config-read-once.md` section 5). Out-of-range values CLAMP: a board with a bad
-    /// stored value still has to run.
+    /// `specs/config-read-once.md` section 5); the boot then calls [`GainShadow::reconcile`] with
+    /// the same words, so a stored gain above a compiled maximum and within its stored one runs as
+    /// stored. Out-of-range values CLAMP: a board with a bad stored value still has to run.
     pub const fn of_stored(flash: [i16; TUNED]) -> Self {
         let max = maxima(DEFAULT_GAIN_MAX);
         let c = clamp_all(flash, &max);

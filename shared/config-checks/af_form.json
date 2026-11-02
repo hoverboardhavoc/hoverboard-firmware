@@ -78,5 +78,26 @@
       }
     },
     "refused": "imu.sda"
+  },
+  {
+    "name": "an af of 0 on the F103",
+    "chip": "gd32f103c8",
+    "board": {
+      "links": [
+        {
+          "usart": 1,
+          "tx": {
+            "port": "A",
+            "pin": 2,
+            "af": 0
+          },
+          "rx": {
+            "port": "A",
+            "pin": 3
+          }
+        }
+      ]
+    },
+    "refused": "links[0].tx"
   }
 ]

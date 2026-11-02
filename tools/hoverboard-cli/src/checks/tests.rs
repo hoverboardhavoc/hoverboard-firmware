@@ -27,7 +27,9 @@ fn refusals(chip: Chip, board: &Json) -> Vec<Refusal> {
     let mut state = State::new();
     for e in &files.entries {
         let row = row_of(e.key).expect("a named key");
-        if let Ok((Some(b), _)) = encode(e.key, row.storage, &e.value) {
+        let (bytes, _) = encode(e.key, row.storage, &e.value)
+            .unwrap_or_else(|p| panic!("{}: {}", path_of(e.key), p.msg));
+        if let Some(b) = bytes {
             state.insert(e.key, (row.storage, b));
         }
     }
@@ -106,7 +108,9 @@ fn file_refusals(chip: Chip, files: &crate::config::Files) -> Vec<Refusal> {
     let mut state = State::new();
     for e in &files.entries {
         let row = row_of(e.key).expect("a named key");
-        if let Ok((Some(b), _)) = encode(e.key, row.storage, &e.value) {
+        let (bytes, _) = encode(e.key, row.storage, &e.value)
+            .unwrap_or_else(|p| panic!("{}: {}", path_of(e.key), p.msg));
+        if let Some(b) = bytes {
             state.insert(e.key, (row.storage, b));
         }
     }

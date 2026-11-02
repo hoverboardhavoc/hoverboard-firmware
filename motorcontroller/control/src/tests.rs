@@ -1373,6 +1373,24 @@ fn a_stored_maximum_bounds_the_boot_clamp_the_lane_and_the_reconcile() {
     assert_eq!(s.gains(), [0, 5, 5, 5]);
 }
 
+/// The boot's order (`firmware::boot`): the shadow under the compiled maxima, the arm-row
+/// function's stored maxima, then a reconcile with the same flash words. A stored gain above the
+/// compiled maximum and within the stored one runs as stored from boot.
+#[test]
+fn a_stored_gain_above_the_compiled_maximum_runs_from_boot_under_the_stored_maximum() {
+    let flash = row([22000, 4002, 197, 926], [80, 41]);
+    let mut s = GainShadow::of_stored(flash);
+    assert_eq!(
+        s.gains()[0],
+        DEFAULT_GAIN_MAX[0],
+        "the compiled bound clamps first"
+    );
+    s.re_apply_max([25000, 20000, 2000, 10000]);
+    s.reconcile(flash);
+    assert_eq!(s.gains(), [22000, 4002, 197, 926]);
+    assert_eq!(s.stored(SF_GAINS_FIELD, 0), Some(22000));
+}
+
 #[test]
 fn the_arm_time_maxima_re_apply_clamps_live_and_leaves_stored_as_read() {
     let mut s = GainShadow::of_stored(row([3491, 4002, 197, 926], [80, 41]));

@@ -2284,12 +2284,16 @@ mod firmware {
         // own level. Per board because the two halves of a chassis are mirror-mounted, which is
         // what stock's per-board cal page absorbed and the only thing its two images differed by.
         // Default 0 = untrimmed, so an unstaged board behaves exactly as before.
+        // The gain and reference words, read once: the shadow is built from them under the
+        // compiled maxima, and reconciled with them once the arm-row function has installed the
+        // stored ones (below).
+        let gains_flash = read_gains(store);
         init_shell(
             [
                 store.get(ATTITUDE_LEVEL_TRIM.at(0)),
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),
             ],
-            control::GainShadow::of_stored(read_gains(store)),
+            control::GainShadow::of_stored(gains_flash),
             // The battery-sense calibration (BOARD_BATTERY_CAL, 0 = slope / 1 = offset), boot-read
             // and seam-clamped by `VbattCal::new`, on a board that stores `battery_sense.pin` only:
             // a board that does not sense has no calibration to read.
@@ -2320,6 +2324,11 @@ mod firmware {
         // SAFETY: the shell was written just above; single-threaded boot, no task exists yet.
         if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
             re_read_arm_values(shell);
+            // The shadow was built under the compiled maxima; with the stored ones installed, a
+            // stored gain above a compiled maximum but within its stored one runs as stored, as it
+            // did when the boot read the maxima first. Nothing is tuned yet, so the reconcile
+            // moves only the words the compiled bound had clamped.
+            shell.orch.ctl.gains.reconcile(gains_flash);
         }
 
         // 3. The tick source (integration.md step-3 order: register the task table, mark the

@@ -2072,7 +2072,7 @@ class RustSourceDriftTest {
     private val boardLib by lazy { rust("motorcontroller/board/src/lib.rs") }
     private val boardStatus by lazy { rust("motorcontroller/board/src/status.rs") }
 
-    /** `NotAPin` -> `NOT_A_PIN`: a Rust variant name as the Kotlin enum spells it. */
+    /** `NotUp` -> `NOT_UP`: a Rust variant name as the Kotlin enum spells it. */
     private fun camelToScreaming(s: String): String =
         s.replace(Regex("""(?<!^)([A-Z])"""), "_$1").uppercase()
 

@@ -392,9 +392,9 @@ class LayoutModel(
      * The configuration checks on the board as the delta would leave it (`specs/config-read-once.md`
      * section 4), or null when they pass: the value checks always, and the pin checks against the
      * board's chip. A delta that touches a key the pin checks read is refused while the chip is not
-     * known, as the CLI refuses one it cannot read `TARGET_ID` for. The `af` of a pin the editor
-     * offers follows the chip ([com.hoverboard.protocol.board.candidates]), given on a mux chip and
-     * left out on one that remaps, so its form is the chip's.
+     * known, as the CLI refuses one it cannot read `TARGET_ID` for. A staged `PinAf` always carries
+     * an `af` byte; on a chip that remaps, where the store holds 0 there, a non-zero byte is an `af`
+     * given, which [Checks.checkForms] refuses, as the CLI refuses a GD32F103 file that gives one.
      */
     private fun checkFirst(s: LayoutState): LayoutNotice? {
         val staged = s.staged ?: return LayoutNotice.NotRead
@@ -403,7 +403,9 @@ class LayoutModel(
             if (s.delta.any { Checks.needsChip(it.key) }) return LayoutNotice.ChipUnknown
             Checks.checkValues(staged.values)
         } else {
-            val forms = s.delta.filter { it.def.type == Type.PinAf }.map { PinForm(it.key, afGiven = !part.remaps) }
+            val forms = s.delta.filter { it.def.type == Type.PinAf }.map {
+                PinForm(it.key, afGiven = !part.remaps || (it.of(staged) as? Value.PinAf)?.af != 0)
+            }
             Checks.run(part, staged.values, forms)
         }
         return refused.firstOrNull()?.let { LayoutNotice.CheckRefused(it) }

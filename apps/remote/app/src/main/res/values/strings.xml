@@ -487,6 +487,7 @@
     <string name="setup_notice_out_of_range">%1$s does not take that value.</string>
     <!-- %1$s is the refusal: the field\'s path and the reason. -->
     <string name="setup_notice_check_refused">Nothing was written. %1$s</string>
+    <string name="setup_notice_bus_unread">The IMU\'s pins and I2C instance have not been read from this board, so the model was not written. Refresh and set it again.</string>
     <string name="setup_notice_no_telemetry">This board has not reported its attitude.</string>
     <string name="setup_notice_not_read">The stored values this needs have not been read.</string>
     <string name="setup_notice_awaiting_arm">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up at its next arm.</string>

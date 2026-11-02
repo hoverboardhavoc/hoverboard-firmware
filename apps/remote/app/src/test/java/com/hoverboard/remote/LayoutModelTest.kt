@@ -137,6 +137,32 @@ class LayoutModelTest {
         assertEquals(emptyList<Any>(), rig.written)
     }
 
+    /**
+     * The `af` form (`shared/config-checks/af_form.json`): on the F103, which routes by its remap
+     * and stores 0 in the `af` byte, a staged pin with a non-zero `af` gives one, and the form
+     * check refuses it as the CLI refuses a GD32F103 file with an `af`.
+     */
+    @Test
+    fun anAfGivenOnTheF103IsRefusedByTheFormCheck() = runTest {
+        val rig = layoutRig(BOARD, chip = ChipTag.F103C8)
+        rig.stage(Fields.IMU_SCL_PIN, af("PB6", af = 1))
+        rig.stage(Fields.IMU_SDA_PIN, af("PB7"))
+        rig.stage(Fields.IMU_I2C, Value.U8(0))
+        rig.model.apply()
+        runCurrent()
+
+        val refused = rig.state.notice as LayoutNotice.CheckRefused
+        assertEquals(Check.AF_FORM, refused.refusal.check)
+        assertEquals(Fields.IMU_SCL_PIN.key(), refused.refusal.key)
+        assertEquals(emptyList<Any>(), rig.written)
+
+        rig.stage(Fields.IMU_SCL_PIN, af("PB6"))
+        rig.model.apply()
+        runCurrent()
+        assertNull(rig.state.notice)
+        assertEquals(3, rig.written.size)
+    }
+
     @Test
     fun applyWritesTheDeltaInFieldOrderAndMarksItUnapplied() = runTest {
         val rig = layoutRig(BOARD)

@@ -570,7 +570,7 @@ pub fn state_after(reads: &Reads, plan: &Plan) -> crate::checks::State {
 /// The checks of `specs/config-read-once.md` section 4 on the board as `plan` would leave it: the
 /// value checks always, the pin checks with the board's `chip`, and the `af` rule of the files'
 /// pins. `Err` lists every refusal; `--force` overrides none. A plan that changes a pin, instance,
-/// remap or dead-time key is refused without the chip.
+/// remap, dead-time or `imu.model` key, or files that carry a pin, is refused without the chip.
 pub fn check_plan(
     chip: Option<hal::pincap::Chip>,
     files: &Files,
@@ -585,11 +585,17 @@ pub fn check_plan(
             refused.extend(crate::checks::check_pins(c, &state));
         }
         None => {
-            if let Some(s) = plan.steps.iter().find(|s| crate::checks::needs_chip(s.key)) {
+            let key = plan
+                .steps
+                .iter()
+                .map(|s| s.key)
+                .find(|k| crate::checks::needs_chip(*k))
+                .or(crate::checks::first_pin(&files.entries));
+            if let Some(k) = key {
                 return Err(format!(
                     "{}: the pin checks need the board's chip, read as TARGET_ID through the \
                      bridge wired to it",
-                    path_of(s.key)
+                    path_of(k)
                 ));
             }
         }
@@ -1652,6 +1658,32 @@ mod tests {
         }
     }
 
+    /// A file that carries a pin has its `af` form checked whether or not the write changes the
+    /// pin: the chip is needed, and a GD32F103 refuses an `af` the board already stores as 0.
+    #[test]
+    fn a_file_with_a_pin_is_form_checked_when_the_plan_changes_nothing() {
+        let f = files(&[(
+            "b.json",
+            json!({ "imu": { "scl": { "port": "B", "pin": 6, "af": 0 } } }),
+        )]);
+        let plan = Plan::default();
+        let reads = Reads::default();
+        let e = check_plan(None, &f, &reads, &plan).unwrap_err();
+        assert!(
+            e.starts_with("imu.scl: the pin checks need the board's chip"),
+            "{e}"
+        );
+        let e = check_plan(Some(hal::pincap::Chip::Gd32f103c8), &f, &reads, &plan).unwrap_err();
+        assert_eq!(
+            e,
+            "imu.scl: the gd32f103c8 routes by its remap and stores no af: leave af out"
+        );
+        assert_eq!(
+            check_plan(Some(hal::pincap::Chip::Gd32f130c8), &f, &reads, &plan),
+            Ok(())
+        );
+    }
+
     #[test]
     fn config_reads_and_writes_one_field_with_the_spec_lines() {
         let mut lp = Loop::new();
@@ -1699,6 +1731,31 @@ mod tests {
             e,
             "rover-left: motors[1].hall.a: the group is incomplete: motors[1].hall.b is not stored"
         );
+        // The un-store path (`board set <path> null`) runs the checks on the board it would
+        // leave: with the IMU switched on, un-storing a pin leaves its group incomplete.
+        let f130 = Some(hal::pincap::Chip::Gd32f130c8);
+        for (key, text) in [
+            (
+                store::IMU_SCL_PIN.key(),
+                r#"{"port": "B", "pin": 6, "af": 1}"#,
+            ),
+            (
+                store::IMU_SDA_PIN.key(),
+                r#"{"port": "B", "pin": 7, "af": 1}"#,
+            ),
+            (store::IMU_I2C.key(), "0"),
+            (store::IMU_MODEL.key(), "2"),
+        ] {
+            config_write(&mut b, key, text, false, f130).unwrap();
+        }
+        let e = config_write(&mut b, store::IMU_SDA_PIN.key(), "null", false, f130).unwrap_err();
+        assert_eq!(
+            e,
+            "rover-left: imu.scl: the group is incomplete: imu.sda is not stored"
+        );
+        // With the IMU switched off the bus may be partly stored, so the same un-store passes.
+        config_write(&mut b, store::IMU_MODEL.key(), "0", false, f130).unwrap();
+        config_write(&mut b, store::IMU_SDA_PIN.key(), "null", false, f130).unwrap();
         // Without the chip, a pin write is refused before anything is written.
         let e = config_write(
             &mut b,

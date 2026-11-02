@@ -1256,7 +1256,8 @@ fn chip_on(wire: &mut impl Wire, addr: u8) -> Result<hal::pincap::Chip, String> 
 }
 
 /// The board checks of a plan (`specs/config-read-once.md` section 4), with the chip read when the
-/// plan changes a key the pin checks read.
+/// plan changes a key the pin checks read or the files carry a pin, whose `af` form is checked
+/// whether or not it changes.
 fn check_board(
     wire: &mut impl Wire,
     addr: u8,
@@ -1268,6 +1269,7 @@ fn check_board(
         .steps
         .iter()
         .any(|s| hoverboard_cli::checks::needs_chip(s.key))
+        || hoverboard_cli::checks::first_pin(&files.entries).is_some()
     {
         Some(chip_on(wire, addr)?)
     } else {

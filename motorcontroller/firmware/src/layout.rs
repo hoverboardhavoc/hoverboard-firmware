@@ -399,19 +399,37 @@ mod tests {
         assert_eq!(l.inputs[1], Some([0, 12]));
     }
 
-    /// The pass reads exactly the registry's pin keys and the groups' instance and remap keys, at
-    /// motor 0 and every link.
+    /// The pass reads exactly the registry's pin keys, the groups' instance and remap keys and the
+    /// IMU's switch, at motor 0 and every link, and its filter ([`KEY_LIST`]) is those keys.
     #[test]
     fn the_pass_reads_every_pin_instance_and_remap_key() {
-        let pins: Vec<Key> = store::REGISTRY
+        let pins = store::REGISTRY
             .iter()
             .filter(|e| matches!(e.kind, Type::Pin | Type::PinAf | Type::PinAdc))
             .filter(|e| e.effect == store::Effect::Boot)
-            .map(|e| e.key())
-            .collect();
-        for k in pins {
-            assert!(KEYS.iter().any(|(key, _)| *key == k), "{k:?}");
+            .map(|e| e.key());
+        let others = [
+            store::MOTOR_GATE_TIMER.at(0).key(),
+            store::MOTOR_GATE_REMAP.at(0).key(),
+            store::IMU_I2C.key(),
+            store::IMU_REMAP.key(),
+            store::IMU_MODEL.key(),
+            store::LINK_USART.at(0).key(),
+            store::LINK_REMAP.at(0).key(),
+            store::LINK_USART.at(1).key(),
+            store::LINK_REMAP.at(1).key(),
+        ];
+        let want: Vec<Key> = pins.chain(others).collect();
+        for k in &want {
+            assert!(KEYS.iter().any(|(key, _)| key == k), "{k:?} not in KEYS");
+            assert!(KEY_LIST.contains(k), "{k:?} not in the pass's filter");
         }
+        assert_eq!(
+            KEY_LIST.len(),
+            want.len() + 1,
+            "only these and the dead time"
+        );
+        assert!(KEY_LIST.contains(&store::MOTOR_DEAD_TIME.at(0).key()));
         for (k, t) in KEYS {
             let d = store::lookup_key(k).unwrap();
             assert_eq!(d.kind, t, "{k:?}");
