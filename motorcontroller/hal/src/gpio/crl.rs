@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The GD32F10x GPIO model: one 4-bit `MD`/`CTL` nibble per pin in `CTL0` (pins 0-7) and `CTL1`
 //! (pins 8-15), set/reset through `BOP`, levels in `ISTAT` (GD32F10x User Manual, section 7).
+//!
+//! The MM32SPIN05 (`hal_gpio = "mm32"`) has the same nibbles, offsets and encodings (MindMotion's
+//! `reg_gpio.h`: `CRL` `0x00`, `CRH` `0x04`, `IDR` `0x08`, `BSRR` `0x10`) and adds a per-pin
+//! alternate-function mux, `AFRL` (`0x20`, pins 0-7) and `AFRH` (`0x24`, pins 8-15), a 4-bit AF
+//! number per pin. Its alternate-function pins take the role's mux number as well as the nibble;
+//! an AF input keeps the floating-input nibble, as MindMotion's own UART samples configure RX.
 
 use super::{InputPull, PinRole};
 use crate::reg::Reg32;
@@ -29,10 +35,28 @@ fn set_nibble(port_base: u32, pin: u8, nibble: u32) {
     Reg32::new(port_base, offset).modify(0xF << shift, nibble << shift);
 }
 
+/// The MM32 mux: pin `pin`'s AF number in `AFRL`/`AFRH`.
+#[cfg(hal_gpio = "mm32")]
+const AFRL: u32 = 0x20;
+#[cfg(hal_gpio = "mm32")]
+const AFRH: u32 = 0x24;
+
+/// Write pin `pin`'s AF number into the MM32 mux.
+#[cfg(hal_gpio = "mm32")]
+#[inline]
+fn set_af(port_base: u32, pin: u8, af: u32) {
+    let n = u32::from(pin & 0x0F);
+    let (offset, within) = if n < 8 { (AFRL, n) } else { (AFRH, n - 8) };
+    let shift = 4 * within;
+    Reg32::new(port_base, offset).modify(0xF << shift, af << shift);
+}
+
 /// An alternate-function pin. The F10x has no per-pin mux: the role picks the nibble, and the
-/// AFIO remap (if any) is the caller's.
+/// AFIO remap (if any) is the caller's. The MM32 sets the role's mux number first, then the nibble.
 pub(crate) fn configure_af(port_base: u32, pin: u8, role: PinRole) {
     let cfg = role.config();
+    #[cfg(hal_gpio = "mm32")]
+    set_af(port_base, pin, cfg.af);
     let nibble = if !cfg.output {
         INPUT_FLOATING
     } else if cfg.open_drain {

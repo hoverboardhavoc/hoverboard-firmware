@@ -38,7 +38,7 @@ WORKSPACES=(motorcontroller shared tools)
 # The HAL builds for exactly one chip (specs/hal.md section 3.2), so its host tests run once per chip
 # feature, after the suites above. `motorcontroller/Cargo.toml`'s default-members leave it out of
 # the plain motorcontroller run, which could not build it.
-HAL_CHIPS=(gd32f103c8 gd32f130c8 gd32f103rc)
+HAL_CHIPS=(gd32f103c8 gd32f130c8 gd32f103rc mm32spin05)
 
 refuse_board_target() {
   echo "tools/host-test.sh: refusing '$1'." >&2

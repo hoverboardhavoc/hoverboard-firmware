@@ -4,6 +4,11 @@
 //! The tree (`CTL`, `CFG0`, the PLL) has the same layout on the F10x RCC and the F1x0 RCU; what
 //! differs is the model's enable-bit map, the flash wait states, the top system clock and the ADC
 //! clock select, which live in `clock/f10x.rs` and `clock/f1x0.rs`.
+//!
+//! The MM32SPIN05's RCC (`clock/mm32.rs`) has no PLL: its tree is the HSI's 72 MHz output, so it
+//! brings its own [`ClockConfig`] and [`configure_tree`]. Its enable registers, the IRC40K (LSI)
+//! control and the reset-cause flags are at the GD32 offsets with the GD32 bits, so the enables and
+//! the reset-cause calls here are shared.
 
 #[cfg(hal_clock = "f10x")]
 #[path = "clock/f10x.rs"]
@@ -11,12 +16,21 @@ mod model;
 #[cfg(hal_clock = "f1x0")]
 #[path = "clock/f1x0.rs"]
 mod model;
+#[cfg(hal_clock = "mm32")]
+#[path = "clock/mm32.rs"]
+mod model;
+
+#[cfg(hal_clock = "mm32")]
+pub use model::{configure_tree, ClockConfig};
 
 use crate::addr::PeriphLabel;
-use crate::chip::{Chip, ClockPath};
+#[cfg(not(hal_clock = "mm32"))]
+use crate::chip::Chip;
+use crate::chip::ClockPath;
 use crate::error::{ClockError, DescriptorError};
 use crate::reg::Reg32;
 
+#[cfg(not(hal_clock = "mm32"))]
 const CTL: u32 = 0x00;
 const CFG0: u32 = 0x04;
 const AHBEN: u32 = 0x14;
@@ -24,10 +38,13 @@ const APB2EN: u32 = 0x18;
 const APB1EN: u32 = 0x1C;
 const RSTSCK: u32 = 0x24;
 
+#[cfg(not(hal_clock = "mm32"))]
 const CFG0_ADCPSC: u32 = 0b11 << 14;
+#[cfg(not(hal_clock = "mm32"))]
 const ADCPSC_DIV6: u32 = 2 << 14;
 
 /// The system clock source the PLL runs from.
+#[cfg(not(hal_clock = "mm32"))]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockSource {
@@ -38,6 +55,7 @@ pub enum ClockSource {
 }
 
 /// A clock tree: the system clock, the PLL source and multiplier, and the bus prescalers.
+#[cfg(not(hal_clock = "mm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockConfig {
     /// The resulting system clock, Hz (what every delay and divider converts against).
@@ -54,6 +72,7 @@ pub struct ClockConfig {
     pub apb2_psc: u16,
 }
 
+#[cfg(not(hal_clock = "mm32"))]
 impl ClockConfig {
     /// The fleet's tree: IRC8M / 2 x 18 = 72 MHz, AHB / 1, APB1 / 2 (36 MHz), APB2 / 1.
     pub const REFERENCE_72M_IRC8M: ClockConfig = ClockConfig {
@@ -96,7 +115,7 @@ impl ClockConfig {
     }
 }
 
-/// The `CFG0.AHBPSC` code for an AHB divider.
+/// The `CFG0.AHBPSC` code for an AHB divider (the MM32's `CFGR.HPRE`, the same codes).
 const fn ahb_psc_code(div: u16) -> Option<u32> {
     Some(match div {
         1 => 0,
@@ -112,7 +131,7 @@ const fn ahb_psc_code(div: u16) -> Option<u32> {
     })
 }
 
-/// The `CFG0.APBxPSC` code for an APB divider.
+/// The `CFG0.APBxPSC` code for an APB divider (the MM32's `CFGR.PPREx`, the same codes).
 const fn apb_psc_code(div: u16) -> Option<u32> {
     Some(match div {
         1 => 0,
@@ -126,6 +145,7 @@ const fn apb_psc_code(div: u16) -> Option<u32> {
 
 /// The `CFG0.PLLMF` bits for a multiplier: bits 21:18 hold `mul - 2` for 2..=16, and bit 27 extends
 /// the field for 17..=32 (`mul - 17` in 21:18).
+#[cfg(not(hal_clock = "mm32"))]
 const fn pll_mul_bits(mul: u8) -> u32 {
     let m = mul as u32;
     if m <= 16 {
@@ -202,6 +222,7 @@ pub fn enable_i2c(
 }
 
 /// Enable SPI0's clock (`APB2EN` bit 12 on both models).
+#[cfg(hal_spi = "gd")]
 pub fn enable_spi(
     rcu_base: u32,
     _path: ClockPath,
@@ -310,28 +331,45 @@ pub fn clear_reset_cause(rcu_base: u32) {
     Reg32::new(rcu_base, RSTSCK).set_bits(RSTSCK_RSTFC);
 }
 
+#[cfg(not(hal_clock = "mm32"))]
 const CTL_IRC8MEN: u32 = 1 << 0;
+#[cfg(not(hal_clock = "mm32"))]
 const CTL_IRC8MSTB: u32 = 1 << 1;
+#[cfg(not(hal_clock = "mm32"))]
 const CTL_HXTALEN: u32 = 1 << 16;
+#[cfg(not(hal_clock = "mm32"))]
 const CTL_HXTALSTB: u32 = 1 << 17;
+#[cfg(not(hal_clock = "mm32"))]
 const CTL_PLLEN: u32 = 1 << 24;
+#[cfg(not(hal_clock = "mm32"))]
 const CTL_PLLSTB: u32 = 1 << 25;
+#[cfg(not(hal_clock = "mm32"))]
 const CFG0_SCS: u32 = 0b11;
+#[cfg(not(hal_clock = "mm32"))]
 const CFG0_SCSS: u32 = 0b11 << 2;
+#[cfg(not(hal_clock = "mm32"))]
 const CFG0_AHBPSC: u32 = 0b1111 << 4;
+#[cfg(not(hal_clock = "mm32"))]
 const CFG0_APB1PSC: u32 = 0b111 << 8;
+#[cfg(not(hal_clock = "mm32"))]
 const CFG0_APB2PSC: u32 = 0b111 << 11;
+#[cfg(not(hal_clock = "mm32"))]
 const CFG0_PLLSEL: u32 = 1 << 16;
+#[cfg(not(hal_clock = "mm32"))]
 const CFG0_PLLMF: u32 = (1 << 27) | (0b1111 << 18);
+#[cfg(not(hal_clock = "mm32"))]
 const SCS_PLL: u32 = 0b10;
+#[cfg(not(hal_clock = "mm32"))]
 const SCSS_PLL: u32 = 0b10 << 2;
 
+#[cfg(not(hal_clock = "mm32"))]
 const FMC_WS_WSCNT: u32 = 0b111;
 
 /// Program the tree: flash wait states first, then the source and its stable poll, the bus
 /// prescalers, the PLL source and multiplier, PLL enable and its lock poll, and the switch to the
 /// PLL with its read-back confirm. Each poll spins until its flag is up (a source that never comes
 /// up is a board fault the image cannot run without).
+#[cfg(not(hal_clock = "mm32"))]
 pub fn configure_tree(chip: &Chip, clock: &ClockConfig) -> Result<(), ClockError> {
     clock.validate()?;
     let rcu = match chip.rcu_base() {
@@ -376,6 +414,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(hal_clock = "mm32"))]
     fn the_fleet_tree_validates_and_runs_the_buses_at_72_and_36() {
         let c = ClockConfig::REFERENCE_72M_IRC8M;
         assert_eq!(c.validate(), Ok(()));
@@ -386,6 +425,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_clock = "mm32"))]
     fn bad_trees_are_refused() {
         let base = ClockConfig::REFERENCE_72M_IRC8M;
         let pll = ClockConfig { pll_mul: 1, ..base };
@@ -413,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_clock = "mm32"))]
     fn pll_multiplier_codes_follow_the_split_field() {
         assert_eq!(pll_mul_bits(2), 0);
         assert_eq!(pll_mul_bits(16), 14 << 18);
@@ -425,7 +466,11 @@ mod tests {
     #[test]
     fn wait_states_are_zero_at_reset_speed_and_the_models_value_above() {
         assert_eq!(model::wait_states(8_000_000), 0);
-        let want = if cfg!(hal_clock = "f10x") { 2 } else { 1 };
+        let want = if cfg!(any(hal_clock = "f10x", hal_clock = "mm32")) {
+            2
+        } else {
+            1
+        };
         assert_eq!(model::wait_states(72_000_000), want);
     }
 

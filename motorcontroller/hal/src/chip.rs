@@ -103,7 +103,7 @@ impl Chip {
     }
 
     /// The factory unique ID, read from the signature block at the descriptor's `UniqueId` base
-    /// (`0x1FFF_F7E8` on the GD32F10x, `0x1FFF_F7AC` on the GD32F1x0).
+    /// (`0x1FFF_F7E8` on the GD32F10x and the MM32SPIN05, `0x1FFF_F7AC` on the GD32F1x0).
     pub fn unique_id(&self) -> UniqueId {
         const BASE: u32 = match DESCRIPTOR.addrs.get(PeriphLabel::UniqueId) {
             Some(b) => b,
@@ -193,6 +193,10 @@ impl Chip {
 
     /// Route a general-timer PWM pin (TIMER1). On the F10x the TIMER1 outputs reach PB3 through the
     /// AFIO partial remap 0, and PB3 is a JTAG pin until the SWJ field frees it.
+    ///
+    /// Not on the Cortex-M0 build: there TIMER1 (the MM32's 32-bit TIM2) is the HAL's own cycle
+    /// counter (`irq::cycle_count`), which the M0 has no DWT for.
+    #[cfg(hal_core = "m3")]
     pub fn route_general_pwm_pin(&self, pin: u8) -> Result<(), DescriptorError> {
         pincap::check_pin_ownership(self, pin, PinClaim::NonGate)?;
         let base = self.clocked_port_base(pin)?;
@@ -207,6 +211,7 @@ impl Chip {
     }
 
     /// Route an SPI pin: `SpiAfPushPull` for SCK, MOSI and a hardware NSS, `SpiInput` for MISO.
+    #[cfg(hal_spi = "gd")]
     pub fn route_spi_pin(&self, pin: u8, role: PinRole) -> Result<(), DescriptorError> {
         if !matches!(role, PinRole::SpiAfPushPull | PinRole::SpiInput) {
             return Err(DescriptorError::UnsupportedRole);

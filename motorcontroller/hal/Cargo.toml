@@ -7,7 +7,7 @@ edition = "2021"
 # the images that depend on this crate (`DEP_HAL_FLASH_KIB` and the rest; firmware/build.rs sizes the
 # per-chip linker regions from them).
 links = "hal"
-description = "The hoverboard HAL (specs/hal.md): one source for the GD32F103C8, GD32F130C8 and GD32F103RC, with the chip chosen at compile time by exactly one cargo feature. Each chip is a const descriptor plus one register model per peripheral; the image links the chip's flash vector table through cortex-m-rt's `device` feature. No detection, no RAM vector table."
+description = "The hoverboard HAL (specs/hal.md): one source for the GD32F103C8, GD32F130C8, GD32F103RC and MM32SPIN05, with the chip chosen at compile time by exactly one cargo feature. Each chip is a const descriptor plus one register model per peripheral; the image links the chip's flash vector table through cortex-m-rt's `device` feature. No detection, no RAM vector table."
 
 [dependencies]
 cortex-m = "0.7"
@@ -29,3 +29,4 @@ cortex-m-rt = { version = "0.7", features = ["device"] }
 gd32f103c8 = []
 gd32f130c8 = []
 gd32f103rc = []
+mm32spin05 = []

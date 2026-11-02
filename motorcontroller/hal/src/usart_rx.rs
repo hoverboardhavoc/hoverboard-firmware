@@ -4,7 +4,7 @@
 //! A circular DMA channel fills an application-owned `'static` buffer while the CPU does no
 //! per-byte work. The reader drains the bytes behind the live write position (`len - CHCNT`) and
 //! detects a lapped cursor from the lap count the channel's vector keeps. The USART's own vector
-//! takes the idle-line and line-error interrupts: it clears their flags (the vector is
+//! takes the idle-line (not on the MM32, which has none) and line-error interrupts: it clears their flags (the vector is
 //! level-sensitive) and records a line error for the reader.
 //!
 //! Both loss conditions are recovered in place with the channel left running: the reader drops the
@@ -342,6 +342,8 @@ macro_rules! usart_vectors {
 usart_vectors!(USART0, USART1, USART2);
 #[cfg(hal_usart = "f1x0")]
 usart_vectors!(USART0, USART1);
+#[cfg(hal_usart = "mm32")]
+usart_vectors!(UART1, UART2);
 
 #[cfg(test)]
 mod tests {

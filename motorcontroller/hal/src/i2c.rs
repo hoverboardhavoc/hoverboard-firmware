@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The I2C master: bring-up, polled transfers and the `embedded-hal` 1.0 `i2c::I2c` trait.
 //!
-//! One register model on every chip this HAL builds: the GD32F10x and GD32F1x0 carry the same
-//! event-based block (`gd32f10x_i2c.h` and `gd32f1x0_i2c.h` agree on every offset and bit used
-//! here), so there is no `hal_i2c` model cfg. The instance is a base from the descriptor; the bus
-//! clock is APB1 from the [`ClockConfig`].
+//! Two register models (`hal_i2c`). The GD32F10x and GD32F1x0 carry the same event-based block
+//! (`gd32f10x_i2c.h` and `gd32f1x0_i2c.h` agree on every offset and bit used here), the `gd` model
+//! in this file. The MM32SPIN05 carries a DesignWare-style block with command and data FIFOs, the
+//! `mm32` model in `i2c/mm32.rs`, which shares this file's bus clear, time budget and bus modes.
+//! The instance is a base from the descriptor; the bus clock is APB1 from the [`ClockConfig`].
+//!
+//! The rest of this header is the `gd` model.
 //!
 //! | Register | Offset | Used here |
 //! |---|---|---|
@@ -46,66 +49,117 @@
 //! motor's demand-stale coast, because the IMU read is the control task's one blocking call and the
 //! commutation ISR floats the phases when the control task goes quiet past the coast.
 
+#[cfg(hal_i2c = "gd")]
 use core::cell::Cell;
 
+#[cfg(hal_i2c = "gd")]
 use embedded_hal::i2c::{ErrorType, Operation, SevenBitAddress};
 
+#[cfg(hal_i2c = "gd")]
 use crate::addr::PeriphLabel;
+#[cfg(hal_i2c = "gd")]
 use crate::chip::Chip;
+#[cfg(hal_i2c = "gd")]
 use crate::clock::ClockConfig;
+#[cfg(hal_i2c = "gd")]
 use crate::error::{DescriptorError, I2cError};
-use crate::gpio::{self, Floating, Input, Pin, PinRole};
+#[cfg(hal_i2c = "gd")]
+use crate::gpio::{Floating, Input, Pin};
+use crate::gpio::{self, PinRole};
+#[cfg(hal_i2c = "gd")]
 use crate::pincap::{self, PinClaim};
+#[cfg(hal_i2c = "gd")]
 use crate::reg::Reg32;
 
+#[cfg(hal_i2c = "mm32")]
+#[path = "i2c/mm32.rs"]
+mod mm32;
+#[cfg(hal_i2c = "mm32")]
+pub use mm32::I2c;
+
+#[cfg(hal_i2c = "gd")]
 const CTL0: u32 = 0x00;
+#[cfg(hal_i2c = "gd")]
 const CTL1: u32 = 0x04;
+#[cfg(hal_i2c = "gd")]
 const SADDR0: u32 = 0x08;
+#[cfg(hal_i2c = "gd")]
 const DATA: u32 = 0x10;
+#[cfg(hal_i2c = "gd")]
 const STAT0: u32 = 0x14;
+#[cfg(hal_i2c = "gd")]
 const STAT1: u32 = 0x18;
+#[cfg(hal_i2c = "gd")]
 const CKCFG: u32 = 0x1C;
+#[cfg(hal_i2c = "gd")]
 const RT: u32 = 0x20;
 
+#[cfg(hal_i2c = "gd")]
 const CTL0_I2CEN: u32 = 1 << 0;
+#[cfg(hal_i2c = "gd")]
 const CTL0_SMBEN: u32 = 1 << 1;
+#[cfg(hal_i2c = "gd")]
 const CTL0_START: u32 = 1 << 8;
+#[cfg(hal_i2c = "gd")]
 const CTL0_STOP: u32 = 1 << 9;
+#[cfg(hal_i2c = "gd")]
 const CTL0_ACKEN: u32 = 1 << 10;
 /// With `POAP` set, `ACKEN` governs the next byte rather than the current one (Solution B, N = 2).
+#[cfg(hal_i2c = "gd")]
 const CTL0_POAP: u32 = 1 << 11;
+#[cfg(hal_i2c = "gd")]
 const CTL0_SRESET: u32 = 1 << 15;
 
+#[cfg(hal_i2c = "gd")]
 const CTL1_I2CCLK: u32 = 0x7F;
+#[cfg(hal_i2c = "gd")]
 const CKCFG_CLKC: u32 = 0xFFF;
+#[cfg(hal_i2c = "gd")]
 const CKCFG_DTCY: u32 = 1 << 14;
+#[cfg(hal_i2c = "gd")]
 const CKCFG_FAST: u32 = 1 << 15;
 /// The `SADDR0` bits the vendor's `i2c_mode_addr_config` masks the address with.
+#[cfg(hal_i2c = "gd")]
 const SADDR0_MASK: u32 = 0x3FF;
 
+#[cfg(hal_i2c = "gd")]
 const STAT0_SBSEND: u32 = 1 << 0;
+#[cfg(hal_i2c = "gd")]
 const STAT0_ADDSEND: u32 = 1 << 1;
+#[cfg(hal_i2c = "gd")]
 const STAT0_BTC: u32 = 1 << 2;
+#[cfg(hal_i2c = "gd")]
 const STAT0_RBNE: u32 = 1 << 6;
+#[cfg(hal_i2c = "gd")]
 const STAT0_TBE: u32 = 1 << 7;
+#[cfg(hal_i2c = "gd")]
 const STAT0_BERR: u32 = 1 << 8;
+#[cfg(hal_i2c = "gd")]
 const STAT0_LOSTARB: u32 = 1 << 9;
+#[cfg(hal_i2c = "gd")]
 const STAT0_AERR: u32 = 1 << 10;
+#[cfg(hal_i2c = "gd")]
 const STAT0_OUERR: u32 = 1 << 11;
 /// The sticky error flags, cleared by writing 0.
+#[cfg(hal_i2c = "gd")]
 const STAT0_ERRORS: u32 = STAT0_BERR | STAT0_LOSTARB | STAT0_AERR | STAT0_OUERR;
 
+#[cfg(hal_i2c = "gd")]
 const STAT1_MASTER: u32 = 1 << 0;
+#[cfg(hal_i2c = "gd")]
 const STAT1_I2CBSY: u32 = 1 << 1;
 
 /// The vendor's clamp bounds for `I2CCLK` and the standard-mode `RT`.
+#[cfg(hal_i2c = "gd")]
 const I2CCLK_MAX: u32 = 0x48;
+#[cfg(hal_i2c = "gd")]
 const I2CCLK_MIN: u32 = 0x02;
 
 /// The own address written to `SADDR0`, as the raw register value (the vendor call takes it
 /// positioned, not as a 7-bit address to shift). A bus master is never addressed, so the value only
 /// has to match what the vendor bring-up writes in the golden trace; `0x24` is `runtime-hal`'s
 /// bench-validated value.
+#[cfg(hal_i2c = "gd")]
 const OWN_ADDR: u32 = 0x24;
 
 /// SCL pulses a bus clear issues at most: a stuck byte's eight data clocks and its ACK clock (NXP
@@ -203,6 +257,7 @@ impl I2cMode {
 }
 
 /// The three timing register values.
+#[cfg(hal_i2c = "gd")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct I2cTiming {
     /// `CTL1.I2CCLK`.
@@ -222,6 +277,7 @@ struct I2cTiming {
 ///   `CKCFG = max(pclk1 / (2 * speed), 4)`, masked to `CLKC`.
 /// - Fast: `RT = I2CCLK * 300 / 1000 + 1`; `CLKC = pclk1 / (3 * speed)` at duty 2 or
 ///   `pclk1 / (25 * speed)` with `DTCY` at 16/9, forced to at least 1; `CKCFG = FAST | DTCY | CLKC`.
+#[cfg(hal_i2c = "gd")]
 const fn timing_for(pclk1_hz: u32, mode: I2cMode) -> Option<I2cTiming> {
     let speed = mode.speed_hz;
     if speed == 0 || speed > 400_000 {
@@ -298,6 +354,7 @@ fn bus_clear(
 }
 
 /// Whether an `AERR` seen while polling is an address or a data NACK.
+#[cfg(hal_i2c = "gd")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Nack {
     Address,
@@ -308,6 +365,7 @@ enum Nack {
 ///
 /// Not `Clone`: it carries the budget left in the acquisition in flight, and a copy would be a
 /// second handle on the peripheral with its own count.
+#[cfg(hal_i2c = "gd")]
 #[derive(Debug)]
 pub struct I2c {
     base: u32,
@@ -343,6 +401,7 @@ impl BusPins {
     }
 }
 
+#[cfg(hal_i2c = "gd")]
 impl I2c {
     /// Bring up `instance` as a master on `pins` (SCL, SDA) at `mode`.
     ///
@@ -687,6 +746,7 @@ impl I2c {
 }
 
 /// Which budget a recovery's STOP wait draws on.
+#[cfg(hal_i2c = "gd")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Budget {
     /// The acquisition's, for the recovery inside the bus-idle wait (most of it is left there).
@@ -768,10 +828,12 @@ fn settle(cycles: u32) {
     let _ = cycles;
 }
 
+#[cfg(hal_i2c = "gd")]
 impl ErrorType for I2c {
     type Error = I2cError;
 }
 
+#[cfg(hal_i2c = "gd")]
 impl embedded_hal::i2c::I2c<SevenBitAddress> for I2c {
     /// The operations as one transaction on `address`. A write is followed by a repeated START
     /// unless it is the last operation, which ends with a STOP; a read always ends with a STOP
@@ -813,9 +875,11 @@ impl embedded_hal::i2c::I2c<SevenBitAddress> for I2c {
 mod tests {
     use super::*;
 
+    #[cfg(hal_i2c = "gd")]
     const APB1_36M: u32 = 36_000_000;
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn standard_100k_at_36mhz_is_the_vendor_value() {
         // The bringup_i2c0_100k golden: I2CCLK 0x24, RT 0x25, CKCFG 0xB4.
         let t = timing_for(APB1_36M, I2cMode::standard(100_000)).unwrap();
@@ -824,12 +888,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn standard_at_the_8mhz_reset_clock() {
         let t = timing_for(8_000_000, I2cMode::standard(100_000)).unwrap();
         assert_eq!((t.i2cclk, t.rt, t.ckcfg), (8, 9, 40));
     }
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn standard_clamps_clkc_and_rt() {
         // CLKC at least 4: 0.5 MHz / (2 * 100 kHz) = 2.
         let t = timing_for(500_000, I2cMode::standard(100_000)).unwrap();
@@ -842,6 +908,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn fast_400k_duty_two() {
         // 36 MHz / (3 * 400 kHz) = 30; RT = 36 * 300 / 1000 + 1 = 11.
         let t = timing_for(APB1_36M, I2cMode::fast(400_000, FastDuty::Two)).unwrap();
@@ -850,6 +917,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn fast_400k_duty_sixteen_ninths() {
         // 36 MHz / (25 * 400 kHz) = 3, with DTCY.
         let t = timing_for(APB1_36M, I2cMode::fast(400_000, FastDuty::SixteenNine)).unwrap();
@@ -857,6 +925,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn fast_forces_clkc_to_at_least_one() {
         // 8 MHz / (25 * 400 kHz) = 0, forced to 1.
         let t = timing_for(8_000_000, I2cMode::fast(400_000, FastDuty::SixteenNine)).unwrap();
@@ -864,6 +933,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn the_speed_picks_the_mode() {
         // fast() at 100 kHz is standard mode, as the vendor call decides by speed.
         let t = timing_for(APB1_36M, I2cMode::fast(100_000, FastDuty::SixteenNine)).unwrap();
@@ -873,6 +943,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn speeds_the_vendor_leaves_unprogrammed_are_refused() {
         assert_eq!(timing_for(APB1_36M, I2cMode::standard(0)), None);
         assert_eq!(
@@ -882,6 +953,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(hal_i2c = "gd")]
     fn the_fleet_tree_feeds_36mhz_to_the_block() {
         assert_eq!(ClockConfig::REFERENCE_72M_IRC8M.apb1_hz(), APB1_36M);
     }
