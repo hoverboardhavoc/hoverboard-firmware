@@ -99,6 +99,9 @@ use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 #[cfg(feature = "ble")]
 mod ble;
 
+#[cfg(test)]
+mod machine_update_sim;
+
 /// What a build without the `ble` cargo feature (the bench Pi's) says for a BLE link or `scan`
 /// (`specs/bridge-onboarding.md` section 4.2).
 #[cfg(not(feature = "ble"))]
@@ -953,9 +956,14 @@ fn bridge_link(name: &str, addr: u8) -> Result<Link, String> {
     Err(format!("{tried}; no BLE in this build"))
 }
 
+/// How `machine update` opens a bridge's own link from its `device.name` and address:
+/// [`bridge_link`], or the simulated machine's ports in the tests.
+type ByName<'a> = &'a dyn Fn(&str, u8) -> Result<Link, String>;
+
 /// `machine update`'s device steps on the real links.
 struct Machine<'a> {
     given: &'a Link,
+    by_name: ByName<'a>,
     bundle: &'a Bundle,
     plan: &'a fleet::Plan,
 }
@@ -970,7 +978,7 @@ impl fleet::Steps for Machine<'_> {
             reaches(self.given, b.addr)?;
             return Ok(self.given.clone());
         }
-        let link = bridge_link(&b.name, b.addr)?;
+        let link = (self.by_name)(&b.name, b.addr)?;
         eprintln!("{}: reached on its own link", b.name);
         Ok(link)
     }
@@ -998,7 +1006,7 @@ impl fleet::Steps for Machine<'_> {
             let link = if pair.given {
                 reaches(self.given, b.addr).map(|()| self.given.clone())
             } else {
-                bridge_link(&b.name, b.addr)
+                (self.by_name)(&b.name, b.addr)
             };
             match link {
                 Ok(l) => return Ok(l),
@@ -1067,6 +1075,11 @@ impl fleet::Steps for Machine<'_> {
 /// link's pair last, stop at the first failure, and report over the given link. Exits 1 unless
 /// every pair is done.
 fn machine_update(link: &Link, path: &str, yes: bool) -> Result<u8, String> {
+    machine_update_with(link, path, yes, &bridge_link)
+}
+
+/// [`machine_update`], with each bridge's own link opened by `by_name`.
+fn machine_update_with(link: &Link, path: &str, yes: bool, by_name: ByName) -> Result<u8, String> {
     let b = read_bundle(path)?;
     let mut wire = wire_on(link)?;
     let w = walk(&mut wire)?;
@@ -1103,6 +1116,7 @@ fn machine_update(link: &Link, path: &str, yes: bool) -> Result<u8, String> {
     )?;
     let mut steps = Machine {
         given: link,
+        by_name,
         bundle: &b,
         plan: &plan,
     };
