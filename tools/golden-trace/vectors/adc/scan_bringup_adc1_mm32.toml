@@ -7,6 +7,12 @@
 # by TIM1's TRGO, read from the per-channel data registers ADDR2 and ADDR6 (scan_read_adc1_mm32). The
 # sample time is one field for every channel (ADCFG.SAMCTL), so the two channels share it. There is
 # no calibration step: the part's ADC has none (reg_adc.h carries no calibration bits).
+#
+# The bring-up ends, on both sides, with ADCR.ADST cleared (LibSamples' ADC_SoftwareStartConvCmd
+# DISABLE, a read-modify-write) and ADIF cleared (ADC_ClearFlag). That is a bench finding, not
+# LibSamples' sample: on the MM32SPIN05 the trigger enable started a scan at once and left ADST
+# set, after which the ADC took no trigger (specs/bench-work/mm32/hal-step3/logs/v08-adc-live.txt,
+# v16-motor-verify-adc-trace.txt); the HAL's bring-up clears both, so the vendor body does too.
 description = """
 ADC1's timer-triggered scan for the phase currents on the MM32SPIN05: channels 2 (PA2) and 6 (PA6),
 the PFOP part's op-amp outputs (specs/agent-runs/mm32-poc-report.md), at 7.5 cycles, left-aligned,
@@ -38,6 +44,8 @@ body = '''
     ADC_ITConfig(ADC1, ADC_IT_EOC, ENABLE);
     ADC_ExternalTrigConvCmd(ADC1, ENABLE);
     ADC_Cmd(ADC1, ENABLE);
+    ADC_SoftwareStartConvCmd(ADC1, DISABLE);
+    ADC_ClearFlag(ADC1, ADC_IT_EOC);
 '''
 
 [hal]

@@ -3,7 +3,11 @@
 # defines:  (none)
 # compiler: arm-none-eabi-gcc (Arm GNU Toolchain 15.2.Rel1 (Build arm-15.86)) 15.2.1 20251203
 # cflags:   -Os -mcpu=cortex-m0 -mthumb -std=gnu11 -ffreestanding -fno-common -ffunction-sections -fdata-sections -Wall -Wno-unused-function
+R4 <RCC_BASE>+0x18 0x00000000      # APB2ENR
+W4 <RCC_BASE>+0x18 0x00400000      # APB2ENR
 R4 <DBGMCU_BASE>+0x04 0x00000000   # CR
 W4 <DBGMCU_BASE>+0x04 0x00000400   # CR
+R4 <RCC_BASE>+0x18 0x00400000      # APB2ENR
+W4 <RCC_BASE>+0x18 0x00400000      # APB2ENR
 R4 <DBGMCU_BASE>+0x04 0x00000400   # CR
 W4 <DBGMCU_BASE>+0x04 0x00000500   # CR

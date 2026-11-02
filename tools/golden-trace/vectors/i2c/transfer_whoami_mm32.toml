@@ -14,10 +14,10 @@
 # ENR |= ABORT, a poll until it clears, a read of the TX_ABRT clear register; then a STOP_DET poll.
 #
 # Outside the assertion, and why: the HAL waits for the master to be idle (SR.MST_ACTIV) before it
-# sets TAR, and clears a stale abort (a read of TX_ABRT, 0x54) after it, both at the start of an
-# acquisition, where the sample assumes an idle block; it does not wait for STOP_DET after the
-# abort (the flag is sticky and the sample never clears it, so after the first transfer that wait
-# passes at once). The SR polls of the write and the read are the vendor's.
+# sets TAR, and clears a stale abort and STOP_DET (reads of 0x54 and 0x60) after it, at the start of
+# an acquisition, where the sample assumes an idle block and never clears STOP_DET (so after its
+# first transfer its STOP_DET wait passes at once). The SR polls of the write and the read and the
+# STOP_DET wait after the abort are the vendor's.
 description = """
 The IMU's WHO_AM_I read on the MM32SPIN05: write the register pointer 0x75 to address 0x69 (the
 master board's MPU-6050 clone), read one byte, end the transfer.

@@ -78,6 +78,17 @@ pub const TRGSEL_T1_TRGO: u32 = 0b01 << 17;
 /// TIMER0 channel 3 the HAL numbers from 0.
 pub const TRGSEL_T1_CC4: u32 = 0b10 << 17;
 
+/// Core cycles between `ADEN` and the trigger enable: 10 us at 72 MHz against the datasheet's
+/// 1 us typical power-on time (`tSTAB`, DS_MM32SPIN05 table 36).
+pub const ADC_STAB_CYCLES: u32 = 720;
+
+/// Wait out the converter's power-on time (the host has no converter).
+#[inline(always)]
+fn settle() {
+    #[cfg(target_arch = "arm")]
+    cortex_m::asm::delay(ADC_STAB_CYCLES);
+}
+
 /// Polls of a conversion flag before the wait gives up, as on the GD32 model.
 const ADC_TIMEOUT: u32 = 100_000;
 
@@ -266,9 +277,18 @@ impl TriggeredAdc for InjectedAdcController {
     type Handle = InjectedHandle;
 
     /// Configure `cfg.adc` as the timer-triggered scan of `cfg.channels` and switch it on: the
-    /// clock divider (`cfg.clock_div`), the sample time and the sensor enables in `ADCFG`, the channel bitmap in `ADCHS`, then `ADCR`
-    /// (scan mode, the alignment, the trigger select from [`etsic_for_link`] and its enable, the
-    /// end-of-scan interrupt), then `ADEN`.
+    /// clock divider (`cfg.clock_div`), the sample time and the sensor enables in `ADCFG`, the
+    /// channel bitmap in `ADCHS`, `ADEN` and the converter's power-on time ([`ADC_STAB_CYCLES`]),
+    /// then `ADCR` (scan mode, the alignment, the trigger select from [`etsic_for_link`] and its
+    /// enable, the end-of-scan interrupt), then `ADST` and `ADIF` cleared.
+    ///
+    /// On the bench MM32SPIN05 the write that enables the trigger (TRGO = TIM1's channel 4
+    /// compare, the counter not yet started) started a scan at once: right after the bring-up
+    /// `ADCR.ADST` read 1 and `ADSTA` showed a finished scan, and with `ADST` left set the block
+    /// took no trigger again, `ADIF` never rose and the data froze
+    /// (`specs/bench-work/mm32/hal-step3/logs/v08-adc-live.txt`, `v16-motor-verify-adc-trace.txt`).
+    /// A write of `ADCR` with `ADST` clear restarted it, after which it converted once per trigger
+    /// with `ADST` reading 0 (`v11`, `v12`, `v14`). Hence the clear.
     ///
     /// Refused before any register access: a label that is not an ADC (`Unsupported`), one the
     /// chip does not carry (`MissingBase`), no channel, a channel with no data register, a channel
@@ -306,8 +326,14 @@ impl TriggeredAdc for InjectedAdcController {
         }
         .apply(base);
         Reg32::new(base, ADCHS).write(bitmap);
-        group_adcr(cfg.left_aligned, trgsel).apply(base);
+        // The converter on, and its power-on time, before the trigger is enabled.
         Reg32::new(base, ADCFG).set_bits(ADCFG_ADEN);
+        settle();
+        group_adcr(cfg.left_aligned, trgsel).apply(base);
+        // The scan the trigger enable may have started: ADST cleared, its ADIF with it.
+        let adcr = Reg32::new(base, ADCR);
+        adcr.write(adcr.read() & !ADCR_ADST);
+        Reg32::new(base, ADSTA).write(ADSTA_ADIF);
         Ok(InjectedHandle::new(base, &cfg.channels))
     }
 }
@@ -343,12 +369,16 @@ impl InjectedHandle {
         self.sta.write(ADSTA_ADIF);
     }
 
-    /// Set the trigger enable (`ADCR.TRGEN`) again, the GD32 build's per-period re-assert. Here it
-    /// is a read-modify-write that leaves the bit as it was; the call keeps the period ISR one
-    /// source.
+    /// Set the trigger enable (`ADCR.TRGEN`) again, the GD32 build's per-period re-assert: here a
+    /// read, and a write only if `TRGEN` is clear or `ADST` set (the stuck start the bring-up
+    /// clears, [`TriggeredAdc::configure`]). The write clears `ADST`: a blind read-modify-write
+    /// would write back an `ADST` that reads 1.
     #[inline]
     pub fn reassert_trigger_enable(&self) {
-        self.adcr.modify(ADCR_TRGEN, ADCR_TRGEN);
+        let v = self.adcr.read();
+        if v & (ADCR_TRGEN | ADCR_ADST) != ADCR_TRGEN {
+            self.adcr.write((v | ADCR_TRGEN) & !ADCR_ADST);
+        }
     }
 
     /// Whether the scan has completed since the flag was last cleared.

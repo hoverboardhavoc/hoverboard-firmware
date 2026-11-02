@@ -11,9 +11,10 @@
 //! | `SSHR`/`SSLR` | `0x14`/`0x18` | 16 | the standard-mode SCL high and low counts |
 //! | `FSHR`/`FSLR` | `0x1C`/`0x20` | 16 | the fast-mode SCL high and low counts |
 //! | `IMR` | `0x30` | 16 | the interrupt mask, cleared to `INTR_MASK` (0xC000) |
-//! | `RAWISR` | `0x34` | 16 | `TX_ABRT` 6, `MST_ON_HOLD` 13 |
+//! | `RAWISR` | `0x34` | 16 | `TX_ABRT` 6, `STOP_DET` 9 |
 //! | `RXTLR`/`TXTLR` | `0x38`/`0x3C` | 16 | the FIFO thresholds, 0 |
 //! | `TX_ABRT` | `0x54` | 16 | read to clear the abort |
+//! | `STOP` (`IC_CLR_STOP_DET`) | `0x60` | 16 | read to clear `STOP_DET` |
 //! | `ENR` | `0x6C` | 16 | `ENABLE` 0, `ABORT` 1 |
 //! | `SR` | `0x70` | 32 | `TFNF` 1, `TFE` 2, `RFNE` 3, `MST_ACTIV` 5 |
 //!
@@ -36,7 +37,10 @@
 //! `I2C_SetDeviceAddr` does; disabling it also empties both FIFOs. A NACK of the address or of a
 //! data byte sets `RAWISR.TX_ABRT`, after which the block has sent a STOP and flushed its FIFO.
 //! MindMotion's header names no abort-source register, so the HAL cannot tell an address NACK
-//! from a data NACK and reports both as [`I2cError::NoAcknowledgeAddress`].
+//! from a data NACK and reports both as [`I2cError::NoAcknowledgeAddress`]. The STOP's own abort
+//! raises the same flag, so a NACK of the last byte of a write that ends in a STOP is not
+//! reported: the block shows nothing for it before the STOP (on the bench MM32SPIN05,
+//! `RAWISR.MST_ON_HOLD` never set while the master held the bus).
 //!
 //! Reads keep at most [`RX_IN_FLIGHT`] read commands ahead of the bytes taken: the FIFOs are two
 //! entries deep (AILIFE's MM32 firmware, measured), so a deeper queue could overrun the receive
@@ -67,6 +71,7 @@ const RAWISR: u32 = 0x34;
 const RXTLR: u32 = 0x38;
 const TXTLR: u32 = 0x3C;
 const CLR_TX_ABRT: u32 = 0x54;
+const CLR_STOP_DET: u32 = 0x60;
 const ENR: u32 = 0x6C;
 const SR: u32 = 0x70;
 
@@ -87,9 +92,8 @@ const DR_CMD_READ: u16 = 1 << 8;
 /// `INTR_MASK` (`hal_i2c.h`), what `I2C_Init` masks `IMR` with: every interrupt off.
 const IMR_KEEP: u16 = 0xC000;
 const RAWISR_TX_ABRT: u16 = 1 << 6;
-/// `RAWISR.MST_ON_HOLD`: the master holds the bus because its FIFO ran empty, after the last
-/// byte's acknowledge bit.
-const RAWISR_HOLD: u16 = 1 << 13;
+/// `RAWISR.STOP_DET`: a STOP was seen on the bus (sticky until `CLR_STOP_DET` is read).
+const RAWISR_STOP_DET: u16 = 1 << 9;
 const ENR_ENABLE: u16 = 1 << 0;
 const ENR_ABORT: u16 = 1 << 1;
 const SR_TFNF: u32 = 1 << 1;
@@ -283,7 +287,7 @@ impl I2c {
     /// Before a fresh transfer: start the acquisition's budget, wait at most [`idle_budget`] polls
     /// for the master to go idle (`SR.MST_ACTIV` clear; recovered once if it does not), then point
     /// the block at `addr7` (`TAR`, written with the block disabled, which also empties the FIFOs
-    /// and ends a stale abort), and clear the abort flag.
+    /// and ends a stale abort), and clear the abort and STOP flags.
     fn acquire(&self, addr7: u8) -> Result<(), I2cError> {
         self.txn_left.set(self.poll_budget);
         let mut cap = self.idle_budget;
@@ -302,11 +306,14 @@ impl I2c {
         self.reg(TAR).write(u16::from(addr7 & 0x7F));
         enr.write(enr.read() | ENR_ENABLE);
         let _ = self.reg(CLR_TX_ABRT).read();
+        let _ = self.reg(CLR_STOP_DET).read();
         Ok(())
     }
 
     /// End the transfer: `ENR.ABORT` (the byte on the bus finishes, then the STOP), wait for the
-    /// block to clear it, and read `TX_ABRT` to clear the abort it raises (`I2C_GenerateSTOP`).
+    /// block to clear it, read `TX_ABRT` to clear the abort it raises (`I2C_GenerateSTOP`), then
+    /// wait for the STOP on the bus (`RAWISR.STOP_DET`, cleared at the acquisition), as
+    /// MindMotion's polled sample does. Both waits are bounded by [`idle_budget`].
     fn stop(&self) {
         let enr = self.reg(ENR);
         enr.write(enr.read() | ENR_ABORT);
@@ -318,6 +325,13 @@ impl I2c {
             }
         }
         let _ = self.reg(CLR_TX_ABRT).read();
+        let mut own = self.idle_budget;
+        while self.reg(RAWISR).read() & RAWISR_STOP_DET == 0 {
+            own -= 1;
+            if own == 0 {
+                break;
+            }
+        }
     }
 
     /// Put the block back in a usable state after a failure: the STOP, then the bring-up
@@ -353,26 +367,16 @@ impl I2c {
     }
 
     /// Each byte into `DR`, then a wait for the FIFO to empty (`SR.TFE`), MindMotion's
-    /// `EEPROM_WriteByte`: one byte in the FIFO at a time. Before a STOP, a wait for the master to
-    /// hold the bus (`RAWISR.MST_ON_HOLD`, after the last byte's acknowledge) or abort, so a NACK of
-    /// the last byte is seen before the STOP's own abort clears the flag.
+    /// `EEPROM_WriteByte`: one byte in the FIFO at a time. An abort seen by then (an address NACK)
+    /// is the error; otherwise the STOP.
     fn write_inner(&self, bytes: &[u8], stop: bool) -> Result<(), I2cError> {
         for &b in bytes {
             self.reg(DR).write(u16::from(b));
             self.wait_sr(SR_TFE)?;
         }
         if stop {
-            loop {
-                let raw = self.reg(RAWISR).read();
-                if raw & RAWISR_TX_ABRT != 0 {
-                    return Err(I2cError::NoAcknowledgeAddress);
-                }
-                if raw & RAWISR_HOLD != 0 {
-                    break;
-                }
-                if !self.spend() {
-                    return Err(I2cError::Timeout);
-                }
+            if self.aborted() {
+                return Err(I2cError::NoAcknowledgeAddress);
             }
             self.stop();
         }
