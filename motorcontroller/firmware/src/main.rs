@@ -1601,6 +1601,7 @@ mod firmware {
             &mut shell.orch,
             r.control_mode_byte,
             r.frame_byte,
+            r.leader_byte,
             r.side_byte,
             r.rider_required_byte,
             r.battery_floor,
@@ -2302,10 +2303,10 @@ mod firmware {
         }
 
         // 2. The control-dispatch boot seam rides inside the orchestrator constructor
-        //    (CONTROL_MODE + CONTROL_FRAME bytes + the IMU fact, the resolution table of
-        //    `specs/rover-one-imu.md` section 2: pivoting Balance without an IMU demotes to
-        //    Throttle with the mode fault; rigid Balance leads with an IMU and follows without
-        //    one). The shell static is built BEFORE the tick source exists, so no dispatch can
+        //    (CONTROL_MODE + CONTROL_FRAME + CONTROL_LEADER bytes + the IMU fact, the resolution
+        //    table of `specs/rigid-leader.md` section 5.1: pivoting Balance without an IMU demotes
+        //    to Throttle with the mode fault; rigid Balance leads when the leader flag is set,
+        //    with the mode fault if no IMU is up, and follows when it is clear). The shell static is built BEFORE the tick source exists, so no dispatch can
         //    see it half-made; the enabled DMA RX ISR never touches it. Built in a POPPED frame
         //    (`init_shell`): the ~700 B Shell value otherwise materializes in `main`'s
         //    boot frame before the static write (the slice-7 stack-budget fix).

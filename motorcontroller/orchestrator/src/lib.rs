@@ -830,6 +830,7 @@ impl OrchestratorState {
         let (ctl, block) = new_ctl(
             store::CONTROL_MODE.default(),
             store::CONTROL_FRAME.default(),
+            store::CONTROL_LEADER.default(),
             store::CONTROL_SIDE.default(),
             imu_configured,
             gains,

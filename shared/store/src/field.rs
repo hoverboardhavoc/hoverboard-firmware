@@ -405,9 +405,9 @@ pub const CONTROL_RIDER_REQUIRED: Field<u8> = Field::new(0x22, 1);
 pub const BOARD_BATTERY_FLOOR: Field<i16> = Field::new(0x26, 2400);
 /// The machine's frame (`specs/control.md` (k), `specs/rover-one-imu.md`): `0 = pivoting`
 /// platforms (the default, byte-identical to the image before the field: each board balances its
-/// own platform on its own IMU), `1 = rigid` body (one balance loop for the machine; the board with
-/// a configured IMU leads and puts its torque on the wire, the board without follows and applies
-/// it). Consumed by the control crate's mode-selection seam beside [`CONTROL_MODE`] (its
+/// own platform on its own IMU), `1 = rigid` body (one balance loop for the machine; the board
+/// whose [`CONTROL_LEADER`] is set leads and puts its torque on the wire, the other follows and
+/// applies it). Consumed by the control crate's mode-selection seam beside [`CONTROL_MODE`] (its
 /// `Frame::from_u8` maps unknown values to pivoting). Staged the SAME on both boards of a machine;
 /// a pair that disagrees is caught on the wire by the leader and follower flags. A machine-type
 /// setting in the arm-time value row (`specs/integration.md`), NOT on the tune lane.
@@ -428,8 +428,8 @@ pub const CONTROL_FRAME: Field<u8> = Field::new(0x21, 0);
 /// version, so the firmware reads index 0. The two boards of a machine hold DIFFERENT values, 1 on
 /// the right wheel's motor. Only the LEADER's copy reaches the split, because the leader computes
 /// both wheel demands and the follower applies what it is given; the follower's copy is written all
-/// the same, because the side is that wheel's own fact and the leader is chosen by IMU presence, so
-/// fitting an IMU to the other board swaps the roles and the split then reads the other copy. Read
+/// the same, because the side is that wheel's own fact and the leader is [`CONTROL_LEADER`], so
+/// moving the flag to the other board swaps the roles and the split then reads the other copy. Read
 /// at boot and at every arm (`firmware::arm::ARM_ROW`), NOT on the tune lane.
 pub const CONTROL_SIDE: Field<u8> = Field::new(0x50, 0);
 pub const DEVICE_NAME: StrField = StrField::new(0x02, "Hoverboard");
@@ -527,11 +527,18 @@ pub const IMU_SCL_PIN: PinField = PinField::new(0x11, Type::PinAf);
 pub const IMU_SDA_PIN: PinField = PinField::new(0x12, Type::PinAf);
 /// The IMU model index (`specs/imu.md`: 0 = no IMU, else the imu crate's model index). The switch
 /// that brings an IMU up: the boot brings the bus up only when this is non-zero and [`IMU_I2C`] and
-/// both pins are stored, so a board can keep its IMU pins with the IMU off (the rover slave, which
-/// must not lead, `specs/rover-one-imu.md`).
+/// both pins are stored, so a board can keep its IMU pins with the IMU off (the rover slave). It
+/// picks no role: the rigid leader is [`CONTROL_LEADER`] (`specs/rigid-leader.md`).
 pub const IMU_MODEL: Field<u8> = Field::new(0x13, 0);
 /// The IMU bus's I2C instance (`specs/config-read-once.md` section 3), the HAL's label number.
 pub const IMU_I2C: Field<u8> = Field::new(0x1D, 0);
+/// Whether this board leads a rigid balance machine (`specs/rigid-leader.md` section 4): `1 = the
+/// leader`, `0 = not` (the default). Read only when the board runs balance in the rigid frame
+/// (`control::select_mode`): a set flag resolves to the leader producer, a clear one to the
+/// follower, whatever IMU is up. A flagged leader with no IMU up raises the mode fault and never
+/// engages. Node scope: the two boards of a rigid pair store different values by design. In the
+/// arm-time value row beside [`CONTROL_MODE`] and [`CONTROL_FRAME`]; NOT on the tune lane.
+pub const CONTROL_LEADER: Field<u8> = Field::new(0x1E, 0);
 /// The IMU bus's AFIO remap on the GD32F10x, `0` = the I2C's default pins; not part of the group.
 pub const IMU_REMAP: Field<u8> = Field::new(0x1A, 0);
 /// Hall inputs, per-motor via `Key.index` (motor groups are CONFIGURED, never defaulted).
@@ -1058,6 +1065,7 @@ field_ids! {
     0x1B, // LINK_USART
     0x1C, // LINK_REMAP
     0x1D, // IMU_I2C
+    0x1E, // CONTROL_LEADER
     0x20, // CONTROL_MODE
     0x21, // CONTROL_FRAME
     0x22, // CONTROL_RIDER_REQUIRED
@@ -1126,6 +1134,7 @@ field_ids! {
     0x1B, // LINK_USART
     0x1C, // LINK_REMAP
     0x1D, // IMU_I2C
+    0x1E, // CONTROL_LEADER
     0x20, // CONTROL_MODE
     0x21, // CONTROL_FRAME
     0x22, // CONTROL_RIDER_REQUIRED
@@ -1247,10 +1256,10 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 64 + 19;
+pub const REGISTRY_LEN: usize = 65 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 66 + 19;
+pub const REGISTRY_LEN: usize = 67 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1436,6 +1445,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     LINK_REMAP.at(0).entry(Boot),
     LINK_REMAP.at(1).entry(Boot),
     IMU_I2C.entry(Boot),
+    CONTROL_LEADER.entry(Arm),
     // Machine (`0x20..=0x3F`).
     CONTROL_MODE.entry(Arm),
     CONTROL_FRAME.entry(Arm),
@@ -1735,6 +1745,7 @@ pub mod names {
         FieldName::single(IMU_REMAP, "imu.remap", Kind::Int),
         FieldName::link(LINK_USART, "usart", Kind::Int),
         FieldName::link(LINK_REMAP, "remap", Kind::Int),
+        FieldName::single(CONTROL_LEADER, "control.leader", Kind::Bool),
         // Machine.
         FieldName::single(CONTROL_MODE, "machine.mode", MODE),
         FieldName::single(CONTROL_FRAME, "machine.frame", FRAME),
@@ -1834,6 +1845,8 @@ pub mod names {
         every(CONTROL_MODE.id(), 0, 1),
         every(CONTROL_FRAME.id(), 0, 1),
         every(CONTROL_RIDER_REQUIRED.id(), 0, 1),
+        // `control.leader`: a bool.
+        every(CONTROL_LEADER.id(), 0, 1),
         every(MOTOR_METHOD.id(), 0, 2),
         // `machine.battery.floor`, centivolts: 0 = no floor, 6000 above any pack the firmware
         // drives.
@@ -2122,6 +2135,10 @@ mod registry_tests {
             (0x05, Type::U8, Value::U8(34))
         );
         assert!(WIFI_TX_POWER_RANGE.contains(&WIFI_TX_POWER.default()));
+        let l = lookup(CONTROL_LEADER.id()).unwrap();
+        assert_eq!((l.field_id, l.default), (0x1E, Value::U8(0)));
+        assert_eq!(Scope::of(CONTROL_LEADER.id()), Some(Scope::Node));
+        assert_eq!(l.effect, Effect::Arm);
         let r = lookup(CONTROL_RIDER_REQUIRED.id()).unwrap();
         assert_eq!((r.field_id, r.default), (0x22, Value::U8(1)));
         let c = lookup(MOTOR_CURRENT_CAL.id()).unwrap();
@@ -2173,6 +2190,7 @@ mod registry_tests {
             (0x1B, LINK_USART.id()),
             (0x1C, LINK_REMAP.id()),
             (0x1D, IMU_I2C.id()),
+            (0x1E, CONTROL_LEADER.id()),
             (0x20, CONTROL_MODE.id()),
             (0x21, CONTROL_FRAME.id()),
             (0x22, CONTROL_RIDER_REQUIRED.id()),
@@ -2315,6 +2333,7 @@ mod registry_tests {
                 (0x15, 2),
                 (0x16, 0),
                 (0x16, 1),
+                (0x1E, 0),
                 (0x20, 0),
                 (0x21, 0),
                 (0x22, 0),

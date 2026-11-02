@@ -50,9 +50,9 @@ pub const UP_AXIS: usize = 2;
 /// block's input words whose producers are out of scope this round (`control.md` (e): each word
 /// lives here, its canonical row, defaulted benign; tests and later producers write it).
 pub struct ControlCtl {
-    /// The mode dispatch (boot seam: `CONTROL_MODE` + `CONTROL_FRAME` bytes + `imu_configured` +
-    /// `CONTROL_RIDER_REQUIRED` byte + `BOARD_BATTERY_FLOOR` word; the four stored ones are
-    /// re-read at every arm through [`re_apply_control_values`]).
+    /// The mode dispatch (boot seam: `CONTROL_MODE` + `CONTROL_FRAME` + `CONTROL_LEADER` bytes +
+    /// `imu_configured` + `CONTROL_RIDER_REQUIRED` byte + `BOARD_BATTERY_FLOOR` word; the five
+    /// stored ones are re-read at every arm through [`re_apply_control_values`]).
     pub dispatch: ControlDispatch,
     /// The throttle conditioning constants (EFeru defaults; a tunable surface).
     pub throttle_cfg: ThrottleConfig,
@@ -125,6 +125,7 @@ impl ControlCtl {
     fn new(
         control_mode_byte: u8,
         frame_byte: u8,
+        leader_byte: u8,
         imu_configured: bool,
         gains: GainShadow,
         pos_clamp: i16,
@@ -136,6 +137,7 @@ impl ControlCtl {
             dispatch: ControlDispatch::new(
                 control_mode_byte,
                 frame_byte,
+                leader_byte,
                 imu_configured,
                 rider_required_byte,
                 battery_floor,
@@ -286,6 +288,7 @@ pub(crate) const fn law_scale(battery: i16, torque_is_current: bool) -> i16 {
 pub(crate) fn new_ctl(
     control_mode_byte: u8,
     frame_byte: u8,
+    leader_byte: u8,
     side_byte: u8,
     imu_configured: bool,
     gains: GainShadow,
@@ -298,6 +301,7 @@ pub(crate) fn new_ctl(
         ControlCtl::new(
             control_mode_byte,
             frame_byte,
+            leader_byte,
             imu_configured,
             gains,
             pos_clamp,
@@ -395,9 +399,9 @@ pub(crate) fn control_dispatch_step(state: &mut OrchestratorState, run: bool) ->
     state.ctl.wheel_demand
 }
 
-/// The LIVE mode-fault level (`events::EV_MODE_FAULT`): the validation seam's demotion, OR the
-/// two-leader staging error (`specs/rover-one-imu.md` section 2): a rigid leader whose fresh peer
-/// cyclic also claims the leader flag. One function, read by the pipeline's level fold and by the
+/// The LIVE mode-fault level (`events::EV_MODE_FAULT`): the validation seam's fault (a pivoting
+/// demotion, or a flagged rigid leader with no IMU up, `specs/rigid-leader.md` section 5.2), OR the
+/// two-leader staging error: a rigid leader whose fresh peer cyclic also claims the leader flag. One function, read by the pipeline's level fold and by the
 /// OBS snapshot, so the counter, the cyclic `fault` word and `CTRL_OBS` cannot disagree about it.
 /// Not a Fault A, deliberately: the refusal is the cleared engagement gate in [`balance_step`],
 /// which keeps both boards from engaging while this level says why.
@@ -531,12 +535,15 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     // arm: a peer running pivoting (no follower flag) would leave this wheel balancing alone, and
     // two leaders are two balance loops on one welded frame. The gate is the ENGAGE edge, so this
     // is a refusal to start, which is the cheap place to be told; a pivoting board's gate is its
-    // own up-axis row, untouched.
+    // own up-axis row, untouched. A flagged leader with no IMU up (`specs/rigid-leader.md`
+    // section 5.2) holds the gate closed whatever its peer says: it arms and never engages, so its
+    // torque and the `peer_demand` it sends stay 0 while its mode fault says why.
     let partner_ok = !leader
-        || state
-            .inbox
-            .rigid_peer()
-            .is_some_and(|p| p.follower() && !p.leader());
+        || (state.imu_configured
+            && state
+                .inbox
+                .rigid_peer()
+                .is_some_and(|p| p.follower() && !p.leader()));
     // The engagement FSM: the shared shell with the balance gates live.
     let fsm_in = FsmInputs {
         orientation_nz: state.block.orientation_nz,
@@ -710,7 +717,7 @@ pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
 
 /// The control section's ARM-TIME value apply (`specs/integration.md`, "When a stored value takes
 /// effect: the arm-time re-read"): install the value-row fields the dispatch owns, and, where the
-/// re-read changed the resolved PRODUCER (a mode or a frame), replace the balance producer record
+/// re-read changed the resolved PRODUCER (a mode, a frame or the leader flag), replace the balance producer record
 /// this layer owns (`SfState`, the `specs/control.md` mode.rs note: replaced wholesale, the
 /// `switch_method` discipline) and reset the engagement machine with it.
 ///
@@ -728,6 +735,7 @@ pub fn re_apply_control_values(
     state: &mut OrchestratorState,
     control_mode_byte: u8,
     frame_byte: u8,
+    leader_byte: u8,
     side_byte: u8,
     rider_required_byte: u8,
     battery_floor: i16,
@@ -742,6 +750,7 @@ pub fn re_apply_control_values(
     let mode_changed = state.ctl.dispatch.re_apply_values(
         control_mode_byte,
         frame_byte,
+        leader_byte,
         state.imu_configured,
         rider_required_byte,
         battery_floor,

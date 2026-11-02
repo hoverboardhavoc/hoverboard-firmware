@@ -1129,6 +1129,7 @@ mod dynamic {
             let d = control::ControlDispatch::new(
                 1,
                 0,
+                0,
                 true,
                 s.get(CONTROL_RIDER_REQUIRED),
                 s.get(crate::field::BOARD_BATTERY_FLOOR),
@@ -1148,6 +1149,7 @@ mod dynamic {
         let d = control::ControlDispatch::new(
             1,
             0,
+            0,
             true,
             s.get(CONTROL_RIDER_REQUIRED),
             s.get(crate::field::BOARD_BATTERY_FLOOR),
@@ -1165,15 +1167,18 @@ mod dynamic {
         }
     }
 
-    /// The `CONTROL_FRAME` seam end to end (`specs/rover-one-imu.md` section 2): an erased board
-    /// reads 0 and a Balance request without an IMU is the demotion it always was; a `CONFIG_WRITE`
-    /// of 1 survives a cold remount and the next boot resolves the same board as the rigid
-    /// FOLLOWER, with no fault, and a board with an IMU as the LEADER. A machine-type setting, NOT
-    /// on the tune lane.
+    /// The `CONTROL_FRAME` and `CONTROL_LEADER` seams end to end (`specs/rigid-leader.md` section
+    /// 5.1): an erased board reads 0 and a Balance request without an IMU is the demotion it always
+    /// was; a `CONFIG_WRITE` of 1 survives a cold remount and the next boot resolves the same board
+    /// as the rigid FOLLOWER with or without an IMU, and a stored leader flag as the LEADER (the mode
+    /// fault raised when no IMU is up). Neither is on the tune lane.
     #[test]
     fn the_frame_round_trips_from_the_store_into_the_control_dispatch() {
-        use crate::field::{BOARD_BATTERY_FLOOR, CONTROL_FRAME, CONTROL_RIDER_REQUIRED};
+        use crate::field::{
+            BOARD_BATTERY_FLOOR, CONTROL_FRAME, CONTROL_LEADER, CONTROL_RIDER_REQUIRED,
+        };
         assert_eq!(CONTROL_FRAME.id(), 0x21);
+        assert_eq!(CONTROL_LEADER.id(), 0x1E);
         let mut f = MockFlash::erased(PS);
         {
             let s = Store::mount(&mut f).unwrap();
@@ -1181,6 +1186,7 @@ mod dynamic {
             let d = control::ControlDispatch::new(
                 1,
                 s.get(CONTROL_FRAME),
+                s.get(CONTROL_LEADER),
                 false,
                 s.get(CONTROL_RIDER_REQUIRED),
                 s.get(BOARD_BATTERY_FLOOR),
@@ -1196,21 +1202,38 @@ mod dynamic {
             let mut s = Store::mount(&mut f).unwrap();
             s.set_value(CONTROL_FRAME.key(), Value::U8(1)).unwrap();
         }
-        let s = Store::mount(&mut f).unwrap();
-        assert_eq!(s.get(CONTROL_FRAME), 1);
-        for (imu, producer) in [
-            (false, control::Producer::Follower),
-            (true, control::Producer::Leader),
-        ] {
-            let d = control::ControlDispatch::new(
+        let resolve = |s: &Store<MockFlash>, imu: bool| {
+            control::ControlDispatch::new(
                 1,
                 s.get(CONTROL_FRAME),
+                s.get(CONTROL_LEADER),
                 imu,
                 s.get(CONTROL_RIDER_REQUIRED),
                 s.get(BOARD_BATTERY_FLOOR),
-            );
-            assert_eq!(d.mode(), producer, "imu_configured = {imu}");
-            assert!(!d.mode_fault(), "a rigid resolution is never a demotion");
+            )
+        };
+        {
+            let s = Store::mount(&mut f).unwrap();
+            assert_eq!(s.get(CONTROL_FRAME), 1);
+            assert_eq!(s.get(CONTROL_LEADER), 0, "unstored = not the leader");
+            // An unflagged rigid board follows, whatever IMU it has (`specs/rigid-leader.md`).
+            for imu in [false, true] {
+                let d = resolve(&s, imu);
+                assert_eq!(d.mode(), control::Producer::Follower, "imu {imu}");
+                assert!(!d.mode_fault(), "imu {imu}");
+            }
+        }
+        {
+            let mut s = Store::mount(&mut f).unwrap();
+            s.set_value(CONTROL_LEADER.key(), Value::U8(1)).unwrap();
+        }
+        let s = Store::mount(&mut f).unwrap();
+        assert_eq!(s.get(CONTROL_LEADER), 1);
+        // A flagged board leads; without its IMU it raises the mode fault.
+        for imu in [true, false] {
+            let d = resolve(&s, imu);
+            assert_eq!(d.mode(), control::Producer::Leader, "imu {imu}");
+            assert_eq!(d.mode_fault(), !imu, "imu {imu}");
         }
 
         let mut g = control::GainShadow::default();
@@ -1218,6 +1241,11 @@ mod dynamic {
             g.set(CONTROL_FRAME.id(), 0, 1),
             Err(control::TuneError::UnknownKey),
             "not on the tune lane"
+        );
+        assert_eq!(
+            g.set(CONTROL_LEADER.id(), 0, 1),
+            Err(control::TuneError::UnknownKey),
+            "nor is the leader flag"
         );
     }
 
@@ -1285,6 +1313,7 @@ mod dynamic {
             let d = control::ControlDispatch::new(
                 1,
                 0,
+                0,
                 true,
                 s.get(CONTROL_RIDER_REQUIRED),
                 s.get(BOARD_BATTERY_FLOOR),
@@ -1301,6 +1330,7 @@ mod dynamic {
         assert_eq!(s.get(BOARD_BATTERY_FLOOR), 0);
         let d = control::ControlDispatch::new(
             1,
+            0,
             0,
             true,
             s.get(CONTROL_RIDER_REQUIRED),
