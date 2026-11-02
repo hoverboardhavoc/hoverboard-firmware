@@ -444,8 +444,8 @@ fn off_inhibit_can_never_block_a_shutdown() {
 #[test]
 fn drive_staleness_at_51_ticks_and_never_received() {
     let mut s = fresh();
-    assert!(s.inbox.drive_stale(), "never received = stale");
-    assert_eq!(s.inbox.drive(), None);
+    assert!(s.inbox.drive_stale(0), "never received = stale");
+    assert_eq!(s.inbox.drive(0), None);
 
     s.inbox.accept(
         CTRL,
@@ -456,12 +456,15 @@ fn drive_staleness_at_51_ticks_and_never_received() {
             motor: 0,
         }),
     );
-    assert!(!s.inbox.drive_stale(), "fresh on receipt");
+    assert!(!s.inbox.drive_stale(0), "fresh on receipt");
     run_ticks(&mut s, 50);
-    assert_eq!(s.inbox.drive_age(), 50);
-    assert!(!s.inbox.drive_stale(), "age 50 is within the 200 ms window");
+    assert_eq!(s.inbox.drive_age(0), 50);
+    assert!(
+        !s.inbox.drive_stale(0),
+        "age 50 is within the 200 ms window"
+    );
     run_ticks(&mut s, 1);
-    assert!(s.inbox.drive_stale(), "age 51 > DRIVE_TIMEOUT_TICKS");
+    assert!(s.inbox.drive_stale(0), "age 51 > DRIVE_TIMEOUT_TICKS");
     // Latest-wins refresh restores freshness.
     s.inbox.accept(
         CTRL,
@@ -472,8 +475,8 @@ fn drive_staleness_at_51_ticks_and_never_received() {
             motor: 0,
         }),
     );
-    assert!(!s.inbox.drive_stale());
-    assert_eq!(s.inbox.drive().unwrap().kind, DriveKind::Neutral);
+    assert!(!s.inbox.drive_stale(0));
+    assert_eq!(s.inbox.drive(0).unwrap().kind, DriveKind::Neutral);
 }
 
 // --- Mirror staleness (`specs/link-control.md`, "Supervision": the remote INPUTS mirror) ------
@@ -723,10 +726,10 @@ fn a_demand_cannot_manufacture_a_power_request() {
         run_ticks(&mut s, DEMAND_GAP_TICKS);
     }
     assert!(
-        s.inbox.drive().is_some(),
+        s.inbox.drive(0).is_some(),
         "the demand landed in its own slot"
     );
-    assert!(!s.inbox.drive_stale(), "and is fresh there");
+    assert!(!s.inbox.drive_stale(0), "and is fresh there");
     assert!(s.inbox.remote_stale(), "but no mirror exists to be fresh");
     assert!(
         !s.inbox.remote_power_request(),
@@ -6352,9 +6355,9 @@ fn a_stale_drive_ramps_the_reference_to_zero_at_speed_slew_and_the_position_hold
     }
     assert_eq!(s.ctl.sf.v_ref, target);
     // The stream stops. The reference holds while the last command is fresh, then steps down.
-    while !s.inbox.drive_stale() {
+    while !s.inbox.drive_stale(0) {
         control_task(&mut s, Some(&level), 1);
-        if !s.inbox.drive_stale() {
+        if !s.inbox.drive_stale(0) {
             assert_eq!(s.ctl.sf.v_ref, target);
         }
     }
@@ -6723,4 +6726,172 @@ fn the_running_flags_ride_cyclic_state() {
     run_ticks(&mut s, 2);
     let c = cyclic_tx(&s, true).unwrap();
     assert!(c.rearm() && c.reboot());
+}
+
+// --- Per-motor drive (`specs/twelve-fet.md` sections 4 and 6.1) -----------------------------
+//
+// A board drives `M` motors: the 12-FET two, every other board one. Each motor has its own drive
+// slot, fed by the `DRIVE_CMD`s that name it, and goes stale on its own; the one engagement
+// machine and the one mode machine serve them all.
+
+/// A throttle board at breadth `M`, built as the firmware's boot builds it.
+fn throttle_board<const M: usize>() -> super::OrchestratorState<M> {
+    let mut s = super::OrchestratorState::<M>::new(
+        false,
+        false,
+        attitude::Config::default(),
+        sf_start(),
+        None,
+        TEST_IDENTITY,
+        test_machine(),
+    );
+    dispatch::re_apply_control_values(
+        &mut s,
+        0,
+        0,
+        0,
+        0,
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
+        store::CONTROL_POS_CLAMP.default(),
+    );
+    s
+}
+
+/// A drive command for motor `motor`.
+fn drive_for(motor: u8, value: i16) -> Payload {
+    Payload::DriveCmd(DriveCmd {
+        kind: DriveKind::Throttle,
+        value,
+        steer: 0,
+        motor,
+    })
+}
+
+/// Hold the power request on a board of any breadth (the two-call press).
+fn press<const M: usize>(s: &mut super::OrchestratorState<M>) {
+    for _ in 0..2 {
+        input_task(
+            s,
+            &InputSample {
+                button_asserted: true,
+                ..Default::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn each_motor_has_its_own_drive_slot_and_staleness() {
+    let mut s = throttle_board::<2>();
+    s.inbox.accept(CTRL, drive_for(1, 5_000));
+    assert_eq!(s.inbox.drive(1).map(|d| d.value), Some(5_000));
+    assert_eq!(
+        s.inbox.drive(0),
+        None,
+        "motor 1's frame does not fill motor 0's slot"
+    );
+    assert!(s.inbox.drive_stale(0));
+    assert!(!s.inbox.drive_stale(1));
+    s.inbox.accept(CTRL, drive_for(0, 3_000));
+    for _ in 0..DRIVE_TIMEOUT_TICKS {
+        s.inbox.tick_ages(true);
+    }
+    s.inbox.accept(CTRL, drive_for(0, 3_000));
+    s.inbox.tick_ages(true);
+    assert!(!s.inbox.drive_stale(0), "refreshed");
+    assert!(s.inbox.drive_stale(1), "motor 1 went stale on its own");
+}
+
+#[test]
+fn a_drive_for_a_motor_the_board_lacks_is_dropped() {
+    let mut one = throttle_board::<1>();
+    one.inbox.accept(CTRL, drive_for(1, 5_000));
+    assert_eq!(
+        one.inbox.drive(0),
+        None,
+        "a one-motor board drops motor 1's frame"
+    );
+    assert!(one.inbox.drive_stale(0));
+    let mut two = throttle_board::<2>();
+    two.inbox.accept(CTRL, drive_for(2, 5_000));
+    assert_eq!((two.inbox.drive(0), two.inbox.drive(1)), (None, None));
+}
+
+#[test]
+fn both_moe_decisions_follow_the_mode_machine() {
+    let mut s = throttle_board::<2>();
+    let out = control_task(&mut s, None, 1);
+    assert_eq!(out.moe, [false; 2], "OFF");
+    press(&mut s);
+    let mut out = control_task(&mut s, None, 1);
+    for _ in 0..3 {
+        out = control_task(&mut s, None, 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert_eq!(out.moe, [true; 2], "armed together");
+    assert_eq!(s.obs().moe_bits, 0b11);
+}
+
+/// Throttle on a two-motor board: each wheel follows its own slot through the one engagement
+/// machine, and a motor whose frames stop decays to zero within the drive timeout while the
+/// other keeps driving.
+#[test]
+fn a_stale_motor_1_coasts_while_motor_0_drives() {
+    let mut s = throttle_board::<2>();
+    press(&mut s);
+    for _ in 0..3 {
+        control_task(&mut s, None, 1);
+    }
+    let mut out = control_task(&mut s, None, 1);
+    for k in 0..400 {
+        if k % 10 == 0 {
+            s.inbox.accept(CTRL, drive_for(0, 8_000));
+            s.inbox.accept(CTRL, drive_for(1, -8_000));
+        }
+        out = control_task(&mut s, None, 1);
+    }
+    assert!(out.torque_setpoint[0] > 0, "{:?}", out.torque_setpoint);
+    assert!(out.torque_setpoint[1] < 0, "{:?}", out.torque_setpoint);
+    assert_eq!(
+        out.torque_setpoint[0], -out.torque_setpoint[1],
+        "the same conditioning on each slot"
+    );
+    // Motor 1's frames stop; motor 0's go on.
+    for k in 0..400 {
+        if k % 10 == 0 {
+            s.inbox.accept(CTRL, drive_for(0, 8_000));
+        }
+        out = control_task(&mut s, None, 1);
+    }
+    assert!(out.torque_setpoint[0] > 0, "motor 0 still drives");
+    assert_eq!(out.torque_setpoint[1], 0, "motor 1 decayed to neutral");
+    assert_eq!(
+        out.moe, [true; 2],
+        "a stale slot coasts the wheel, it does not disarm"
+    );
+}
+
+/// A one-motor board runs the same throttle path as motor 0 of a two-motor one.
+#[test]
+fn a_one_motor_board_drives_motor_0_as_a_two_motor_board_does() {
+    let mut one = throttle_board::<1>();
+    let mut two = throttle_board::<2>();
+    press(&mut one);
+    press(&mut two);
+    let mut a = control_task(&mut one, None, 1);
+    let mut b = control_task(&mut two, None, 1);
+    for k in 0..300 {
+        if k % 10 == 0 {
+            one.inbox.accept(CTRL, drive_for(0, 6_000));
+            two.inbox.accept(CTRL, drive_for(0, 6_000));
+        }
+        a = control_task(&mut one, None, 1);
+        b = control_task(&mut two, None, 1);
+    }
+    assert!(a.torque_setpoint[0] > 0);
+    assert_eq!(a.torque_setpoint[0], b.torque_setpoint[0]);
+    assert_eq!(b.torque_setpoint[1], 0, "motor 1 was never commanded");
+    assert_eq!(a.moe, [true]);
+    assert!(one.latches.len() == 1 && two.latches.len() == 2);
 }

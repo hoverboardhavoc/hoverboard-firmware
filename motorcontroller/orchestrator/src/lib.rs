@@ -194,8 +194,11 @@ impl Default for ImuHealth {
 /// [`LinkInbox::accept`]; the 250 Hz pipeline bumps the ages ([`LinkInbox::tick_ages`], step 3)
 /// and consumes the levels. All four families are best-effort / latest-wins: no queue, one slot
 /// per family.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LinkInbox {
+///
+/// `M` is the board's motor count: one drive slot and one drive age per motor, each fed by the
+/// `DRIVE_CMD`s that name that motor (`specs/twelve-fet.md` section 6.1).
+#[derive(Clone, Copy, Debug)]
+pub struct LinkInbox<const M: usize> {
     /// The latest accepted peer `CYCLIC_STATE` (`None` = never seen a peer since boot).
     peer: Option<CyclicState>,
     /// The L3 source address the latest peer cyclic arrived under (`None` = never seen a peer).
@@ -214,10 +217,10 @@ pub struct LinkInbox {
     /// The largest value [`LinkInbox::cyclic_age`] has reached since boot: the PEAK LATCH, an
     /// instrument and not an input ([`LinkInbox::cyclic_age_peak`]).
     cyclic_age_peak: u32,
-    /// The latest accepted `DRIVE_CMD` (`None` = never received).
-    drive: Option<DriveCmd>,
-    /// Ticks since the last accepted drive command.
-    drive_age: u32,
+    /// The latest accepted `DRIVE_CMD` per motor (`None` = never received for that motor).
+    drive: [Option<DriveCmd>; M],
+    /// Ticks since the last accepted drive command, per motor.
+    drive_age: [u32; M],
     /// The latest accepted remote `INPUTS` mirror (`None` = never received). CONTENT: written by
     /// `INPUTS` and by nothing else, so no other payload can put a level in here that its sender
     /// never stated.
@@ -252,7 +255,13 @@ pub struct LinkInbox {
 /// one is a fault.
 pub const RIGID_STALE_TICKS: u32 = 5;
 
-impl LinkInbox {
+impl<const M: usize> Default for LinkInbox<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const M: usize> LinkInbox<M> {
     /// An empty inbox: no peer, no drive, no mirror.
     pub const fn new() -> Self {
         LinkInbox {
@@ -261,8 +270,8 @@ impl LinkInbox {
             peer_pos: 0,
             cyclic_age: 0,
             cyclic_age_peak: 0,
-            drive: None,
-            drive_age: 0,
+            drive: [None; M],
+            drive_age: [0; M],
             remote: None,
             remote_src: None,
             remote_age: 0,
@@ -341,9 +350,17 @@ impl LinkInbox {
                 self.peer_src = Some(src);
                 self.cyclic_age = 0;
             }
+            // Routed by its motor byte to that motor's slot; a motor this board does not drive is
+            // dropped (on a one-motor board, every `motor != 0`). Its liveness refresh above stands
+            // either way: it is still the controller talking.
             Payload::DriveCmd(d) => {
-                self.drive = Some(d);
-                self.drive_age = 0;
+                if let (Some(slot), Some(age)) = (
+                    self.drive.get_mut(d.motor as usize),
+                    self.drive_age.get_mut(d.motor as usize),
+                ) {
+                    *slot = Some(d);
+                    *age = 0;
+                }
             }
             Payload::Inputs(i) => {
                 self.remote = Some(i);
@@ -395,8 +412,10 @@ impl LinkInbox {
                 self.cyclic_age_peak = self.cyclic_age;
             }
         }
-        if self.drive.is_some() {
-            self.drive_age = self.drive_age.saturating_add(1);
+        for (slot, age) in self.drive.iter().zip(self.drive_age.iter_mut()) {
+            if slot.is_some() {
+                *age = age.saturating_add(1);
+            }
         }
         if self.remote.is_some() {
             self.remote_age = self.remote_age.saturating_add(1);
@@ -412,20 +431,21 @@ impl LinkInbox {
         self.peer.is_some() && self.cyclic_age > CYCLIC_TIMEOUT_TICKS
     }
 
-    /// The drive-staleness predicate: true when no `DRIVE_CMD` is fresh within
-    /// [`DRIVE_TIMEOUT_TICKS`] (or none was ever received). The slice-6 throttle-reference
-    /// producer decays to neutral on this (a reference-zeroing, not a fault).
-    pub fn drive_stale(&self) -> bool {
-        match self.drive {
-            None => true,
-            Some(_) => self.drive_age > DRIVE_TIMEOUT_TICKS,
+    /// The drive-staleness predicate for motor `motor`: true when no `DRIVE_CMD` for it is fresh
+    /// within [`DRIVE_TIMEOUT_TICKS`] (or none was ever received, or the board has no such motor).
+    /// The slice-6 throttle-reference producer decays to neutral on this (a reference-zeroing,
+    /// not a fault). Each motor's slot goes stale on its own.
+    pub fn drive_stale(&self, motor: usize) -> bool {
+        match (self.drive.get(motor), self.drive_age.get(motor)) {
+            (Some(Some(_)), Some(age)) => *age > DRIVE_TIMEOUT_TICKS,
+            _ => true,
         }
     }
 
-    /// The latest drive command, `None` when never received. Staleness is the caller's to apply
-    /// via [`LinkInbox::drive_stale`].
-    pub fn drive(&self) -> Option<DriveCmd> {
-        self.drive
+    /// The latest drive command for motor `motor`, `None` when never received. Staleness is the
+    /// caller's to apply via [`LinkInbox::drive_stale`].
+    pub fn drive(&self, motor: usize) -> Option<DriveCmd> {
+        self.drive.get(motor).copied().flatten()
     }
 
     /// The latest peer cyclic words, `None` when never seen.
@@ -559,8 +579,8 @@ impl LinkInbox {
     }
 
     /// The drive age in ticks (OBS).
-    pub fn drive_age(&self) -> u32 {
-        self.drive_age
+    pub fn drive_age(&self, motor: usize) -> u32 {
+        self.drive_age.get(motor).copied().unwrap_or(0)
     }
 
     /// Ticks since the mirror's owner was last heard from (meaningless before the first mirror).
@@ -606,7 +626,7 @@ pub struct OrchestratorState<const M: usize> {
     /// the miss/hit streaks + the loss latch that feeds `fault_a` and drives the retry breaker.
     pub imu_health: ImuHealth,
     /// The link inbox + supervision.
-    pub inbox: LinkInbox,
+    pub inbox: LinkInbox<M>,
     /// The per-motor fault latches (pipeline step 4). The a_substate tie is live: each pass
     /// feeds the engagement machine's sub-state (previous tick's, the spec's step order) as
     /// `a_substate`, the per-motor wheel word as `b_motion`, and `running_enable` follows the
@@ -948,7 +968,7 @@ impl<const M: usize> OrchestratorState<M> {
             comms_loss: self.inbox.comms_loss(),
             cyclic_age: self.inbox.cyclic_age(),
             cyclic_age_peak: self.inbox.cyclic_age_peak(),
-            drive_age: self.inbox.drive_age(),
+            drive_age: self.inbox.drive_age(0),
             enact_inits: self.enact_inits,
             enact_shutdowns: self.enact_shutdowns,
             torque_setpoint: self.ctl.wheel_demand[0],
@@ -1021,7 +1041,7 @@ pub struct Obs {
     /// The largest value `cyclic_age` has reached since boot
     /// ([`LinkInbox::cyclic_age_peak`]): the worst case recorded rather than sampled.
     pub cyclic_age_peak: u32,
-    /// Ticks since the last accepted drive command.
+    /// Ticks since the last accepted drive command for motor 0.
     pub drive_age: u32,
     /// INIT bring-up records emitted through the enact seam ("last enact actions").
     pub enact_inits: u32,

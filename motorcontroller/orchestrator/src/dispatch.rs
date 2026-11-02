@@ -332,9 +332,12 @@ const fn side_is_right(byte: u8) -> bool {
 /// latest command's live words when fresh and of `Throttle` kind, else neutral (staleness is a
 /// reference-zeroing, not a fault; the conditioning's rate limit turns the snap into the decay
 /// ramp).
-fn effective_drive(inbox: &LinkInbox) -> (i16, i16) {
-    match inbox.drive() {
-        Some(d) if d.kind == DriveKind::Throttle && !inbox.drive_stale() => (d.value, d.steer),
+///
+/// Per motor: motor `motor`'s own slot (`specs/twelve-fet.md` section 6.1). The balance producers
+/// read motor 0's.
+fn effective_drive<const M: usize>(inbox: &LinkInbox<M>, motor: usize) -> (i16, i16) {
+    match inbox.drive(motor) {
+        Some(d) if d.kind == DriveKind::Throttle && !inbox.drive_stale(motor) => (d.value, d.steer),
         _ => (0, 0),
     }
 }
@@ -509,7 +512,7 @@ fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> 
     // disagree about whether someone is aboard: waived, the conjunction drops the term and the
     // wind-down is held clear.
     let rider = effective_rider(state);
-    let (drive_value, drive_steer) = effective_drive(&state.inbox);
+    let (drive_value, drive_steer) = effective_drive(&state.inbox, 0);
 
     // The rigid frame's turn input (`specs/rover-one-imu.md` section 5), on the LEADER only: the
     // `DRIVE_CMD.steer` word as a bounded, slewed DIFFERENTIAL torque, stepped here where the
@@ -627,7 +630,7 @@ fn throttle_step<const M: usize>(
     let cfg = state.ctl.throttle_cfg;
     let mut refs = [0i32; M];
     for (m, reference) in refs.iter_mut().enumerate() {
-        let (speed_cmd, steer_cmd) = effective_drive(&state.inbox);
+        let (speed_cmd, steer_cmd) = effective_drive(&state.inbox, m);
         let out = state
             .ctl
             .dispatch
