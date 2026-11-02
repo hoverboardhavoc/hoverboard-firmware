@@ -28,8 +28,9 @@ Two things differ between boards, and they are **independent axes**: the MCU and
   not minor variants of one: an **STM32F103 / GD32F103** class (APB-bus GPIO, the legacy `CRL`/`CRH`
   config registers) and a **GD32F130** class (AHB-bus GPIO with an explicit alternate-function mux, an
   ST-style peripheral set). Same Cortex-M3 core, different register model. The firmware is one source
-  built once per chip, on the in-repo HAL (`motorcontroller/hal`): `mainboard-gd32f103c8` and
-  `mainboard-gd32f130c8`. The CLI reads the chip on the board and installs the image built for it
+  built once per chip, on the in-repo HAL (`motorcontroller/hal`): `mainboard-gd32f103c8`,
+  `mainboard-gd32f130c8`, and `mainboard-gd32f103rc` for the 12-FET, whose GD32F103RC drives two
+  motors from one chip (`specs/twelve-fet.md`). The CLI reads the chip on the board and installs the image built for it
   (`hoverboard-cli board update`), so a board never runs the other chip's register model.
 - **The board layout cannot be detected:** which pins drive the phases, where the halls, IMU, buttons, and
   LEDs sit, which IMU model is fitted, and whether it is a single mainboard driving both wheels or a split
@@ -88,9 +89,9 @@ Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned &nbs
 
 ### Why there is no bootloader
 
-Every board in the fleet maps only 64 KiB of flash, the GD32F103RCT6 "256 KB" 12-FET board included:
-above 64 KiB it reads back `0x00` rather than firmware, so no part in the fleet has room the others
-lack.
+Every board in the fleet but one has 64 KiB of flash. The exception is the 12-FET's GD32F103RCT6,
+whose 256 KiB is real (written and read back at `0x0803_F800` on 2026-06-24); its image is still
+limited to 63,488 B, the bridge's flash buffer, and nothing below has been redone for it.
 
 A self-update path needs an immutable bootloader at the bottom of flash, below the app, because it
 has to bring up the Bluetooth module, receive and validate an image, erase and program flash, and
@@ -112,7 +113,7 @@ achievable leaves the image over the slot, with nothing left to grow into.
 So firmware is written over SWD, which is what [Flashing](#flashing) describes, and the configurator
 reaches a board's settings over Bluetooth, UART, or SWD without reflashing it. The bootloader is
 written and host-tested on a branch, including a web tool that flashes over Bluetooth, and it is kept
-for a board with genuinely more than 64 KiB of mapped flash rather than for this fleet.
+for a board with more than 64 KiB of flash rather than for this fleet.
 
 ## Commutation
 
@@ -158,8 +159,8 @@ the board each one flashes, each through its own bridge. One device at a time:
 built for it, `hoverboard-cli bridge update <bridge> <bundle>` the bridge's app image, and
 `hoverboard-cli bridge install <bundle>` a new bridge over USB. `hoverboard-cli board flash <board>
 <elf>` flashes a development ELF as it is; `hoverboard-cli firmware info <bundle>` lists what the
-bundle holds. The bundle holds `mainboard-gd32f103c8`, `mainboard-gd32f130c8`, `bridge-esp32c3`
-and `bridge-esp32c3-install`.
+bundle holds. The bundle holds `mainboard-gd32f103c8`, `mainboard-gd32f130c8`,
+`mainboard-gd32f103rc`, `bridge-esp32c3` and `bridge-esp32c3-install`.
 
 - **Latest `main` build** (no login): [download `firmware-bundle.zip`](https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware-bundle.zip)
   (the bundle from the most recent green `main` build, served by [nightly.link](https://nightly.link)).
@@ -171,7 +172,7 @@ Each build chain is its own folder; run cargo or Gradle from inside it:
 
 | Folder | Builds |
 |---|---|
-| `motorcontroller/` | the GD32 firmware images (`cargo image-f103`, `cargo image-f130`), the HAL, and the test and bench images |
+| `motorcontroller/` | the GD32 firmware images (`cargo image-f103`, `cargo image-f130`, `cargo image-f103rc`), the HAL, and the test and bench images |
 | `shared/` | the crates the firmware, the bridge and the host tools all link; `shared/protocol-kotlin/` is their Kotlin mirror |
 | `bridge/` | the ESP32-C3 bridge image |
 | `tools/` | the host programs (the CLI, the SWD mailbox bridge, the emulator and hardware runners) beside the scripts |
@@ -190,14 +191,18 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
   `thumbv7m-none-eabi`, so it compiles the test binaries for the board and silently runs none of
   them. The script resolves the host triple and passes CI's flags, and CI's host-test job runs the
   same script.
-- **Shipping images: `cargo image-f103` and `cargo image-f130` in `motorcontroller/`**
-  (`specs/hal.md` section 6). Each is the build-std release build of `firmware` for one chip, on the
-  `hal` crate (`motorcontroller/hal`), whose bytes reach flash (`motorcontroller/.cargo/config.toml`
-  explains why they are aliases and not a config key). The ELFs are
-  `motorcontroller/target/gd32f103c8/thumbv7m-none-eabi/release/firmware` and
-  `motorcontroller/target/gd32f130c8/thumbv7m-none-eabi/release/firmware`. An F103 board needs the
-  F103 image and an F130 board the F130 image: `hoverboard-cli board update` picks it from a bundle by
-  the chip the board reports, while `board flash` writes an ELF as given and checks no chip.
+- **Shipping images: `cargo image-f103`, `cargo image-f130` and `cargo image-f103rc` in
+  `motorcontroller/`** (`specs/hal.md` section 6). Each is the build-std release build of `firmware`
+  for one chip, on the `hal` crate (`motorcontroller/hal`), whose bytes reach flash
+  (`motorcontroller/.cargo/config.toml` explains why they are aliases and not a config key). The ELFs
+  are `motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware`. An F103 board needs the
+  F103 image, an F130 board the F130 image and the 12-FET the RC image: `hoverboard-cli board update`
+  picks it from a bundle by the chip and flash size the board reports, while `board flash` writes an
+  ELF as given and checks no chip.
+- **The size gate against main: `tools/size-vs-base.sh <base>`** (`specs/twelve-fet.md` section
+  4.3). Builds the one-motor images at HEAD and at `<base>` and fails if any image's flashed span,
+  `.hotcode` or static RAM grew, printing "byte-identical" or the `nm -S` diff per image. CI's
+  `size-vs-main` job runs it against the merge base with `origin/main`.
 - **The MM32SPIN05 size build: `cargo image-mm32` in `motorcontroller/`** (`specs/hal.md` section 9,
   step 3). The full mainboard firmware for the MM32SPIN05 (`thumbv6m-none-eabi`), which does not fit
   its 32 KiB, linked into an oversized measurement region so its size can be read
