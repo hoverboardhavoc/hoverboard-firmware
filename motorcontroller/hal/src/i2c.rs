@@ -63,9 +63,9 @@ use crate::chip::Chip;
 use crate::clock::ClockConfig;
 #[cfg(hal_i2c = "gd")]
 use crate::error::{DescriptorError, I2cError};
+use crate::gpio::{self, PinRole};
 #[cfg(hal_i2c = "gd")]
 use crate::gpio::{Floating, Input, Pin};
-use crate::gpio::{self, PinRole};
 #[cfg(hal_i2c = "gd")]
 use crate::pincap::{self, PinClaim};
 #[cfg(hal_i2c = "gd")]

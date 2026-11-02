@@ -435,14 +435,26 @@ mod tests {
     #[cfg(hal_gpio = "mm32")]
     fn mm32_uart_pairs_mix_rows_of_one_instance() {
         let m = usart_pins(&chip(), 0x02, 0x03).expect("UART2 on PA2/PA3");
-        assert_eq!((m.usart, m.tx_af, m.rx_af), (PeriphLabel::Usart1, UsartAf::Af1, UsartAf::Af1));
+        assert_eq!(
+            (m.usart, m.tx_af, m.rx_af),
+            (PeriphLabel::Usart1, UsartAf::Af1, UsartAf::Af1)
+        );
         // trondin's link pins: UART1 TX PB6 (AF0), RX PB4 (AF3).
         let m = usart_pins(&chip(), 0x16, 0x14).expect("UART1 on PB6/PB4");
-        assert_eq!((m.usart, m.tx_af, m.rx_af), (PeriphLabel::Usart0, UsartAf::Af0, UsartAf::Af3));
+        assert_eq!(
+            (m.usart, m.tx_af, m.rx_af),
+            (PeriphLabel::Usart0, UsartAf::Af0, UsartAf::Af3)
+        );
         assert_eq!(m.remap, UsartRemap::Default);
         // PB7 is UART1's RX and UART2's TX.
-        assert_eq!(usart_pins(&chip(), 0x17, 0x18).map(|m| m.usart), Some(PeriphLabel::Usart1));
-        assert_eq!(usart_pins(&chip(), 0x16, 0x17).map(|m| m.usart), Some(PeriphLabel::Usart0));
+        assert_eq!(
+            usart_pins(&chip(), 0x17, 0x18).map(|m| m.usart),
+            Some(PeriphLabel::Usart1)
+        );
+        assert_eq!(
+            usart_pins(&chip(), 0x16, 0x17).map(|m| m.usart),
+            Some(PeriphLabel::Usart0)
+        );
         // Mixed instances are no mapping, nor is the absent USART2's pair.
         assert_eq!(usart_pins(&chip(), 0x02, 0x17), None);
         assert_eq!(usart_pins(&chip(), 0x1A, 0x1B), None);

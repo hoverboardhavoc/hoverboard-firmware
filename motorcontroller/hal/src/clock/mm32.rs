@@ -177,7 +177,8 @@ pub fn configure_tree(_chip: &Chip, clock: &ClockConfig) -> Result<(), ClockErro
     cr.set_bits(CR_HSI_72M);
     cr.clear_bits(CR_HSITEN);
     cfgr.write(code(apb_psc_code(clock.apb1_psc)) << 8);
-    Reg32::new(crate::fmc::FMC_BASE, crate::fmc::WS).write(wait_states(clock.sysclk_hz) | ACR_PRFTBE);
+    Reg32::new(crate::fmc::FMC_BASE, crate::fmc::WS)
+        .write(wait_states(clock.sysclk_hz) | ACR_PRFTBE);
     cfgr.set_bits(HPRE_DIV4);
     cfgr.modify(CFGR_PPRE2, code(apb_psc_code(clock.apb2_psc)) << 11);
     cfgr.modify(CFGR_PPRE1, code(apb_psc_code(clock.apb1_psc)) << 8);

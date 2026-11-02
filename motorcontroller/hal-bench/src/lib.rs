@@ -4,7 +4,8 @@
 //! Every validator writes its fields into [`HB_RESULT`] (word 0 is the magic, word 1 the validator
 //! id, the rest its own layout, documented in its source and decoded by `tools/hal-bench.py`), and
 //! writes the magic LAST, so a block that carries it is complete. Then it busy-spins: a bare `wfi`
-//! with `DBG_CTL0 = 0` locks SWD re-attach on these parts, and the fleet's boards do not wire NRST.
+//! with `DBG_CTL0 = 0` locks SWD re-attach on the GD32 parts, and the fleet's boards do not wire
+//! NRST; whether it does on the MM32 (`DBGMCU_CR`) is not known, and nothing here finds out.
 #![no_std]
 
 /// Words in the result block.
@@ -35,7 +36,9 @@ pub fn finish(id: u32) -> ! {
     }
 }
 
-/// The DWT cycle counter (started by `hal::irq::enable_cycle_counter`).
+/// The DWT cycle counter (started by `hal::irq::enable_cycle_counter`). The Cortex-M0 has none,
+/// so the GD32 builds alone carry it (and [`wait_ms`]).
+#[cfg(feature = "gd32")]
 #[inline]
 pub fn cycles() -> u32 {
     // SAFETY: a read of the word-aligned DWT_CYCCNT register.
@@ -43,6 +46,7 @@ pub fn cycles() -> u32 {
 }
 
 /// Spin `ms` milliseconds at 72 MHz on the cycle counter.
+#[cfg(feature = "gd32")]
 pub fn wait_ms(ms: u32) {
     let start = cycles();
     while cycles().wrapping_sub(start) < ms * 72_000 {}

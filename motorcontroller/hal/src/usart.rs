@@ -37,9 +37,9 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use crate::addr::PeriphLabel;
 use crate::chip::{Chip, ClockPath};
 use crate::clock::ClockConfig;
+use crate::config::{Oversampling, UsartConfig, UsartFrame};
 #[cfg(not(hal_usart = "mm32"))]
 use crate::config::{Parity, WordLen};
-use crate::config::{Oversampling, UsartConfig, UsartFrame};
 use crate::error::DescriptorError;
 use crate::gpio::{configure_af, Pin, PinRole};
 use crate::pincap::{self, PinClaim, UsartRemap};

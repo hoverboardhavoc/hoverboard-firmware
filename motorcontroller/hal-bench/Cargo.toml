@@ -3,7 +3,7 @@ name = "hal-bench"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "The hal crate's bench validators (specs/hal.md section 8.4), one image per validator per chip: probe, fmc, serial, coldpath, motor-verify. Each writes a result block (`HB_RESULT`, magic last) that the host reads over SWD through the board's bridge; tools/hal-bench.py decodes it. Busy-spin, never `wfi`; nothing sets MOE."
+description = "The hal crate's bench validators (specs/hal.md section 8.4), one image per validator per chip: probe, fmc, serial (GD32 only), coldpath, motor-verify. Each writes a result block (`HB_RESULT`, magic last) that the host reads over SWD through the board's bridge; tools/hal-bench.py decodes it. Busy-spin, never `wfi`; nothing sets MOE."
 
 [dependencies]
 cortex-m = "0.7"
@@ -19,9 +19,13 @@ hal = { path = "../hal" }
 # One per chip (specs/hal.md section 3.2); none is the default, so the workspace sweep skips this
 # crate (`default-members`).
 [features]
-gd32f103c8 = ["hal/gd32f103c8"]
-gd32f130c8 = ["hal/gd32f130c8"]
-gd32f103rc = ["hal/gd32f103rc"]
+gd32f103c8 = ["hal/gd32f103c8", "gd32"]
+gd32f130c8 = ["hal/gd32f130c8", "gd32"]
+gd32f103rc = ["hal/gd32f103rc", "gd32"]
+mm32spin05 = ["hal/mm32spin05"]
+# Set by the GD32 chip features: the validators that build only for them (`serial`, which runs
+# between the two boards of a pair; no MM32 board is wired to a peer).
+gd32 = []
 # The IMU on I2C1 PB10/PB11 (the offroad pair) instead of I2C0 PB6/PB7 (the rover pair), for
 # `coldpath`.
 imu-i2c1 = []
@@ -31,3 +35,8 @@ serial-side-a = []
 [[bin]]
 name = "motor-verify"
 path = "src/bin/motor_verify.rs"
+
+[[bin]]
+name = "serial"
+path = "src/bin/serial.rs"
+required-features = ["gd32"]

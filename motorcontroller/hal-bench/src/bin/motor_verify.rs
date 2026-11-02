@@ -16,7 +16,7 @@
 #![no_std]
 #![no_main]
 
-#[cfg(target_os = "none")]
+#[cfg(all(target_os = "none", feature = "gd32"))]
 mod image {
     use cortex_m_rt::entry;
     use hal::clock::{self, ClockConfig};
@@ -166,6 +166,157 @@ mod image {
         let prio = ipr == 0x10 && shpr3 == 0xF0;
         put(19, u32::from(prio));
         let moe = (Reg32::new(T0, 0x44).read() >> 15) & 1;
+        put(20, moe);
+        put(21, u32::from(fail == 0 && eoic && prio && moe == 0));
+        finish(5)
+    }
+}
+
+/// The MM32SPIN05 motor-verify: TIM1 configured as the GD32 TIMER0 is (the same register model,
+/// `timer/*_tim1_mm32` golden traces), the ADC's timer-triggered scan of PA2 (channel 2) and PA6
+/// (channel 6), the PFOP part's phase-current op-amp outputs, started by TIM1's TRGO, and the
+/// Cortex-M0 priority ladder read back (period vector `0x00`, SysTick `0xC0`).
+///
+/// The gate pins are NOT routed to TIM1 here, unlike the GD32 build: the Gen2.4.2 board's gate pins
+/// and the low-side gate polarity are not verified (`specs/agent-runs/mm32-poc-report.md`), so they
+/// stay in their reset state, inputs. With `MOE` clear the timer reaches no pin either way.
+///
+/// Result words as the GD32 motor-verify (2..21), with 19 = 1 for `0x00` and `0xC0`.
+#[cfg(all(target_os = "none", feature = "mm32spin05"))]
+mod image {
+    use cortex_m_rt::entry;
+    use hal::clock::{self, ClockConfig};
+    use hal::config::{
+        AdcClockDiv, BreakConfig, ClockDiv, InjectedAdcConfig, InjectedChannel, OcMode, PwmAlign,
+        PwmChannelConfig, PwmConfig, TimerTriggerLink, TrgoSource,
+    };
+    use hal::reg::Reg32;
+    use hal::{Chip, InjectedAdcController, PeriphLabel, PwmTimer, TriggeredAdc};
+    use hal_bench::{finish, put};
+    use heapless::Vec;
+    use panic_halt as _;
+
+    const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_HSI;
+    const PERIOD: u16 = 2250;
+    const TRIGGER_COMPARE: u16 = PERIOD - 50;
+    const DEAD_TIME: u8 = 28;
+    const T1: u32 = 0x4001_2C00;
+
+    #[entry]
+    fn main() -> ! {
+        let Some(chip) = Chip::take() else { finish(5) };
+        if clock::configure_tree(&chip, &CLOCK).is_err() {
+            finish(5);
+        }
+        hal::irq::apply_motor_era_priorities(chip.irq());
+        let rcu = chip.rcu_base().unwrap_or(0);
+        let _ = clock::enable_timer(rcu, chip.clock(), PeriphLabel::Timer0);
+
+        let ch = |h: u8, l: u8| PwmChannelConfig {
+            high: h,
+            low: l,
+            polarity: true,
+            idle_high: false,
+            idle_high_n: true,
+        };
+        let cfg = PwmConfig {
+            timer: PeriphLabel::Timer0,
+            channels: [ch(0x08, 0x1D), ch(0x09, 0x1E), ch(0x0A, 0x1F)],
+            period: PERIOD,
+            prescaler: 0,
+            dead_time: DEAD_TIME,
+            brk: BreakConfig {
+                enabled: false,
+                level: false,
+            },
+            trigger_compare: TRIGGER_COMPARE,
+            align: PwmAlign::Center1,
+            arse: false,
+            trigger_oc_mode: OcMode::Pwm1,
+            trigger_ch_enable: true,
+            crep: 1,
+            ckdiv: ClockDiv::Div2,
+            trgo_src: TrgoSource::Ch3Compare,
+        };
+        let Ok(timer) = PwmTimer::configure(&chip, &cfg) else {
+            finish(5)
+        };
+        timer.configure_trigger(TRIGGER_COMPARE, OcMode::Pwm1, true, TrgoSource::Ch3Compare);
+
+        let r = |o: u32| Reg32::new(T1, o).read();
+        let (ctl0, ctl1, chctl0, chctl1, chctl2) = (r(0x00), r(0x04), r(0x18), r(0x1C), r(0x20));
+        let (psc, car, crep, ch3cv, cchp) = (r(0x28), r(0x2C), r(0x30), r(0x40), r(0x44));
+        for (i, v) in [
+            ctl0, ctl1, chctl0, chctl1, chctl2, psc, car, crep, ch3cv, cchp,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put(2 + i, v);
+        }
+        let mut fail = 0u32;
+        fail |= u32::from(car != u32::from(PERIOD));
+        fail |= u32::from(psc != 0) << 1;
+        fail |= u32::from(cchp & 0xFF != u32::from(DEAD_TIME)) << 2;
+        fail |= u32::from(cchp & (1 << 15) != 0) << 3;
+        fail |= u32::from(ch3cv != u32::from(TRIGGER_COMPARE)) << 4;
+        fail |= u32::from(ctl0 & (0b11 << 5) != 0b01 << 5) << 5;
+        fail |= u32::from(ctl1 & (0b111 << 4) != 7 << 4) << 6;
+        let _ = chctl2;
+        put(12, fail);
+
+        let _ = clock::enable_adc(rcu, chip.clock(), PeriphLabel::Adc0);
+        for pin in [2u8, 6] {
+            let _ = chip.analog_pin(PeriphLabel::Gpioa, pin);
+        }
+        let mut chans: Vec<InjectedChannel, 4> = Vec::new();
+        for channel in [2u8, 6] {
+            let _ = chans.push(InjectedChannel {
+                channel,
+                sample_time: 1,
+            });
+        }
+        let inj_cfg = InjectedAdcConfig {
+            adc: PeriphLabel::Adc0,
+            channels: chans,
+            left_aligned: true,
+            trigger_timer: PeriphLabel::Timer0,
+            trigger_link: TimerTriggerLink::Trgo,
+            clock_div: AdcClockDiv::Div6,
+        };
+        let mut eoic = false;
+        match InjectedAdcController::new().configure(&chip, &inj_cfg) {
+            Ok(inj) => {
+                put(13, 0);
+                timer.enable_counter();
+                for _ in 0..4 {
+                    inj.clear_eoic();
+                    inj.reassert_trigger_enable();
+                    let mut spins = 200_000u32;
+                    while spins > 0 && !inj.eoic() {
+                        spins -= 1;
+                    }
+                    eoic = spins > 0;
+                    if !eoic {
+                        break;
+                    }
+                }
+                let s = inj.read_injected();
+                put(15, u32::from(s[0]));
+                put(16, u32::from(s[1]));
+            }
+            Err(_) => put(13, 1),
+        }
+        put(14, u32::from(eoic));
+
+        let period = hal::irq::period_irq(chip.irq()) as u32;
+        let ipr = (Reg32::new(0xE000_E400, (period / 4) * 4).read() >> ((period % 4) * 8)) & 0xFF;
+        let shpr3 = Reg32::new(0xE000_ED20, 0).read() >> 24;
+        put(17, ipr);
+        put(18, shpr3);
+        let prio = ipr == 0x00 && shpr3 == 0xC0;
+        put(19, u32::from(prio));
+        let moe = (Reg32::new(T1, 0x44).read() >> 15) & 1;
         put(20, moe);
         put(21, u32::from(fail == 0 && eoic && prio && moe == 0));
         finish(5)

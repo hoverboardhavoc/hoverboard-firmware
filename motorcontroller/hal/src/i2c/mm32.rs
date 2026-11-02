@@ -473,7 +473,14 @@ mod tests {
     fn fast_400k_at_36mhz_is_the_vendor_arithmetic() {
         // p = 27 ns, s = 3, m = 90: LCNT = 74 / 2 + 4 = 41, HCNT = 90 - 13 - 41 - 3 = 33.
         let t = timing_for(APB1_36M, I2cMode::fast(400_000, FastDuty::Two)).unwrap();
-        assert_eq!(t, Mm32Timing { fast: true, hcnt: 33, lcnt: 41 });
+        assert_eq!(
+            t,
+            Mm32Timing {
+                fast: true,
+                hcnt: 33,
+                lcnt: 41
+            }
+        );
     }
 
     #[test]
@@ -482,22 +489,42 @@ mod tests {
         // golden trace i2c/bringup_i2c1_400k_mm32).
         let pclk1 = ClockConfig::REFERENCE_72M_HSI.apb1_hz();
         let t = timing_for(pclk1, I2cMode::fast(400_000, FastDuty::Two)).unwrap();
-        assert_eq!(t, Mm32Timing { fast: true, hcnt: 77, lcnt: 84 });
+        assert_eq!(
+            t,
+            Mm32Timing {
+                fast: true,
+                hcnt: 77,
+                lcnt: 84
+            }
+        );
     }
 
     #[test]
     fn standard_100k_at_36mhz() {
         // m = 360: LCNT = 344 / 2 = 172, HCNT = 172.
         let t = timing_for(APB1_36M, I2cMode::standard(100_000)).unwrap();
-        assert_eq!(t, Mm32Timing { fast: false, hcnt: 172, lcnt: 172 });
+        assert_eq!(
+            t,
+            Mm32Timing {
+                fast: false,
+                hcnt: 172,
+                lcnt: 172
+            }
+        );
     }
 
     #[test]
     fn speeds_the_counts_cannot_express_are_refused() {
         assert_eq!(timing_for(APB1_36M, I2cMode::standard(0)), None);
-        assert_eq!(timing_for(APB1_36M, I2cMode::fast(400_001, FastDuty::Two)), None);
+        assert_eq!(
+            timing_for(APB1_36M, I2cMode::fast(400_001, FastDuty::Two)),
+            None
+        );
         // 1 MHz APB1 at 400 kHz: m = 2, below the 13-count floor.
-        assert_eq!(timing_for(1_000_000, I2cMode::fast(400_000, FastDuty::Two)), None);
+        assert_eq!(
+            timing_for(1_000_000, I2cMode::fast(400_000, FastDuty::Two)),
+            None
+        );
     }
 
     #[test]
