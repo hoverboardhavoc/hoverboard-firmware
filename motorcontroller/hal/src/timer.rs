@@ -389,8 +389,6 @@ mod tests {
 
     fn channel(polarity: bool, idle_high: bool, idle_high_n: bool) -> PwmChannelConfig {
         PwmChannelConfig {
-            high: 0x08,
-            low: 0x1D,
             polarity,
             idle_high,
             idle_high_n,

@@ -2,6 +2,7 @@ package com.hoverboard.remote
 
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.Editor
 import com.hoverboard.remote.model.SetupFields
@@ -17,9 +18,12 @@ class SetupFieldsTest {
 
     @Test
     fun everyEditableRowTakesItsFieldsDefault() {
-        for (f in SetupFields.ALL.filter { it.editor != Editor.ReadOnly }) {
+        // But the dead time, whose default 0 is a board with no gates: this screen does not read
+        // the gates, so it offers only what no check refuses whatever they are.
+        for (f in SetupFields.ALL.filter { it.editor != Editor.ReadOnly && it != SetupFields.MOTOR_DEAD_TIME }) {
             assertTrue(f.accepts(f.def.default), "${f.key} refuses its own default ${f.def.default}")
         }
+        assertFalse(SetupFields.MOTOR_DEAD_TIME.accepts(Fields.MOTOR_DEAD_TIME.default))
     }
 
     @Test
@@ -34,11 +38,11 @@ class SetupFieldsTest {
         assertNull(SetupFields.MOTOR_ALIGN_OFFSET.parse("6"))
         assertNull(SetupFields.MOTOR_DEAD_TIME.parse("256"), "outside a u8")
         // The dead-time floor: the Setup screen is the second editor of the field the layout
-        // screen also offers, and the board refuses a configured gate group below it.
+        // screen also offers, and the checks refuse a configured gate group below it.
         assertNull(SetupFields.MOTOR_DEAD_TIME.parse("1"), "below the dead-time floor")
         assertNull(SetupFields.MOTOR_DEAD_TIME.parse("${DEAD_TIME_MIN_DTG - 1}"), "below the dead-time floor")
         assertEquals(Value.U8(DEAD_TIME_MIN_DTG), SetupFields.MOTOR_DEAD_TIME.parse("$DEAD_TIME_MIN_DTG"))
-        assertEquals(Value.U8(0), SetupFields.MOTOR_DEAD_TIME.parse("0"), "0 = the gates unset")
+        assertNull(SetupFields.MOTOR_DEAD_TIME.parse("0"), "0 is the gates unset, which this screen does not judge")
         assertEquals(Value.I32(-88), SetupFields.GYRO_BIAS[2].parse(" -88 "))
         assertEquals(Value.I16(-266), SetupFields.LEVEL_TRIM[0].parse("-266"))
         assertNull(SetupFields.LEVEL_TRIM[0].parse("40000"), "outside an i16")

@@ -4,7 +4,7 @@
 
 use net::walk::{CONFIG_RESP_VALUE_MAX, CONFIG_WRITE_VALUE_MAX};
 use serde_json::{Map, Value as Json};
-use store::{by_id, FieldName, Index, Key, Kind, Type, Value, NAMES, PIN_ABSENT};
+use store::{by_id, FieldName, Index, Key, Kind, Type, Value, NAMES};
 
 use crate::nodes::{parse_int, parse_key};
 
@@ -253,29 +253,88 @@ fn distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
-/// A pin byte as a file writes it: `"PC13"`, or `"none"` for `0xFF`.
-pub fn pin_name(b: u8) -> String {
-    if b == PIN_ABSENT {
-        "none".into()
-    } else {
-        format!("P{}{}", char::from(b'A' + (b >> 4)), b & 0x0F)
-    }
+/// A pin as a line names it: `PA8`.
+pub fn pin_text(port: u8, pin: u8) -> String {
+    format!("P{}{pin}", port_letter(port))
 }
 
-/// The byte a pin token packs to: `(port << 4) | pin`, `none` for `0xFF`.
-pub fn parse_pin(s: &str) -> Option<u8> {
-    if s.eq_ignore_ascii_case("none") {
-        return Some(PIN_ABSENT);
+/// A port number as a file writes it: `0` is `"A"`.
+fn port_letter(port: u8) -> String {
+    char::from(b'A' + port.min(25)).to_string()
+}
+
+/// A pin value's bytes as a file writes them (`specs/config-read-once.md` section 3): an object
+/// of the port letter, the pin number, and the `af` of a [`Type::PinAf`] or the `adc` of a
+/// [`Type::PinAdc`]. The absent default (port `0xFF`) is `null`.
+fn pin_json(t: Type, b: &[u8]) -> Json {
+    if b.first() == Some(&0xFF) {
+        return Json::Null;
     }
-    let rest = s.strip_prefix(['P', 'p'])?;
-    let mut chars = rest.chars();
-    let port = chars.next()?.to_ascii_uppercase();
-    let pin: u8 = chars.as_str().parse().ok()?;
-    if !('A'..='P').contains(&port) || pin > 15 || chars.as_str().starts_with('+') {
-        return None;
+    let mut o = Map::new();
+    o.insert("port".into(), Json::String(port_letter(b[0])));
+    o.insert("pin".into(), Json::from(b[1]));
+    match t {
+        Type::PinAf => {
+            o.insert("af".into(), Json::from(b[2]));
+        }
+        Type::PinAdc => {
+            o.insert("adc".into(), Json::from(b[2]));
+        }
+        _ => {}
     }
-    let b = ((port as u8 - b'A') << 4) | pin;
-    (b != PIN_ABSENT).then_some(b)
+    Json::Object(o)
+}
+
+/// A pin object's bytes for storage type `t`: `Err` naming what is wrong.
+fn pin_bytes(t: Type, v: &Json) -> Result<Vec<u8>, String> {
+    let o = v
+        .as_object()
+        .ok_or("a pin object, {\"port\": \"A\", \"pin\": 8, ...}")?;
+    let third = match t {
+        Type::PinAf => Some("af"),
+        Type::PinAdc => Some("adc"),
+        _ => None,
+    };
+    if let Some(k) = o
+        .keys()
+        .find(|k| !["port", "pin"].contains(&k.as_str()) && Some(k.as_str()) != third)
+    {
+        return Err(format!("a pin object, without {k}"));
+    }
+    let port = o
+        .get("port")
+        .and_then(Json::as_str)
+        .filter(|p| p.len() == 1)
+        .and_then(|p| p.chars().next())
+        .map(|c| c.to_ascii_uppercase())
+        .filter(|c| ('A'..='F').contains(c))
+        .ok_or("a port letter A to F")?;
+    let pin = o
+        .get("pin")
+        .and_then(Json::as_u64)
+        .filter(|p| *p <= 15)
+        .ok_or("a pin number 0 to 15")?;
+    let mut b = vec![port as u8 - b'A', pin as u8];
+    match (t, third) {
+        (Type::PinAf, Some(k)) => {
+            // Left out on a chip that remaps, whose af byte is not used: stored as 0.
+            let af = match o.get(k) {
+                Some(x) => x.as_u64().filter(|a| *a <= 15).ok_or("an af 0 to 15")?,
+                None => 0,
+            };
+            b.push(af as u8);
+        }
+        (Type::PinAdc, Some(k)) => {
+            let adc = o
+                .get(k)
+                .and_then(Json::as_u64)
+                .filter(|a| *a <= 255)
+                .ok_or("an adc channel")?;
+            b.push(adc as u8);
+        }
+        _ => {}
+    }
+    Ok(b)
 }
 
 /// An integer of a JSON value, if it is one.
@@ -317,10 +376,12 @@ pub fn to_json(row: Option<&FieldName>, tag: u8, bytes: &[u8]) -> Json {
         Value::Bool(b) => return Json::Bool(b),
         Value::Str(s) => return Json::String(String::from_utf8_lossy(s).into_owned()),
         Value::Bytes(b) => return Json::String(hex(b)),
+        Value::Pin(b) => return pin_json(Type::Pin, &b),
+        Value::PinAf(b) => return pin_json(Type::PinAf, &b),
+        Value::PinAdc(b) => return pin_json(Type::PinAdc, &b),
     };
     let byte = u8::try_from(int).ok();
     match (row.map(|r| r.kind), byte) {
-        (Some(Kind::Pin), Some(b)) => Json::String(pin_name(b)),
         (Some(Kind::Bool), Some(0)) => Json::Bool(false),
         (Some(Kind::Bool), Some(1)) => Json::Bool(true),
         (Some(Kind::Enum(labels)), Some(b)) => match labels.iter().find(|(v, _)| *v == b) {
@@ -339,25 +400,41 @@ pub fn to_json(row: Option<&FieldName>, tag: u8, bytes: &[u8]) -> Json {
     }
 }
 
-/// A value for `key` as a line shows it: a pin or a label bare, anything else as the file writes it.
+/// A value for `key` as a line shows it: a label bare, a pin as `PB5`, `PA8 af2` or `PA4 adc4`
+/// (`none` when absent), anything else as the file writes it.
 pub fn show(row: Option<&FieldName>, v: &Json) -> String {
     match (row.map(|r| r.kind), v) {
-        (Some(Kind::Pin | Kind::Enum(_)), Json::String(s)) => s.clone(),
+        (Some(Kind::Enum(_)), Json::String(s)) => s.clone(),
+        (Some(Kind::Pin), Json::Null) => "none".into(),
+        (Some(Kind::Pin), Json::Object(o)) => {
+            let mut t = format!(
+                "P{}{}",
+                o.get("port").and_then(Json::as_str).unwrap_or("?"),
+                o.get("pin").map_or_else(String::new, Json::to_string)
+            );
+            for k in ["af", "adc"] {
+                if let Some(x) = o.get(k) {
+                    t = format!("{t} {k}{x}");
+                }
+            }
+            t
+        }
         _ => v.to_string(),
     }
 }
 
 /// A value on the command line as the file would write it, for `row` (or, for an id the table
-/// does not name, the board's `storage` type): `null` un-stores, a pin, label, string or blob is
-/// text, bit names may be listed with commas, and everything else is a number.
+/// does not name, the board's `storage` type): `null` un-stores, a pin is its JSON object, a label,
+/// string or blob is text, bit names may be listed with commas, and everything else is a number.
 pub fn from_text(row: Option<&FieldName>, storage: Type, text: &str) -> Json {
     if text == "null" {
         return Json::Null;
     }
-    let textual = matches!(
-        row.map(|r| r.kind),
-        Some(Kind::Pin | Kind::Str | Kind::Blob)
-    ) || (row.is_none() && matches!(storage, Type::Str | Type::Blob));
+    if row.is_some_and(|r| r.kind == Kind::Pin) {
+        return serde_json::from_str(text).unwrap_or_else(|_| Json::String(text.into()));
+    }
+    let textual = matches!(row.map(|r| r.kind), Some(Kind::Str | Kind::Blob))
+        || (row.is_none() && matches!(storage, Type::Str | Type::Blob));
     if textual {
         return Json::String(text.into());
     }
@@ -389,7 +466,7 @@ fn bounds(t: Type) -> Option<(i128, i128)> {
         Type::I32 => (i32::MIN.into(), i32::MAX.into()),
         Type::I64 => (i64::MIN.into(), i64::MAX.into()),
         Type::Bool => (0, 1),
-        Type::Str | Type::Blob => return None,
+        Type::Str | Type::Blob | Type::Pin | Type::PinAf | Type::PinAdc => return None,
     })
 }
 
@@ -432,11 +509,9 @@ pub fn encode(
     };
     let int = match (row.map(|r| r.kind), v) {
         (Some(Kind::Pin), _) => {
-            let b = v
-                .as_str()
-                .and_then(parse_pin)
-                .ok_or_else(|| bad("a pin (PC13 or none)"))?;
-            i128::from(b)
+            return pin_bytes(storage, v)
+                .map(|b| (Some(b), warn))
+                .map_err(|what| bad(&what));
         }
         (Some(Kind::Bool), Json::Bool(b)) => i128::from(*b),
         (Some(Kind::Bool), _) => {
@@ -511,7 +586,12 @@ pub fn encode(
             "{path}: {int} is outside {storage:?} ({lo}..{hi})"
         )));
     }
-    if let Some((lo, hi)) = row.and_then(|r| r.range) {
+    // The range table. An arm-row or calibration field's range is a board check, made on the
+    // board as the write would leave it and never overridden (`crate::checks`,
+    // `specs/config-read-once.md` section 4); any other field's is this forceable one.
+    let board_check = store::lookup_key(key).is_some_and(|d| d.effect == store::Effect::Arm)
+        || store::CALIBRATION.contains(&key.field_id);
+    if let Some((lo, hi)) = store::range_of(key).filter(|_| !board_check) {
         checked(
             &mut warn,
             (i128::from(lo)..=i128::from(hi)).contains(&int),
@@ -588,8 +668,16 @@ pub fn table_json() -> Json {
                 m.into(),
             );
         }
-        if let Some((lo, hi)) = r.range {
-            o.insert("range".into(), vec![lo, hi].into());
+        let ranges: Vec<Json> = store::RANGES
+            .iter()
+            .filter(|g| g.id == r.id)
+            .map(|g| match g.index {
+                Some(i) => serde_json::json!({ "index": i, "range": [g.lo, g.hi] }),
+                None => serde_json::json!({ "range": [g.lo, g.hi] }),
+            })
+            .collect();
+        if !ranges.is_empty() {
+            o.insert("ranges".into(), Json::Array(ranges));
         }
         let scope = match r.scope() {
             Some(store::Scope::Node) => "node",
@@ -787,18 +875,69 @@ mod tests {
     }
 
     #[test]
-    fn pins_round_trip_every_byte() {
-        for b in 0..=255u8 {
-            let name = pin_name(b);
-            assert_eq!(parse_pin(&name), Some(b), "{name}");
-        }
-        assert_eq!(pin_name(0x2D), "PC13");
-        assert_eq!(pin_name(0x1C), "PB12");
-        assert_eq!(pin_name(0xFF), "none");
-        assert_eq!(parse_pin("pa15"), Some(0x0F));
-        for bad in ["PC16", "PQ1", "C13", "P", "PC", "PC+1", "PP15"] {
-            assert_eq!(parse_pin(bad), None, "{bad}");
-        }
+    fn pins_are_objects_of_their_type_both_ways() {
+        use serde_json::json;
+        let hall = k(0x40, 0);
+        let (b, _) = encode(hall, Type::Pin, &json!({"port": "C", "pin": 13})).unwrap();
+        assert_eq!(b, Some(vec![2, 13]));
+        assert_eq!(
+            to_json(row_of(hall), Type::Pin.tag(), &[2, 13]),
+            json!({"port": "C", "pin": 13})
+        );
+        let gate = k(0x43, 0);
+        let v = json!({"port": "A", "pin": 8, "af": 2});
+        assert_eq!(
+            encode(gate, Type::PinAf, &v).unwrap().0,
+            Some(vec![0, 8, 2])
+        );
+        assert_eq!(to_json(row_of(gate), Type::PinAf.tag(), &[0, 8, 2]), v);
+        // Left out (a chip that remaps), the af is stored as 0.
+        let (b, _) = encode(gate, Type::PinAf, &json!({"port": "A", "pin": 8})).unwrap();
+        assert_eq!(b, Some(vec![0, 8, 0]));
+        let phase = k(0x49, 0);
+        let v = json!({"port": "B", "pin": 0, "adc": 8});
+        assert_eq!(
+            encode(phase, Type::PinAdc, &v).unwrap().0,
+            Some(vec![1, 0, 8])
+        );
+        assert_eq!(to_json(row_of(phase), Type::PinAdc.tag(), &[1, 0, 8]), v);
+        // The absent default reads as null.
+        assert_eq!(
+            to_json(row_of(hall), Type::Pin.tag(), &[0xFF, 0xFF]),
+            Json::Null
+        );
+        assert_eq!(pin_text(1, 12), "PB12");
+    }
+
+    #[test]
+    fn a_pin_that_is_not_its_types_object_always_stops() {
+        use serde_json::json;
+        let stop = |key: Key, v: Json| {
+            let row = row_of(key).unwrap();
+            let e = encode(key, row.storage, &v).unwrap_err();
+            assert!(!e.force, "{}", e.msg);
+            e.msg
+        };
+        assert_eq!(
+            stop(k(0x40, 0), json!("PC13")),
+            "motors[0].hall.a: a pin object, {\"port\": \"A\", \"pin\": 8, ...}, not \"PC13\""
+        );
+        assert_eq!(
+            stop(k(0x40, 0), json!({"port": "G", "pin": 1})),
+            "motors[0].hall.a: a port letter A to F, not {\"port\":\"G\",\"pin\":1}"
+        );
+        assert_eq!(
+            stop(k(0x40, 0), json!({"port": "C", "pin": 16})),
+            "motors[0].hall.a: a pin number 0 to 15, not {\"port\":\"C\",\"pin\":16}"
+        );
+        assert_eq!(
+            stop(k(0x40, 0), json!({"port": "C", "pin": 1, "af": 1})),
+            "motors[0].hall.a: a pin object, without af, not {\"port\":\"C\",\"pin\":1,\"af\":1}"
+        );
+        assert_eq!(
+            stop(k(0x49, 0), json!({"port": "A", "pin": 0})),
+            "motors[0].current.phase_a: an adc channel, not {\"port\":\"A\",\"pin\":0}"
+        );
     }
 
     /// Encode then show back: the file form of `v` for `key`.
@@ -813,9 +952,9 @@ mod tests {
     fn every_display_kind_round_trips() {
         use serde_json::json;
         for (key, v) in [
-            (k(0x40, 1), json!("PB5")),
-            (k(0x07, 0), json!("none")),
-            (k(0x0F, 1), json!("PB6")),
+            (k(0x40, 1), json!({"port": "B", "pin": 5})),
+            (k(0x07, 0), json!({"port": "A", "pin": 4, "adc": 4})),
+            (k(0x0F, 1), json!({"port": "B", "pin": 6, "af": 0})),
             (k(0x20, 0), json!("balance")),
             (k(0x50, 1), json!("right")),
             (k(0x22, 0), json!(false)),
@@ -868,12 +1007,8 @@ mod tests {
             e.msg
         };
         assert_eq!(
-            stop(k(0x40, 0), json!("PC99")),
-            "motors[0].hall.a: a pin (PC13 or none), not \"PC99\""
-        );
-        assert_eq!(
-            stop(k(0x10, 0), json!("PC99")),
-            "links[0].rx: a pin (PC13 or none), not \"PC99\""
+            stop(k(0x10, 0), json!("PC9")),
+            "links[0].rx: a pin object, {\"port\": \"A\", \"pin\": 8, ...}, not \"PC9\""
         );
         assert_eq!(
             stop(k(0x20, 0), json!("balanse")),
@@ -939,19 +1074,23 @@ mod tests {
         assert!(!e.msg.contains(&long));
     }
 
+    /// The range table outside the arm row and the calibration is forceable; inside them it is a
+    /// board check (`crate::checks`), which encoding leaves alone.
     #[test]
-    fn the_tables_range_is_forceable() {
+    fn the_tables_range_is_forceable_outside_the_board_checks() {
         use serde_json::json;
-        let key = k(0x51, 0);
-        let (bytes, p) = encode(key, Type::U8, &json!(6)).unwrap();
-        assert_eq!(bytes, Some(vec![6]));
+        let power = k(0x05, 0);
+        let (bytes, p) = encode(power, Type::U8, &json!(90)).unwrap();
+        assert_eq!(bytes, Some(vec![90]));
         assert_eq!(
             p,
             [Problem::forceable(
-                "motors[0].align_offset takes 0..5, not 6 (--force writes it anyway)"
+                "wifi.tx_power takes 8..84, not 90 (--force writes it anyway)"
             )]
         );
-        assert!(encode(key, Type::U8, &json!(5)).unwrap().1.is_empty());
+        assert!(encode(power, Type::U8, &json!(34)).unwrap().1.is_empty());
+        let (bytes, p) = encode(k(0x51, 0), Type::U8, &json!(6)).unwrap();
+        assert_eq!((bytes, p), (Some(vec![6]), Vec::new()));
     }
 
     #[test]
@@ -1010,6 +1149,11 @@ mod tests {
         let odo = row("odometer");
         assert_eq!(odo["board_owned"], true);
         let align = row("align_offset");
-        assert_eq!(align["range"], serde_json::json!([0, 5]));
+        assert_eq!(align["ranges"], serde_json::json!([{ "range": [0, 5] }]));
+        assert_eq!(
+            row("machine.turn")["ranges"],
+            serde_json::json!([{ "index": 0, "range": [0, 28500] }, { "index": 1, "range": [1, 1000] }])
+        );
+        assert_eq!(row("gate.hi_a")["type"], "pinaf");
     }
 }

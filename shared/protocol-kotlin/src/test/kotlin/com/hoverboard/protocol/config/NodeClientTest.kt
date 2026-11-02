@@ -44,10 +44,10 @@ class NodeClientTest {
     @Test
     fun theStatusIsTheBootRecordsEntriesAndEmptyFromABridge() = runTest {
         val f = FakeConfigBoards(this)
-        f.statuses[slave] = byteArrayOf(Fields.LINK_TX.id.toByte(), 1, BoardStatus.Reason.NOT_ROUTED.code.toByte(), 0x16)
+        f.statuses[slave] = byteArrayOf(Fields.LINK_TX.id.toByte(), 1, BoardStatus.Reason.NOT_UP.code.toByte(), 0x03)
 
         assertEquals(
-            StatusEntries(listOf(BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED.code, 0x16))),
+            StatusEntries(listOf(BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_UP.code, 0x03))),
             f.node.status(slave),
         )
         assertEquals(StatusEntries(emptyList()), f.node.status(master))

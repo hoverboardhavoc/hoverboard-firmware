@@ -19,17 +19,13 @@ pub(crate) const fn wait_states(sysclk_hz: u32) -> u32 {
     }
 }
 
-/// The GPIO port enable: `APB2EN.PxEN`, port A at bit 2.
-pub(crate) const fn gpio_enable(port: PeriphLabel) -> Option<EnableBit> {
-    let bit = match port {
-        PeriphLabel::Gpioa => 2,
-        PeriphLabel::Gpiob => 3,
-        PeriphLabel::Gpioc => 4,
-        PeriphLabel::Gpiod => 5,
-        PeriphLabel::Gpiof => 7,
-        _ => return None,
-    };
-    Some(EnableBit { reg: APB2EN, bit })
+/// The GPIO port enable for port `port` (`0` = A): the port A enable bit, `APB2EN` bit 2, plus
+/// the port number.
+pub(crate) const fn gpio_enable(port: u8) -> EnableBit {
+    EnableBit {
+        reg: APB2EN,
+        bit: 2 + port,
+    }
 }
 
 /// The USART enable: USART0 on APB2 bit 14, USART1 and USART2 on APB1 bits 17 and 18.

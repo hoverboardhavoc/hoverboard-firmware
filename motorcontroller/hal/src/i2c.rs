@@ -63,11 +63,9 @@ use crate::chip::Chip;
 use crate::clock::ClockConfig;
 #[cfg(hal_i2c = "gd")]
 use crate::error::{DescriptorError, I2cError};
-use crate::gpio::{self, PinRole};
 #[cfg(hal_i2c = "gd")]
-use crate::gpio::{Floating, Input, Pin};
-#[cfg(hal_i2c = "gd")]
-use crate::pincap::{self, PinClaim};
+use crate::gpio::PinAf;
+use crate::gpio::{self, AfMode};
 #[cfg(hal_i2c = "gd")]
 use crate::reg::Reg32;
 
@@ -384,54 +382,63 @@ pub struct I2c {
     settle_cycles: u32,
 }
 
-/// The port base and packed pin of SCL and SDA.
+/// The port base, pin number and alternate function of SCL and SDA.
 #[derive(Debug, Clone, Copy)]
 struct BusPins {
     scl_base: u32,
     scl: u8,
+    scl_af: u8,
     sda_base: u32,
     sda: u8,
+    sda_af: u8,
 }
 
 impl BusPins {
     /// Both pins as AF open-drain with the pull-up: the block owns the bus from here.
     fn claim_af(&self) {
-        gpio::configure_af(self.scl_base, self.scl, PinRole::I2cAfOpenDrain);
-        gpio::configure_af(self.sda_base, self.sda, PinRole::I2cAfOpenDrain);
+        gpio::configure_af(
+            self.scl_base,
+            self.scl,
+            AfMode::OpenDrainPullUp,
+            self.scl_af,
+        );
+        gpio::configure_af(
+            self.sda_base,
+            self.sda,
+            AfMode::OpenDrainPullUp,
+            self.sda_af,
+        );
     }
 }
 
 #[cfg(hal_i2c = "gd")]
 impl I2c {
-    /// Bring up `instance` as a master on `pins` (SCL, SDA) at `mode`.
+    /// Bring up `instance` as a master on the stored `scl` and `sda` at `mode`
+    /// (`specs/config-read-once.md` section 5; nothing here checks the pins or the instance).
     ///
-    /// Refused, before any pin is driven: a pair that is not `instance`'s SCL and SDA in the pin
-    /// model ([`pincap::i2c_instance`]), a gate pin, an instance the chip does not carry
-    /// (`MissingBase`), or a speed the vendor timing does not cover (`Unsupported`). Then: the
-    /// instance's clock, the bus clear on the pins as open-drain outputs, the pins as AF open-drain,
-    /// and the block's timing, mode, own address, enable and ACK.
+    /// Refused, before any pin is driven: an instance the chip does not carry (`MissingBase`), or a
+    /// speed the vendor timing does not cover (`Unsupported`). Then: the instance's clock, the bus
+    /// clear on the pins as open-drain outputs, the pins as AF open-drain on their stored
+    /// alternate functions, and the block's timing, mode, own address, enable and ACK.
     pub fn new(
         chip: &Chip,
         clock: &ClockConfig,
         instance: PeriphLabel,
-        pins: (Pin<Input<Floating>>, Pin<Input<Floating>>),
+        scl: PinAf,
+        sda: PinAf,
         mode: I2cMode,
     ) -> Result<I2c, DescriptorError> {
-        let (scl, sda) = pins;
-        pincap::check_pin_ownership(chip, scl.pin(), PinClaim::NonGate)?;
-        pincap::check_pin_ownership(chip, sda.pin(), PinClaim::NonGate)?;
-        if pincap::i2c_instance(chip, scl.pin(), sda.pin()) != Some(instance) {
-            return Err(DescriptorError::UnsupportedRole);
-        }
         let base = chip.base(instance)?;
         let timing = timing_for(clock.apb1_hz(), mode).ok_or(DescriptorError::Unsupported)?;
         crate::clock::enable_i2c(chip.rcu_base()?, chip.clock(), instance)?;
 
         let pins = BusPins {
-            scl_base: scl.port_base(),
-            scl: scl.pin(),
-            sda_base: sda.port_base(),
-            sda: sda.pin(),
+            scl_base: chip.clocked_port_base(scl.port),
+            scl: scl.pin,
+            scl_af: scl.af,
+            sda_base: chip.clocked_port_base(sda.port),
+            sda: sda.pin,
+            sda_af: sda.af,
         };
         let settle_cycles = (clock.sysclk_hz / 200_000).max(1);
         // A bus still held after this is not an error here: the owner's first transfer finds it,
@@ -771,6 +778,7 @@ fn clear_bus(pins: &BusPins, settle_cycles: u32) -> bool {
         scl,
         sda_base,
         sda,
+        ..
     } = *pins;
     let at = move |line: Line| match line {
         Line::Scl => (scl_base, scl),

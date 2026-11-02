@@ -576,36 +576,37 @@ mod config_tests {
     use net::walk::{Emits, CFG_OK, MAX_PDU};
     use net::{Opcode, Pdu, Responder};
     use store::{
-        Flash, Store, Type, Value, ATTITUDE_LEVEL_TRIM, IMU_MODEL, IMU_SCL_PIN, IMU_SDA_PIN,
-        LINK_RX, LINK_TX, MOTOR_CURRENT_LIMIT, MOTOR_HALL_A, NODE_ADDRESS,
+        Flash, Store, Type, Value, ATTITUDE_LEVEL_TRIM, IMU_I2C, IMU_SCL_PIN, IMU_SDA_PIN, LINK_RX,
+        LINK_TX, MOTOR_CURRENT_LIMIT, MOTOR_HALL_A, NODE_ADDRESS,
     };
 
     // --- the registry-sourced parser -------------------------------------------------------
 
     #[test]
-    fn parse_scalar_and_packed_pin_by_registry_type() {
+    fn parse_scalar_and_pin_by_registry_type() {
         // A scalar (u32 tunable): decimal.
         let v = parse_field_value(MOTOR_CURRENT_LIMIT.id(), "22750").unwrap();
         assert_eq!(v, Value::U32(22750));
         assert_eq!(v.kind(), Type::U32, "the type came from the registry");
-        // A packed port|pin byte (u8 board-layout field): hex round-trips exactly (0x16 = PB6).
-        let p = parse_field_value(IMU_SCL_PIN.id(), "0x16").unwrap();
-        assert_eq!(p, Value::U8(0x16));
-        // ...and decimal for the same u8 field.
+        // A pin with its alternate function: its three bytes (PB6 at AF1).
+        let p = parse_field_value(IMU_SCL_PIN.id(), "1,6,1").unwrap();
+        assert_eq!(p, Value::PinAf([1, 6, 1]));
+        // A hall: two bytes, hex or decimal.
         assert_eq!(
-            parse_field_value(IMU_SCL_PIN.id(), "22").unwrap(),
-            Value::U8(22)
+            parse_field_value(MOTOR_HALL_A.id(), "0x2,13").unwrap(),
+            Value::Pin([2, 13])
         );
     }
 
     #[test]
     fn parse_is_type_checked_against_the_registry() {
-        // A non-numeric into a u8 field is rejected (honoring the field's registered type), NOT
-        // silently accepted or coerced.
-        let e = parse_field_value(IMU_SCL_PIN.id(), "PB6").unwrap_err();
-        assert!(matches!(e, FieldArgError::BadValue { .. }), "{e:?}");
+        // A pin name, or the wrong number of bytes, is not the field's type.
+        for raw in ["PB6", "1,6", "1,6,1,0", "1,256,1"] {
+            let e = parse_field_value(IMU_SCL_PIN.id(), raw).unwrap_err();
+            assert!(matches!(e, FieldArgError::BadValue { .. }), "{raw}: {e:?}");
+        }
         // Out of range for the type is rejected too (256 into a u8).
-        let e = parse_field_value(IMU_SCL_PIN.id(), "256").unwrap_err();
+        let e = parse_field_value(IMU_I2C.id(), "256").unwrap_err();
         assert!(matches!(e, FieldArgError::BadValue { .. }), "{e:?}");
         // An unknown field id is rejected by the registry lookup (no second table to drift).
         let unknown = unknown_field_id();
@@ -636,6 +637,8 @@ mod config_tests {
                 Type::I16 | Type::I32 | Type::I64 => "-1",
                 Type::Bool => "true",
                 Type::Str => "x",
+                Type::Pin => "1,2",
+                Type::PinAf | Type::PinAdc => "1,2,3",
                 Type::Blob => continue, // not writable via this CLI (asserted below)
             };
             let v = parse_field_value(def.field_id, raw).unwrap();
@@ -841,21 +844,26 @@ mod config_tests {
         // IMU group, each write confirmed by a read-back over the wire path. The tool judges only
         // the type; what comes up is the board's to report in `board.status` after a reboot.
         let mut b = BoardNode::booted(0x01);
-        b.stage(LINK_TX.id(), 0, "0x02"); // PA2
-        b.stage(LINK_RX.id(), 0, "0x03"); // PA3
-        b.stage(IMU_SCL_PIN.id(), 0, "0x16"); // PB6
-        b.stage(IMU_SDA_PIN.id(), 0, "0x17"); // PB7
-        b.stage(IMU_MODEL.id(), 0, "2");
+        b.stage(LINK_TX.id(), 0, "0,2,1"); // PA2, AF1
+        b.stage(LINK_RX.id(), 0, "0,3,1"); // PA3, AF1
+        b.stage(IMU_SCL_PIN.id(), 0, "1,6,1"); // PB6
+        b.stage(IMU_SDA_PIN.id(), 0, "1,7,1"); // PB7
+        b.stage(IMU_I2C.id(), 0, "0");
 
         let mut flash = b.flash;
         let s = Store::mount(&mut flash).unwrap();
+        let read = |k| s.get_value(k).unwrap();
         assert_eq!(
             [
-                s.get(LINK_TX.at(0)),
-                s.get(LINK_RX.at(0)),
-                s.get(LINK_TX.at(1))
+                read(LINK_TX.at(0).key()),
+                read(LINK_RX.at(0).key()),
+                read(LINK_TX.at(1).key())
             ],
-            [0x02, 0x03, store::PIN_ABSENT],
+            [
+                (Value::PinAf([0, 2, 1]), store::Stored::Yes),
+                (Value::PinAf([0, 3, 1]), store::Stored::Yes),
+                (Value::PinAf([0xFF; 3]), store::Stored::No)
+            ],
             "link 1 stays unset"
         );
     }

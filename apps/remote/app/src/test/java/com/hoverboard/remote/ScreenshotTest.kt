@@ -373,7 +373,8 @@ class ScreenshotTest {
 
     @Test
     fun layout_editor() {
-        val values = Layout.SLOTS.associate { it.key to it.def.default }
+        // A board that stores nothing: every key read, each answered with its default.
+        val values = Layout.SLOTS.associate<LayoutSlot, Key, Value?> { it.key to null }
         val state = LayoutState(
             board = 0x01,
             chip = ChipTag.F103C8,
@@ -552,7 +553,7 @@ class ScreenshotTest {
         override fun onShown() = Unit
         override fun onHidden() = Unit
         override fun refresh() = Unit
-        override fun stage(slot: LayoutSlot, raw: Int) = Unit
+        override fun stage(slot: LayoutSlot, value: Value) = Unit
         override fun revert(slot: LayoutSlot) = Unit
         override fun revertAll() = Unit
         override fun apply() = Unit

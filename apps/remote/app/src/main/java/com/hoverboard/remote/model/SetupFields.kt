@@ -148,7 +148,7 @@ fun Value.asLong(): Long? = when (this) {
     is Value.I16 -> v.toLong()
     is Value.I32 -> v.toLong()
     is Value.I64 -> v
-    is Value.Bool, is Value.Str, is Value.Bytes -> null
+    is Value.Bool, is Value.Str, is Value.Bytes, is Value.Pin, is Value.PinAf, is Value.PinAdc -> null
 }
 
 /** How a value reads on screen. */
@@ -170,7 +170,7 @@ private fun integer(type: Type, n: Long): Value? {
         Type.I16 -> Value.I16(n.toInt())
         Type.I32 -> Value.I32(n.toInt())
         Type.I64 -> Value.I64(n)
-        Type.Bool, Type.Str, Type.Blob -> null
+        Type.Bool, Type.Str, Type.Blob, Type.Pin, Type.PinAf, Type.PinAdc -> null
     }
 }
 
@@ -183,7 +183,7 @@ private fun naturalRange(type: Type): LongRange? = when (type) {
     Type.I16 -> Short.MIN_VALUE.toLong()..Short.MAX_VALUE.toLong()
     Type.I32 -> Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()
     Type.I64 -> Long.MIN_VALUE..Long.MAX_VALUE
-    Type.Bool, Type.Str, Type.Blob -> null
+    Type.Bool, Type.Str, Type.Blob, Type.Pin, Type.PinAf, Type.PinAdc -> null
 }
 
 private const val U8_MAX = 0xFFL
@@ -293,14 +293,15 @@ object SetupFields {
         Editor.Range(0L..ALIGN_OFFSET_MAX),
     )
     /**
-     * `motor.dead_time`, the SECOND editor of the field the layout screen also offers. The board
-     * does not bring up a configured gate group below [DEAD_TIME_MIN_DTG] (shoot-through), and 0
-     * means the gates are unset, so this row offers exactly what the motor bring-up takes rather
-     * than the whole byte.
+     * `motor.dead_time`, the SECOND editor of the field the layout screen also offers. The checks
+     * refuse a configured gate group below [DEAD_TIME_MIN_DTG] (shoot-through), and judging that
+     * needs the gate pins and the chip, which the layout editor reads and this screen does not. So
+     * this row offers the floor upwards and nothing below it, which no check refuses whatever the
+     * gates are.
      */
     val MOTOR_DEAD_TIME = SetupField(
         Fields.MOTOR_DEAD_TIME, 0, R.string.setup_field_dead_time, SetupGroup.DRIVE,
-        Editor.Range(DEAD_TIME_MIN_DTG.toLong()..U8_MAX, unset = 0L),
+        Editor.Range(DEAD_TIME_MIN_DTG.toLong()..U8_MAX),
         note = R.string.setup_note_dead_time, noteArgs = listOf(DEAD_TIME_MIN_DTG),
     )
     val MOTOR_CURRENT_LIMIT = SetupField(

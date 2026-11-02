@@ -3,7 +3,7 @@
 //! `PUD` pull per pin, the per-pin alternate-function mux in `AFSEL0` (pins 0-7) and `AFSEL1`
 //! (pins 8-15), set/reset through `BOP`, levels in `ISTAT` (GD32F1x0 User Manual, section 8).
 
-use super::{InputPull, PinRole};
+use super::{AfMode, InputPull};
 use crate::reg::Reg32;
 
 const CTL: u32 = 0x00;
@@ -35,23 +35,23 @@ fn omode(port_base: u32, n: u32, open_drain: bool) {
     Reg32::new(port_base, OMODE).modify(1 << n, u32::from(open_drain) << n);
 }
 
-/// An alternate-function pin: AF mode, the role's pull, its `AFSEL` nibble, and for an output its
-/// type and 50 MHz speed.
-pub(crate) fn configure_af(port_base: u32, pin: u8, role: PinRole) {
+/// An alternate-function pin: AF mode, its `AFSEL` nibble `af`, the pull-up for an open-drain
+/// line, and for a driven pin its output type and 50 MHz speed.
+pub(crate) fn configure_af(port_base: u32, pin: u8, mode: AfMode, af: u8) {
     let n = u32::from(pin & 0x0F);
-    let cfg = role.config();
     field2(port_base, CTL, n, MODE_AF);
+    let pull_up = mode == AfMode::OpenDrainPullUp;
     field2(
         port_base,
         PUD,
         n,
-        if cfg.pull_up { PUD_PULLUP } else { PUD_NONE },
+        if pull_up { PUD_PULLUP } else { PUD_NONE },
     );
     let (offset, within) = if n < 8 { (AFSEL0, n) } else { (AFSEL1, n - 8) };
     let shift = 4 * within;
-    Reg32::new(port_base, offset).modify(0xF << shift, cfg.af << shift);
-    if cfg.output {
-        omode(port_base, n, cfg.open_drain);
+    Reg32::new(port_base, offset).modify(0xF << shift, u32::from(af & 0x0F) << shift);
+    if mode != AfMode::Input {
+        omode(port_base, n, pull_up);
         field2(port_base, OSPD, n, OSPEED_50MHZ);
     }
 }

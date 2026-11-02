@@ -59,9 +59,11 @@ const val LAYOUT_PART_UNKNOWN_TAG = "layout_part_unknown"
  * done from `hoverboard-cli` at the bench (`specs/decision-cli-onboarding.md` section 1), so this
  * screen offers no whole-layout presets.
  *
- * Nothing judges the layout here. After the power-cycle the board brings up what it can from these
- * fields and lists what it could not in its boot status record, which Setup's machine status shows
- * (`specs/configured-links.md` sections 3 and 5).
+ * The firmware applies what is stored and checks nothing, so Apply runs the configuration checks
+ * (`specs/config-read-once.md` section 4) on the board as the changes would leave it and writes
+ * nothing when one refuses, naming the field and the reason. What still fails at boot is a runtime
+ * fact, a peripheral that did not come up, which the board lists in its boot status record and
+ * Setup's machine status shows (`specs/configured-links.md` section 5).
  */
 @Composable
 fun LayoutScreen(
@@ -128,7 +130,7 @@ private fun Notice(notice: LayoutNotice, state: LayoutState, actions: LayoutActi
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(layoutNoticeText(notice), modifier = Modifier.weight(1f), color = Fg)
+        Text(layoutNoticeText(notice, state.part), modifier = Modifier.weight(1f), color = Fg)
         // The slot was taken, the board was not asked: applying again is the retry, and what was
         // not written is still in the delta.
         if (notice == LayoutNotice.SlotBusy && state.board != null) {
@@ -154,7 +156,8 @@ private fun Status(state: LayoutState, actions: LayoutActions) {
 
 /**
  * Which part the board says it is: the `chip` tag of its own `CYCLIC_STATE`
- * (`shared/linkctl/src/lib.rs`, `CyclicObs`), which is what the pin picker offers pins of.
+ * (`shared/linkctl/src/lib.rs`, `CyclicObs`), which is what the pin picker offers pins of and what
+ * the checks judge the layout against.
  *
  * Two boards cannot be named: one that has sent no `CYCLIC_STATE` yet, so no part has arrived, and
  * one whose boot probe measured a combination the firmware allocates no fleet part for, which sends
@@ -166,7 +169,7 @@ private fun Part(state: LayoutState) {
     val part = state.part
     if (part != null) {
         Text(
-            text = stringResource(R.string.layout_part, part.label),
+            text = stringResource(R.string.layout_part, part.name),
             style = MaterialTheme.typography.bodyMedium,
             color = FgMuted,
         )
@@ -200,7 +203,7 @@ private fun Delta(state: LayoutState, armed: Boolean, actions: LayoutActions) {
         for (slot in state.delta) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    layoutDeltaLine(slot, slot.of(stored), slot.of(staged)),
+                    layoutDeltaLine(slot, slot.of(stored), slot.of(staged), state.part),
                     modifier = Modifier.weight(1f),
                     color = Fg,
                 )

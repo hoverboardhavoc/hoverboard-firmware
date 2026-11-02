@@ -31,6 +31,12 @@ pub enum Value<'a> {
     Str(&'a [u8]),
     /// Raw bytes.
     Bytes(&'a [u8]),
+    /// A pin: port, pin ([`Type::Pin`]).
+    Pin([u8; 2]),
+    /// A pin and its alternate function ([`Type::PinAf`]).
+    PinAf([u8; 3]),
+    /// A pin and its ADC channel ([`Type::PinAdc`]).
+    PinAdc([u8; 3]),
 }
 
 impl<'a> Value<'a> {
@@ -47,6 +53,9 @@ impl<'a> Value<'a> {
             Value::Bool(_) => Type::Bool,
             Value::Str(_) => Type::Str,
             Value::Bytes(_) => Type::Blob,
+            Value::Pin(_) => Type::Pin,
+            Value::PinAf(_) => Type::PinAf,
+            Value::PinAdc(_) => Type::PinAdc,
         }
     }
 
@@ -72,6 +81,8 @@ impl<'a> Value<'a> {
             Value::I64(v) => write_le(&v.to_le_bytes(), out),
             Value::Str(s) => write_le(s, out),
             Value::Bytes(b) => write_le(b, out),
+            Value::Pin(p) => write_le(p, out),
+            Value::PinAf(p) | Value::PinAdc(p) => write_le(p, out),
         }
     }
 
@@ -92,6 +103,9 @@ impl<'a> Value<'a> {
             Type::I64 => Value::I64(i64::from_le_bytes(fixed(bytes)?)),
             Type::Str => Value::Str(bytes),
             Type::Blob => Value::Bytes(bytes),
+            Type::Pin => Value::Pin(fixed(bytes)?),
+            Type::PinAf => Value::PinAf(fixed(bytes)?),
+            Type::PinAdc => Value::PinAdc(fixed(bytes)?),
         })
     }
 }
@@ -146,6 +160,21 @@ mod tests {
             let got = Value::decode(v.kind(), &buf[..n]).unwrap();
             assert_eq!(got, v);
         }
+    }
+
+    #[test]
+    fn the_pin_types_round_trip_at_their_widths() {
+        for v in [
+            Value::Pin([1, 12]),
+            Value::PinAf([0, 8, 2]),
+            Value::PinAdc([0, 4, 4]),
+        ] {
+            let mut buf = [0u8; 8];
+            let n = v.encode(&mut buf);
+            assert_eq!(n, v.kind().fixed_len().unwrap());
+            assert_eq!(Value::decode(v.kind(), &buf[..n]), Some(v));
+        }
+        assert_eq!(Value::decode(Type::PinAf, &[0, 8]), None, "a short record");
     }
 
     #[test]

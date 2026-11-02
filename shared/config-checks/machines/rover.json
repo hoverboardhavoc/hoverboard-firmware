@@ -1,0 +1,258 @@
+{
+  "machine": {
+    "mode": "balance",
+    "frame": "rigid",
+    "rider_required": false,
+    "method": "foc",
+    "turn": [
+      12000,
+      600
+    ],
+    "balance": {
+      "gains": [
+        3200,
+        880,
+        240,
+        300
+      ],
+      "reference": [
+        57,
+        246
+      ],
+      "pos_clamp": 45
+    },
+    "battery": {
+      "floor": 2400
+    }
+  },
+  "boards": {
+    "84fc41333235390839393638": {
+      "device": {
+        "name": "Rover slave"
+      },
+      "imu": {
+        "scl": {
+          "port": "B",
+          "pin": 6,
+          "af": 1
+        },
+        "sda": {
+          "port": "B",
+          "pin": 7,
+          "af": 1
+        },
+        "gyro_bias": [
+          48,
+          13,
+          -88
+        ],
+        "i2c": 0
+      },
+      "links": [
+        {
+          "tx": {
+            "port": "A",
+            "pin": 2,
+            "af": 1
+          },
+          "rx": {
+            "port": "A",
+            "pin": 3,
+            "af": 1
+          },
+          "usart": 1
+        }
+      ],
+      "motors": [
+        {
+          "current": {
+            "limit": 10000,
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            }
+          },
+          "hall": {
+            "a": {
+              "port": "C",
+              "pin": 13
+            },
+            "b": {
+              "port": "A",
+              "pin": 1
+            },
+            "c": {
+              "port": "C",
+              "pin": 14
+            }
+          },
+          "gate": {
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 2
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            },
+            "dead_time": 28,
+            "timer": 0
+          },
+          "side": "left",
+          "align_offset": 1
+        }
+      ]
+    },
+    "8adc39323335381255343333": {
+      "device": {
+        "name": "Rover master"
+      },
+      "battery_sense": {
+        "pin": {
+          "port": "A",
+          "pin": 4,
+          "adc": 4
+        }
+      },
+      "leds": {
+        "red": {
+          "port": "B",
+          "pin": 4
+        }
+      },
+      "imu": {
+        "scl": {
+          "port": "B",
+          "pin": 6
+        },
+        "sda": {
+          "port": "B",
+          "pin": 7
+        },
+        "axis_sign": [
+          -1,
+          1,
+          -1
+        ],
+        "axis_role": [
+          "x",
+          "z"
+        ],
+        "i2c": 0,
+        "model": 2
+      },
+      "attitude": {
+        "level_trim": [
+          -51,
+          -169
+        ]
+      },
+      "links": [
+        {
+          "tx": {
+            "port": "A",
+            "pin": 2
+          },
+          "rx": {
+            "port": "A",
+            "pin": 3
+          },
+          "usart": 1
+        }
+      ],
+      "motors": [
+        {
+          "current": {
+            "limit": 10000,
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            },
+            "cal": 455
+          },
+          "hall": {
+            "a": {
+              "port": "C",
+              "pin": 13
+            },
+            "b": {
+              "port": "A",
+              "pin": 1
+            },
+            "c": {
+              "port": "C",
+              "pin": 14
+            }
+          },
+          "gate": {
+            "hi_a": {
+              "port": "A",
+              "pin": 8
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15
+            },
+            "dead_time": 28,
+            "timer": 0
+          },
+          "direction": "reverse",
+          "side": "right",
+          "align_offset": 1,
+          "pole_pairs": 15,
+          "wheel_diameter_mm": 165
+        }
+      ]
+    }
+  }
+}

@@ -23,16 +23,43 @@ mod image {
     use embedded_hal::i2c::I2c as _;
     use hal::clock::{self, ClockConfig};
     use hal::reg::Reg32;
-    use hal::{Chip, I2c, I2cMode, PeriphLabel};
+    use hal::{Chip, I2c, I2cMode, PeriphLabel, PinAf};
     use hal_bench::{finish, put};
     use panic_halt as _;
 
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
 
+    /// SCL PB6, SDA PB7, AF1 on the F1x0 mux (the F10x reaches them at the I2C0 default remap and
+    /// reads no AF).
     #[cfg(not(feature = "imu-i2c1"))]
-    const BUS: (PeriphLabel, u8, u8) = (PeriphLabel::I2c0, 0x16, 0x17);
+    const BUS: (PeriphLabel, PinAf, PinAf) = (
+        PeriphLabel::I2c0,
+        PinAf {
+            port: 1,
+            pin: 6,
+            af: 1,
+        },
+        PinAf {
+            port: 1,
+            pin: 7,
+            af: 1,
+        },
+    );
+    /// SCL PB10, SDA PB11, AF1 on the F1x0 mux.
     #[cfg(feature = "imu-i2c1")]
-    const BUS: (PeriphLabel, u8, u8) = (PeriphLabel::I2c1, 0x1A, 0x1B);
+    const BUS: (PeriphLabel, PinAf, PinAf) = (
+        PeriphLabel::I2c1,
+        PinAf {
+            port: 1,
+            pin: 10,
+            af: 1,
+        },
+        PinAf {
+            port: 1,
+            pin: 11,
+            af: 1,
+        },
+    );
 
     fn who(bus: &mut I2c) -> u32 {
         let mut b = [0u8];
@@ -57,15 +84,12 @@ mod image {
         put(5, u32::from(tree && pll_on && switched && x18_irc));
 
         let (label, scl, sda) = BUS;
-        let pins = (chip.pin(scl), chip.pin(sda));
-        let (Ok(p_scl), Ok(p_sda)) = pins else {
-            finish(4)
-        };
         match I2c::new(
             &chip,
             &CLOCK,
             label,
-            (p_scl, p_sda),
+            scl,
+            sda,
             I2cMode::fast(400_000, hal::i2c::FastDuty::Two),
         ) {
             Ok(mut bus) => {
@@ -80,9 +104,7 @@ mod image {
             Err(e) => put(6, u32::from(e.code())),
         }
         // The SCL line's level through the HAL's input path: it idles high once the block owns it.
-        let level = chip
-            .input_group([scl, scl, scl])
-            .map_or(0xFF, |g| u32::from(g.read() & 1));
+        let level = u32::from(chip.input_group([scl.id(); 3]).read() & 1);
         put(13, level);
 
         let rcu = chip.rcu_base().unwrap_or(0);
@@ -112,14 +134,25 @@ mod image {
     use embedded_hal::i2c::I2c as _;
     use hal::clock::{self, ClockConfig};
     use hal::reg::Reg32;
-    use hal::{Chip, I2c, I2cMode, PeriphLabel};
+    use hal::{Chip, I2c, I2cMode, PeriphLabel, PinAf};
     use hal_bench::{finish, put};
     use panic_halt as _;
 
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_HSI;
     const IMU: u8 = 0x69;
-    /// SCL PD1, SDA PD0.
-    const BUS: (u8, u8) = (0x31, 0x30);
+    /// SCL PD1, SDA PD0, both at AF1.
+    const BUS: (PinAf, PinAf) = (
+        PinAf {
+            port: 3,
+            pin: 1,
+            af: 1,
+        },
+        PinAf {
+            port: 3,
+            pin: 0,
+            af: 1,
+        },
+    );
 
     fn reg8(bus: &mut I2c, reg: u8) -> u32 {
         let mut b = [0u8];
@@ -146,14 +179,12 @@ mod image {
         put(5, u32::from(tree && hsi && switched && ahb1 && latency));
 
         let (scl, sda) = BUS;
-        let (Ok(p_scl), Ok(p_sda)) = (chip.pin(scl), chip.pin(sda)) else {
-            finish(4)
-        };
         match I2c::new(
             &chip,
             &CLOCK,
             PeriphLabel::I2c0,
-            (p_scl, p_sda),
+            scl,
+            sda,
             I2cMode::fast(400_000, hal::i2c::FastDuty::Two),
         ) {
             Ok(mut bus) => {
@@ -179,9 +210,7 @@ mod image {
             }
             Err(e) => put(6, u32::from(e.code())),
         }
-        let level = chip
-            .input_group([scl, scl, scl])
-            .map_or(0xFF, |g| u32::from(g.read() & 1));
+        let level = u32::from(chip.input_group([scl.id(); 3]).read() & 1);
         put(13, level);
 
         let rcu = chip.rcu_base().unwrap_or(0);

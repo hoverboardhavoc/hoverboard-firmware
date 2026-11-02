@@ -8,7 +8,7 @@ on PB13-PB15, AF push-pull at 50 MHz, AF2 (datasheet tables 6 and 7). The same p
 TIMER0 set.
 
 Vendor: GPIO_PinAFConfig(.., GPIO_AF_2) per pin, then GPIO_Init(AF_PP, 50 MHz) on each port's three.
-HAL: chip.route_advanced_pwm_pin() for each of the six.
+HAL: chip.gate_pin(PinAf) for each of the six.
 """
 family = "mm32spin05"
 mode = "final_state"
@@ -38,13 +38,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::Chip;
+    use hal::{Chip, PinAf};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
-        for pin in [0x08, 0x09, 0x0A, 0x1D, 0x1E, 0x1F] {
-            chip.route_advanced_pwm_pin(pin).unwrap();
+        for (port, pin) in [(0, 8), (0, 9), (0, 10), (1, 13), (1, 14), (1, 15)] {
+            chip.gate_pin(PinAf { port, pin, af: 2 });
         }
     }
 '''

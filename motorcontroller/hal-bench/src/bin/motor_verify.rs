@@ -25,7 +25,7 @@ mod image {
         PwmChannelConfig, PwmConfig, TimerTriggerLink, TrgoSource,
     };
     use hal::reg::Reg32;
-    use hal::{Chip, InjectedAdcController, PeriphLabel, PwmTimer, TriggeredAdc};
+    use hal::{Chip, InjectedAdcController, PeriphLabel, PinAf, PinId, PwmTimer, TriggeredAdc};
     use hal_bench::{finish, put};
     use heapless::Vec;
     use panic_halt as _;
@@ -47,16 +47,14 @@ mod image {
         let rcu = chip.rcu_base().unwrap_or(0);
         let _ = clock::enable_timer(rcu, chip.clock(), PeriphLabel::Timer0);
 
-        let ch = |h: u8, l: u8| PwmChannelConfig {
-            high: h,
-            low: l,
+        let ch = || PwmChannelConfig {
             polarity: true,
             idle_high: false,
             idle_high_n: true,
         };
         let cfg = PwmConfig {
             timer: PeriphLabel::Timer0,
-            channels: [ch(0x08, 0x1D), ch(0x09, 0x1E), ch(0x0A, 0x1F)],
+            channels: [ch(), ch(), ch()],
             period: PERIOD,
             prescaler: 0,
             dead_time: DEAD_TIME,
@@ -77,10 +75,10 @@ mod image {
             finish(5)
         };
         timer.configure_trigger(TRIGGER_COMPARE, OcMode::Pwm1, true, TrgoSource::Ch3Compare);
-        for pin in [0x08u8, 0x09, 0x0A, 0x1D, 0x1E, 0x1F] {
-            if chip.route_advanced_pwm_pin(pin).is_err() {
-                finish(5);
-            }
+        // The TIMER0 gate set, PA8-10 and PB13-15, at AF2 on the F1x0 mux (the F10x default remap
+        // reads no AF).
+        for (port, pin) in [(0, 8), (0, 9), (0, 10), (1, 13), (1, 14), (1, 15)] {
+            chip.gate_pin(PinAf { port, pin, af: 2 });
         }
 
         let r = |o: u32| Reg32::new(T0, o).read();
@@ -108,13 +106,9 @@ mod image {
         put(12, fail);
 
         let _ = clock::enable_adc(rcu, chip.clock(), PeriphLabel::Adc0);
-        for pin in [0x00u8, 0x10] {
-            let port = if pin >> 4 == 0 {
-                PeriphLabel::Gpioa
-            } else {
-                PeriphLabel::Gpiob
-            };
-            let _ = chip.analog_pin(port, pin & 0x0F);
+        // PA0 and PB0.
+        for port in [0, 1] {
+            chip.analog_pin(PinId { port, pin: 0 });
         }
         let mut chans: Vec<InjectedChannel, 4> = Vec::new();
         let _ = chans.push(InjectedChannel {
@@ -191,7 +185,7 @@ mod image {
         PwmChannelConfig, PwmConfig, TimerTriggerLink, TrgoSource,
     };
     use hal::reg::Reg32;
-    use hal::{Chip, InjectedAdcController, PeriphLabel, PwmTimer, TriggeredAdc};
+    use hal::{Chip, InjectedAdcController, PeriphLabel, PinId, PwmTimer, TriggeredAdc};
     use hal_bench::{finish, put};
     use heapless::Vec;
     use panic_halt as _;
@@ -212,16 +206,14 @@ mod image {
         let rcu = chip.rcu_base().unwrap_or(0);
         let _ = clock::enable_timer(rcu, chip.clock(), PeriphLabel::Timer0);
 
-        let ch = |h: u8, l: u8| PwmChannelConfig {
-            high: h,
-            low: l,
+        let ch = || PwmChannelConfig {
             polarity: true,
             idle_high: false,
             idle_high_n: true,
         };
         let cfg = PwmConfig {
             timer: PeriphLabel::Timer0,
-            channels: [ch(0x08, 0x1D), ch(0x09, 0x1E), ch(0x0A, 0x1F)],
+            channels: [ch(), ch(), ch()],
             period: PERIOD,
             prescaler: 0,
             dead_time: DEAD_TIME,
@@ -267,7 +259,7 @@ mod image {
 
         let _ = clock::enable_adc(rcu, chip.clock(), PeriphLabel::Adc0);
         for pin in [2u8, 6] {
-            let _ = chip.analog_pin(PeriphLabel::Gpioa, pin);
+            chip.analog_pin(PinId { port: 0, pin });
         }
         let mut chans: Vec<InjectedChannel, 4> = Vec::new();
         for channel in [2u8, 6] {

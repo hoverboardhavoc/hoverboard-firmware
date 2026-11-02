@@ -31,17 +31,21 @@ body = '''
 
 [hal]
 body = '''
-    use hal::{Chip, ClockConfig, I2c, I2cMode, PeriphLabel};
+    use hal::{Chip, ClockConfig, I2c, I2cMode, PeriphLabel, PinAf};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
-        let pins = (chip.pin(0x16).unwrap(), chip.pin(0x17).unwrap()); // SCL PB6, SDA PB7
+        let (scl, sda) = (
+            PinAf { port: 1, pin: 6, af: 1 }, // SCL PB6
+            PinAf { port: 1, pin: 7, af: 1 },
+        );
         let _i2c = I2c::new(
             &chip,
             &ClockConfig::REFERENCE_72M_IRC8M,
             PeriphLabel::I2c0,
-            pins,
+            scl,
+            sda,
             I2cMode::standard(100_000),
         )
         .unwrap();

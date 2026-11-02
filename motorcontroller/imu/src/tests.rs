@@ -391,7 +391,7 @@ fn model_index_lookup_owns_the_numbering() {
 fn nothing_staged_is_exactly_the_reference_map() {
     // The compatibility floor: a board with no IMU_AXIS_SIGN records must behave byte-for-byte as
     // it did before the field existed.
-    let cfg = Config::staged([0; 3], [0; 3], [0, 0]).unwrap();
+    let cfg = Config::staged([0; 3], [0; 3], [0, 0]);
     assert_eq!(cfg.sign, Config::default().sign);
     assert_eq!(cfg.gyro_bias, [0; 3]);
 }
@@ -401,7 +401,7 @@ fn staged_axes_override_only_themselves() {
     // Per-axis, because 0 is the unset marker and not a valid sign. Staging two axes (the
     // smallest legal change: one flip alone is a reflection, refused below) must not disturb the
     // third, and each staged axis applies to the accelerometer and the gyro alike.
-    let cfg = Config::staged([1, -1, 0], [0; 3], [0, 0]).unwrap();
+    let cfg = Config::staged([1, -1, 0], [0; 3], [0, 0]);
     let reference = Config::default().sign;
     assert_eq!((cfg.sign[0], cfg.sign[3]), (1, 1), "the staged axis took");
     assert_eq!((cfg.sign[1], cfg.sign[4]), (-1, -1), "the staged axis took");
@@ -411,23 +411,23 @@ fn staged_axes_override_only_themselves() {
 }
 
 #[test]
-fn a_single_staged_flip_is_a_reflection_and_is_refused_at_boot() {
-    // Before IMU_AXIS_ROLE the sign rule was a host-test property only; `staged` now refuses it, so
-    // the bring-up does not start the IMU on a mirrored frame (`specs/imu.md`, "Validation").
+fn a_single_staged_flip_is_a_reflection_and_the_frame_check_refuses_it() {
+    // The CLI and the app make this check before writing a frame (`specs/config-read-once.md`
+    // section 4); the firmware applies what is stored.
     assert_eq!(
-        Config::staged([0, 0, 1], [0; 3], [0, 0]).unwrap_err(),
+        Config::frame_error([0, 0, 1], [0, 0]).unwrap(),
         FrameError::Accel
     );
     // A nonzero value that is not a sign is refused too (it used to be staged as-is).
     assert_eq!(
-        Config::staged([2, 0, 0], [0; 3], [0, 0]).unwrap_err(),
+        Config::frame_error([2, 0, 0], [0, 0]).unwrap(),
         FrameError::Accel
     );
 }
 
 #[test]
 fn a_fully_staged_map_replaces_the_reference() {
-    let cfg = Config::staged([-1, -1, 1], [48, 13, -88], [0, 0]).unwrap();
+    let cfg = Config::staged([-1, -1, 1], [48, 13, -88], [0, 0]);
     assert_eq!(cfg.sign, [-1, -1, 1, -1, -1, 1]);
     assert_eq!(cfg.gyro_bias, [48, 13, -88], "the bias rides alongside");
 }
@@ -477,7 +477,7 @@ fn the_bench_boards_staged_map_is_a_proper_rotation() {
     ]));
     // And it does what the bench measured it must: the chip's +Z becomes the board's +up, so a
     // level board's up-axis count comes out POSITIVE instead of the -0.97 g that failed the gate.
-    let cfg = Config::staged([staged[0], staged[1], staged[2]], [0; 3], [0, 0]).unwrap();
+    let cfg = Config::staged([staged[0], staged[1], staged[2]], [0; 3], [0, 0]);
     assert_eq!(cfg.sign[2], 1);
 }
 
@@ -530,7 +530,7 @@ fn unset_roles_are_the_identity_and_decode_bit_for_bit_as_before() {
     assert_eq!(Config::default().roles, [3, 2]);
     assert_eq!(DEFAULT_ROLES, [3, 2]);
     for sign in [Config::default().sign, [-1, -1, 1, -1, -1, 1]] {
-        let staged = Config::staged([sign[0], sign[1], sign[2]], [48, 13, -88], [0, 0]).unwrap();
+        let staged = Config::staged([sign[0], sign[1], sign[2]], [48, 13, -88], [0, 0]);
         assert_eq!(staged.roles, DEFAULT_ROLES);
         let words = [1234, -2345, 16000, 321, -432, 543];
         let s = Imu::new(MPU6050, staged).decode(&burst(words));
@@ -558,7 +558,7 @@ fn unset_roles_are_the_identity_and_decode_bit_for_bit_as_before() {
 fn a_board_on_edge_puts_gravity_on_chip_x_onto_body_z() {
     // UP = chip X, PITCH_RATE = chip Z, so FORWARD = chip Y: a cyclic permutation (even), which
     // the all-positive signs make a proper rotation.
-    let cfg = Config::staged([1, 1, 1], [0; 3], [1, 3]).unwrap();
+    let cfg = Config::staged([1, 1, 1], [0; 3], [1, 3]);
     let mut imu = Imu::new(MPU6050, cfg);
     // Level: +1 g (8192 counts) on chip X; a pitch rate about chip Z; something else on chip Y.
     let s = imu.decode(&burst([8192, 0, 0, 0, 0, 0]));
@@ -580,7 +580,7 @@ fn sign_and_bias_stay_per_chip_axis_under_a_role_permutation() {
     // both must be applied before the permutation, so each lands on the body axis its chip axis
     // feeds. Roles UP = X, PITCH_RATE = Y: FORWARD = Z, order [2, 1, 0], a transposition (odd),
     // so the sign product must be -1.
-    let cfg = Config::staged([-1, 1, 1], [7, 0, -5], [1, 2]).unwrap();
+    let cfg = Config::staged([-1, 1, 1], [7, 0, -5], [1, 2]);
     let s = Imu::new(MPU6050, cfg).decode(&burst([100, 200, 300, 1000, 2000, 3000]));
     // body up = -chip X, body pitch = chip Y, body fwd = chip Z.
     assert_eq!(s.accel_raw, [300, 200, -100]);
@@ -593,8 +593,8 @@ fn the_same_body_motion_decodes_identically_flat_and_on_edge() {
     // A body-frame vector seen by a flat board (identity frame) and by the same board turned on
     // edge (UP = chip X, PITCH_RATE = chip Z) must decode to the SAME body sample: that is what
     // keeps the attitude filter, the gating row and the pitch-rate word unchanged.
-    let flat = Config::staged([1; 3], [0; 3], [3, 2]).unwrap();
-    let edge = Config::staged([1; 3], [0; 3], [1, 3]).unwrap();
+    let flat = Config::staged([1; 3], [0; 3], [3, 2]);
+    let edge = Config::staged([1; 3], [0; 3], [1, 3]);
     // Body [fwd, pitch, up] gravity for a forward lean, and a pitch rate with some yaw.
     let (bf, bp, bu) = (-2000i16, 150, 7900);
     let (gf, gp, gu) = (-30i16, 900, 12);
@@ -662,14 +662,15 @@ fn every_role_pair_and_sign_triple_agrees_with_the_determinant_and_the_decode() 
                 det == 1,
                 "roles {roles:?} signs {t:?} det {det}"
             );
-            let staged = Config::staged(t, [0; 3], roles);
             if det != 1 {
-                assert_eq!(staged.unwrap_err(), FrameError::Accel);
+                assert_eq!(Config::frame_error(t, roles), Some(FrameError::Accel));
                 continue;
             }
+            assert_eq!(Config::frame_error(t, roles), None);
+            let staged = Config::staged(t, [0; 3], roles);
             accepted += 1;
             let chip = [11i16, 22, 33];
-            let s = Imu::new(MPU6050, staged.unwrap()).decode(&burst([
+            let s = Imu::new(MPU6050, staged).decode(&burst([
                 chip[0], chip[1], chip[2], chip[0], chip[1], chip[2],
             ]));
             let want = [
@@ -688,37 +689,37 @@ fn every_role_pair_and_sign_triple_agrees_with_the_determinant_and_the_decode() 
 }
 
 #[test]
-fn staged_refuses_repeated_out_of_range_and_mirrored_frames() {
+fn the_frame_check_refuses_repeated_out_of_range_and_mirrored_frames() {
     let ref_sign = [0; 3];
     // A repeated role, explicit or through the unset fallback (UP unset = Z).
     assert_eq!(
-        Config::staged(ref_sign, [0; 3], [2, 2]).unwrap_err(),
+        Config::frame_error(ref_sign, [2, 2]).unwrap(),
         FrameError::Roles
     );
     assert_eq!(
-        Config::staged(ref_sign, [0; 3], [0, 3]).unwrap_err(),
+        Config::frame_error(ref_sign, [0, 3]).unwrap(),
         FrameError::Roles
     );
     assert_eq!(
-        Config::staged(ref_sign, [0; 3], [4, 0]).unwrap_err(),
+        Config::frame_error(ref_sign, [4, 0]).unwrap(),
         FrameError::Roles
     );
     // A transposition (UP = Z, PITCH_RATE = X) with the reference map (product +1) is mirrored.
     assert_eq!(
-        Config::staged(ref_sign, [0; 3], [0, 1]).unwrap_err(),
+        Config::frame_error(ref_sign, [0, 1]).unwrap(),
         FrameError::Accel
     );
     // A partial stage resolves per index: UP = X with PITCH_RATE unset (= Y).
-    let cfg = Config::staged([1, 1, -1], [0; 3], [1, 0]).unwrap();
+    let cfg = Config::staged([1, 1, -1], [0; 3], [1, 0]);
     assert_eq!(cfg.roles, [1, 2]);
 }
 
 #[test]
 fn set_config_reinstalls_the_permutation() {
-    let mut imu = Imu::new(MPU6050, Config::staged([1; 3], [0; 3], [0, 0]).unwrap());
+    let mut imu = Imu::new(MPU6050, Config::staged([1; 3], [0; 3], [0, 0]));
     let words = [10, 20, 30, 40, 50, 60];
     assert_eq!(imu.decode(&burst(words)).accel_raw, [10, 20, 30]);
-    imu.set_config(Config::staged([1; 3], [0; 3], [1, 3]).unwrap());
+    imu.set_config(Config::staged([1; 3], [0; 3], [1, 3]));
     assert_eq!(imu.decode(&burst(words)).accel_raw, [20, 30, 10]);
 }
 
@@ -743,12 +744,10 @@ fn three_signs_equal_the_old_six_with_the_gyro_half_repeated() {
                     six[i + 3] = three[i];
                 }
             }
-            match Config::staged(three, [0; 3], [0, 0]) {
-                Ok(cfg) => assert_eq!(cfg.sign, six, "{three:?}"),
-                Err(e) => {
-                    assert_eq!(e, FrameError::Accel);
-                    assert!(!Config::triple_is_rotation([six[0], six[1], six[2]]));
-                }
+            assert_eq!(Config::staged(three, [0; 3], [0, 0]).sign, six, "{three:?}");
+            if let Some(e) = Config::frame_error(three, [0, 0]) {
+                assert_eq!(e, FrameError::Accel);
+                assert!(!Config::triple_is_rotation([six[0], six[1], six[2]]));
             }
         }
     }

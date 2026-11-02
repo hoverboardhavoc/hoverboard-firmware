@@ -1241,9 +1241,9 @@ fn settled_through_imu(cfg: imu::Config, up_chip_axis: usize) -> (f64, f64) {
 fn a_board_on_edge_with_its_roles_staged_settles_level() {
     // Gravity on chip X. With the roles staged (UP = chip X, PITCH_RATE = chip Z) the filter sees
     // body +Z gravity and settles level, exactly as a flat board does.
-    let edge = imu::Config::staged([1; 3], [0; 3], [1, 3]).unwrap();
+    let edge = imu::Config::staged([1; 3], [0; 3], [1, 3]);
     let (pitch, roll) = settled_through_imu(edge, 0);
-    let flat = imu::Config::staged([1; 3], [0; 3], [0, 0]).unwrap();
+    let flat = imu::Config::staged([1; 3], [0; 3], [0, 0]);
     assert_eq!((pitch, roll), settled_through_imu(flat, 2));
     assert!(
         pitch.abs() < 0.5 && roll.abs() < 0.5,

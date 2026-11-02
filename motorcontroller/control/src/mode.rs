@@ -94,7 +94,7 @@ pub struct ModeSelection {
 /// | Balance | Rigid | yes | [`Producer::Leader`] |
 /// | Balance | Rigid | no | [`Producer::Follower`] |
 ///
-/// Pivoting Balance requires a configured IMU (`imu.model != 0`); selecting it without one falls
+/// Pivoting Balance requires a configured IMU (stored, and answering its probe); selecting it without one falls
 /// back to Throttle AND raises the fault flag, exactly as `MOTOR_METHOD = Foc` without current
 /// sense falls back to SixStep. On a rigid frame the same absence is not a demotion: it is what
 /// makes the board the follower, so no fault. `imu_configured` is a parameterized input; its real

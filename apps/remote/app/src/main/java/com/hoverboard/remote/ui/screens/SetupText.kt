@@ -19,6 +19,8 @@ internal fun fieldLabel(key: Key): String =
 internal fun noticeText(n: SetupNotice): String = when (n) {
     is SetupNotice.FrameRefused -> stringResource(frameText(n.refusal))
     is SetupNotice.OutOfRange -> stringResource(R.string.setup_notice_out_of_range, fieldLabel(n.key))
+    is SetupNotice.CheckRefused -> stringResource(R.string.setup_notice_check_refused, n.refusal.msg)
+    is SetupNotice.BusUnread -> stringResource(R.string.setup_notice_bus_unread)
     is SetupNotice.LevelUnavailable -> stringResource(blockedText(n.reason))
     is SetupNotice.CheckUnavailable -> stringResource(blockedText(n.reason))
 }

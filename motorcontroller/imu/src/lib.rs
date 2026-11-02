@@ -189,7 +189,7 @@ pub struct Config {
 /// body order IS the chip order (the identity permutation). The fallback for an unset (`0`) role.
 pub const DEFAULT_ROLES: [u8; 2] = [3, 2];
 
-/// Why [`Config::staged`] refused a frame (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
+/// Why [`Config::frame_error`] refuses a frame (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameError {
     /// A role is outside `1..=3`, or the two roles name the same chip axis.
@@ -216,7 +216,7 @@ impl Default for Config {
 
 impl Config {
     /// Build a config from per-board STAGED values (the store's `IMU_AXIS_SIGN`, `IMU_GYRO_BIAS`
-    /// and `IMU_AXIS_ROLE`), applying the unset rule, and REFUSE a frame that is not a rotation.
+    /// and `IMU_AXIS_ROLE`), applying the unset rule.
     ///
     /// `sign` is the three-axis triple `[x, y, z]`, applied to the accelerometer AND the gyro: on
     /// the MPU-6050 class both share one rotation (`specs/imu.md`, the reference map;
@@ -229,15 +229,10 @@ impl Config {
     /// sign, which is what lets one all-indices default express three different per-axis defaults.
     /// A staged role of 0 likewise falls back to that index of [`DEFAULT_ROLES`].
     ///
-    /// The rule lives here rather than in the firmware's bring-up because it is this type's own
-    /// contract: `sign` and `roles` are the config's fields, so what an absent value means for them
-    /// is the config's to say, and saying it here is what makes it host-testable.
-    ///
-    /// The resolved frame must pass [`Config::frame_is_rotation`], or this returns the
-    /// [`FrameError`] and the caller does not bring the IMU up: a wrong role is worse than a wrong
-    /// sign (the machine balances about the wrong axis and nothing in the loop can tell), so it is
-    /// a boot refusal, not only a host-test property.
-    pub fn staged(sign: [i32; 3], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError> {
+    /// Nothing is refused here (`specs/config-read-once.md` section 5): the CLI and the app check
+    /// the frame with [`Config::frame_error`] before they write it, and a frame whose roles name no
+    /// permutation decodes in chip order ([`body_order`]).
+    pub fn staged(sign: [i32; 3], gyro_bias: [i32; 3], roles: [u8; 2]) -> Self {
         let mut cfg = Config {
             gyro_bias,
             ..Config::default()
@@ -253,13 +248,23 @@ impl Config {
                 *dst = *staged;
             }
         }
+        cfg
+    }
+
+    /// Why the staged frame `sign`, `roles` (the unset rule of [`Config::staged`] applied) is not
+    /// a proper rotation with distinct roles, or `None` when it is: the check the CLI and the app
+    /// make before writing a frame (`specs/config-read-once.md` section 4). A wrong role is worse
+    /// than a wrong sign: the machine balances about the wrong axis and nothing in the loop can
+    /// tell.
+    pub fn frame_error(sign: [i32; 3], roles: [u8; 2]) -> Option<FrameError> {
+        let cfg = Self::staged(sign, [0; 3], roles);
         let s = cfg.sign;
         if body_order(cfg.roles).is_none() {
-            Err(FrameError::Roles)
+            Some(FrameError::Roles)
         } else if !Self::frame_is_rotation(cfg.roles, [s[0], s[1], s[2]]) {
-            Err(FrameError::Accel)
+            Some(FrameError::Accel)
         } else {
-            Ok(cfg)
+            None
         }
     }
 

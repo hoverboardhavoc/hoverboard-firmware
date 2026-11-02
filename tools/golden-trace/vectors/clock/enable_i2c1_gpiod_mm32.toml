@@ -7,7 +7,7 @@ specs/bench-work/mm32/README.md): the GPIO ports on AHBENR (GPIOD = bit 20), I2C
 (bit 21). The port first, then the bus.
 
 Vendor: RCC_AHBPeriphClockCmd(RCC_AHBENR_GPIOD, ENABLE); RCC_APB1PeriphClockCmd(RCC_APB1ENR_I2C1, ENABLE).
-HAL: clock::enable_gpio_port(Gpiod); clock::enable_i2c(I2c0) (the HAL's label for I2C1, at 0x4000_5400).
+HAL: chip.pin(port D) (the port clock alone); clock::enable_i2c(I2c0) (the HAL's label for I2C1, at 0x4000_5400).
 """
 family = "mm32spin05"
 mode = "register_writes"
@@ -20,13 +20,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::{clock, Chip, PeriphLabel};
+    use hal::{clock, Chip, PeriphLabel, PinId};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
         let rcu = chip.rcu_base().unwrap();
-        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpiod).unwrap();
+        let _ = chip.pin(PinId { port: 3, pin: 0 });
         clock::enable_i2c(rcu, chip.clock(), PeriphLabel::I2c0).unwrap();
     }
 '''

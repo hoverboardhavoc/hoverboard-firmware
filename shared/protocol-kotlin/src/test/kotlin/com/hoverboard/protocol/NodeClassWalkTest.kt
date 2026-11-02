@@ -114,8 +114,8 @@ class NodeClassWalkTest {
     @Test
     fun theBootReportIsReadWithStatusRead() {
         val m = Mesh()
-        // One entry: link 0's tx pin (`links[0].tx`) is not a pin encoding, detail the stored byte.
-        val entry = byteArrayOf(0x0F, 0x00, BoardStatus.Reason.NOT_A_PIN.code.toByte(), 0x4F)
+        // One entry: link 0 (`links[0].tx`) did not come up, detail the HAL's error code.
+        val entry = byteArrayOf(0x0F, 0x00, BoardStatus.Reason.NOT_UP.code.toByte(), 0x04)
         val esp = m.addBoard(2, nodeClass = Walk.CLASS_BRIDGE)
         val board = m.addBoard(1, status = entry)
         m.attachController(esp, 0)
@@ -124,7 +124,7 @@ class NodeClassWalkTest {
 
         val fromBoard = Pdu.decode(m.statusRead(0x02))
         assertEquals(Opcode.Status, fromBoard.known())
-        assertEquals(listOf(BoardStatus.Entry(0x0F, 0, BoardStatus.Reason.NOT_A_PIN.code, 0x4F)), BoardStatus.decode(fromBoard.payload))
+        assertEquals(listOf(BoardStatus.Entry(0x0F, 0, BoardStatus.Reason.NOT_UP.code, 0x04)), BoardStatus.decode(fromBoard.payload))
         assertEquals(0, Pdu.decode(m.statusRead(0x01)).payload.size, "a bridge reports no entries")
     }
 }

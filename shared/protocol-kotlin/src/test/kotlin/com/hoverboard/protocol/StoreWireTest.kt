@@ -22,6 +22,9 @@ class StoreWireTest {
         assertEquals(0x08, Type.Bool.tag)
         assertEquals(0x09, Type.Blob.tag)
         assertEquals(0x0A, Type.Str.tag)
+        assertEquals(0x0B, Type.Pin.tag)
+        assertEquals(0x0C, Type.PinAf.tag)
+        assertEquals(0x0D, Type.PinAdc.tag)
         for (t in Type.entries) assertEquals(t, Type.fromTag(t.tag))
     }
 
@@ -39,6 +42,9 @@ class StoreWireTest {
             Value.Bool(false),
             Value.Str("hoverboard"),
             Value.Bytes(byteArrayOf(0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte())),
+            Value.Pin(1, 12),
+            Value.PinAf(0, 8, 2),
+            Value.PinAdc(0, 4, 4),
         )
         for (v in values) {
             val bytes = v.encode()
@@ -56,12 +62,18 @@ class StoreWireTest {
         )
         assertArrayEquals(byteArrayOf(0xAB.toByte()), Value.U8(0xAB).encode())
         assertArrayEquals(byteArrayOf(1), Value.Bool(true).encode())
+        // A pin is its register model in order: port, pin, then the af or the ADC channel.
+        assertArrayEquals(byteArrayOf(0, 8, 2), Value.PinAf(0, 8, 2).encode())
+        assertArrayEquals(byteArrayOf(2, 13), Value.Pin(2, 13).encode())
     }
 
     @Test
     fun decodeRejectsWidthMismatchAndBadUtf8() {
         assertNull(Value.decode(Type.U32, byteArrayOf(1, 2))) // U32 needs 4 bytes
         assertNull(Value.decode(Type.U8, ByteArray(0)))
+        assertNull(Value.decode(Type.PinAf, byteArrayOf(0, 8))) // a short pin record
+        // The absent default a board answers for an unstored pin is the bytes 0xFF.
+        assertEquals(Value.PinAdc(0xFF, 0xFF, 0xFF), Value.decode(Type.PinAdc, byteArrayOf(-1, -1, -1)))
         assertNull(Value.decode(Type.Str, byteArrayOf(0xFF.toByte(), 0xFE.toByte()))) // invalid UTF-8
         // A Blob accepts any bytes.
         assertEquals(Value.Bytes(byteArrayOf(0xFF.toByte(), 0xFE.toByte())), Value.decode(Type.Blob, byteArrayOf(0xFF.toByte(), 0xFE.toByte())))

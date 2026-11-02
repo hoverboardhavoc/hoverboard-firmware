@@ -19,8 +19,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import com.hoverboard.protocol.board.BoardFields
+import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.LayoutActions
 import com.hoverboard.remote.LayoutState
 import com.hoverboard.remote.R
@@ -65,7 +66,7 @@ internal fun GroupTabs(state: LayoutState, editable: Boolean, actions: LayoutAct
     var picked by rememberSaveable { mutableIntStateOf(0) }
     // Motor 0 always has a tab, every board drives one. A later motor earns one by holding a pin,
     // or by the add action, which is the only way a board configured from scratch can get there.
-    val motors = (0 until BoardFields.MOTORS).filter { it == 0 || added || state.motorHoldsAPin(it) }
+    val motors = (0 until Fields.MOTORS).filter { it == 0 || added || state.motorHoldsAPin(it) }
     val tabs = listOf(LayoutTab(LayoutGroup.BOARD), LayoutTab(LayoutGroup.IMU)) +
         motors.map { LayoutTab(LayoutGroup.MOTOR, it) }
     val selected = picked.coerceIn(0, tabs.lastIndex)
@@ -79,7 +80,7 @@ internal fun GroupTabs(state: LayoutState, editable: Boolean, actions: LayoutAct
             )
         }
     }
-    if (motors.size < BoardFields.MOTORS) {
+    if (motors.size < Fields.MOTORS) {
         OutlinedButton(
             onClick = {
                 added = true
@@ -110,11 +111,11 @@ internal fun FieldRow(row: LayoutRow, state: LayoutState, editable: Boolean, act
         Text(stringResource(row.label), style = MaterialTheme.typography.titleSmall, color = Fg)
         Text(
             text = when {
-                staged != null -> layoutValueText(slot, staged)
+                state.staged != null -> layoutValueText(slot, staged, state.part)
                 slot.key in state.unread -> stringResource(R.string.layout_field_unread)
                 else -> stringResource(R.string.layout_not_read)
             },
-            color = if (staged != null && staged != stored) Primary else FgMuted,
+            color = if (state.staged != null && staged != stored) Primary else FgMuted,
         )
         if (slot.key in state.written) {
             Text(stringResource(R.string.layout_written_mark), color = Primary)
@@ -136,7 +137,7 @@ internal fun FieldRow(row: LayoutRow, state: LayoutState, editable: Boolean, act
 private fun Editor(
     row: LayoutRow,
     state: LayoutState,
-    staged: Int?,
+    staged: Value?,
     editable: Boolean,
     actions: LayoutActions,
 ) {
@@ -157,7 +158,7 @@ private fun Editor(
         }
         is LayoutEditor.Number -> {
             Change(row, editable) { open = true }
-            if (open) NumberDialog(row, editor, staged, { open = false }, actions)
+            if (open) NumberDialog(row, editor, (staged as? Value.U8)?.v, { open = false }, actions)
         }
     }
 }

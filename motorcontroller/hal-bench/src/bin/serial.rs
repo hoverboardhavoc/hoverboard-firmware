@@ -24,7 +24,7 @@ mod image {
     use embedded_io::{Read, ReadReady, Write};
     use hal::clock::{self, ClockConfig};
     use hal::descriptor::DESCRIPTOR;
-    use hal::{Chip, DmaTx, PeriphLabel, RingBufferedRx, SplitSerial, Usart};
+    use hal::{Chip, DmaTx, PeriphLabel, PinAf, RingBufferedRx, SplitSerial, Usart};
     use hal_bench::{cycles, finish, put, wait_ms};
     use panic_halt as _;
 
@@ -121,10 +121,20 @@ mod image {
         let side_a = DESCRIPTOR.node_mcu == 1 || cfg!(feature = "serial-side-a");
         put(2, u32::from(!side_a));
 
-        let (Ok(tx), Ok(rx)) = (chip.pin(0x02), chip.pin(0x03)) else {
-            finish(3)
-        };
-        let Ok(usart) = Usart::new(&chip, &CLOCK, PeriphLabel::Usart1, (tx, rx), 115_200) else {
+        // USART1 on TX PA2 and RX PA3, AF1 on the F1x0 mux (the F10x default remap reads no AF).
+        let (tx, rx) = (
+            PinAf {
+                port: 0,
+                pin: 2,
+                af: 1,
+            },
+            PinAf {
+                port: 0,
+                pin: 3,
+                af: 1,
+            },
+        );
+        let Ok(usart) = Usart::new(&chip, &CLOCK, PeriphLabel::Usart1, tx, rx, 115_200) else {
             finish(3)
         };
         let (utx, urx) = usart.split();

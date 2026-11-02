@@ -43,7 +43,7 @@ W_SUB_FLAGS = 12        # sub_state | control_mode << 8 | flags << 16 | event_le
 #                         flags bits (motorcontroller/orchestrator/src/lib.rs, Obs::flags_byte): b0
 #                         imu_configured, b1 imu_live, b2 comms_loss, b3 mode_fault, b4 imu_loss,
 #                         b5 motor_fault, b6 imu_staged, b7 free. b0 and b6 are read as a PAIR: b6
-#                         is whether the layout ASKED for an IMU, so b6=1 with b0=0 is a staged
+#                         is whether the store holds an IMU bus, so b6=1 with b0=0 is a stored
 #                         IMU whose bring-up failed (a finding) and b6=0 is a board with no IMU
 #                         fitted, where b0=0 is expected.
 W_PERIODS = 19
@@ -64,7 +64,7 @@ W_EVENTS_HI = 28        # event_counts[4..8]
 W_RETIRED_29 = 29       # ZERO: was the CC2541 port's RX losses; the port went (specs/decision-cc2541-removal.md)
 W_MOTOR_CURRENT = 31    # peak i16 | chopped << 16 | trips << 24
 W_BATTERY = 32
-W_ARM_REFUSALS = 33     # ReReadValues refusals | ConfirmPeriodsLive << 8 | frame cause << 16
+W_ARM_REFUSALS = 33     # ConfirmPeriodsLive refusals << 8 (the other bits read 0)
 W_MAILBOX_DROPS = 34    # SWD mailbox port: L2 frames dropped because the outbound ring had no room
 #                         (or no bridge was attached); read it against the mailbox `epoch`
 W_TX_TIMEOUTS = 35      # the inter-board links' ABANDONED writes, link 0 in the low half and link 1 in
@@ -135,33 +135,16 @@ W_IMU_RETRIES = 51      # low byte: the boot's IMU probe-and-init attempts (spec
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT
 # --------------------------------------------------------------------------------------------------
-# CTRL_OBS word 33, arm_refusals: the two arm refusals, counted per boot (specs/integration.md, "The
-# arm refusals (word 33, permanent)"). It is a COUNT and not a level because the ReReadValues
-# refusal is released when the engage that met it ends (an OFF pass with the power request dropped),
-# so the level is gone by the time a bench read looks: a board refused for a bad axis frame and then
-# left disarmed reads like a board that was never engaged.
-#
-# The cause byte mirrors motorcontroller/firmware/src/main.rs `imu_frame_cause_byte`: bit 7 = a cause is
-# present (the accel refusal encodes field and index both as 0, so the flag is what tells it from
-# "no frame refusal"), bit 2 = the refusal names IMU_AXIS_ROLE rather than IMU_AXIS_SIGN, bits 0..1 =
-# the refused triple's first IMU_AXIS_SIGN index, always 0 (the accelerometer and the gyro share the
-# three signs), exactly as the boot status record's IMU-frame entry carries it in its detail byte
-# (the STATUS reply, BOARD_OBS).
+# CTRL_OBS word 33, arm_refusals: the ConfirmPeriodsLive refusals, counted per boot, in bits 8..15
+# (specs/integration.md, "The arm refusals (word 33, permanent)"). Bits 0..7 counted the
+# ReReadValues refusals and bits 16..23 carried a refused IMU frame's cause until the arm row
+# stopped refusing (specs/config-read-once.md section 5); they read 0.
 # --------------------------------------------------------------------------------------------------
-CAUSE_PRESENT = 0x80
-CAUSE_NAMES_ROLE = 0x04
 
 
 def decode_arm_refusals(word):
-    """(re_read count, confirm count, cause text) of CTRL_OBS word 33."""
-    cause = (word >> 16) & 0xFF
-    if not cause & CAUSE_PRESENT:
-        text = "no frame refusal"
-    elif cause & CAUSE_NAMES_ROLE:
-        text = "imu.axis_role (0x16): the roles are not two distinct chip axes in 1..3"
-    else:
-        text = "imu.axis_sign (0x15): the sign triple is a reflection"
-    return word & 0xFF, (word >> 8) & 0xFF, text
+    """The ConfirmPeriodsLive refusal count of CTRL_OBS word 33."""
+    return (word >> 8) & 0xFF
 
 
 # --------------------------------------------------------------------------------------------------

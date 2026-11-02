@@ -331,7 +331,6 @@ def decode_sample(w, m, off, t, label):
     d01, d2a, mf, ms = w[W_DUTY01], w[W_DUTY2_ANGLE], w[W_MOTOR_FAULT], w[W_MOTOR_STATE]
     ev = [(w[W_EVENTS_LO] >> (8 * i)) & 0xFF for i in range(4)]
     ev += [(w[W_EVENTS_HI] >> (8 * i)) & 0xFF for i in range(4)]
-    refusals = decode_arm_refusals(w[W_ARM_REFUSALS])
     d0, d1, d2 = d01 & 0xFFFF, (d01 >> 16) & 0xFFFF, d2a & 0xFFFF
     return {
         "t": t, "label": label, "magic": w[0], "boot": w[W_BOOT_COUNT], "tick": w[W_TICK_COUNT],
@@ -344,9 +343,9 @@ def decode_sample(w, m, off, t, label):
         "cal": w[W_MOTOR_CAL], "ev": ev, "latch_a": ev[EV_LATCH_A_INDEX],
         "peak": s16(mc & 0xFFFF), "chopped": (mc >> 16) & 0xFF, "trips": (mc >> 24) & 0xFF,
         "battery": w[W_BATTERY] & 0xFFFF,
-        # Word 33, the arm refusals: both counts are per BOOT and nothing clears them, so they are
-        # read as absolute numbers rather than deltas, and the cause text is already decoded.
-        "reread_refusals": refusals[0], "confirm_refusals": refusals[1], "refusal_cause": refusals[2],
+        # Word 33, the arm refusals: the confirm's count, per BOOT, nothing clears it, so it is read
+        # as an absolute number rather than a delta.
+        "confirm_refusals": decode_arm_refusals(w[W_ARM_REFUSALS]),
         # Word 34, the mailbox drops: L2 frames the board could not place on its SWD mailbox ring
         # (specs/swd-mailbox.md, "Backpressure"). Per boot, nothing clears it, so it reads as an
         # absolute number and a delta across a step is what matters. It is in the block this tool
@@ -494,25 +493,12 @@ def _within(samples, t0, secs):
 
 
 def refusal_text(s, since=None):
-    """What CTRL_OBS word 33 says about the arm refusals (specs/integration.md, "The arm refusals").
-
-    The two counts are per BOOT and nothing clears them; `since` adds what changed across an
-    attempt. They are the only record a bench read gets of a REFUSED re-read, because that refusal
-    is released as soon as the engage that met it ends (an OFF pass with the power request dropped),
-    so a board refused for a bad axis frame and then left disarmed reads exactly like a board that
-    was never engaged. The confirm count is the other refusal, the one that stays held for the
-    boot.
-
-    The cause names the frame check that refused the value-row re-read, so an operator who wrote a
-    bad `imu.axis_role` / `imu.axis_sign` from the app sees which field to fix rather than a board
-    that will not arm for no stated reason.
-    """
-    text = f"arm refusals: re-read {s['reread_refusals']}, confirm {s['confirm_refusals']}"
+    """What CTRL_OBS word 33 says about the arm refusals (specs/integration.md, "The arm refusals"):
+    the ConfirmPeriodsLive count, per BOOT, which nothing clears; `since` adds what changed across
+    an attempt. The arm-row re-read refuses nothing (specs/config-read-once.md section 5)."""
+    text = f"arm refusals: confirm {s['confirm_refusals']}"
     if since is not None:
-        text += (f" (+{s['reread_refusals'] - since['reread_refusals']} re-read, "
-                 f"+{s['confirm_refusals'] - since['confirm_refusals']} confirm during the attempt)")
-    if s["reread_refusals"]:
-        text += f", cause: {s['refusal_cause']}"
+        text += f" (+{s['confirm_refusals'] - since['confirm_refusals']} confirm during the attempt)"
     return text
 
 
@@ -1133,8 +1119,7 @@ def encode_ctrl_obs(f):
     w[W_EVENTS_HI] = sum(ev[4 + i] << (8 * i) for i in range(4))
     w[W_MOTOR_CURRENT] = (f.get("peak", 0) & 0xFFFF) | (f.get("chopped", 0) << 16) | ((f.get("trips", 0) & 0xFF) << 24)
     w[W_BATTERY] = f.get("battery", 2497)
-    w[W_ARM_REFUSALS] = ((f.get("reread_refusals", 0) & 0xFF) | ((f.get("confirm_refusals", 0) & 0xFF) << 8)
-                         | ((f.get("refusal_cause", 0) & 0xFF) << 16))
+    w[W_ARM_REFUSALS] = (f.get("confirm_refusals", 0) & 0xFF) << 8
     w[W_MAILBOX_DROPS] = f.get("mailbox_drops", 0) & M32
     return w
 
@@ -1877,11 +1862,9 @@ class Session:
             raise SessionAbort("disarmed state not ready: " + "; ".join(problems))
         self.say(f"   disarmed: mode OFF, moe 0, motor flags 0x{s[-1]['mflags']:02x}, fault 0, "
                  f"throttle mode, boot {s[-1]['boot']}")
-        # A refusal from EARLIER THIS BOOT, which the disarmed state itself cannot show: the
-        # re-read refusal was released when that engage ended, so the counts are what is left of it.
-        # Not a stand-up problem (the board is armable again); said so it is not a surprise when the
-        # arm below is refused for the same stored value.
-        if s[-1]["reread_refusals"] or s[-1]["confirm_refusals"]:
+        # A confirm refusal from EARLIER THIS BOOT: it is boot-sticky, so the arm below is refused
+        # for it too, and the count says how many attempts it has taken.
+        if s[-1]["confirm_refusals"]:
             self.say(f"   {refusal_text(s[-1])} (earlier this boot)")
         # The mailbox drop count, said only when non-zero, and said HERE because this tool drives
         # the board over that very mailbox: a frame the board could not place on its outbound ring is

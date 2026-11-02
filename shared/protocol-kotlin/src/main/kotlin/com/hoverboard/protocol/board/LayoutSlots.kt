@@ -7,102 +7,75 @@ import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
 
 /**
- * One store field a layout is made of: the registered field, the motor it names where the field is
- * per-motor, and how it sits in [BoardFields].
+ * One store key a layout is made of: the registered field, at [index], and the motor it names
+ * where the field is per motor.
  */
 class LayoutSlot internal constructor(
     val def: FieldDef,
-    /** The motor this slot names, or null for a singleton. */
+    val index: Int,
+    /** The motor this slot names, or null for a field that is not per motor. */
     val motor: Int?,
-    /** Whether the value is a packed pin (so [PIN_ABSENT] means absent and [Pin] can spell it). */
-    val isPin: Boolean,
-    private val read: (BoardFields) -> Int,
-    private val write: (BoardFields, Int) -> BoardFields,
 ) {
     /** The key naming this slot on its board. */
-    val key: Key get() = def.key(motor ?: 0)
+    val key: Key get() = def.key(index)
 
-    /** This slot's raw value in [fields]. */
-    fun of(fields: BoardFields): Int = read(fields)
+    /** Whether the value is a pin ([Type.Pin], [Type.PinAf] or [Type.PinAdc]). */
+    val isPin: Boolean get() = def.type in PIN_TYPES
 
-    /** [fields] with this slot set to [raw]. */
-    fun on(fields: BoardFields, raw: Int): BoardFields = write(fields, raw)
+    /** This slot's stored value in [fields], or null when the board stores none. */
+    fun of(fields: BoardFields): Value? = fields.values[key]
 
-    /** [raw] as the value one `CONFIG_WRITE` carries for this slot, in the field's own type. */
-    fun value(raw: Int): Value = when (def.type) {
-        Type.U8 -> Value.U8(raw)
-        Type.U16 -> Value.U16(raw)
-        else -> error("$key is a ${def.type} field, which no layout slot holds")
+    override fun toString(): String = "LayoutSlot(${def.id}/$index)"
+
+    private companion object {
+        val PIN_TYPES = setOf(Type.Pin, Type.PinAf, Type.PinAdc)
     }
-
-    /** The raw value [v] holds for this slot, or null when it is not the field's own type. */
-    fun raw(v: Value): Int? = when {
-        def.type == Type.U8 && v is Value.U8 -> v.v
-        def.type == Type.U16 && v is Value.U16 -> v.v
-        else -> null
-    }
-
-    override fun toString(): String = "LayoutSlot(${def.id}/${motor ?: 0})"
 }
 
 /**
- * The layout as ONE object: which store fields it is made of, and the conversions between those
- * fields and [BoardFields]. Both motors are carried, so a staged second motor is written with the
- * first.
+ * A board's layout: the stored value of each layout key. A key the board does not store is not in
+ * [values]: a pin that is not stored is an absent function, or its fleet pin where the field has one
+ * (`specs/config-read-once.md` section 3).
+ */
+data class BoardFields(val values: Map<Key, Value> = emptyMap()) {
+    /** These fields with [slot] set to [value]. */
+    fun with(slot: LayoutSlot, value: Value): BoardFields = copy(values = values + (slot.key to value))
+}
+
+/**
+ * The layout as ONE object: which store keys it is made of, read and checked together. Every key
+ * the pin checks read is here (the links' pins, USARTs and remaps too), so the checks run on the
+ * whole board as a write would leave it.
  */
 object Layout {
-    /** Every field of a layout: the singletons, then each motor's pins and facts. */
+    /** Every key of a layout: the board's own pins, the IMU bus, the links, then each motor's. */
     val SLOTS: List<LayoutSlot> = buildList {
-        fun pin(def: FieldDef, read: (BoardFields) -> Int, write: (BoardFields, Int) -> BoardFields) =
-            add(LayoutSlot(def, null, isPin = true, read = read, write = write))
+        fun single(def: FieldDef) = add(LayoutSlot(def, 0, null))
 
-        pin(Fields.BOARD_SELF_HOLD, { it.selfHold }, { b, v -> b.copy(selfHold = v) })
-        pin(Fields.BOARD_BATTERY_PIN, { it.vbatt }, { b, v -> b.copy(vbatt = v) })
-        pin(Fields.BOARD_BUZZER, { it.buzzer }, { b, v -> b.copy(buzzer = v) })
-        pin(Fields.LED_GREEN, { it.ledGreen }, { b, v -> b.copy(ledGreen = v) })
-        pin(Fields.LED_ORANGE, { it.ledOrange }, { b, v -> b.copy(ledOrange = v) })
-        pin(Fields.LED_RED, { it.ledRed }, { b, v -> b.copy(ledRed = v) })
-        pin(Fields.PAD_A, { it.padA }, { b, v -> b.copy(padA = v) })
-        pin(Fields.PAD_B, { it.padB }, { b, v -> b.copy(padB = v) })
-        pin(Fields.BOARD_BUTTON, { it.button }, { b, v -> b.copy(button = v) })
-        pin(Fields.IMU_SCL_PIN, { it.imuScl }, { b, v -> b.copy(imuScl = v) })
-        pin(Fields.IMU_SDA_PIN, { it.imuSda }, { b, v -> b.copy(imuSda = v) })
-        add(
-            LayoutSlot(
-                Fields.IMU_MODEL, null, isPin = false,
-                read = { it.imuModel }, write = { b, v -> b.copy(imuModel = v) },
-            ),
-        )
-
-        for (m in 0 until BoardFields.MOTORS) {
-            fun motorSlot(
-                def: FieldDef,
-                isPin: Boolean,
-                read: (MotorFields) -> Int,
-                write: (MotorFields, Int) -> MotorFields,
-            ) = add(
-                LayoutSlot(
-                    def, m, isPin,
-                    read = { read(it.motors[m]) },
-                    write = { b, v -> b.copy(motors = b.motors.mapIndexed { i, mf -> if (i == m) write(mf, v) else mf }) },
-                ),
-            )
-
-            motorSlot(Fields.MOTOR_HALL_A, true, { it.hallA }, { mf, v -> mf.copy(hallA = v) })
-            motorSlot(Fields.MOTOR_HALL_B, true, { it.hallB }, { mf, v -> mf.copy(hallB = v) })
-            motorSlot(Fields.MOTOR_HALL_C, true, { it.hallC }, { mf, v -> mf.copy(hallC = v) })
-            motorSlot(Fields.MOTOR_GATE_HI_A, true, { it.gateHiA }, { mf, v -> mf.copy(gateHiA = v) })
-            motorSlot(Fields.MOTOR_GATE_HI_B, true, { it.gateHiB }, { mf, v -> mf.copy(gateHiB = v) })
-            motorSlot(Fields.MOTOR_GATE_HI_C, true, { it.gateHiC }, { mf, v -> mf.copy(gateHiC = v) })
-            motorSlot(Fields.MOTOR_GATE_LO_A, true, { it.gateLoA }, { mf, v -> mf.copy(gateLoA = v) })
-            motorSlot(Fields.MOTOR_GATE_LO_B, true, { it.gateLoB }, { mf, v -> mf.copy(gateLoB = v) })
-            motorSlot(Fields.MOTOR_GATE_LO_C, true, { it.gateLoC }, { mf, v -> mf.copy(gateLoC = v) })
-            motorSlot(Fields.MOTOR_DEAD_TIME, false, { it.deadTime }, { mf, v -> mf.copy(deadTime = v) })
-            motorSlot(Fields.MOTOR_DIRECTION, false, { it.direction }, { mf, v -> mf.copy(direction = v) })
-            motorSlot(Fields.MOTOR_ALIGN_OFFSET, false, { it.alignOffset }, { mf, v -> mf.copy(alignOffset = v) })
-            motorSlot(Fields.MOTOR_CURRENT_CAL, false, { it.currentCal }, { mf, v -> mf.copy(currentCal = v) })
-            motorSlot(Fields.MOTOR_PHASE_A, true, { it.phaseA }, { mf, v -> mf.copy(phaseA = v) })
-            motorSlot(Fields.MOTOR_PHASE_B, true, { it.phaseB }, { mf, v -> mf.copy(phaseB = v) })
+        for (def in listOf(
+            Fields.BOARD_SELF_HOLD, Fields.BOARD_BATTERY_PIN, Fields.BOARD_BUZZER, Fields.LED_GREEN,
+            Fields.LED_ORANGE, Fields.LED_RED, Fields.PAD_A, Fields.PAD_B, Fields.BOARD_BUTTON,
+            Fields.IMU_SCL_PIN, Fields.IMU_SDA_PIN, Fields.IMU_MODEL, Fields.IMU_I2C, Fields.IMU_REMAP,
+        )) {
+            single(def)
+        }
+        for (i in 0 until Fields.LINKS) {
+            add(LayoutSlot(Fields.LINK_TX, i, null))
+            add(LayoutSlot(Fields.LINK_RX, i, null))
+            add(LayoutSlot(Fields.LINK_USART.at(i), i, null))
+            add(LayoutSlot(Fields.LINK_REMAP.at(i), i, null))
+        }
+        for (m in 0 until Fields.MOTORS) {
+            for (def in listOf(
+                Fields.MOTOR_HALL_A, Fields.MOTOR_HALL_B, Fields.MOTOR_HALL_C,
+                Fields.MOTOR_GATE_HI_A, Fields.MOTOR_GATE_HI_B, Fields.MOTOR_GATE_HI_C,
+                Fields.MOTOR_GATE_LO_A, Fields.MOTOR_GATE_LO_B, Fields.MOTOR_GATE_LO_C,
+                Fields.MOTOR_GATE_TIMER, Fields.MOTOR_GATE_REMAP, Fields.MOTOR_DEAD_TIME,
+                Fields.MOTOR_DIRECTION, Fields.MOTOR_ALIGN_OFFSET, Fields.MOTOR_CURRENT_CAL,
+                Fields.MOTOR_PHASE_A, Fields.MOTOR_PHASE_B,
+            )) {
+                add(LayoutSlot(def, m, m))
+            }
         }
     }
 
@@ -119,31 +92,31 @@ object Layout {
     /** The slot [key] names, or null when the key is not part of a layout. */
     fun forKey(key: Key): LayoutSlot? = byKey[key]
 
-    /** The slot holding [def] (on [motor], for a per-motor field), or null for a field no slot holds. */
-    fun forField(def: FieldDef, motor: Int? = null): LayoutSlot? = forKey(def.key(motor ?: 0))
+    /** The slot holding [def] at [index] (the motor or the link), or null for a field no slot holds. */
+    fun forField(def: FieldDef, index: Int? = null): LayoutSlot? = forKey(def.key(index ?: 0))
 
     /**
-     * The layout [stored] describes, or null when any slot is missing or holds the wrong type: a
-     * layout is one object, so a partial read is not a layout with gaps, it is no layout yet.
+     * The layout [read] describes, or null when any slot is unread or holds the wrong type. [read]
+     * holds each read slot's stored value, or null for a slot the board answered with its default
+     * (stores none). A layout is one object, so a partial read is not a layout with gaps.
      */
-    fun fieldsFrom(stored: Map<Key, Value>): BoardFields? {
-        var fields = BoardFields()
-        for (slot in SLOTS) {
-            val raw = stored[slot.key]?.let(slot::raw) ?: return null
-            fields = slot.on(fields, raw)
-        }
-        return fields
+    fun fieldsFrom(read: Map<Key, Value?>): BoardFields? {
+        if (missing(read).isNotEmpty()) return null
+        return BoardFields(SLOTS.mapNotNull { s -> read[s.key]?.let { s.key to it } }.toMap())
     }
 
-    /** The slots [stored] has no usable value for (what a read pass has not read yet). */
-    fun missing(stored: Map<Key, Value>): List<LayoutSlot> =
-        SLOTS.filter { slot -> stored[slot.key]?.let(slot::raw) == null }
+    /** The slots [read] has no usable answer for (what a read pass has not read yet). */
+    fun missing(read: Map<Key, Value?>): List<LayoutSlot> =
+        SLOTS.filter { s -> s.key !in read || read[s.key]?.let { it.kind() != s.def.type } == true }
 
     /** Every slot whose value differs between [from] and [to], in [SLOTS] order. */
     fun delta(from: BoardFields, to: BoardFields): List<LayoutSlot> =
         SLOTS.filter { it.of(from) != it.of(to) }
 
-    /** The writes that turn [from] into [to]: one `CONFIG_WRITE` per changed slot, in slot order. */
+    /**
+     * The writes that turn [from] into [to]: one `CONFIG_WRITE` per changed slot, in slot order. A
+     * slot [to] stores nothing for is not written: a layout edit sets values and never un-stores one.
+     */
     fun writes(from: BoardFields, to: BoardFields): List<Pair<Key, Value>> =
-        delta(from, to).map { it.key to it.value(it.of(to)) }
+        delta(from, to).mapNotNull { s -> s.of(to)?.let { s.key to it } }
 }

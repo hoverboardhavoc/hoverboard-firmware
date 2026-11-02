@@ -3537,8 +3537,10 @@ fn the_esp_answers_a_default_read_un_stores_its_name_and_compacts() {
             r[2..],
             [
                 net::walk::CFG_DEFAULT,
-                store::Type::U8.tag(),
-                store::PIN_ABSENT
+                store::Type::PinAf.tag(),
+                0xFF,
+                0xFF,
+                0xFF
             ]
         );
 

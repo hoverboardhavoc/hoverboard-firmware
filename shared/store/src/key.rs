@@ -38,6 +38,10 @@ pub const ERASED_TAG: u8 = 0x00;
 ///
 /// Fixed scalar types imply their length; `Blob`/`Str` are variable and use the record `len`.
 /// Encoded as the record's `type` byte via [`Type::tag`].
+///
+/// The three pin types (`specs/config-read-once.md` section 3) are the register model of one pin:
+/// a byte each, in order, of the port (`0` = A to `5` = F), the pin number, and for `PinAf` the
+/// alternate function, for `PinAdc` the ADC channel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Type {
     U8,
@@ -50,6 +54,12 @@ pub enum Type {
     Bool,
     Blob,
     Str,
+    /// Port, pin.
+    Pin,
+    /// Port, pin, alternate function.
+    PinAf,
+    /// Port, pin, ADC channel.
+    PinAdc,
 }
 
 impl Type {
@@ -66,6 +76,9 @@ impl Type {
             Type::Bool => 0x08,
             Type::Blob => 0x09,
             Type::Str => 0x0A,
+            Type::Pin => 0x0B,
+            Type::PinAf => 0x0C,
+            Type::PinAdc => 0x0D,
         }
     }
 
@@ -83,6 +96,9 @@ impl Type {
             0x08 => Some(Type::Bool),
             0x09 => Some(Type::Blob),
             0x0A => Some(Type::Str),
+            0x0B => Some(Type::Pin),
+            0x0C => Some(Type::PinAf),
+            0x0D => Some(Type::PinAdc),
             _ => None,
         }
     }
@@ -92,7 +108,8 @@ impl Type {
     pub const fn fixed_len(self) -> Option<usize> {
         match self {
             Type::U8 | Type::Bool => Some(1),
-            Type::U16 | Type::I16 => Some(2),
+            Type::U16 | Type::I16 | Type::Pin => Some(2),
+            Type::PinAf | Type::PinAdc => Some(3),
             Type::U32 | Type::I32 => Some(4),
             Type::U64 | Type::I64 => Some(8),
             Type::Blob | Type::Str => None,

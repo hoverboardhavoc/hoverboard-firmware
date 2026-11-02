@@ -21,13 +21,16 @@ body = '''
 
 [hal]
 body = '''
-    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+    use hal::{Chip, ClockConfig, PeriphLabel, PinAf, Usart};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
-        let pins = (chip.pin(0x02).unwrap(), chip.pin(0x03).unwrap()); // TX PA2, RX PA3
-        Usart::new(&chip, &ClockConfig::REFERENCE_72M_IRC8M, PeriphLabel::Usart1, pins, 115_200)
+        let (tx, rx) = (
+            PinAf { port: 0, pin: 2, af: 0 }, // TX PA2
+            PinAf { port: 0, pin: 3, af: 0 },
+        );
+        Usart::new(&chip, &ClockConfig::REFERENCE_72M_IRC8M, PeriphLabel::Usart1, tx, rx, 115_200)
             .unwrap();
     }
 '''

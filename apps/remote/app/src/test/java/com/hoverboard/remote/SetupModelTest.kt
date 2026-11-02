@@ -79,13 +79,14 @@ class SetupModelTest {
 
         rig.model.onShown()
         runCurrent()
-        assertEquals(rideFacts + SetupFields.ALL.map { board to it.key }, rig.transport.reads)
+        val pass = SetupFields.ALL.map { board to it.key } + SetupModel.IMU_BUS.map { board to it }
+        assertEquals(rideFacts + pass, rig.transport.reads)
         assertEquals(SetupFields.ALL.associate { it.key to it.def.default }, rig.state.values)
 
         rig.model.onHidden()
         rig.model.onShown()
         runCurrent()
-        val once = SetupFields.ALL.size + rideFacts.size
+        val once = SetupFields.ALL.size + SetupModel.IMU_BUS.size + rideFacts.size
         assertEquals(once, rig.transport.reads.size, "a second showing re-read the board")
     }
 
@@ -146,8 +147,8 @@ class SetupModelTest {
     fun `each board's status is read on attach and decoded`() = runTest {
         val rig = SetupRig(this)
         rig.transport.statuses[other] = listOf(
-            BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.DEAD_TIME.code, 10),
-            BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED.code, 0x16),
+            BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.NOT_UP.code, 5),
+            BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_UP.code, 3),
         )
 
         rig.transport.setAttachedBoard(board, other)
@@ -156,8 +157,8 @@ class SetupModelTest {
         assertEquals(emptyList<BoardStatus.Entry>(), rig.state.setupOf(board).status, "everything came up")
         assertEquals(
             listOf(
-                BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.DEAD_TIME.code, 10),
-                BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED.code, 0x16),
+                BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.NOT_UP.code, 5),
+                BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_UP.code, 3),
             ),
             rig.state.setupOf(other).status,
         )
@@ -450,7 +451,7 @@ class SetupModelTest {
         assertTrue(rig.state.writes.isEmpty(), "a write record survived the restart that applied it")
         // The ride facts first (what the arm control states), then the whole screen.
         assertEquals(
-            rideFacts + SetupFields.ALL.map { board to it.key },
+            rideFacts + SetupFields.ALL.map { board to it.key } + SetupModel.IMU_BUS.map { board to it },
             rig.transport.reads.drop(readsBefore),
             "no re-read after the restart",
         )

@@ -86,8 +86,8 @@ mod firmware {
     use embedded_hal::digital::OutputPin;
     use hal::clock::{self, ClockConfig};
     use hal::{
-        DescriptorError, DmaTx, Floating, FreeWatchdog, I2c, I2cMode, Input, InputGroup,
-        PeriphLabel, Pin as GpioPin, RingBufferedRx, SplitSerial, Usart, WdgTimeout,
+        DescriptorError, DmaTx, FreeWatchdog, I2c, I2cMode, InputGroup, PeriphLabel,
+        RingBufferedRx, SplitSerial, Usart, WdgTimeout,
     };
     use link::{Link, SerialTransport};
     use linkctl::{ChipTag, CyclicState};
@@ -101,10 +101,8 @@ mod firmware {
     use panic_halt as _;
     use scheduler::{systick_load, Scheduler};
     use store::{
-        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_BATTERY_CAL, BOARD_BATTERY_FLOOR,
-        CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_GAIN_MAX, CONTROL_MODE, CONTROL_POS_CLAMP,
-        CONTROL_REFERENCE, CONTROL_RIDER_REQUIRED, CONTROL_SF_GAINS, CONTROL_SIDE, IMU_AXIS_ROLE,
-        IMU_AXIS_SIGN, IMU_GYRO_BIAS,
+        FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_BATTERY_CAL, CONTROL_REFERENCE,
+        CONTROL_SF_GAINS, IMU_GYRO_BIAS,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
 
@@ -177,18 +175,6 @@ mod firmware {
     /// configured or did not come up is still a REGISTERED port: an emission to it drops, and a
     /// `PROBE_PORTS` reports it `empty`.
     const N_PORTS: u8 = 1 + store::LINKS;
-
-    /// The USART a link's pin pair drives on THIS chip, if the HAL can bring that instance up: the
-    /// one place the firmware asks the pin model "what is on these pins, and can I use it?".
-    ///
-    /// Two HAL answers, both required. `pincap::usart_pins` is the ROUTING half (does this (TX, RX)
-    /// pair map to a USART on this family, and through which AF or remap); `supports_rx` is the
-    /// RECEIVE half (can the HAL take that instance's RX with a DMA ring). `None` from either means
-    /// the link is not routable here, recorded as such (`specs/configured-links.md` section 4).
-    fn link_usart(chip: &hal::Chip, tx: u8, rx: u8) -> Option<PeriphLabel> {
-        let mapping = hal::pincap::usart_pins(chip, tx, rx)?;
-        hal::supports_rx(chip, mapping.usart).then_some(mapping.usart)
-    }
 
     // ---------------------------------------------------------------------------------------------
     // The integrated control stack (specs/integration.md, slice 7): the scheduler static + SysTick
@@ -877,23 +863,13 @@ mod firmware {
         /// and balance cannot engage). Bits 16..31: zero, reserved.
         battery: u32,
         /// The arm refusals (`specs/integration.md`, "The arm refusals (word 33, permanent)"),
-        /// maintained in this packing by `arm::hw` through [`arm::note_re_read_refusal`] /
-        /// [`arm::note_confirm_refusal`]. Appended LAST; word 33 in the SWD map.
+        /// maintained in this packing by `arm::hw` through [`arm::note_confirm_refusal`]. Appended
+        /// LAST; word 33 in the SWD map.
         ///
-        /// Bits 0..7: a saturating count of `arm::ArmStep::ReReadValues` refusals this boot.
-        /// Bits 8..15: the same for `arm::ArmStep::ConfirmPeriodsLive`. Bits 16..23: the last
-        /// refused IMU frame's cause byte ([`arm::imu_frame_cause_byte`]; 0 = no frame refusal this
-        /// boot). Bits 24..31: zero, reserved.
-        ///
-        /// **Why a count and not a level.** The re-read refusal is RELEASED at the end of the
-        /// engage that met it, so the level a bench read would otherwise infer it from is gone by
-        /// the time anyone looks: a board refused for a bad axis frame, then left disarmed, reads
-        /// exactly like a board that was never engaged. The counts separate "refused once and
-        /// recovered" from "refusing every attempt", and the cause byte names which of the three
-        /// frame checks failed without a second symbol to resolve. The confirm count is beside it
-        /// because the even/odd reading that works for the event counters is not available here:
-        /// that refusal is boot-sticky, so the count is the only record of how many attempts it
-        /// ate.
+        /// Bits 8..15: a saturating count of `arm::ArmStep::ConfirmPeriodsLive` refusals this
+        /// boot. Bits 0..7 and 16..31: zero (the re-read's refusal count and the refused IMU frame's
+        /// cause byte, until the arm row stopped refusing: `specs/config-read-once.md` section 5).
+        /// The refusal is boot-sticky, so the count is the only record of how many attempts it ate.
         arm_refusals: u32,
         /// The mailbox port's dropped-frame count ([`MAILBOX_DROPS`]), the third port's loss counter.
         /// Appended LAST, so every prior field keeps its offset (the offset-preserving append every
@@ -1493,19 +1469,9 @@ mod firmware {
         // mutable borrow of `shell` is the only one live across the call.
         let motor_fault = shell.orch.motor_fault;
         let moe = out.moe[0];
-        // The end-of-engage seam, as the orchestrator published it (`off_request_clear`: this pass
-        // resolved to OFF and the power request is clear). The arm layer's retryable re-read
-        // refusal is released there (`specs/integration.md`, "A refused re-read refuses the ARM,
-        // not the boot"); the fault latches and the engagement machine clear on the OFF half of the
-        // same pass, inside `control_task`. Taken, never recomputed here: the mode and the request
-        // are both the orchestrator's facts.
-        arm::hw::enact(
-            moe,
-            motor_configured,
-            motor_fault != 0,
-            out.off_request_clear,
-            || re_read_arm_values(shell),
-        );
+        arm::hw::enact(moe, motor_configured, motor_fault != 0, || {
+            re_read_arm_values(shell)
+        });
         publish_obs(
             &obs,
             shell.boot_count,
@@ -1560,61 +1526,48 @@ mod firmware {
         ]
     }
 
-    /// The arm-time re-read's whole apply (`specs/integration.md`, "When a stored value takes
-    /// effect: the arm-time re-read"): re-read the value row from flash, derive and validate it, and
-    /// install all of it. `Ok(())` only if every applicable apply happened; `Err(cause)` REFUSES
-    /// the arm (`arm::ArmStep::ReReadValues`) and carries the `CTRL_OBS` word-33 cause byte
-    /// ([`arm::imu_frame_cause_byte`], or `0` for a refusal with no frame cause). Because
-    /// `arm::rederive` validates before anything is written, an `Err` has applied nothing.
-    ///
-    /// The five applies are the five owners of the value row: the period ISR's record
+    /// The arm-row function (`specs/config-read-once.md` section 5): read the arm row in one store
+    /// pass, convert it, and install it into its five owners: the period ISR's record
     /// (`motor::hw::install_rederived`), the IMU's axis frame (`imu::Imu::set_config`), the control
     /// section's mode, rider requirement, battery floor and position clamp
     /// (`orchestrator::re_apply_control_values`, which also replaces the balance producer record
-    /// when the active mode changed), the turn bound and rate, and the gain shadow's maxima.
-    /// The IMU apply is conditional on the DEVICE and the derived config both being
-    /// present, and they are present together by construction: the bias handed to `rederive` is
-    /// `Some` exactly when the device is, and a successful `rederive` carries `Some` config exactly
-    /// when it was given a bias. So there is no applicable apply this can skip.
+    /// when the active mode changed), the turn bound and rate, and the gain shadow's maxima. The
+    /// boot calls it once, after the bring-ups; the arm sequence calls it as its first step. It
+    /// refuses nothing: the row is checked before it is written.
     ///
     /// `#[inline(never)]` with NO `#[link_section]`, deliberately: it must stay OUT of `.hotcode`,
-    /// the F1x0 zero-wait first 32 KiB (`motorcontroller/firmware/memory.x`). It runs once per arm rather
-    /// than once per pass, so window space spent on it would be taken from the 16 kHz and 250 Hz
-    /// paths that need it; and `inline(never)` is what stops the body being inlined into
+    /// the F1x0 zero-wait first 32 KiB (`motorcontroller/firmware/memory.x`). It runs once per arm
+    /// rather than once per pass, so window space spent on it would be taken from the 16 kHz and
+    /// 250 Hz paths that need it; and `inline(never)` is what stops the body being inlined into
     /// `control_task_cb`, which IS placed in the window.
     #[inline(never)]
-    fn re_read_arm_values(shell: &mut Shell) -> Result<(), u8> {
-        // The fresh value row. SAFETY: main-thread context (a dispatch callback), the `STORE`
-        // discipline: the borrow ends with this statement and the loop holds none across
-        // `dispatch()`.
-        let values = match unsafe { (*addr_of_mut!(STORE)).as_ref() } {
-            Some(st) => arm::read_arm_values(st),
-            None => return Err(0),
+    fn re_read_arm_values(shell: &mut Shell) {
+        // SAFETY: main-thread context (the boot, or a dispatch callback), the `STORE` discipline:
+        // the borrow ends with this statement and the loop holds none across `dispatch()`.
+        let Some(values) = (unsafe { (*addr_of_mut!(STORE)).as_ref() }).map(arm::read_arm_values)
+        else {
+            return;
         };
-        // The bring-up-row decode facts, from the runtime rather than re-read, and the IMU's
-        // INSTALLED gyro bias, carried through because `IMU_GYRO_BIAS` is not in the value row.
-        let Some(boot) = motor::hw::boot_fixed() else {
-            return Err(0);
-        };
+        // The bring-up's floor and accepted offsets, from the runtime; a board with no motor
+        // runtime installs the rest.
+        let boot = motor::hw::boot_fixed();
+        // The IMU's INSTALLED gyro bias, carried through: `IMU_GYRO_BIAS` is a boot calibration.
         let bias = shell.imu.as_ref().map(|d| d.config().gyro_bias);
-        // Derive and validate EVERYTHING before the first apply below. A refused axis frame is the
-        // one refusal that carries a cause an operator can act on, so it travels to `CTRL_OBS` word
-        // 33 as the cause byte; the other three exits describe a board that could not have armed
-        // anyway (no store, no runtime), so they refuse with no cause and only step the count.
-        let r = match arm::rederive(&values, boot, bias) {
-            Ok(r) => r,
-            Err(e) => return Err(arm::imu_frame_cause_byte(e)),
-        };
-        if !motor::hw::install_rederived(&r.motor) {
-            return Err(0);
+        let r = arm::rederive(
+            &values,
+            boot.unwrap_or(motor::BootFixed {
+                noise_floor: 0,
+                accepted_offsets: None,
+            }),
+            bias,
+        );
+        if boot.is_some() {
+            motor::hw::install_rederived(&r.motor);
         }
         if let (Some(dev), Some(cfg)) = (shell.imu.as_mut(), r.imu) {
             // Reinstalls the axis permutation; touches no bus.
             dev.set_config(cfg);
         }
-        // The control section's four fields, through the orchestrator: a changed producer (a mode
-        // or a frame) replaces the balance producer records with the engagement machine, which
-        // this layer does not own.
         orchestrator::re_apply_control_values(
             &mut shell.orch,
             r.control_mode_byte,
@@ -1630,7 +1583,6 @@ mod firmware {
         // The board now runs the stored arm-effect values: `FLAG_REARM` clears
         // (`specs/machine-settings.md` section 5).
         shell.orch.machine.armed();
-        Ok(())
     }
 
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget fix): the Shell value
@@ -1639,21 +1591,15 @@ mod firmware {
     /// round 7 that frame is `boot`'s and pops; it was `main`'s and permanent).
     ///
     /// The argument list is the Shell's boot inputs one for one (the orchestrator constructor's
-    /// inputs, then the bus, the device, the input pins, the boot ordinal and the part);
-    /// bundling them into a struct for the lint would be a type with this one caller.
+    /// inputs, then the bus, the device, the input pins, the boot ordinal and the part); the arm
+    /// row's values are not among them, because the arm-row function installs them right after
+    /// (`specs/config-read-once.md` section 5).
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     fn init_shell(
-        control_mode_byte: u8,
-        frame_byte: u8,
-        side_byte: u8,
         level_trim_centideg: [i16; 2],
         gains: control::GainShadow,
         vbatt_cal: Option<orchestrator::battery::VbattCal>,
-        pos_clamp: i16,
-        drive_turn: control::DriveTurn,
-        rider_required_byte: u8,
-        battery_floor: i16,
         imu_bus: Option<I2c>,
         imu_dev: Option<imu::Imu>,
         imu_staged: bool,
@@ -1669,18 +1615,11 @@ mod firmware {
         unsafe {
             *addr_of_mut!(SHELL) = Some(Shell {
                 orch: OrchestratorState::new(
-                    control_mode_byte,
-                    frame_byte,
-                    side_byte,
                     imu_configured,
                     imu_staged,
                     attitude::Config::staged(level_trim_centideg),
                     gains,
                     vbatt_cal,
-                    pos_clamp,
-                    drive_turn,
-                    rider_required_byte,
-                    battery_floor,
                     // What this board says about itself for the life of the boot
                     // (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 17 and 18).
                     // The boot ordinal is narrowed to its low byte HERE, once, rather than on
@@ -1710,17 +1649,17 @@ mod firmware {
         }
     }
 
-    /// Bring the IMU up on the bus its staged pins name (`specs/configured-links.md` section 3).
+    /// Bring the IMU up on its stored bus (`specs/config-read-once.md` section 5): the I2C
+    /// instance and the two pins with their alternate functions, as stored, and on the GD32F10x the
+    /// I2C's stored remap, when `imu.model` is non-zero (`layout::ImuBus`); the probe checks the
+    /// model's `WHO_AM_I`, and a model index the imu crate does not know is recorded `NotUp`.
     ///
-    /// Everything about WHERE the IMU is comes from the store: `imu.model` enables the group, the
-    /// pin pair is `imu.scl`/`imu.sda` ([`layout::read_imu`]), and the I2C instance behind the pair
-    /// is the pin model's answer for this chip. There is no compiled pin pair and no compiled
-    /// instance, because there is no fleet-wide answer: the standard family's IMU is I2C0 on
-    /// PB6/PB7 and the classywalk offroad family's is I2C1 on PB10/PB11, on the same GD32F130 part.
+    /// The frame installed here is the reference one with the stored gyro bias; the arm-row
+    /// function installs the stored signs and roles right after, as it does at every arm.
     ///
-    /// Fails soft in every refusal (`(None, None)`), each one recorded in the status record: the
-    /// board boots link-only-plus-throttle, and `CTRL_OBS`'s `imu_configured` reads 0 beside
-    /// `imu_staged` (the flags byte's b0 and b6).
+    /// Fails soft (`(None, None)`), recorded in the status record as `NotUp`: the board boots
+    /// link-only-plus-throttle, and `CTRL_OBS`'s `imu_configured` reads 0 beside `imu_staged` (the
+    /// flags byte's b0 and b6).
     ///
     /// `#[inline(never)]`: a POPPED boot frame (the slice-7 stack-budget idiom, as `init_shell`).
     /// Only the two live handles are returned; the staged gyro bias, the probe/init working set and
@@ -1729,75 +1668,40 @@ mod firmware {
     fn bring_up_imu<F: store::Flash>(
         chip: &hal::Chip,
         store: &Store<F>,
+        bus: Option<layout::ImuBus>,
         status: &mut StatusRecord,
     ) -> (Option<I2c>, Option<imu::Imu>) {
-        let Some(ip) = layout::read_imu(store, status) else {
+        let Some(b) = bus else {
             return (None, None);
         };
-        let (scl_id, scl_packed) = (store::IMU_SCL_PIN.id(), ip.scl.packed());
-        // The instance behind the staged pair, from the pin model that owns the pair -> instance
-        // fact, so the label handed to `I2c::new` comes from the same table that routes the pins.
-        let Some(instance) = hal::pincap::i2c_instance(chip, scl_packed, ip.sda.packed()) else {
-            status.record(scl_id, 0, Reason::NotRouted, scl_packed);
-            return (None, None);
-        };
-        // The staged pins as typed handles, with their port clock enabled.
-        let Some(scl) = typed_pin(chip, scl_packed, scl_id, 0, status) else {
-            return (None, None);
-        };
-        let Some(sda) = typed_pin(chip, ip.sda.packed(), scl_id, 0, status) else {
-            return (None, None);
-        };
-        let Some(model) = imu::model_from_index(ip.model) else {
+        let scl_id = store::IMU_SCL_PIN.id();
+        let Some(model) = imu::model_from_index(b.model) else {
             status.record(store::IMU_MODEL.id(), 0, Reason::NotUp, 0);
             return (None, None);
         };
-        // Stage the per-board zero-rate gyro bias from the store (IMU_GYRO_BIAS x/y/z at indices
-        // 0/1/2; default 0 = uncalibrated). The bench capture for the F130 clone was
-        // [48, 13, -88] counts (2026-07-18 imu-bench bias phase).
+        let instance = i2c_label(b.i2c);
+        // The GD32F10x routes the I2C by its AFIO remap, the stored one.
+        #[cfg(feature = "gd32f103c8")]
+        hal::afio::remap(instance, b.remap);
+        // The per-board zero-rate gyro bias from the store (IMU_GYRO_BIAS x/y/z at indices
+        // 0/1/2; default 0 = uncalibrated), a boot calibration.
         let bias = [
             store.get(IMU_GYRO_BIAS.at(0)),
             store.get(IMU_GYRO_BIAS.at(1)),
             store.get(IMU_GYRO_BIAS.at(2)),
         ];
-        // Stage the per-board IMU SIGN MAP the same way (IMU_AXIS_SIGN, indices 0..2 = [x, y, z],
-        // shared by the accelerometer and the gyro): the rotation between the chip's axes and the
-        // board frame, a mounting fact per board (`specs/imu.md`, "Board-config fields"). 0 = unset
-        // -> that index of the compiled reference map (`imu::Config::staged` owns the rule).
-        let staged_sign = [
-            store.get(IMU_AXIS_SIGN.at(0)),
-            store.get(IMU_AXIS_SIGN.at(1)),
-            store.get(IMU_AXIS_SIGN.at(2)),
-        ];
-        // And the axis ROLES (IMU_AXIS_ROLE, 0 = UP / 1 = PITCH_RATE, chip axis 1..=3, 0 = unset =
-        // the stock flat mount's Z / Y): with the signs they are the signed permutation from chip
-        // to body axes, applied to the whole sample in `Imu::decode` (`specs/imu.md`).
-        let staged_roles = [
-            store.get(IMU_AXIS_ROLE.at(0)),
-            store.get(IMU_AXIS_ROLE.at(1)),
-        ];
-        // A frame that is not a proper rotation with distinct roles is REFUSED here, before the
-        // bus is touched: the IMU is not brought up (so Balance demotes to Throttle with the mode
-        // fault, the existing fail-soft), and the status record names the refusal through the
-        // mapping the arm refusal shares (`arm::imu_frame_fault`).
-        let cfg = match imu::Config::staged(staged_sign, bias, staged_roles) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                let (field, first) = arm::imu_frame_fault(e);
-                status.record(field, 0, Reason::ImuFrame, first);
-                return (None, None);
-            }
-        };
+        let cfg = imu::Config::staged([0; 3], bias, [0; 2]);
         let mut bus = match I2c::new(
             chip,
             &CLOCK,
             instance,
-            (scl, sda),
+            pin_af(b.scl),
+            pin_af(b.sda),
             I2cMode::fast(IMU_I2C_HZ, hal::i2c::FastDuty::Two),
         ) {
             Ok(bus) => bus,
             Err(e) => {
-                refused(status, scl_id, 0, e, scl_packed);
+                status.record(scl_id, 0, Reason::NotUp, e.code());
                 return (None, None);
             }
         };
@@ -1937,68 +1841,54 @@ mod firmware {
     // and asks the HAL; a failure costs only that function and adds an entry to BOARD_OBS.
     // ---------------------------------------------------------------------------------------------
 
-    /// Record a HAL refusal of `pin` against the function `field`/`index`: the SWD pins as
-    /// [`Reason::SwdPin`] with the pin, anything else as [`Reason::NotUp`] with the HAL's error code
-    /// (`DescriptorError::code`).
-    fn refused(status: &mut StatusRecord, field: u8, index: u8, e: DescriptorError, pin: u8) {
-        match e {
-            DescriptorError::SwdPin => status.record(field, index, Reason::SwdPin, pin),
-            e => status.record(field, index, Reason::NotUp, e.code()),
+    /// A stored pin with its alternate function, as the HAL takes it.
+    #[inline]
+    fn pin_af([port, pin, af]: layout::Pin3) -> hal::PinAf {
+        hal::PinAf { port, pin, af }
+    }
+
+    /// The HAL's label for a stored I2C instance number.
+    #[inline]
+    fn i2c_label(n: u8) -> PeriphLabel {
+        if n == 1 {
+            PeriphLabel::I2c1
+        } else {
+            PeriphLabel::I2c0
         }
     }
 
-    /// `pin` as a typed HAL handle with its port clock on, or `None` recorded against the function
-    /// `field`/`index` (an SWD pin, or a port this silicon does not carry).
-    fn typed_pin(
-        chip: &hal::Chip,
-        pin: u8,
-        field: u8,
-        index: u8,
-        status: &mut StatusRecord,
-    ) -> Option<GpioPin<Input<Floating>>> {
-        match chip.pin(pin) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                refused(status, field, index, e, pin);
-                None
-            }
+    /// The HAL's label for a stored USART instance number.
+    #[inline]
+    fn usart_label(n: u8) -> PeriphLabel {
+        match n {
+            0 => PeriphLabel::Usart0,
+            1 => PeriphLabel::Usart1,
+            _ => PeriphLabel::Usart2,
         }
     }
 
-    /// Assert this board's power-latch (SELF_HOLD) high, on the pin `power.self_hold` STAGES, FIRST
-    /// of every bring-up, and record the pin driven in the status record (`ABSENT` when none was).
+    /// Assert this board's power-latch (SELF_HOLD) high, on the stored `power.self_hold` pin (the
+    /// fleet's PB12 when none is stored), FIRST of every bring-up, and record the pin driven in the
+    /// status record.
     ///
     /// Role-agnostic on EVERY board: latch this board's own rail on so it stays up after the
     /// inter-board wake drops. A slave is woken over the cable and would otherwise fall back asleep
     /// once the master stops driving it; a master bridges its own power button. Unconditional,
     /// never gated on chip family, because role is not known here. RoboDurden does the same
-    /// (`main.c:148`).
-    ///
-    /// **Which pin, and why from the store.** The pin is per-board wiring, so the staged field owns
-    /// it: `power.self_hold`'s registry default (PB12, the fleet wiring) is what an unstaged board
-    /// reads. A board wired differently stages its own byte and this drives THAT pin. It is
-    /// unavoidably post-mount (its pin is persisted data), so the window between power-on and the
-    /// assert is the mount itself.
-    ///
-    /// A staged byte that names no usable pin (a bad encoding, an SWD pin, a port this silicon does
-    /// not carry) drives nothing and is recorded; on battery that board powers off rather than
-    /// holding a wrong pin high.
-    fn assert_self_hold<F: store::Flash>(
-        chip: &hal::Chip,
-        store: &Store<F>,
-        status: &mut StatusRecord,
-    ) {
-        let field = store::BOARD_SELF_HOLD;
-        let Some(pin) = layout::pin(store, field, status) else {
-            return;
-        };
-        let Some(handle) = typed_pin(chip, pin.packed(), field.id(), 0, status) else {
+    /// (`main.c:148`). It is unavoidably post-mount (its pin is persisted data), so the window
+    /// between power-on and the assert is the mount itself.
+    fn assert_self_hold(chip: &hal::Chip, pin: Option<layout::Pin>, status: &mut StatusRecord) {
+        let Some([port, pin]) = pin else {
             return;
         };
         // Dropping the handle leaves the pin configured and driven: the latch has to outlive every
         // frame in this boot.
-        let _ = handle.into_push_pull_output().set_high();
-        status.self_hold = pin.packed();
+        let _ = chip
+            .pin(hal::PinId { port, pin })
+            .into_push_pull_output()
+            .set_high();
+        status.self_hold_port = port;
+        status.self_hold_pin = pin;
     }
 
     /// The boot status record (`specs/configured-links.md` section 5): what did not come up, and
@@ -2259,11 +2149,15 @@ mod firmware {
         // reference to `BOARD_OBS` while this one is live.
         let status: &mut StatusRecord = unsafe { &mut *addr_of_mut!(BOARD_OBS) };
 
-        // The power latch FIRST of every bring-up, on the pin the store stages: the board's own
-        // power rail goes up the moment its pin is knowable. On the bench both boards run on
-        // debugger 3V3 that bypasses the latch, so the assert is verifiable only as the pin's
-        // `GPIOx.OCTL` bit; it matters on battery + the inter-board cable.
-        assert_self_hold(&chip, store, status);
+        // The pin, instance and remap keys in one store pass (`specs/config-read-once.md`
+        // section 5): the values the bring-ups below write into the registers, as stored.
+        let layout = layout::read(store);
+
+        // The power latch FIRST of every bring-up, on the stored pin: the board's own power rail
+        // goes up the moment its pin is knowable. On the bench both boards run on debugger 3V3
+        // that bypasses the latch, so the assert is verifiable only as the pin's `GPIOx.OCTL` bit;
+        // it matters on battery + the inter-board cable.
+        assert_self_hold(&chip, layout.self_hold, status);
 
         // The application owns the one Peripherals::take() (the HAL uses raw register views
         // internally and never consumes the one-shot flag); fail loud if somehow taken twice.
@@ -2295,7 +2189,7 @@ mod firmware {
             // SAFETY: a pointer to slot `i` of the `links` field of `main`'s uninitialized state,
             // written once by the placer and read by nobody until `boot` returns.
             let slot = unsafe { addr_of_mut!((*st).links).cast::<Option<UartLink>>().add(i) };
-            *c = place_link(slot, i as u8, &chip, store, status);
+            *c = place_link(slot, i as u8, &chip, layout.links[i], status);
         }
 
         // The mailbox, port 0, always.
@@ -2325,97 +2219,46 @@ mod firmware {
         //    Fails soft: the board boots link-only-plus-throttle and the outcome is observable
         //    (imu_configured in CTRL_OBS, read against imu_staged: the flags byte's b0 and b6, and
         //    the status record).
-        let (imu_bus, imu_dev) = bring_up_imu(&chip, store, status);
-        // Whether the staging ASKED for an IMU (`imu.model` nonzero, the group's enable): published
-        // as `CTRL_OBS` b6 so a bench read tells "never asked" from "asked and nothing came up".
-        let imu_staged = store.get(store::IMU_MODEL) != 0;
+        let (imu_bus, imu_dev) = bring_up_imu(&chip, store, layout.imu, status);
+        // Whether the store asks for an IMU (`imu.model` non-zero, the switch): published as
+        // `CTRL_OBS` b6 so a bench read tells "never asked" from "asked and nothing came up".
+        let imu_staged = layout.imu_model != 0;
 
-        // The input pins (button + pads): each its own single field, resolved into a branch-free
-        // InputGroup; absent or refused lines sample as idle through the per-line mask. Resolving
-        // each pin through the HAL enables its port clock (port C for the fleet-default pad B,
-        // PC15) and refuses the SWD pins, recorded against that line's field.
+        // The input pins (button + pads), each stored on its own, read together through one
+        // branch-free InputGroup; an absent line samples as idle through the per-line mask.
+        // Resolving each pin through the HAL enables its port clock (port C for a pad on PC15).
         let inputs = {
-            let mut line = |field: store::Field<u8>| -> Option<u8> {
-                let p = layout::pin(store, field, status)?.packed();
-                typed_pin(&chip, p, field.id(), 0, status).map(|_| p)
-            };
-            let (b, pa, pb) = (
-                line(store::BOARD_BUTTON),
-                line(store::PAD_A),
-                line(store::PAD_B),
-            );
-            // `match`, not `.and_then(..)`: at opt-level "z" the closure survived as its own
-            // out-of-line function once `main` stopped being one whole-program body (~110 B).
-            let group = match b.or(pa).or(pb) {
-                Some(f) => {
-                    match chip.input_group([b.unwrap_or(f), pa.unwrap_or(f), pb.unwrap_or(f)]) {
-                        Ok(g) => Some(g),
-                        Err(e) => {
-                            let field = if b.is_some() {
-                                store::BOARD_BUTTON.id()
-                            } else if pa.is_some() {
-                                store::PAD_A.id()
-                            } else {
-                                store::PAD_B.id()
-                            };
-                            refused(status, field, 0, e, f);
-                            None
-                        }
-                    }
-                }
-                None => None,
-            };
+            let [b, pa, pb] = layout.inputs;
+            let group = b.or(pa).or(pb).map(|f| {
+                chip.input_group(
+                    [b.unwrap_or(f), pa.unwrap_or(f), pb.unwrap_or(f)]
+                        .map(|[port, pin]| hal::PinId { port, pin }),
+                )
+            });
             InputPins {
-                has_button: group.is_some() && b.is_some(),
-                has_pad_a: group.is_some() && pa.is_some(),
-                has_pad_b: group.is_some() && pb.is_some(),
+                has_button: b.is_some(),
+                has_pad_a: pa.is_some(),
+                has_pad_b: pb.is_some(),
                 group,
                 polarity: store.get(store::BOARD_INPUT_POLARITY),
             }
         };
 
-        // The battery-sense input (`board.battery.pin`) and the ADC channel behind it: the motor's
-        // injected group converts it, and its calibration is read only where it is staged.
-        let vbatt = layout::read_adc_input(
-            store,
-            store::BOARD_BATTERY_PIN,
-            |p| hal::pincap::adc_channel(&chip, p),
-            status,
-        );
-
-        // 1b. Motor bring-up (`specs/motor-integration.md` slice 3, DISARMED): motor 0's own fields
-        //     (`layout::read_motor`, which holds its gate group to the dead-time floor), then the
-        //     timer + injected ADC are configured and the 16 kHz period ISR starts stepping the
-        //     commutator, with MOE never written (this crate does not name the arming gate at all).
-        //     A board with no motor group configured, or one this image cannot drive, is left
-        //     exactly as before: the outcome rides in `CTRL_OBS`'s motor block, and a group that is
-        //     staged but refused, or a bring-up step that fails, in the status record.
-        //     Placed after the interrupt priorities are set and before the tick source, so the 250 Hz task never runs against a half-built motor.
-        //     A successful bring-up hands its configured timer to `arm`, which derives the one
-        //     arming gate in the image from it. A board that skips the bring-up never installs a
-        //     gate and is therefore UNARMABLE, not merely unarmed.
-        let motor_plan = layout::read_motor(
-            store,
-            0,
-            |hi, lo| {
-                hal::pincap::gate_set(&chip, hi, lo).map(|t| {
-                    if t == PeriphLabel::Timer7 {
-                        1
-                    } else {
-                        0
-                    }
-                })
-            },
-            |p| hal::pincap::adc_channel(&chip, p),
-            status,
-        );
+        // 1b. Motor bring-up (`specs/motor-integration.md` slice 3, DISARMED): motor 0's stored
+        //     configuration (`layout::read`), then the timer + injected ADC are configured and the
+        //     16 kHz period ISR starts stepping the commutator, with MOE never written (this crate
+        //     does not name the arming gate at all). A board with no motor stored is left exactly
+        //     as before: the outcome rides in `CTRL_OBS`'s motor block, and a bring-up step that
+        //     fails in the status record. Placed after the interrupt priorities are set and before
+        //     the tick source, so the 250 Hz task never runs against a half-built motor. A
+        //     successful bring-up hands its configured timer to `arm`, which derives the one arming
+        //     gate in the image from it. A board that skips the bring-up never installs a gate and
+        //     is therefore UNARMABLE, not merely unarmed.
         match motor::bring_up(
             &chip,
-            &motor_plan,
-            vbatt,
-            store.get(store::MOTOR_METHOD),
+            layout.motor.as_ref(),
+            layout.battery,
             PERIOD_HZ,
-            store.get(store::MOTOR_CURRENT_LIMIT.at(0)),
             store.get(store::MOTOR_NOISE_FLOOR.at(0)),
         ) {
             Ok(summary) => arm::hw::install(&summary.timer),
@@ -2441,57 +2284,25 @@ mod firmware {
         // own level. Per board because the two halves of a chassis are mirror-mounted, which is
         // what stock's per-board cal page absorbed and the only thing its two images differed by.
         // Default 0 = untrimmed, so an unstaged board behaves exactly as before.
+        // The gain and reference words, read once: the shadow is built from them under the
+        // compiled maxima, and reconciled with them once the arm-row function has installed the
+        // stored ones (below).
+        let gains_flash = read_gains(store);
         init_shell(
-            store.get(CONTROL_MODE),
-            store.get(CONTROL_FRAME),
-            // Which wheel of a rigid machine this board's motor drives (CONTROL_SIDE at motor 0,
-            // 0 = left): the
-            // control block's `role_right` word at last, which the rigid leader's steering split
-            // and the state-feedback law's side mirror read. Default 0 (left), the state the app's
-            // picker shows as unset: on a right wheel it reverses the law's position and speed
-            // terms, which is what gate 1 of `specs/state-feedback.md` reads disarmed.
-            store.get(CONTROL_SIDE.at(0)),
             [
                 store.get(ATTITUDE_LEVEL_TRIM.at(0)),
                 store.get(ATTITUDE_LEVEL_TRIM.at(1)),
             ],
-            // The gain maxima (CONTROL_GAIN_MAX, 0 = gp / 1 = gr / 2 = gx / 3 = gv) bound the
-            // shadow until the next arm re-reads them: the boot clamp, the reconcile clamp and the
-            // tune lane's refusal.
-            control::GainShadow::of_stored(
-                read_gains(store),
-                [
-                    store.get(CONTROL_GAIN_MAX.at(0)),
-                    store.get(CONTROL_GAIN_MAX.at(1)),
-                    store.get(CONTROL_GAIN_MAX.at(2)),
-                    store.get(CONTROL_GAIN_MAX.at(3)),
-                ],
-            ),
+            control::GainShadow::of_stored(gains_flash),
             // The battery-sense calibration (BOARD_BATTERY_CAL, 0 = slope / 1 = offset), boot-read
-            // and seam-clamped by `VbattCal::new`, on a board whose plan carries `board.battery.pin`
-            // only: a board that does not sense has no calibration to read.
-            vbatt.map(|_| {
+            // and seam-clamped by `VbattCal::new`, on a board that stores `battery_sense.pin` only:
+            // a board that does not sense has no calibration to read.
+            layout.battery.map(|_| {
                 orchestrator::battery::VbattCal::new(
                     store.get(BOARD_BATTERY_CAL.at(0)),
                     store.get(BOARD_BATTERY_CAL.at(1)),
                 )
             }),
-            // The state-feedback law's position clamp (CONTROL_POS_CLAMP, edges), boot-read and
-            // seam-clamped by `control::sf::pos_clamp` in the control section. Default 45.
-            store.get(CONTROL_POS_CLAMP),
-            // The rigid frame's turn bound and rate (CONTROL_DRIVE_TURN, 0 = turn_max / 1 =
-            // turn_slew, torque counts), boot-read and seam-clamped by `DriveTurn::new`. Default
-            // turn_max 0 = disabled: the machine drives straight.
-            control::DriveTurn::new(
-                store.get(CONTROL_DRIVE_TURN.at(0)),
-                store.get(CONTROL_DRIVE_TURN.at(1)),
-            ),
-            // Whether balance mode requires a rider (CONTROL_RIDER_REQUIRED, `specs/control.md`
-            // (i)): default 1 = required, so an unstaged board engages exactly as before.
-            store.get(CONTROL_RIDER_REQUIRED),
-            // The low-battery floor (BOARD_BATTERY_FLOOR, centivolts, `<= 0` = none,
-            // `specs/sensing-and-safety.md`): refuses a balance engage below it, never a disengage.
-            store.get(BOARD_BATTERY_FLOOR),
             imu_bus,
             imu_dev,
             // Whether the staging asked for an IMU at all: published as the `CTRL_OBS` flags byte
@@ -2507,6 +2318,18 @@ mod firmware {
             // (`specs/machine-settings.md` sections 4 and 5).
             orchestrator::Machine::new(orchestrator::Digests::of(store), configured),
         );
+        // 2b. The arm-row function, once (`specs/config-read-once.md` section 5, boot step 5): the
+        //     control and motor values the board runs until the next arm re-reads them, installed
+        //     before the tick source exists.
+        // SAFETY: the shell was written just above; single-threaded boot, no task exists yet.
+        if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
+            re_read_arm_values(shell);
+            // The shadow was built under the compiled maxima; with the stored ones installed, a
+            // stored gain above a compiled maximum but within its stored one runs as stored, as it
+            // did when the boot read the maxima first. Nothing is tuned yet, so the reconcile
+            // moves only the words the compiled bound had clamped.
+            shell.orch.ctl.gains.reconcile(gains_flash);
+        }
 
         // 3. The tick source (integration.md step-3 order: register the task table, mark the
         //    scheduler's tick-source latch, THEN enable SysTick).
@@ -2566,64 +2389,60 @@ mod firmware {
         }
     }
 
-    /// Bring link `i` up from its stored pins and place it into its slot of the loop's state
-    /// (`specs/configured-links.md` section 4): the USART the pair drives, the receive ring and the
+    /// Bring link `i` up from its stored configuration and place it into its slot of the loop's
+    /// state (`specs/configured-links.md` section 4): the USART as stored, the receive ring and the
     /// one-shot transmitter on its split halves, and the `Link` over them. A POPPED boot frame
     /// (shrink round 7): the ring receiver, the transmitter and the `SplitSerial` are each a value
     /// on the way to the `Link`, and here they are this frame's; the `Link` is written into the
     /// slot through the raw pointer, never returned by value.
     ///
-    /// Unset (both pins), the slot is `None` and no pin is touched. Any failure (one pin of two, a
-    /// pair no USART routes on this chip, a HAL refusal, a USART already brought up by the other
-    /// link) leaves the slot `None` and records why against `links[i].tx` at index `i`; it never halts.
-    /// The two buffers are this link's own statics, formed once each (each `i` is placed once).
+    /// Not stored (`layout::Link` absent), the slot is `None` and no pin is touched. A HAL
+    /// constructor that refuses leaves the slot `None` and records `NotUp` against `links[i].tx` at
+    /// index `i`; it never halts. The two buffers are this link's own statics, formed once each.
     ///
-    /// Returns whether the link is CONFIGURED, both its pins stored: the expectation of a peer
-    /// the arm gate holds the board to whether or not the USART came up
-    /// (`specs/machine-settings.md` section 4.2).
+    /// Returns whether the link is CONFIGURED: the expectation of a peer the arm gate holds the
+    /// board to whether or not the USART came up (`specs/machine-settings.md` section 4.2).
     ///
     /// Runs AFTER `irq::install` and `cortex_m::interrupt::enable()`: arming either half registers
     /// and unmasks a vector.
     #[inline(never)]
-    fn place_link<F: store::Flash>(
+    fn place_link(
         slot: *mut Option<UartLink>,
         i: u8,
         chip: &hal::Chip,
-        store: &Store<F>,
+        stored: Option<layout::Link>,
         status: &mut StatusRecord,
     ) -> bool {
-        let pins = layout::read_link(store, i, status);
-        let link = pins.and_then(|[tx, rx]| bring_up_link(i, tx, rx, chip, status));
+        let link = stored.and_then(|l| bring_up_link(i, l, chip, status));
         // SAFETY: `slot` is slot `i` of the `links` field of `main`'s `MaybeUninit<LoopState>`,
         // written here once and read by nobody until `boot` returns.
         unsafe { slot.write(link) };
-        pins.is_some()
+        stored.is_some()
     }
 
     /// [`place_link`]'s body: the link, or `None` with the reason recorded.
     #[inline(always)]
     fn bring_up_link(
         i: u8,
-        tx: board::Pin,
-        rx: board::Pin,
+        l: layout::Link,
         chip: &hal::Chip,
         status: &mut StatusRecord,
     ) -> Option<UartLink> {
-        let (field, tx, rx) = (store::LINK_TX.id(), tx.packed(), rx.packed());
-        let Some(usart) = link_usart(chip, tx, rx) else {
-            status.record(field, i, Reason::NotRouted, tx);
-            return None;
+        let field = store::LINK_TX.id();
+        let usart = usart_label(l.usart);
+        // The GD32F10x routes the USART by its AFIO remap, the stored one.
+        #[cfg(feature = "gd32f103c8")]
+        hal::afio::remap(usart, l.remap);
+        let refused = |status: &mut StatusRecord, e: DescriptorError| {
+            status.record(field, i, Reason::NotUp, e.code())
         };
-        let tx_pin = typed_pin(chip, tx, field, i, status)?;
-        let rx_pin = typed_pin(chip, rx, field, i, status)?;
         // One bring-up, split into owned halves (specs/usart-split.md): the RX half is consumed by
-        // the ring, the TX half by the transmitter. `Usart::new` refuses an instance the other link
-        // already brought up (`InUse`) before it touches a register, so that link keeps running.
+        // the ring, the TX half by the transmitter.
         let (usart_tx, usart_rx) =
-            match Usart::new(chip, &CLOCK, usart, (tx_pin, rx_pin), LINK_BAUD) {
+            match Usart::new(chip, &CLOCK, usart, pin_af(l.tx), pin_af(l.rx), LINK_BAUD) {
                 Ok(u) => u.split(),
                 Err(e) => {
-                    refused(status, field, i, e, tx);
+                    refused(status, e);
                     return None;
                 }
             };
@@ -2644,7 +2463,7 @@ mod firmware {
         let rx_dma = match RingBufferedRx::new(chip, usart_rx, usart, ring) {
             Ok(r) => r,
             Err(e) => {
-                refused(status, field, i, e, rx);
+                refused(status, e);
                 return None;
             }
         };
@@ -2653,7 +2472,7 @@ mod firmware {
         let tx_dma = match DmaTx::new(chip, usart_tx, tx_buf, CLOCK.sysclk_hz, LINK_BAUD) {
             Ok(t) => t,
             Err(e) => {
-                refused(status, field, i, e, tx);
+                refused(status, e);
                 return None;
             }
         };

@@ -219,5 +219,13 @@ if [ "$run_hal" = 1 ]; then
       status=1
     fi
   done
+  # The host's pin tables, every chip's, which the CLI checks against
+  # (specs/config-read-once.md section 4): built on their own, with no chip.
+  cmd=(cargo test --target "$HOST_TARGET" -p hal --features pincap ${rest[@]+"${rest[@]}"})
+  echo "+ (cd motorcontroller && ${cmd[*]})" >&2
+  if ! (cd -- "$root/motorcontroller" && "${cmd[@]}"); then
+    echo "tools/host-test.sh: the hal pin tables suite FAILED." >&2
+    status=1
+  fi
 fi
 exit "$status"

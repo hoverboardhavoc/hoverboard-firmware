@@ -6,13 +6,15 @@ import com.hoverboard.protocol.linkctl.ChipTag
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.FieldDef
+import com.hoverboard.protocol.store.Value
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 
 /**
  * A [LayoutModel] over the fake transport, whose board answers every layout field's registry
- * default: a board nobody has staged, which is the state an editor most often opens on.
+ * default and stores nothing: a board nobody has staged, which is the state an editor most often
+ * opens on.
  */
 internal class LayoutRig(scope: TestScope) {
     var armed = false
@@ -26,16 +28,16 @@ internal class LayoutRig(scope: TestScope) {
     fun slot(field: FieldDef, motor: Int? = null): LayoutSlot =
         checkNotNull(Layout.forField(field, motor))
 
-    /** What the board stores for [field], as a raw byte. */
-    fun stored(field: FieldDef, motor: Int? = null): Int =
+    /** What the board stores for [field], or null when it stores nothing. */
+    fun stored(field: FieldDef, motor: Int? = null): Value? =
         slot(field, motor).of(checkNotNull(state.stored))
 
     /** What is staged for [field]. */
-    fun staged(field: FieldDef, motor: Int? = null): Int =
+    fun staged(field: FieldDef, motor: Int? = null): Value? =
         slot(field, motor).of(checkNotNull(state.staged))
 
     /** Set [field] in the staged layout. */
-    fun stage(field: FieldDef, raw: Int, motor: Int? = null) = model.stage(slot(field, motor), raw)
+    fun stage(field: FieldDef, value: Value, motor: Int? = null) = model.stage(slot(field, motor), value)
 
     /**
      * The board reports [chip] on its [boot]-th boot in its cyclic state, which is where the

@@ -56,9 +56,11 @@ sealed interface ConfigWriteResult
 
 /**
  * The key's value, as `CONFIG_RESP` reported it: the stored value (`CFG_OK`), or the field's
- * default when the board stores none (`CFG_DEFAULT`).
+ * default when the board stores none (`CFG_DEFAULT`, [isDefault]). The configuration checks need
+ * the difference: a key that is not stored is an absent function or an unset instance
+ * (`specs/config-read-once.md` section 3).
  */
-data class ReadValue(val value: Value) : ConfigReadResult
+data class ReadValue(val value: Value, val isDefault: Boolean = false) : ConfigReadResult
 
 /**
  * The write was accepted and the `CONFIG_RESP` echo of the STORED value equals what was written.
@@ -318,7 +320,8 @@ class ConfigClient(private val exchange: ConfigExchange) {
             is ConfigExchange.Outcome.Answered -> {
                 val resp = o.resp
                 when (resp.status) {
-                    Walk.CFG_OK, Walk.CFG_DEFAULT -> resp.decodeValue()?.let { ReadValue(it) } ?: Malformed(resp)
+                    Walk.CFG_OK, Walk.CFG_DEFAULT ->
+                        resp.decodeValue()?.let { ReadValue(it, resp.status == Walk.CFG_DEFAULT) } ?: Malformed(resp)
                     else -> CfgRefusal.fromCode(resp.status)?.let { Refused(it) } ?: Malformed(resp)
                 }
             }

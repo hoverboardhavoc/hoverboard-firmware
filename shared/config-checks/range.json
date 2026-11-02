@@ -1,0 +1,78 @@
+[
+  {
+    "name": "a current limit",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "limit": 10000
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "a turn slew of 0",
+    "chip": "gd32f130c8",
+    "board": {
+      "machine": {
+        "turn": [
+          0,
+          0
+        ]
+      }
+    },
+    "refused": "machine.turn[1]"
+  },
+  {
+    "name": "an align offset of 6",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "align_offset": 6
+        }
+      ]
+    },
+    "refused": "motors[0].align_offset"
+  },
+  {
+    "name": "a current calibration of 50",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "cal": 50
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.cal"
+  },
+  {
+    "name": "a battery slope",
+    "chip": "gd32f103c8",
+    "board": {
+      "battery_sense": {
+        "cal": [
+          25200,
+          -5
+        ]
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "wifi.tx_power outside its range is the tool's forceable check, not a board check",
+    "chip": "gd32f130c8",
+    "board": {
+      "wifi": {
+        "tx_power": 90
+      }
+    },
+    "refused": null
+  }
+]

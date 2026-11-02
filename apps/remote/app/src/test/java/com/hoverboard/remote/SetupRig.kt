@@ -22,6 +22,9 @@ internal class SetupRig(scope: TestScope) {
         // they say nothing, which is not the same as a board that refuses the key.
         defaults[Fields.MOTOR_POLE_PAIRS.key()] = Fields.MOTOR_POLE_PAIRS.default
         defaults[Fields.WHEEL_DIAMETER_MM.key()] = Fields.WHEEL_DIAMETER_MM.default
+        // The IMU bus `imu.model` switches on, read for the group check of an `imu.model` write:
+        // not stored, as on a board with no IMU staged.
+        for (def in listOf(Fields.IMU_SCL_PIN, Fields.IMU_SDA_PIN, Fields.IMU_I2C)) defaults[def.key()] = def.default
     }
     val model = SetupModel(transport, scope.backgroundScope) { armed }
     val state: SetupState get() = model.state.value

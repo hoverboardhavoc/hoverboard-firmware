@@ -149,12 +149,13 @@ pub struct GainShadow {
 
 impl GainShadow {
     /// The shadow of a board whose store carries `flash` (`CONTROL_SF_GAINS` indices 0..3, then
-    /// `CONTROL_REFERENCE` indices 0..1), with the gain row bounded by `gain_max` (the four
-    /// `CONTROL_GAIN_MAX` indices as read; a negative maximum reads as 0, since it would otherwise
-    /// make the range empty). Out-of-range values CLAMP: this is boot, and a board with a bad
-    /// stored value still has to run.
-    pub const fn of_stored(flash: [i16; TUNED], gain_max: [i16; sf::GAINS]) -> Self {
-        let max = maxima(gain_max);
+    /// `CONTROL_REFERENCE` indices 0..1), bounded by the compiled maxima until the arm-row read
+    /// installs the stored ones ([`GainShadow::re_apply_max`], at boot and at every arm;
+    /// `specs/config-read-once.md` section 5); the boot then calls [`GainShadow::reconcile`] with
+    /// the same words, so a stored gain above a compiled maximum and within its stored one runs as
+    /// stored. Out-of-range values CLAMP: a board with a bad stored value still has to run.
+    pub const fn of_stored(flash: [i16; TUNED]) -> Self {
+        let max = maxima(DEFAULT_GAIN_MAX);
         let c = clamp_all(flash, &max);
         Self {
             live: c,
@@ -214,6 +215,8 @@ impl GainShadow {
     /// `specs/remote-ui.md` section 4, so it is a spec-level decision and not this seam's to take.
     ///
     /// The reference row is not in it: its maxima are compiled, so there is nothing to re-read.
+    /// `gain_max` is the four `CONTROL_GAIN_MAX` indices as read; a negative maximum reads as 0,
+    /// since it would otherwise make the range empty.
     pub fn re_apply_max(&mut self, gain_max: [i16; sf::GAINS]) {
         self.max = maxima(gain_max);
         self.live = clamp_all(self.live, &self.max);
@@ -241,7 +244,7 @@ impl Default for GainShadow {
     /// are also the store's defaults. Inert: zero gains give a zero word.
     fn default() -> Self {
         let r = sf::REFERENCE_DEFAULT;
-        Self::of_stored([0, 0, 0, 0, r[0], r[1]], DEFAULT_GAIN_MAX)
+        Self::of_stored([0, 0, 0, 0, r[0], r[1]])
     }
 }
 

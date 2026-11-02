@@ -375,12 +375,13 @@ pub fn get_lines(key: Key, copies: &[(String, crate::nodes::ConfigResp)]) -> Vec
 }
 
 /// The machine file `machine dump` writes: the machine section of copy `from`, and each board's
-/// file without it, filed under its `uid`.
-pub fn dump_file(boards: &[(Uid, Reads)], from: usize) -> Json {
+/// file without it, filed under its `uid`. Each board comes with whether its chip remaps
+/// ([`to_file`]).
+pub fn dump_file(boards: &[(Uid, Reads, bool)], from: usize) -> Json {
     let mut out = Map::new();
     let mut entries = Map::new();
-    for (i, (uid, reads)) in boards.iter().enumerate() {
-        let Json::Object(mut file) = to_file(reads) else {
+    for (i, (uid, reads, remaps)) in boards.iter().enumerate() {
+        let Json::Object(mut file) = to_file(reads, *remaps) else {
             unreachable!("a board's file is an object")
         };
         let machine = file.remove("machine");
@@ -540,10 +541,14 @@ mod tests {
         let f = read_machine_file("m", &bad).unwrap();
         assert_eq!(
             f.problems()[0].msg,
-            format!("m: boards.{L}: leds.green: a pin (PC13 or none), not \"PZ9\"")
+            format!("m: boards.{L}: leds.green: a pin object, {{\"port\": \"A\", \"pin\": 8, ...}}, not \"PZ9\"")
         );
         // A machine section holding a board field names it as unknown under machine.
-        let f = read_machine_file("m", r#"{ "machine": { "leds": { "green": "PB3" } } }"#).unwrap();
+        let f = read_machine_file(
+            "m",
+            r#"{ "machine": { "leds": { "green": { "port": "B", "pin": 3 } } } }"#,
+        )
+        .unwrap();
         assert!(
             f.problems()[0].msg.contains("unknown field machine.leds"),
             "{:?}",
@@ -797,8 +802,8 @@ mod tests {
             .collect()
         };
         let boards = [
-            (uid(L), reads(1, b"rover-left")),
-            (uid(R), reads(0, b"rover-right")),
+            (uid(L), reads(1, b"rover-left"), false),
+            (uid(R), reads(0, b"rover-right"), false),
         ];
         assert_eq!(
             dump_file(&boards, 1),

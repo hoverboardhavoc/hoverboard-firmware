@@ -1,0 +1,235 @@
+{
+  "machine": {
+    "mode": "throttle",
+    "frame": "pivoting",
+    "rider_required": false,
+    "method": "foc",
+    "battery": {
+      "cells": 8
+    }
+  },
+  "boards": {
+    "51ce39393333370134313739": {
+      "imu": {
+        "scl": {
+          "port": "B",
+          "pin": 10,
+          "af": 1
+        },
+        "sda": {
+          "port": "B",
+          "pin": 11,
+          "af": 1
+        },
+        "axis_sign": [
+          1,
+          1,
+          1
+        ],
+        "i2c": 1,
+        "model": 2
+      },
+      "links": [
+        {
+          "tx": {
+            "port": "A",
+            "pin": 2,
+            "af": 1
+          },
+          "rx": {
+            "port": "A",
+            "pin": 3,
+            "af": 1
+          },
+          "usart": 1
+        }
+      ],
+      "motors": [
+        {
+          "current": {
+            "limit": 10000,
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            }
+          },
+          "hall": {
+            "a": {
+              "port": "C",
+              "pin": 13
+            },
+            "b": {
+              "port": "A",
+              "pin": 1
+            },
+            "c": {
+              "port": "C",
+              "pin": 14
+            }
+          },
+          "gate": {
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 2
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            },
+            "dead_time": 28,
+            "timer": 0
+          },
+          "direction": "reverse",
+          "side": "left",
+          "align_offset": 1,
+          "pole_pairs": 15,
+          "wheel_diameter_mm": 214
+        }
+      ]
+    },
+    "58224535393631174a353930": {
+      "device": {
+        "name": "Offroad"
+      },
+      "battery_sense": {
+        "pin": {
+          "port": "A",
+          "pin": 4,
+          "adc": 4
+        }
+      },
+      "imu": {
+        "scl": {
+          "port": "B",
+          "pin": 10,
+          "af": 1
+        },
+        "sda": {
+          "port": "B",
+          "pin": 11,
+          "af": 1
+        },
+        "axis_sign": [
+          1,
+          1,
+          1
+        ],
+        "i2c": 1,
+        "model": 2
+      },
+      "links": [
+        {
+          "tx": {
+            "port": "A",
+            "pin": 2,
+            "af": 1
+          },
+          "rx": {
+            "port": "A",
+            "pin": 3,
+            "af": 1
+          },
+          "usart": 1
+        }
+      ],
+      "motors": [
+        {
+          "current": {
+            "limit": 10000,
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            }
+          },
+          "hall": {
+            "a": {
+              "port": "C",
+              "pin": 13
+            },
+            "b": {
+              "port": "A",
+              "pin": 1
+            },
+            "c": {
+              "port": "C",
+              "pin": 14
+            }
+          },
+          "gate": {
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 2
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            },
+            "dead_time": 28,
+            "timer": 0
+          },
+          "direction": "forward",
+          "side": "right",
+          "align_offset": 1,
+          "pole_pairs": 15,
+          "wheel_diameter_mm": 214
+        }
+      ]
+    }
+  }
+}

@@ -5,8 +5,8 @@
 # ignore RCU: Chip::route_spi_pin enables the port clock (APB2EN) as part of routing; the vendor
 # body is gpio_init alone, and clock/enable_spi0_gpioa_f10x compares that enable.
 #
-# chips: the GD32F103C8 only. On the GD32F103RC, PA7 is TIMER7's CH0N gate output, and the HAL refuses
-# a non-gate claim on a gate pin (pincap::check_pin_ownership), so MOSI on PA7 is not routable there.
+# chips: the GD32F103C8 only. On the GD32F103RC, PA7 is TIMER7's CH0N gate output, so no board there
+# routes MOSI to it.
 description = """
 The alternate-function configuration of the SPI0 pins SCK = PA5, MISO = PA6, MOSI = PA7 on the
 GD32F10x GPIO model: no per-pin mux, the CTL0 nibble alone. SCK and MOSI AF push-pull at 50 MHz,
@@ -14,7 +14,7 @@ MISO a floating input.
 
 Vendor: gpio_init(GPIOA, GPIO_MODE_AF_PP, 50MHZ, PIN_5 | PIN_7);
         gpio_init(GPIOA, GPIO_MODE_IN_FLOATING, 50MHZ, PIN_6).
-HAL: chip.route_spi_pin(PA5 / PA7, SpiAfPushPull); chip.route_spi_pin(PA6, SpiInput).
+HAL: chip.route_spi_pin(PA5 / PA7, output); chip.route_spi_pin(PA6, input).
 """
 family = "gd32f10x"
 chips = ["gd32f103c8"]
@@ -29,14 +29,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::gpio::PinRole;
-    use hal::Chip;
+    use hal::{Chip, PinAf};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
-        chip.route_spi_pin(0x05, PinRole::SpiAfPushPull).unwrap(); // SCK
-        chip.route_spi_pin(0x06, PinRole::SpiInput).unwrap(); // MISO
-        chip.route_spi_pin(0x07, PinRole::SpiAfPushPull).unwrap(); // MOSI
+        chip.route_spi_pin(PinAf { port: 0, pin: 5, af: 0 }, false); // SCK
+        chip.route_spi_pin(PinAf { port: 0, pin: 6, af: 0 }, true); // MISO
+        chip.route_spi_pin(PinAf { port: 0, pin: 7, af: 0 }, false); // MOSI
     }
 '''

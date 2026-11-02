@@ -419,6 +419,7 @@ fn main() {
         );
     }
 
+    println!("cargo:rustc-check-cfg=cfg(hal_chip)");
     let enabled: Vec<&ChipRow> = CHIPS
         .iter()
         .filter(|c| env::var_os(format!("CARGO_FEATURE_{}", c.feature.to_uppercase())).is_some())
@@ -427,6 +428,9 @@ fn main() {
     let [chip] = enabled.as_slice() else {
         return;
     };
+    // Exactly one chip: the register models and drivers are compiled (the `pincap` feature alone
+    // builds only the host's pin tables).
+    println!("cargo:rustc-cfg=hal_chip");
     for (name, model) in chip.models {
         println!("cargo:rustc-cfg={name}=\"{model}\"");
     }

@@ -1,0 +1,54 @@
+[
+  {
+    "name": "a bonded pin",
+    "chip": "gd32f130c8",
+    "board": {
+      "power": {
+        "button": {
+          "port": "A",
+          "pin": 5
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "PC0 is not bonded on the LQFP48",
+    "chip": "gd32f130c8",
+    "board": {
+      "power": {
+        "button": {
+          "port": "C",
+          "pin": 0
+        }
+      }
+    },
+    "refused": "power.button"
+  },
+  {
+    "name": "PC0 is bonded on the GD32F103RC's LQFP64",
+    "chip": "gd32f103rc",
+    "board": {
+      "power": {
+        "button": {
+          "port": "C",
+          "pin": 0
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "port E is no port",
+    "chip": "gd32f103c8",
+    "board": {
+      "pads": {
+        "a": {
+          "port": "E",
+          "pin": 2
+        }
+      }
+    },
+    "refused": "pads.a"
+  }
+]

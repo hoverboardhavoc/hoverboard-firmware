@@ -1029,17 +1029,15 @@ mod dynamic {
             ]
         };
         let g = g4(CONTROL_SF_GAINS);
-        let mut shadow = control::GainShadow::of_stored(
-            [
-                g[0],
-                g[1],
-                g[2],
-                g[3],
-                s.get(CONTROL_REFERENCE.at(0)),
-                s.get(CONTROL_REFERENCE.at(1)),
-            ],
-            g4(CONTROL_GAIN_MAX),
-        );
+        let mut shadow = control::GainShadow::of_stored([
+            g[0],
+            g[1],
+            g[2],
+            g[3],
+            s.get(CONTROL_REFERENCE.at(0)),
+            s.get(CONTROL_REFERENCE.at(1)),
+        ]);
+        shadow.re_apply_max(g4(CONTROL_GAIN_MAX));
         assert_eq!(shadow.gains()[0], 3000, "3491 clamps to the stored maximum");
         assert_eq!(
             shadow.set(control::SF_GAINS_FIELD, 0, 3001),
@@ -1079,7 +1077,7 @@ mod dynamic {
         let mut s = Store::mount(&mut f).unwrap();
         assert_eq!(IMU_AXIS_ROLE.id(), 0x16);
         // Nothing staged: the compiled frame, the identity roles.
-        let unstaged = read(&s).unwrap();
+        let unstaged = read(&s);
         assert_eq!(unstaged.roles, imu::DEFAULT_ROLES);
         assert_eq!(unstaged.sign, imu::Config::default().sign);
 
@@ -1090,7 +1088,7 @@ mod dynamic {
         s.set_value(key(0x14, 0), Value::I32(5)).unwrap();
         s.set_value(key(0x16, 0), Value::U8(1)).unwrap();
         s.set_value(key(0x16, 1), Value::U8(3)).unwrap();
-        let cfg = read(&s).unwrap();
+        let cfg = read(&s);
         assert_eq!(cfg.roles, [1, 3]);
         assert_eq!(cfg.sign, [1; 6]);
         assert_eq!(cfg.gyro_bias, [5, 0, 0]);
@@ -1105,9 +1103,14 @@ mod dynamic {
             "the chip-X bias rides to body Z"
         );
 
-        // A repeated role is refused, not staged.
+        // A repeated role is staged as stored; the frame check before the write is what refuses it
+        // (`specs/config-read-once.md` section 4).
         s.set_value(key(0x16, 1), Value::U8(1)).unwrap();
-        assert_eq!(read(&s).unwrap_err(), imu::FrameError::Roles);
+        assert_eq!(read(&s).roles, [1, 1]);
+        assert_eq!(
+            imu::Config::frame_error([1; 3], [1, 1]),
+            Some(imu::FrameError::Roles)
+        );
     }
 
     /// The `CONTROL_RIDER_REQUIRED` seam end to end (`specs/control.md` (i)): an erased board reads
@@ -1870,7 +1873,8 @@ mod digest {
     fn node_and_wheel_fields_do_not_change_it() {
         let empty = machine(&mut MockFlash::erased(PS));
         let mut f = with(|s| {
-            s.set(BOARD_SELF_HOLD, 0x20).unwrap();
+            s.set_value(BOARD_SELF_HOLD.key(), Value::Pin([2, 0]))
+                .unwrap();
             s.set(CONTROL_SIDE, 1).unwrap();
             s.set(MOTOR_DIRECTION.at(1), 1).unwrap();
             s.set_str(DEVICE_NAME, "rover-left").unwrap();
@@ -1892,7 +1896,10 @@ mod digest {
         let (arm, boot, live) = digests(&mut MockFlash::erased(PS));
         let (a, b, l) = digests(&mut with(|s| s.set(CONTROL_DRIVE_TURN.at(0), 9).unwrap()));
         assert_eq!((a != arm, b, l), (true, boot, live));
-        let (a, b, l) = digests(&mut with(|s| s.set(BOARD_SELF_HOLD, 0x20).unwrap()));
+        let (a, b, l) = digests(&mut with(|s| {
+            s.set_value(BOARD_SELF_HOLD.key(), Value::Pin([2, 0]))
+                .unwrap()
+        }));
         assert_eq!((a, b != boot, l), (arm, true, live));
         let (a, b, l) = digests(&mut with(|s| s.set(CONTROL_SF_GAINS.at(1), 9).unwrap()));
         assert_eq!((a, b, l != live), (arm, boot, true));

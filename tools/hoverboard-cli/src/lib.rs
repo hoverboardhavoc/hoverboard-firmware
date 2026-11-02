@@ -8,6 +8,7 @@
 //! `main.rs` adds the command line, and `ble.rs` the BLE link (btleplug, the `ble` feature).
 
 pub mod bundle;
+pub mod checks;
 pub mod cli;
 pub mod client;
 pub mod config;

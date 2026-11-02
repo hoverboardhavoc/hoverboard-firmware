@@ -311,8 +311,10 @@ pub fn read_board<W: Wire>(
 }
 
 /// The board's stored keys as a file (`specs/cli-config.md` section 2): every `CFG_OK` answer
-/// among [`dump_keys`] at its path, nothing else.
-pub fn to_file(reads: &Reads) -> Json {
+/// among [`dump_keys`] at its path, nothing else. `remaps` is a board whose chip routes by the AFIO
+/// remap (the GD32F10x, `IDENTITY`'s family), whose pins carry no `af` in a file
+/// (`specs/config-read-once.md` section 3).
+pub fn to_file(reads: &Reads, remaps: bool) -> Json {
     let mut top = Map::new();
     let mut arrays: BTreeMap<&str, Vec<Map<String, Json>>> = BTreeMap::new();
     for key in dump_keys() {
@@ -320,7 +322,12 @@ pub fn to_file(reads: &Reads) -> Json {
             continue;
         };
         let row = row_of(key).expect("a table key");
-        let v = to_json(Some(row), r.tag, &r.bytes);
+        let mut v = to_json(Some(row), r.tag, &r.bytes);
+        if remaps && row.storage == Type::PinAf {
+            if let Json::Object(o) = &mut v {
+                o.remove("af");
+            }
+        }
         match row.index {
             Index::Motor | Index::Link => {
                 let elems = arrays
@@ -536,6 +543,72 @@ pub fn plan(
         }
     }
     Ok(plan)
+}
+
+/// The board's stored values as `plan` would leave them: every stored key read, with the plan's
+/// writes and un-stores applied.
+pub fn state_after(reads: &Reads, plan: &Plan) -> crate::checks::State {
+    let mut state = crate::checks::State::new();
+    for (key, r) in reads {
+        if let (CFG_OK, Some(t)) = (r.status, Type::from_tag(r.tag)) {
+            state.insert(*key, (t, r.bytes.clone()));
+        }
+    }
+    for s in &plan.steps {
+        match &s.bytes {
+            Some(b) => {
+                state.insert(s.key, (s.storage, b.clone()));
+            }
+            None => {
+                state.remove(&s.key);
+            }
+        }
+    }
+    state
+}
+
+/// The checks of `specs/config-read-once.md` section 4 on the board as `plan` would leave it: the
+/// value checks always, the pin checks with the board's `chip`, and the `af` rule of the files'
+/// pins. `Err` lists every refusal; `--force` overrides none. A plan that changes a pin, instance,
+/// remap, dead-time or `imu.model` key, or files that carry a pin, is refused without the chip.
+pub fn check_plan(
+    chip: Option<hal::pincap::Chip>,
+    files: &Files,
+    reads: &Reads,
+    plan: &Plan,
+) -> Result<(), String> {
+    let state = state_after(reads, plan);
+    let mut refused = crate::checks::check_values(&state);
+    match chip {
+        Some(c) => {
+            refused.extend(crate::checks::check_forms(c, &files.entries));
+            refused.extend(crate::checks::check_pins(c, &state));
+        }
+        None => {
+            let key = plan
+                .steps
+                .iter()
+                .map(|s| s.key)
+                .find(|k| crate::checks::needs_chip(*k))
+                .or(crate::checks::first_pin(&files.entries));
+            if let Some(k) = key {
+                return Err(format!(
+                    "{}: the pin checks need the board's chip, read as TARGET_ID through the \
+                     bridge wired to it",
+                    path_of(k)
+                ));
+            }
+        }
+    }
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err(refused
+            .into_iter()
+            .map(|r| r.msg)
+            .collect::<Vec<_>>()
+            .join("\nerror: "))
+    }
 }
 
 /// A value as a line shows it, with ` (default)` when the board stores nothing. A secret shows as
@@ -791,11 +864,15 @@ impl Written {
 /// `set <node> <path> <value>`: write `text` to `key` in the file's value forms. `force` lets
 /// through the checks of `specs/cli-config.md` section 5 that it may; the board's own refusals
 /// stand.
+///
+/// The checks of `specs/config-read-once.md` section 4 run on the board as the write would leave
+/// it, with `chip` for the pin checks.
 pub fn config_write<W: Wire>(
     b: &mut Board<'_, W>,
     key: Key,
     text: &str,
     force: bool,
+    chip: Option<hal::pincap::Chip>,
 ) -> Result<Written, String> {
     stop_on(&write_checks(key), force)?;
     let before = b.read(key)?;
@@ -824,6 +901,21 @@ pub fn config_write<W: Wire>(
     let value = crate::names::from_text(row, storage, text);
     let (bytes, warn) = encode(key, storage, &value).map_err(|p| p.msg)?;
     stop_on(&warn, force)?;
+    let (reads, _) = read_board(b, &table_keys())?;
+    let plan = Plan {
+        steps: vec![Step {
+            key,
+            act: Act::Change,
+            storage,
+            bytes: bytes.clone(),
+        }],
+        ..Plan::default()
+    };
+    let files = Files {
+        entries: vec![Entry { key, value }],
+        problems: Vec::new(),
+    };
+    check_plan(chip, &files, &reads, &plan).map_err(|e| format!("{}: {e}", b.name))?;
     let status = b.write(key, storage, bytes.as_deref())?;
     if status != CFG_OK {
         let why = if key == store::DEVICE_NAME.key() {
@@ -970,7 +1062,7 @@ mod tests {
                 "machine": { "mode": "balance", "balance": { "gains": [3491, null, 197] } },
                 "battery_sense": { "cal": [null, -3] },
                 "motors": [
-                    { "hall": { "a": "PC13" }, "gate": { "dead_time": 25 }, "current": { "cal": 470 } },
+                    { "hall": { "a": { "port": "C", "pin": 13 } }, "gate": { "dead_time": 25 }, "current": { "cal": 470 } },
                     {},
                 ],
             }),
@@ -985,7 +1077,7 @@ mod tests {
         let mut lp = staged();
         let mut b = board(&mut lp);
         let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
-        let dumped = to_file(&reads);
+        let dumped = to_file(&reads, false);
         assert_eq!(
             dumped,
             json!({
@@ -993,7 +1085,7 @@ mod tests {
                 "machine": { "mode": "balance", "balance": { "gains": [3491, null, 197, null] } },
                 "device": { "name": "rover-left" },
                 "motors": [
-                    { "current": { "cal": 470 }, "gate": { "dead_time": 25 }, "hall": { "a": "PC13" } },
+                    { "current": { "cal": 470 }, "gate": { "dead_time": 25 }, "hall": { "a": { "port": "C", "pin": 13 } } },
                 ],
             })
         );
@@ -1012,13 +1104,13 @@ mod tests {
     #[test]
     fn the_node_paths_links_and_active_high_round_trip() {
         let layout = json!({
-            "power": { "self_hold": "PB12", "button": "PA5" },
-            "battery_sense": { "pin": "PA4", "cal": [25000, -5] },
-            "buzzer": "PB9",
-            "leds": { "green": "PB3", "orange": "PA15", "red": "PB4" },
-            "pads": { "a": "PA0", "b": "none" },
+            "power": { "self_hold": { "port": "B", "pin": 12 }, "button": { "port": "A", "pin": 5 } },
+            "battery_sense": { "pin": { "port": "A", "pin": 4, "adc": 4 }, "cal": [25000, -5] },
+            "buzzer": { "port": "B", "pin": 9 },
+            "leds": { "green": { "port": "B", "pin": 3 }, "orange": { "port": "A", "pin": 15 }, "red": { "port": "B", "pin": 4 } },
+            "pads": { "a": { "port": "A", "pin": 0 } },
             "active_high": ["power.button", "pads.b"],
-            "links": [{}, { "tx": "PB6", "rx": "PB7" }],
+            "links": [{}, { "tx": { "port": "B", "pin": 6, "af": 1 }, "rx": { "port": "B", "pin": 7, "af": 1 } }],
             "motors": [{ "side": "right" }],
         });
         let mut lp = Loop::new();
@@ -1031,7 +1123,7 @@ mod tests {
         assert_eq!(r.bytes, [0b101], "button b0 and pad B b2");
 
         let mut b = board(&mut lp);
-        let dumped = to_file(&read_board(&mut b, &dump_keys()).unwrap().0);
+        let dumped = to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false);
         assert_eq!(dumped, layout);
         let f = files(&[("dump.json", dumped)]);
         let (plan, _) = run(&mut lp, &f, false).unwrap();
@@ -1039,10 +1131,13 @@ mod tests {
 
         // Link 0 alone is a one-element array.
         let mut lp = Loop::new();
-        let link0 = json!({ "links": [{ "tx": "PA2", "rx": "PA3" }] });
+        let link0 = json!({ "links": [{ "tx": { "port": "A", "pin": 2, "af": 1 }, "rx": { "port": "A", "pin": 3, "af": 1 } }] });
         run(&mut lp, &files(&[("l.json", link0.clone())]), false).unwrap();
         let mut b = board(&mut lp);
-        assert_eq!(to_file(&read_board(&mut b, &dump_keys()).unwrap().0), link0);
+        assert_eq!(
+            to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false),
+            link0
+        );
     }
 
     #[test]
@@ -1050,10 +1145,10 @@ mod tests {
         let f = files(&[(
             "a.json",
             json!({
-                "tx": "PA2",
-                "links": [{ "hall": { "a": "PC13" }, "power": { "button": "PA5" } }],
-                "motors": [{ "rx": "PA3" }],
-                "leds": [{ "green": "PB3" }],
+                "tx": { "port": "A", "pin": 2, "af": 1 },
+                "links": [{ "hall": { "a": { "port": "C", "pin": 13 } }, "power": { "button": { "port": "A", "pin": 5 } } }],
+                "motors": [{ "rx": { "port": "A", "pin": 3, "af": 1 } }],
+                "leds": [{ "green": { "port": "B", "pin": 3 } }],
             }),
         )]);
         let msgs: Vec<&str> = f.problems.iter().map(|p| p.msg.as_str()).collect();
@@ -1067,7 +1162,10 @@ mod tests {
                 "a.json: unknown field leds",
             ]
         );
-        let f = files(&[("b.json", json!({ "links": { "tx": "PA2" } }))]);
+        let f = files(&[(
+            "b.json",
+            json!({ "links": { "tx": { "port": "A", "pin": 2, "af": 1 } } }),
+        )]);
         assert_eq!(
             f.problems,
             [Problem::stop(
@@ -1081,14 +1179,14 @@ mod tests {
         let mut source = staged();
         let dumped = {
             let mut b = board(&mut source);
-            to_file(&read_board(&mut b, &dump_keys()).unwrap().0)
+            to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false)
         };
         // The same layout plus records from an earlier life, a board-owned one among them.
         let mut target = staged();
         let extra = files(&[(
             "old.json",
             json!({
-                "motors": [{}, { "hall": { "a": "PB5" } }],
+                "motors": [{}, { "hall": { "a": { "port": "B", "pin": 5 } } }],
                 "battery_sense": { "cal": [25000] },
                 "machine": { "frame": "rigid" },
             }),
@@ -1143,7 +1241,7 @@ mod tests {
             "machine.json",
             json!({
                 "machine": { "balance": { "gains": [3491, 4002] } },
-                "motors": [{ "gate": { "dead_time": 28 }, "hall": { "a": "PC13" }, "current": { "noise_floor": 2100 } }],
+                "motors": [{ "gate": { "dead_time": 28 }, "hall": { "a": { "port": "C", "pin": 13 } }, "current": { "noise_floor": 2100 } }],
             }),
         )]);
         let (plan, lines) = run(&mut lp, &f, false).unwrap();
@@ -1339,10 +1437,10 @@ mod tests {
             "a.json",
             json!({
                 "machine": { "mod": "balance", "frame": "bent", "battery": { "cells": "ten" } },
-                "motors": [{ "align_offset": 6, "side": 5 }, {}, { "hall": { "a": "PA1" } }],
+                "motors": [{ "side": 5 }, {}, { "hall": { "a": { "port": "A", "pin": 1 } } }],
                 "battery_sense": { "cal": [1, 2, 3] },
                 "node": { "address": 4 },
-                "hall": { "b": "PA2" },
+                "hall": { "b": { "port": "A", "pin": 2 } },
                 "0x99.0": 5,
                 "0x21": "rigid",
             }),
@@ -1358,7 +1456,6 @@ mod tests {
                 (false, "a.json: unknown field machine.mod (did you mean machine.mode?)"),
                 (false, "a.json: machine.frame: unknown label bent (pivoting, rigid)"),
                 (false, "a.json: machine.battery.cells: an integer, not \"ten\""),
-                (true, "a.json: motors[0].align_offset takes 0..5, not 6 (--force writes it anyway)"),
                 (true, "a.json: motors[0].side takes left, right, not 5 (--force writes it anyway)"),
                 (true, "a.json: hall.a has 2 motors (--force writes motors[2] anyway)"),
                 (true, "a.json: battery_sense.cal has 2 indices (--force writes index 2 anyway)"),
@@ -1384,7 +1481,7 @@ mod tests {
         let f = files(&[
             (
                 "layout.json",
-                json!({ "motors": [{ "hall": { "a": "PC13" } }] }),
+                json!({ "motors": [{ "hall": { "a": { "port": "C", "pin": 13 } } }] }),
             ),
             (
                 "machine.json",
@@ -1400,7 +1497,7 @@ mod tests {
         let f = files(&[
             (
                 "layout.json",
-                json!({ "motors": [{ "hall": { "a": "PC13" } }] }),
+                json!({ "motors": [{ "hall": { "a": { "port": "C", "pin": 13 } } }] }),
             ),
             ("machine.json", json!({ "machine": { "mode": "balance" } })),
         ]);
@@ -1446,7 +1543,7 @@ mod tests {
         let l = config_read(&mut b, pass).unwrap();
         assert_eq!(l, "rover-left: wifi.pass = (default)");
         all.push(l);
-        let w = config_write(&mut b, pass, PASS, false).unwrap();
+        let w = config_write(&mut b, pass, PASS, false, None).unwrap();
         assert_eq!(
             w.lines(),
             [
@@ -1496,7 +1593,7 @@ mod tests {
         let mut b = board(&mut lp);
         let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
         assert_eq!(reads[&pass].status, CFG_SECRET);
-        let dumped = to_file(&reads);
+        let dumped = to_file(&reads, false);
         assert_eq!(dumped, json!({ "wifi": { "ssid": "bench" } }));
         let notes = left_out("rover-left", &reads);
         assert_eq!(
@@ -1561,6 +1658,32 @@ mod tests {
         }
     }
 
+    /// A file that carries a pin has its `af` form checked whether or not the write changes the
+    /// pin: the chip is needed, and a GD32F103 refuses an `af` the board already stores as 0.
+    #[test]
+    fn a_file_with_a_pin_is_form_checked_when_the_plan_changes_nothing() {
+        let f = files(&[(
+            "b.json",
+            json!({ "imu": { "scl": { "port": "B", "pin": 6, "af": 0 } } }),
+        )]);
+        let plan = Plan::default();
+        let reads = Reads::default();
+        let e = check_plan(None, &f, &reads, &plan).unwrap_err();
+        assert!(
+            e.starts_with("imu.scl: the pin checks need the board's chip"),
+            "{e}"
+        );
+        let e = check_plan(Some(hal::pincap::Chip::Gd32f103c8), &f, &reads, &plan).unwrap_err();
+        assert_eq!(
+            e,
+            "imu.scl: the gd32f103c8 routes by its remap and stores no af: leave af out"
+        );
+        assert_eq!(
+            check_plan(Some(hal::pincap::Chip::Gd32f130c8), &f, &reads, &plan),
+            Ok(())
+        );
+    }
+
     #[test]
     fn config_reads_and_writes_one_field_with_the_spec_lines() {
         let mut lp = Loop::new();
@@ -1569,8 +1692,11 @@ mod tests {
             config_read(&mut b, k(0x4C, 0)).unwrap(),
             "rover-left: motors[0].current.cal = 455 (default)"
         );
-        let lines =
-            |b: &mut Board<'_, Loop>, key, text| config_write(b, key, text, false).unwrap().lines();
+        let lines = |b: &mut Board<'_, Loop>, key, text| {
+            config_write(b, key, text, false, Some(hal::pincap::Chip::Gd32f130c8))
+                .unwrap()
+                .lines()
+        };
         assert_eq!(
             lines(&mut b, k(0x20, 0), "balance"),
             [
@@ -1579,19 +1705,67 @@ mod tests {
             ]
         );
         assert_eq!(
-            lines(&mut b, k(0x40, 1), "PB5"),
+            lines(&mut b, k(0x0C, 0), r#"{"port": "B", "pin": 5}"#),
             [
-                "rover-left: motors[1].hall.a: none (default) -> PB5",
+                "rover-left: pads.a: none (default) -> PB5",
                 "1 takes effect at the next boot"
             ]
         );
         assert_eq!(
-            lines(&mut b, k(0x10, 0), "PA3"),
+            lines(&mut b, k(0x07, 0), r#"{"port": "A", "pin": 4, "adc": 4}"#),
             [
-                "rover-left: links[0].rx: none (default) -> PA3",
+                "rover-left: battery_sense.pin: none (default) -> PA4 adc4",
                 "1 takes effect at the next boot"
             ]
         );
+        // One pin of a group alone is an incomplete group, and the board checks refuse it.
+        let e = config_write(
+            &mut b,
+            k(0x40, 1),
+            r#"{"port": "B", "pin": 6}"#,
+            true,
+            Some(hal::pincap::Chip::Gd32f130c8),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            "rover-left: motors[1].hall.a: the group is incomplete: motors[1].hall.b is not stored"
+        );
+        // The un-store path (`board set <path> null`) runs the checks on the board it would
+        // leave: with the IMU switched on, un-storing a pin leaves its group incomplete.
+        let f130 = Some(hal::pincap::Chip::Gd32f130c8);
+        for (key, text) in [
+            (
+                store::IMU_SCL_PIN.key(),
+                r#"{"port": "B", "pin": 6, "af": 1}"#,
+            ),
+            (
+                store::IMU_SDA_PIN.key(),
+                r#"{"port": "B", "pin": 7, "af": 1}"#,
+            ),
+            (store::IMU_I2C.key(), "0"),
+            (store::IMU_MODEL.key(), "2"),
+        ] {
+            config_write(&mut b, key, text, false, f130).unwrap();
+        }
+        let e = config_write(&mut b, store::IMU_SDA_PIN.key(), "null", false, f130).unwrap_err();
+        assert_eq!(
+            e,
+            "rover-left: imu.scl: the group is incomplete: imu.sda is not stored"
+        );
+        // With the IMU switched off the bus may be partly stored, so the same un-store passes.
+        config_write(&mut b, store::IMU_MODEL.key(), "0", false, f130).unwrap();
+        config_write(&mut b, store::IMU_SDA_PIN.key(), "null", false, f130).unwrap();
+        // Without the chip, a pin write is refused before anything is written.
+        let e = config_write(
+            &mut b,
+            k(0x0D, 0),
+            r#"{"port": "B", "pin": 7}"#,
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(e.contains("the pin checks need the board's chip"), "{e}");
         assert_eq!(
             lines(&mut b, k(0x19, 0), "power.button"),
             [
@@ -1618,30 +1792,27 @@ mod tests {
             ["rover-left: battery_sense.cal[1]: -5 (default) -> -5"]
         );
         assert_eq!(
-            config_write(&mut b, k(0x20, 1), "balance", false).unwrap_err(),
+            config_write(&mut b, k(0x20, 1), "balance", false, None).unwrap_err(),
             "machine.mode has one index (--force writes index 1 anyway)"
         );
         assert_eq!(
-            config_write(&mut b, k(0x20, 1), "balance", true).unwrap(),
+            config_write(&mut b, k(0x20, 1), "balance", true, None).unwrap(),
             Written {
                 warnings: Vec::new(),
                 line: "rover-left: machine.mode[1]: throttle (default) -> balance".into(),
                 changed: Some(k(0x20, 1)),
             }
         );
-        assert_eq!(
-            config_write(&mut b, k(0x51, 0), "9", false).unwrap_err(),
-            "motors[0].align_offset takes 0..5, not 9 (--force writes it anyway)"
-        );
-        assert_eq!(
-            config_write(&mut b, k(0x51, 0), "9", true)
-                .unwrap()
-                .warnings,
-            ["warning: motors[0].align_offset takes 0..5, not 9 (--force writes it anyway)"]
-        );
+        // An arm-row range is a board check: --force does not override it.
+        for force in [false, true] {
+            assert_eq!(
+                config_write(&mut b, k(0x51, 0), "9", force, None).unwrap_err(),
+                "rover-left: motors[0].align_offset: 9 is outside 0..5"
+            );
+        }
         b.wire.board.resp.set_armed(true);
         assert_eq!(
-            config_write(&mut b, k(0x20, 0), "throttle", true).unwrap_err(),
+            config_write(&mut b, k(0x20, 0), "throttle", true, None).unwrap_err(),
             "rover-left: machine.mode: refused: armed"
         );
     }

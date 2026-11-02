@@ -1,0 +1,160 @@
+[
+  {
+    "name": "the gate set at AF2",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 28,
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 2
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "a gate at AF1",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 28,
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 1
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].gate.hi_a"
+  },
+  {
+    "name": "I2C1 at AF1 on PB10/PB11",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "i2c": 1,
+        "scl": {
+          "port": "B",
+          "pin": 10,
+          "af": 1
+        },
+        "sda": {
+          "port": "B",
+          "pin": 11,
+          "af": 1
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "I2C0's pins named as I2C1",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "i2c": 1,
+        "scl": {
+          "port": "B",
+          "pin": 6,
+          "af": 1
+        },
+        "sda": {
+          "port": "B",
+          "pin": 7,
+          "af": 1
+        }
+      }
+    },
+    "refused": "imu.scl"
+  },
+  {
+    "name": "trondin's UART1 on PB6/PB4",
+    "chip": "mm32spin05",
+    "board": {
+      "links": [
+        {
+          "usart": 0,
+          "tx": {
+            "port": "B",
+            "pin": 6,
+            "af": 0
+          },
+          "rx": {
+            "port": "B",
+            "pin": 4,
+            "af": 3
+          }
+        }
+      ],
+      "leds": {
+        "red": {
+          "port": "A",
+          "pin": 12
+        }
+      }
+    },
+    "refused": null
+  }
+]

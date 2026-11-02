@@ -1,0 +1,53 @@
+[
+  {
+    "name": "the rover master's wall mount",
+    "chip": "gd32f103c8",
+    "board": {
+      "imu": {
+        "axis_sign": [
+          -1,
+          1,
+          -1
+        ],
+        "axis_role": [
+          "x",
+          "z"
+        ]
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "nothing staged",
+    "chip": "gd32f130c8",
+    "board": {},
+    "refused": null
+  },
+  {
+    "name": "one sign flipped",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "axis_sign": [
+          1,
+          1,
+          -1
+        ]
+      }
+    },
+    "refused": "imu.axis_sign[0]"
+  },
+  {
+    "name": "UP and PITCH_RATE on one axis",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "axis_role": [
+          "z",
+          "z"
+        ]
+      }
+    },
+    "refused": "imu.axis_role[0]"
+  }
+]

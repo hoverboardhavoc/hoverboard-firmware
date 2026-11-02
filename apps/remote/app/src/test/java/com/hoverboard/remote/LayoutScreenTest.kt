@@ -17,12 +17,12 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.board.BoardFields
-import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
-import com.hoverboard.protocol.board.PIN_ABSENT
-import com.hoverboard.protocol.board.Pin
+import com.hoverboard.protocol.checks.Check
+import com.hoverboard.protocol.checks.Refusal
 import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.store.FieldDef
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
@@ -48,10 +48,10 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
 /**
- * What the layout editor says (`specs/remote-ui.md` sections 3.5 and 3.5a): the delta and Apply
- * with no verdict in front of it (the board reports what it could not bring up in its status), a
- * picker that offers the part's bonded pins that no other field holds, the power latch shown but
- * never offered, and the editing done in dialogs from tabbed groups rather than in the rows.
+ * What the layout editor says (`specs/remote-ui.md` sections 3.5 and 3.5a): the delta and Apply, a
+ * check's refusal named by its field and reason, a picker that offers what the part's table gives
+ * the slot from the pins no other field holds, the power latch shown but never offered, and the
+ * editing done in dialogs from tabbed groups rather than in the rows.
  */
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34], application = Application::class, qualifiers = "w411dp-h891dp-xhdpi")
@@ -68,37 +68,39 @@ class LayoutScreenTest {
     /** Records what the screen asked for. */
     private class Recorder : LayoutActions {
         val calls = mutableListOf<String>()
-        val staged = mutableListOf<Pair<Key, Int>>()
+        val staged = mutableListOf<Pair<Key, Value>>()
         override fun onShown() { calls += "shown" }
         override fun onHidden() { calls += "hidden" }
         override fun refresh() { calls += "refresh" }
-        override fun stage(slot: LayoutSlot, raw: Int) { staged += slot.key to raw }
+        override fun stage(slot: LayoutSlot, value: Value) { staged += slot.key to value }
         override fun revert(slot: LayoutSlot) { calls += "revert:${slot.key}" }
         override fun revertAll() { calls += "revertAll" }
         override fun apply() { calls += "apply" }
         override fun dismissNotice() { calls += "dismiss" }
     }
 
-    private val values: Map<Key, Value> =
-        Layout.SLOTS.associate { it.key to it.def.default }
+    /** A board that stores nothing: every key read, each answered with its default. */
+    private val values: Map<Key, Value?> = Layout.SLOTS.associate { it.key to null }
 
     private val blank: BoardFields = checkNotNull(Layout.fieldsFrom(values))
 
     private fun slot(field: FieldDef, motor: Int? = null): LayoutSlot =
         checkNotNull(Layout.forField(field, motor))
 
-    private fun pin(name: String) = checkNotNull(Pin.byName(name)).packed
+    private fun pin(name: String) = Value.Pin(name[1] - 'A', name.drop(2).toInt())
 
     private fun state(
         chip: ChipTag? = ChipTag.F103C8,
         staged: BoardFields? = blank,
         written: Set<Key> = emptySet(),
+        notice: LayoutNotice? = null,
     ) = LayoutState(
         board = 0x01,
         chip = chip,
         values = values,
         staged = staged,
         written = written,
+        notice = notice,
     )
 
     private fun show(state: LayoutState, armed: Boolean = false, actions: LayoutActions = Recorder()) =
@@ -107,23 +109,20 @@ class LayoutScreenTest {
         }
 
     @Test
-    fun anyStagedDeltaOffersApplyAndThereIsNoVerdict() {
-        // A pin the old validator refused (the inter-board link's PA2): the board brings up what it
-        // can and lists the rest in its status, so the screen writes it as staged.
-        val staged = slot(Fields.BOARD_BUZZER).on(blank, pin("PA2"))
-        val actions = Recorder()
-        show(state(staged = staged), actions = actions)
+    fun aRefusedApplyNamesTheFieldAndTheReason() {
+        val refusal = Refusal(
+            Check.GROUP,
+            Fields.MOTOR_HALL_A.key(0),
+            "motors[0].hall.a: the group is incomplete: motors[0].hall.b is not stored",
+        )
+        show(state(notice = LayoutNotice.CheckRefused(refusal)))
 
-        compose.onNodeWithText(
-            s(R.string.layout_delta_line, s(R.string.layout_field_buzzer), "PB9", "PA2"),
-        ).assertExists()
-        compose.onNodeWithTag(LAYOUT_APPLY_TAG).performScrollTo().assertIsEnabled().performClick()
-        assertEquals(listOf("shown", "apply"), actions.calls)
+        compose.onNodeWithText(s(R.string.layout_notice_check_refused, refusal.msg)).assertExists()
     }
 
     @Test
     fun aCleanDeltaOffersApply() {
-        val staged = slot(Fields.BOARD_BUZZER).on(blank, pin("PB5"))
+        val staged = blank.with(slot(Fields.BOARD_BUZZER), pin("PB5"))
         val actions = Recorder()
         show(state(staged = staged), actions = actions)
 
@@ -159,7 +158,7 @@ class LayoutScreenTest {
     fun aKnownPartIsStatedAsTheBoardsOwn() {
         show(state())
 
-        compose.onNodeWithText(s(R.string.layout_part, ChipFamily.F103C8.label)).assertExists()
+        compose.onNodeWithText(s(R.string.layout_part, Chip.GD32F103C8.name)).assertExists()
         compose.onNodeWithTag(LAYOUT_PART_UNKNOWN_TAG).assertDoesNotExist()
     }
 
@@ -172,35 +171,33 @@ class LayoutScreenTest {
         compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
         compose.onNodeWithTag(layoutDialogTag(key)).assertExists()
 
-        // Free and bonded: offered, an advanced-timer pin among them (what the chip can route to a
-        // function is the board's answer at boot, not the picker's).
-        compose.onNodeWithTag(layoutOptionTag(key, pin("PB5"))).assertExists()
-        compose.onNodeWithTag(layoutOptionTag(key, pin("PA8"))).assertExists()
+        // Free and bonded: offered, an advanced-timer pin among them, since an LED is a plain pin.
+        compose.onNodeWithTag(layoutOptionTag(key, "PB5")).assertExists()
+        compose.onNodeWithTag(layoutOptionTag(key, "PA8")).assertExists()
         // Another function's pin, an SWD pin, and a pin this part does not bond: each withheld.
-        compose.onNodeWithTag(layoutOptionTag(key, pin("PB9"))).assertDoesNotExist()
-        compose.onNodeWithTag(layoutOptionTag(key, pin("PA13"))).assertDoesNotExist()
-        compose.onNodeWithTag(layoutOptionTag(key, pin("PF0"))).assertDoesNotExist()
-        // Unsetting the function is always available: an absent function is a valid board state.
-        compose.onNodeWithTag(layoutOptionTag(key, PIN_ABSENT)).assertExists()
+        compose.onNodeWithTag(layoutOptionTag(key, "PB9")).assertDoesNotExist()
+        compose.onNodeWithTag(layoutOptionTag(key, "PA13")).assertDoesNotExist()
+        compose.onNodeWithTag(layoutOptionTag(key, "PF0")).assertDoesNotExist()
 
-        compose.onNodeWithTag(layoutOptionTag(key, pin("PB5"))).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutOptionTag(key, "PB5")).performScrollTo().performClick()
         assertEquals(listOf(key to pin("PB5")), actions.staged)
         // Tapping one stages it and closes, which is the simple-dialog pattern: no confirm step.
         compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
     }
 
     @Test
-    fun aGateSlotOffersThePinsOfTheBoardsOtherLayoutsToo() {
-        show(state())
+    fun aGateSlotOffersTheRoutesOfItsChannelWithTheirAlternateFunction() {
+        val actions = Recorder()
+        show(state(chip = ChipTag.F130C8), actions = actions)
         val key = slot(Fields.MOTOR_GATE_HI_A, 0).key
 
         compose.onNodeWithTag(layoutTabTag(LayoutGroup.MOTOR, 0)).performScrollTo().performClick()
         compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
 
-        // The 6-FET map and the low side some RoboDurden layouts put on PA7/PB0/PB1.
-        for (name in listOf("PA8", "PA9", "PA10", "PB13", "PB14", "PB15", "PA7", "PB0", "PB1")) {
-            compose.onNodeWithTag(layoutOptionTag(key, pin(name))).assertExists()
-        }
+        // TIMER0 channel 0 is PA8 at AF2 on the F130, and no other pin carries it.
+        compose.onNodeWithTag(layoutOptionTag(key, "PA9 AF2")).assertDoesNotExist()
+        compose.onNodeWithTag(layoutOptionTag(key, "PA8 AF2")).performClick()
+        assertEquals(listOf(key to Value.PinAf(0, 8, 2)), actions.staged)
     }
 
     @Test
@@ -256,13 +253,13 @@ class LayoutScreenTest {
         ).assertDoesNotExist()
         compose.onNodeWithText(s(R.string.layout_note_self_hold)).assertExists()
 
-        // A row that is not a pin needs no part, so it keeps its control.
+        // A row that is not a pin needs no part to be staged, so it keeps its control.
         compose.onNodeWithTag(layoutTabTag(LayoutGroup.IMU)).performScrollTo().performClick()
-        val choiceRow = slot(Fields.IMU_MODEL).key
+        val numberRow = slot(Fields.IMU_I2C).key
         compose.onNode(
-            hasText(s(R.string.layout_row_part_unknown)) and hasAnyAncestor(hasTestTag(layoutRowTag(choiceRow))),
+            hasText(s(R.string.layout_row_part_unknown)) and hasAnyAncestor(hasTestTag(layoutRowTag(numberRow))),
         ).assertDoesNotExist()
-        compose.onNodeWithTag(layoutChangeTag(choiceRow)).performScrollTo().assertIsEnabled()
+        compose.onNodeWithTag(layoutChangeTag(numberRow)).performScrollTo().assertIsEnabled()
     }
 
     @Test
@@ -273,9 +270,24 @@ class LayoutScreenTest {
 
         compose.onNodeWithTag(layoutTabTag(LayoutGroup.IMU)).performScrollTo().performClick()
         compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
-        compose.onNodeWithTag(layoutOptionTag(key, Fields.ImuModel.CLONE_2E)).performClick()
+        compose.onNodeWithTag(layoutOptionTag(key, Fields.ImuModel.CLONE_2E.toString())).performClick()
 
-        assertEquals(listOf(key to Fields.ImuModel.CLONE_2E), actions.staged)
+        assertEquals(listOf(key to Value.U8(Fields.ImuModel.CLONE_2E)), actions.staged)
+        compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
+    }
+
+    @Test
+    fun anInstanceIsTypedIntoAnEditDialog() {
+        val actions = Recorder()
+        show(state(), actions = actions)
+        val key = slot(Fields.IMU_I2C).key
+
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.IMU)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
+        compose.onNode(hasSetTextAction()).performTextReplacement("1")
+        compose.onNodeWithText(s(R.string.layout_set)).performClick()
+
+        assertEquals(listOf(key to Value.U8(1)), actions.staged)
         compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
     }
 
@@ -291,16 +303,16 @@ class LayoutScreenTest {
         // actions: the entry is staged on Set and nowhere else.
         compose.onNodeWithTag(layoutDialogTag(key)).assertExists()
         compose.onNode(hasSetTextAction()).performTextReplacement("64")
-        assertEquals(emptyList<Pair<Key, Int>>(), actions.staged)
+        assertEquals(emptyList<Pair<Key, Value>>(), actions.staged)
         compose.onNodeWithText(s(R.string.layout_set)).performClick()
 
-        assertEquals(listOf(key to 64), actions.staged)
+        assertEquals(listOf(key to Value.U8(64)), actions.staged)
         compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
     }
 
     @Test
     fun aSecondMotorThatHoldsAPinHasItsOwnTab() {
-        show(state(staged = slot(Fields.MOTOR_HALL_A, 1).on(blank, pin("PC13"))))
+        show(state(staged = blank.with(slot(Fields.MOTOR_HALL_A, 1), pin("PC13"))))
 
         compose.onNodeWithTag(layoutTabTag(LayoutGroup.MOTOR, 1)).performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag(LAYOUT_ADD_MOTOR_TAG).assertDoesNotExist()

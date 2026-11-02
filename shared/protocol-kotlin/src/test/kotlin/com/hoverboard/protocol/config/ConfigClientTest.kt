@@ -113,7 +113,7 @@ class ConfigClientTest {
         f.store[slave to limit] = Value.U32(10_000)
         f.status = Walk.CFG_DEFAULT
 
-        assertEquals(ReadValue(Value.U32(10_000)), f.client.read(limit, slave))
+        assertEquals(ReadValue(Value.U32(10_000), isDefault = true), f.client.read(limit, slave))
         assertNull(CfgRefusal.fromCode(Walk.CFG_DEFAULT))
     }
 

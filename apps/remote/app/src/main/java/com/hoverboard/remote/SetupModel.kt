@@ -1,6 +1,8 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.board.BoardStatus
+import com.hoverboard.protocol.checks.Checks
+import com.hoverboard.protocol.checks.Refusal
 import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.ConfigReadResult
@@ -127,6 +129,18 @@ sealed interface SetupNotice {
     /** The value is outside what the field takes. */
     data class OutOfRange(val key: Key) : SetupNotice
 
+    /**
+     * The configuration checks refused the write (`specs/config-read-once.md` section 4), so
+     * nothing was written: [refusal] names the field and the reason.
+     */
+    data class CheckRefused(val refusal: Refusal) : SetupNotice
+
+    /**
+     * The `imu.model` write was not sent: the IMU bus it switches on (`imu.scl`, `imu.sda`,
+     * `imu.i2c`) has not been read from this board, so the group check could not run.
+     */
+    data class BusUnread(val key: Key) : SetupNotice
+
     /** "Set level" could not compute a trim. */
     data class LevelUnavailable(val reason: Blocked) : SetupNotice
 
@@ -239,6 +253,12 @@ data class BoardSetup(
     val identity: Identity? = null,
     val rearm: Boolean? = null,
     val reboot: Boolean? = null,
+    /**
+     * The keys of the IMU bus `imu.model` switches on (`imu.scl`, `imu.sda`, `imu.i2c`) that this
+     * board stores, a key it does not store absent; null until read. The group check of an
+     * `imu.model` write runs on them ([SetupModel]'s enqueue).
+     */
+    val imuBus: Map<Key, Value>? = null,
 ) {
     /** Whether any field's write is queued or in flight. */
     val writing: Boolean get() = writes.values.any { it.sending }
@@ -1074,11 +1094,27 @@ class SetupModel(
      */
     private suspend fun readAll(board: Int) {
         if (_state.value.nodeAt(board)?.nodeClass == null) identify(board)
-        for (field in SetupFields.rowsFor(_state.value.nodeAt(board)?.nodeClass)) {
+        val rows = SetupFields.rowsFor(_state.value.nodeAt(board)?.nodeClass)
+        for (field in rows) {
             if (board !in _state.value.addresses) return
             val r = awaitSlot { transport.readConfig(field.key, board) } ?: return
             record(board, field.key, r)
         }
+        if (SetupFields.IMU_MODEL in rows) readImuBus(board)
+    }
+
+    /**
+     * Read the IMU bus `imu.model` switches on into [BoardSetup.imuBus]: a key the board answers
+     * with its default is not stored. Any other answer leaves the bus unread.
+     */
+    private suspend fun readImuBus(board: Int) {
+        val bus = mutableMapOf<Key, Value>()
+        for (key in IMU_BUS) {
+            if (board !in _state.value.addresses) return
+            val r = awaitSlot { transport.readConfig(key, board) } as? ReadValue ?: return
+            if (!r.isDefault) bus[key] = r.value
+        }
+        update(board) { it.copy(imuBus = bus) }
     }
 
     /** Fold one read of [key] from [node] into every node its value stands for ([fanOut]). */
@@ -1146,17 +1182,31 @@ class SetupModel(
      * A re-edit moves the entry to the BACK of the queue rather than leaving it where it was, so
      * the send order is always the order the edits were last made in. The right wheel depends on
      * that: picking another board must not leave the previous pick's writes in their old order.
+     *
+     * The value checks (`specs/config-read-once.md` section 4: the range table and the IMU frame)
+     * run first, on [node]'s values as [together] would leave them: the one write, or every write
+     * of a frame that goes as one. The firmware applies what is stored, so a value a check refuses
+     * is never queued. A refusal of a key this write does not touch (a value the board already
+     * holds) does not stop it: each edit is its own transaction, and the refused value is the one
+     * its own row's edit must fix. A frame goes as one, so all five of its keys are in [together]
+     * and the frame check's refusal, which names the first sign or the first role, names one of them.
      */
-    private fun enqueue(node: Int, key: Key, value: Value): Boolean {
+    private fun enqueue(node: Int, key: Key, value: Value, together: Map<Key, Value> = mapOf(key to value)): Boolean {
         val field = SetupFields.forKey(key)?.takeIf { it.takesEffect != null } ?: return false
-        if (!field.accepts(value)) {
-            notice(SetupNotice.OutOfRange(key))
+        val board = _state.value.setupOf(node)
+        val refused = when {
+            !field.accepts(value) -> SetupNotice.OutOfRange(key)
+            key == SetupFields.IMU_MODEL.key -> imuGroupRefusal(board, key, value)
+            else -> Checks.checkValues(board.values + together).firstOrNull { it.key in together }
+                ?.let { SetupNotice.CheckRefused(it) }
+        }
+        if (refused != null) {
+            notice(refused)
             return false
         }
         val target = Target(node, key)
         queue.remove(target)
         waitsFor.remove(target)
-        val board = _state.value.setupOf(node)
         if (board.values[key] != value) {
             queue[target] = value
             edits++
@@ -1166,6 +1216,18 @@ class SetupModel(
         // Taken back to what the board holds: nothing to send, and nothing left to report.
         if (board.writes[key] != null) update(node) { it.copy(writes = it.writes - key) }
         return false
+    }
+
+    /**
+     * The group check of an `imu.model` write (`checks::check_pins`, the IMU group switched by
+     * `imu.model`): a model with the bus incomplete is refused as the CLI refuses it, naming the
+     * group's first pin. Model 0 (the IMU off) always passes; any other model with the bus unread is
+     * refused ([SetupNotice.BusUnread]).
+     */
+    private fun imuGroupRefusal(board: BoardSetup, key: Key, value: Value): SetupNotice? {
+        if (value == Value.U8(Fields.ImuModel.NONE)) return null
+        val bus = board.imuBus ?: return SetupNotice.BusUnread(key)
+        return Checks.checkGroups(bus + (key to value)).firstOrNull()?.let { SetupNotice.CheckRefused(it) }
     }
 
     /**
@@ -1354,9 +1416,10 @@ class SetupModel(
             notice(SetupNotice.FrameRefused(refusal))
             return
         }
+        val frame = SetupFields.AXIS_SIGN.mapIndexed { i, f -> f.key to Value.I32(signs[i]) } +
+            SetupFields.AXIS_ROLE.mapIndexed { i, f -> f.key to Value.U8(target[i]) }
         var due = false
-        SetupFields.AXIS_SIGN.forEachIndexed { i, f -> due = enqueue(node, f.key, Value.I32(signs[i])) || due }
-        SetupFields.AXIS_ROLE.forEachIndexed { i, f -> due = enqueue(node, f.key, Value.U8(target[i])) || due }
+        for ((key, value) in frame) due = enqueue(node, key, value, together = frame.toMap()) || due
         if (!due) return
         update(node) { it.copy(rotationCheck = RotationCheck()) }
         notice(null)
@@ -1462,6 +1525,10 @@ class SetupModel(
          * not the ones passed through on the way.
          */
         const val EDIT_SETTLE_MS = TuneModel.DRAG_SEND_INTERVAL_MS
+
+        /** The bus `imu.model` switches on: its group's pins and instance key ([Checks.GROUPS]). */
+        val IMU_BUS: List<Key> = Checks.GROUPS.first { it.switch == SetupFields.IMU_MODEL.key }
+            .let { g -> g.pins.map { it.first.key } + listOfNotNull(g.instance?.first) }
 
         /** The level step passes with pitch and roll both within 10 degrees of zero. */
         const val LEVEL_TOLERANCE_CENTIDEG = 1_000

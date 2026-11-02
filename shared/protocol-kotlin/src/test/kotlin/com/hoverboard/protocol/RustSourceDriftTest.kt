@@ -21,10 +21,15 @@ import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_INPUTS
-import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
-import com.hoverboard.protocol.board.PIN_ABSENT
+import com.hoverboard.protocol.pincap.AdcInput
+import com.hoverboard.protocol.pincap.Chip
+import com.hoverboard.protocol.pincap.Func
+import com.hoverboard.protocol.pincap.FuncKind
+import com.hoverboard.protocol.pincap.Route
+import com.hoverboard.protocol.pincap.SWD
+import com.hoverboard.protocol.store.Names
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
@@ -365,7 +370,7 @@ class RustSourceDriftTest {
 
     /**
      * A Rust value that may NAME another constant rather than spell a number, reduced to the
-     * number: `= PIN_ABSENT;` resolves through `pub const PIN_ABSENT: u8 = 0xFF;` in the same file,
+     * number: `= NAME;` resolves through `pub const NAME: u8 = 0xFF;` in the same file,
      * and a plain literal passes through with its digit separators dropped.
      *
      * This is the resolution [literal]'s own failure message asks for, rather than the narrower
@@ -1504,6 +1509,29 @@ class RustSourceDriftTest {
     fun theSetupFieldsAgreeWithTheRustSource() {
         val field = rust("shared/store/src/field.rs")
         for ((name, def) in Fields.ALL) {
+            // `pub const NAME: PinField = PinField::new(0x06, Type::Pin).or(1, 12);`: a pin field,
+            // whose default is its fleet pin's bytes or the absent bytes 0xFF.
+            val pin = Regex(
+                """^pub\s+const\s+$name\s*:\s*PinField\s*=\s*PinField::new\(\s*([^,]+?)\s*,\s*Type::(\w+)\s*\)""" +
+                    """\s*(?:\.or\(\s*(\d+)\s*,\s*(\d+)\s*\))?\s*;""",
+                RegexOption.MULTILINE,
+            ).find(field)
+            if (pin != null) {
+                assertEquals(literal(name, pin.groupValues[1], "field id"), def.id, "$name id drifted")
+                val fleet = pin.groupValues[3].takeIf { it.isNotEmpty() }
+                    ?.let { literal(name, it, "fleet port") to literal(name, pin.groupValues[4], "fleet pin") }
+                val (port, n) = fleet ?: (0xFF to 0xFF)
+                val third = if (fleet == null) 0xFF else 0
+                val default = when (pin.groupValues[2]) {
+                    "Pin" -> Value.Pin(port, n)
+                    "PinAf" -> Value.PinAf(port, n, third)
+                    "PinAdc" -> Value.PinAdc(port, n, third)
+                    else -> error("$name is a PinField of Type::${pin.groupValues[2]}, which is no pin type")
+                }
+                assertEquals(default.kind(), def.type, "$name storage type drifted")
+                assertEquals(default, def.default, "$name default drifted")
+                continue
+            }
             // `pub const NAME: Field<u32> = Field::new(0x20, 10_000);` or `StrField::new(0x10, "Hoverboard")`
             val m = findOne(
                 field,
@@ -1856,8 +1884,9 @@ class RustSourceDriftTest {
      * (`specs/imu.md`, the role model).
      *
      * The facts pinned. The reference map an unset sign falls back to, and [Orientation.DEFAULT_ROLES]
-     * an unset role falls back to. `staged`'s signature (it returns `Result<Self, FrameError>`), its
-     * unset rule on both fields, and its refusal order (roles, then accel, then gyro), with
+     * an unset role falls back to. `staged`'s signature (it returns the config and refuses nothing)
+     * and its unset rule on both fields; `frame_error`'s body, which is the frame check
+     * ([com.hoverboard.protocol.checks.Check.FRAME]) and its refusal order (roles, then accel), with
      * `FrameError`'s variants equal to [Orientation.FrameError]'s. The rotation rule, pinned as the
      * Rust it is written in (`triple_is_rotation` delegating to `frame_is_rotation` under the default
      * roles, `frame_is_rotation`'s parity rule and `body_order`'s role check), normalised for
@@ -1920,7 +1949,7 @@ class RustSourceDriftTest {
             "imu::body_order changed: review Orientation.bodyOrder",
         )
 
-        val staged = fnBody("pub fn staged(sign: [i32; 3], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError>")
+        val staged = fnBody("pub fn staged(sign: [i32; 3], gyro_bias: [i32; 3], roles: [u8; 2]) -> Self")
         assertTrue(
             staged.contains("..Config::default()") &&
                 staged.contains(
@@ -1930,14 +1959,14 @@ class RustSourceDriftTest {
                 staged.contains("for (dst, staged) in cfg.roles.iter_mut().zip(roles.iter()) { if *staged != 0 { *dst = *staged; } }"),
             "imu::Config::staged's unset rule changed: review Orientation.effective / effectiveRoles. Got: $staged",
         )
-        val order = listOf(
-            "if body_order(cfg.roles).is_none() { Err(FrameError::Roles) }",
-            "else if !Self::frame_is_rotation(cfg.roles, [s[0], s[1], s[2]]) { Err(FrameError::Accel) }",
-            "else { Ok(cfg) }",
-        ).map { staged.indexOf(it) }
-        assertTrue(
-            order.all { it >= 0 } && order == order.sorted(),
-            "imu::Config::staged's refusal order changed: review Orientation.frameError. Got: $staged",
+        val frameError = fnBody("pub fn frame_error(sign: [i32; 3], roles: [u8; 2]) -> Option<FrameError>")
+        assertEquals(
+            "let cfg = Self::staged(sign, [0; 3], roles); let s = cfg.sign; " +
+                "if body_order(cfg.roles).is_none() { Some(FrameError::Roles) } " +
+                "else if !Self::frame_is_rotation(cfg.roles, [s[0], s[1], s[2]]) { Some(FrameError::Accel) } " +
+                "else { None }",
+            frameError,
+            "imu::Config::frame_error changed: review Orientation.frameError",
         )
 
         assertEquals(
@@ -2043,7 +2072,7 @@ class RustSourceDriftTest {
     private val boardLib by lazy { rust("motorcontroller/board/src/lib.rs") }
     private val boardStatus by lazy { rust("motorcontroller/board/src/status.rs") }
 
-    /** `NotAPin` -> `NOT_A_PIN`: a Rust variant name as the Kotlin enum spells it. */
+    /** `NotUp` -> `NOT_UP`: a Rust variant name as the Kotlin enum spells it. */
     private fun camelToScreaming(s: String): String =
         s.replace(Regex("""(?<!^)([A-Z])"""), "_$1").uppercase()
 
@@ -2083,25 +2112,17 @@ class RustSourceDriftTest {
             .replace(Regex("""\s+"""), " ").trim()
     }
 
-    /**
-     * The absent sentinel both sides spell (the crate's `ABSENT` and the registry's `PIN_ABSENT`,
-     * which are one value), and the motor count the layout's field set carries (`store::MOTORS`).
-     */
+    /** The motor and link counts a board's field set carries (`store::MOTORS`, `store::LINKS`). */
     @Test
-    fun theAbsentSentinelAndTheMotorCountAgreeWithTheRustSource() {
-        val absent = literal("ABSENT", findOne(boardLib, """^pub\s+const\s+ABSENT\s*:\s*u8\s*=\s*([^;]+);""", "ABSENT").groupValues[1], "ABSENT")
-        assertEquals(PIN_ABSENT, absent, "board::ABSENT drifted")
+    fun theMotorAndLinkCountsAgreeWithTheRustSource() {
         val field = rust("shared/store/src/field.rs")
-        assertEquals(
-            PIN_ABSENT,
-            literal("PIN_ABSENT", findOne(field, """^pub\s+const\s+PIN_ABSENT\s*:\s*u8\s*=\s*([^;]+);""", "PIN_ABSENT").groupValues[1], "PIN_ABSENT"),
-            "store::PIN_ABSENT drifted",
+        fun count(name: String) = literal(
+            name,
+            findOne(field, """^pub\s+const\s+$name\s*:\s*u8\s*=\s*([^;]+);""", "store::$name").groupValues[1],
+            "count",
         )
-        assertEquals(
-            BoardFields.MOTORS,
-            literal("MOTORS", findOne(field, """^pub\s+const\s+MOTORS\s*:\s*u8\s*=\s*([^;]+);""", "store::MOTORS").groupValues[1], "motor count"),
-            "the number of motors a field set carries drifted",
-        )
+        assertEquals(count("MOTORS"), Fields.MOTORS, "the number of motors a field set carries drifted")
+        assertEquals(count("LINKS"), Fields.LINKS, "the number of links a field set carries drifted")
     }
 
     /**
@@ -2175,35 +2196,211 @@ class RustSourceDriftTest {
     }
 
     /**
-     * [BoardStatus.NAMES], against the store's name table (`store::NAMES` in
-     * `shared/store/src/field.rs`), which is what the CLI prints a status entry through: each row's
-     * path and index kind, looked up by the Rust handle whose id the Kotlin row is keyed by. A row
-     * the Rust renames or re-indexes fails here.
+     * [Names], against the store's name table (`store::NAMES` in `shared/store/src/field.rs`): every
+     * row's handle, path, index kind and value kind, and an enum's or bit set's labels, in order, as
+     * an exact list both ways. The configuration checks name the key they refuse by this path, and
+     * the shared check cases are settings fragments read through it.
      */
     @Test
-    fun theStatusNamesAgreeWithTheStoreNameTable() {
+    fun theNameTableAgreesWithTheRustSource() {
         val field = rust("shared/store/src/field.rs")
         val start = field.indexOf("pub static NAMES: &[FieldName] = &[")
         check(start >= 0) { "No `pub static NAMES: &[FieldName] = &[` in shared/store/src/field.rs" }
         val table = field.substring(start, field.indexOf("\n    ];", start))
-        val handles = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
-        for ((id, name) in BoardStatus.NAMES) {
-            val handle = handles.entries.singleOrNull { it.value == id }?.key
-            checkNotNull(handle) { "BoardStatus.NAMES names id 0x%02X, which Fields does not mirror".format(id) }
-            val row = findOne(
-                table,
-                """FieldName::(\w+)\(\s*$handle\s*,(?:\s*\d+\s*,)?\s*"([^"]+)"""",
-                "the NAMES row of $handle",
-            )
-            val kind = when (row.groupValues[1]) {
-                "single" -> BoardStatus.IndexKind.SINGLE
-                "motor" -> BoardStatus.IndexKind.MOTOR
-                "family", "array" -> BoardStatus.IndexKind.ARRAY
-                "link" -> BoardStatus.IndexKind.LINK
-                else -> error("$handle's NAMES row is a `${row.groupValues[1]}` row, which no status entry names")
-            }
-            assertEquals(BoardStatus.Name(row.groupValues[2], kind), name, "the NAMES row of $handle drifted")
+            .lines().filterNot { it.trim().startsWith("//") }.joinToString("\n")
+            .replace(Regex("""#\[cfg\(feature = "test-fields"\)\]\s*FieldName::\w+\([^)]*\),"""), "")
+            .replace(Regex("""\s+"""), " ")
+        val rows = Regex("""FieldName::(\w+)\(\s*(\w+)\s*,\s*"([^"]+)"\s*(?:,\s*([\w:]+)\s*)?,?\s*\)""").findAll(table).toList()
+        assertEquals(
+            table.split("FieldName::").size - 1,
+            rows.size,
+            "a NAMES row this gate does not read: teach it the shape",
+        )
+        val ids = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
+        fun labels(const: String): Pair<Names.Kind, List<Pair<Int, String>>> {
+            val m = findOne(field, """^\s*const\s+$const\s*:\s*Kind\s*=\s*Kind::(Enum|Bits)\(&\[(.*?)\]\);""", "the Kind `$const`")
+            val pairs = Regex("""\(\s*(\d+)\s*,\s*"([^"]+)"\s*\)""").findAll(m.groupValues[2])
+                .map { it.groupValues[1].toInt() to it.groupValues[2] }.toList()
+            return (if (m.groupValues[1] == "Enum") Names.Kind.ENUM else Names.Kind.BITS) to pairs
         }
+        fun kind(arg: String): Pair<Names.Kind, List<Pair<Int, String>>> = when (arg) {
+            "Kind::Int" -> Names.Kind.INT to emptyList()
+            "Kind::Bool" -> Names.Kind.BOOL to emptyList()
+            else -> labels(arg)
+        }
+        val rust = rows.map { r ->
+            val (ctor, handle, path, arg) = r.destructured
+            val id = checkNotNull(ids[handle]) { "NAMES names `$handle`, which Fields does not mirror" }
+            val (index, k) = when (ctor) {
+                "single" -> Names.IndexKind.SINGLE to kind(arg)
+                "motor" -> Names.IndexKind.MOTOR to kind(arg)
+                "array" -> Names.IndexKind.ARRAY to kind(arg)
+                "link" -> Names.IndexKind.LINK to kind(arg)
+                "text" -> Names.IndexKind.SINGLE to (Names.Kind.STR to emptyList())
+                "pin" -> Names.IndexKind.valueOf(arg.removePrefix("Index::").uppercase()) to (Names.Kind.PIN to emptyList())
+                else -> error("a `FieldName::$ctor` row, which this gate does not map yet")
+            }
+            Names.Name(id, path, index, k.first, k.second)
+        }
+        assertEquals(rust, Names.ALL, "the name table drifted from store::NAMES")
+    }
+
+    /**
+     * [Fields.RANGES] and [Fields.CALIBRATION], against `store::RANGES` and `store::CALIBRATION`
+     * (`specs/config-read-once.md` section 4): every row's field, index and bounds, in order, both
+     * ways. A bound written as an expression is evaluated here, from the constant it names.
+     */
+    @Test
+    fun theRangeTableAgreesWithTheRustSource() {
+        val field = rust("shared/store/src/field.rs")
+        fun block(open: String): String {
+            val start = field.indexOf(open)
+            check(start >= 0) { "No `$open` in shared/store/src/field.rs" }
+            return field.substring(start + open.length, field.indexOf("];", start))
+                .replace(Regex("""//[^\n]*"""), "").replace(Regex("""\s+"""), " ")
+        }
+        val ids = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
+        fun idOf(arg: String): Int {
+            val handle = checkNotNull(Regex("""^(\w+)\.id\(\)$""").find(arg.trim())) { "`$arg` is not `HANDLE.id()`" }
+                .groupValues[1]
+            return checkNotNull(ids[handle]) { "the range table names `$handle`, which Fields does not mirror" }
+        }
+        val txPower = findOne(
+            field,
+            """^pub\s+const\s+WIFI_TX_POWER_RANGE\s*:\s*core::ops::RangeInclusive<u8>\s*=\s*(\d+)\.\.=(\d+);""",
+            "WIFI_TX_POWER_RANGE",
+        )
+        fun bound(arg: String): Long {
+            val a = arg.trim()
+            return when {
+                Regex("""^-?[\d_]+$""").matches(a) -> a.replace("_", "").toLong()
+                a == "i16::MAX as i64" -> Short.MAX_VALUE.toLong()
+                a == "*WIFI_TX_POWER_RANGE.start() as i64" -> txPower.groupValues[1].toLong()
+                a == "*WIFI_TX_POWER_RANGE.end() as i64" -> txPower.groupValues[2].toLong()
+                else -> error("the range bound `$a` is an expression this gate does not evaluate yet: teach it")
+            }
+        }
+        val body = block("pub static RANGES: &[Range] = &[")
+        val calls = Regex("""\b(every|at)\(""").findAll(body).map { m ->
+            // The call's arguments, up to its closing parenthesis, split at the top level.
+            var depth = 0
+            var i = m.range.last
+            val args = mutableListOf(StringBuilder())
+            while (true) {
+                val c = body[i]
+                if (c == '(') depth++
+                if (c == ')') depth--
+                if (depth == 0) break
+                if (c == ',' && depth == 1) args += StringBuilder() else if (i != m.range.last) args.last().append(c)
+                i++
+            }
+            m.groupValues[1] to args.map { it.toString().trim() }.filter { it.isNotEmpty() }
+        }.toList()
+        val rust = calls.map { (fn, a) ->
+            when (fn) {
+                "every" -> Fields.Range(idOf(a[0]), null, bound(a[1]), bound(a[2]))
+                else -> Fields.Range(idOf(a[0]), a[1].toInt(), bound(a[2]), bound(a[3]))
+            }
+        }
+        assertTrue(rust.isNotEmpty(), "no rows read from store::RANGES")
+        assertEquals(rust, Fields.RANGES, "the range table drifted from store::RANGES")
+        val calibration = block("pub const CALIBRATION: &[u8] = &[").split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        assertEquals(calibration.map(::idOf), Fields.CALIBRATION, "the calibration fields drifted from store::CALIBRATION")
+        // Every registered default is inside its range, so a value a board answers with its default
+        // never trips a check the app makes on what it read.
+        for (def in Fields.ALL.values) {
+            val v = (def.default as? Value.U8)?.v?.toLong() ?: (def.default as? Value.U16)?.v?.toLong()
+                ?: (def.default as? Value.U32)?.v ?: (def.default as? Value.I16)?.v?.toLong() ?: continue
+            Fields.rangeOf(def.key())?.let { assertTrue(v in it, "0x%02x's default $v is outside $it".format(def.id)) }
+        }
+        for (def in Fields.INDEXED.values) {
+            for (i in 0 until def.size) {
+                val v = when (val d = def.defaults[i]) {
+                    is Value.U8 -> d.v.toLong()
+                    is Value.I16 -> d.v.toLong()
+                    is Value.I32 -> d.v.toLong()
+                    else -> continue
+                }
+                Fields.rangeOf(def.at(i).key(i))?.let { assertTrue(v in it, "0x%02x[$i]'s default $v is outside $it".format(def.id)) }
+            }
+        }
+    }
+
+    /**
+     * The pin tables ([com.hoverboard.protocol.pincap]), against `motorcontroller/hal/src/pincap.rs`:
+     * the chips by name, which of them remap, and each chip's bonding, routes and ADC inputs, in
+     * order, both ways; and the SWD pair. Every `route(` and `adc(` in a table is read or the gate
+     * fails, so a route added to the Rust is a route the app's checks know.
+     */
+    @Test
+    fun thePinTablesAgreeWithTheRustSource() {
+        val pincap = rust("motorcontroller/hal/src/pincap.rs")
+            .replace(Regex("""//[^\n]*"""), "")
+        val names = findAllClaiming(
+            rustBody(pincap, "pub const fn name(self) -> &'static str", "\n    }"),
+            """Chip::(\w+)\s*=>\s*"([^"]+)"""",
+            ARM_LINE,
+            "Chip::name's arms",
+        ).associate { it.groupValues[1] to it.groupValues[2] }
+        assertEquals(rustVariants(pincap, "Chip").map { names[it] }, Chip.entries.map { it.id }, "pincap::Chip drifted")
+        val remaps = findOne(pincap, """matches!\(self,\s*([^)]+)\)""", "Chip::remaps").groupValues[1]
+            .split("|").map { checkNotNull(names[it.trim().removePrefix("Chip::")]) }
+        assertEquals(remaps, Chip.entries.filter { it.remaps }.map { it.id }, "which chips remap drifted")
+        val tables = findAllClaiming(
+            rustBody(pincap, "pub const fn table(self) -> &'static Table", "\n    }"),
+            """Chip::(\w+)\s*=>\s*&(\w+)""",
+            ARM_LINE,
+            "Chip::table's arms",
+        ).associate { checkNotNull(names[it.groupValues[1]]) to it.groupValues[2] }
+
+        fun constBlock(name: String): String {
+            val m = findOne(pincap, """^const\s+$name\s*:\s*[^=]+=\s*""", "the const `$name`")
+            val close = if (pincap[m.range.last + 1] == '[') "\n];" else "\n};"
+            return pincap.substring(m.range.last + 1, pincap.indexOf(close, m.range.last))
+        }
+        fun list(table: String, member: String): String {
+            val ref = Regex("""$member:\s*&(\w+)\s*,""").find(table)
+            if (ref != null) return constBlock(ref.groupValues[1])
+            val open = table.indexOf("$member: &[")
+            check(open >= 0) { "No `$member:` in a pin table" }
+            return table.substring(open, table.indexOf("],", open))
+        }
+        fun func(kind: String, args: String): Func {
+            val n = args.split(",").map { it.trim().toInt() }
+            return when (kind) {
+                "Gate" -> Func(FuncKind.GATE, n[0], n[1])
+                "GateN" -> Func(FuncKind.GATE_N, n[0], n[1])
+                "Tx" -> Func(FuncKind.TX, n[0])
+                "Rx" -> Func(FuncKind.RX, n[0])
+                "Scl" -> Func(FuncKind.SCL, n[0])
+                "Sda" -> Func(FuncKind.SDA, n[0])
+                else -> error("pincap::Func::$kind is not mirrored")
+            }
+        }
+        for (chip in Chip.entries) {
+            val table = constBlock(checkNotNull(tables[chip.id]) { "${chip.id} has no table arm" })
+            val bonding = findOne(table, """bonding:\s*\[([^\]]+)\]""", "${chip.id}'s bonding").groupValues[1]
+                .split(",").map { num(it.trim()) }
+            assertEquals(bonding, chip.table.bonding, "${chip.id}'s bonding drifted")
+            val routeText = list(table, "routes")
+            val routes = Regex("""route\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\w+)\(([^)]*)\)\s*,\s*(\d+)\s*\)""").findAll(routeText)
+                .map { Route(it.groupValues[1].toInt(), it.groupValues[2].toInt(), func(it.groupValues[3], it.groupValues[4]), it.groupValues[5].toInt()) }
+                .toList()
+            assertEquals(Regex("""\broute\(""").findAll(routeText).count(), routes.size, "${chip.id}: a route this gate does not read")
+            assertEquals(routes, chip.table.routes, "${chip.id}'s routes drifted")
+            val adcText = list(table, "adc")
+            val adc = Regex("""\badc\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)""").findAll(adcText)
+                .map { AdcInput(it.groupValues[1].toInt(), it.groupValues[2].toInt(), it.groupValues[3].toInt()) }
+                .toList()
+            assertEquals(Regex("""\badc\(""").findAll(adcText).count(), adc.size, "${chip.id}: an ADC input this gate does not read")
+            assertEquals(adc, chip.table.adc, "${chip.id}'s ADC inputs drifted")
+        }
+        val swd = findOne(pincap, """^pub const SWD: \[\(u8, u8\); 2\] = \[(.*)\];""", "pincap::SWD").groupValues[1]
+        assertEquals(
+            Regex("""\((\d+),\s*(\d+)\)""").findAll(swd).map { it.groupValues[1].toInt() to it.groupValues[2].toInt() }.toList(),
+            SWD,
+            "the SWD pins drifted",
+        )
     }
 
     /**
