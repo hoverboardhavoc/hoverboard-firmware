@@ -88,7 +88,8 @@ impl DmaTx {
     /// In order: check the buffer (1 to 65535 bytes); resolve the instance's channel and vectors;
     /// enable the DMA clock; stop the channel in case it runs; the write-back self-check; `DENT` on
     /// the USART; clear the in-flight flag; start the cycle counter the deadline is measured on
-    /// ([`irq::enable_cycle_counter`], which zeroes it); unmask the transmit vector. No transfer is
+    /// (`irq::enable_cycle_counter` on the Cortex-M3, which zeroes it; TIMER1 on the Cortex-M0);
+    /// unmask the transmit vector. No transfer is
     /// programmed until the first send. `core_hz` and `baud` size the deadline.
     ///
     /// Refusals: [`DescriptorError::Unsupported`], before any register is written, for a buffer
@@ -117,7 +118,10 @@ impl DmaTx {
         }
         tx.enable_dma();
         in_flight.store(false, Ordering::Release);
+        #[cfg(hal_core = "m3")]
         irq::enable_cycle_counter();
+        #[cfg(hal_core = "m0")]
+        irq::start_cycle_timer();
         irq::unmask_irq(usart_dma.irqs.dma_tx);
 
         Ok(DmaTx {

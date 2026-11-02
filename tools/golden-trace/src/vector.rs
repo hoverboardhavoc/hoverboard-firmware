@@ -5,7 +5,7 @@
 //! ```toml
 //! # Why the mode, and why any narrowing (comments are the reasoning; the harness reads the keys).
 //! description = """What the operation is."""
-//! family = "gd32f10x"              # the vendor library; the HAL chips follow from it
+//! family = "gd32f10x"              # gd32f10x, gd32f1x0 or mm32spin05; the HAL chips follow from it
 //! chips = ["gd32f103c8"]           # optional: a subset of the family's chips, with the reason
 //! mode = "final_state"             # register_writes | final_state | with_polling
 //! assert_only = ["<GPIOB_BASE>+0x00"]   # or ignore = [...]; at most one of the two
@@ -19,7 +19,8 @@
 //! "<RCU_BASE>+0x04" = 0
 //!
 //! [vendor]
-//! body = '''C statements against the GD standard peripheral library'''
+//! body = '''C statements against the family's vendor library'''
+//! prelude = '''optional C at file scope, e.g. #include "system_mm32spin0x_q.c"'''
 //!
 //! [hal]
 //! body = '''Rust: a module body defining `pub fn body()` against the `hal` crate'''
@@ -81,6 +82,10 @@ pub struct Vector {
     pub ignore: Vec<String>,
     /// The vendor body (C).
     pub vendor_body: String,
+    /// C at file scope before the vendor body's function, if any: an `#include` of a vendor
+    /// source whose static functions the body calls (the MM32's clock tree is a static function of
+    /// LibSamples' `system_mm32spin0x_q.c`).
+    pub vendor_prelude: Option<String>,
     /// The HAL side.
     pub hal: HalSide,
 }
@@ -117,6 +122,7 @@ enum RawResponse {
 #[serde(deny_unknown_fields)]
 struct RawVendor {
     body: String,
+    prelude: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +185,7 @@ impl Vector {
             assert_only: raw.assert_only,
             ignore: raw.ignore,
             vendor_body: raw.vendor.body,
+            vendor_prelude: raw.vendor.prelude,
             hal,
         })
     }

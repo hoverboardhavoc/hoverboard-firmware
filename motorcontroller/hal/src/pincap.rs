@@ -4,6 +4,10 @@
 //! Pure functions of the descriptor and the tables here: no register access. A capability the HAL
 //! cannot express (a remapped gate set, a remapped I2C pair) answers `None` rather than a guess.
 //! Pins are packed bytes, `(port << 4) | pin`, port A = 0, B = 1, C = 2, D = 3, F = 5.
+//!
+//! The pin tables are the GD32's (one set for the F10x and the F1x0) or, with the `mm32` GPIO
+//! model, the MM32SPIN05's, from MindMotion's datasheet (DS_MM32SPIN05 tables 5 to 9, the
+//! alternate functions per pin). The advanced-timer gate set is the same on all of them.
 
 use crate::addr::PeriphLabel;
 use crate::chip::Chip;
@@ -17,8 +21,16 @@ const TIMER0_CHN: [u8; 3] = [0x1D, 0x1E, 0x1F];
 const TIMER7_CH: [u8; 3] = [0x26, 0x27, 0x28];
 const TIMER7_CHN: [u8; 3] = [0x07, 0x10, 0x11];
 /// I2C0 on PB6 (SCL) / PB7 (SDA), I2C1 on PB10 / PB11.
+#[cfg(not(hal_gpio = "mm32"))]
 const I2C0_PAIR: (u8, u8) = (0x16, 0x17);
+#[cfg(not(hal_gpio = "mm32"))]
 const I2C1_PAIR: (u8, u8) = (0x1A, 0x1B);
+/// The MM32's one I2C (MindMotion's I2C1, the HAL's `I2c0`) at AF1, the mux number
+/// [`crate::gpio::PinRole::I2cAfOpenDrain`] programs: (SCL, SDA) on PB6/PB7, PB8/PB9, PB10/PB11
+/// and PD1/PD0 (the Gen2.4.2 master's IMU bus). Its other pins are at AF4 and AF5 and not in the
+/// table.
+#[cfg(hal_gpio = "mm32")]
+const MM32_I2C_PAIRS: [(u8, u8); 4] = [(0x16, 0x17), (0x18, 0x19), (0x1A, 0x1B), (0x31, 0x30)];
 /// PA13 (SWDIO) and PA14 (SWCLK).
 const SWD_PINS: [u8; 2] = [0x0D, 0x0E];
 
@@ -41,6 +53,7 @@ struct UsartPin {
 
 /// The USART pins: USART1 on PA2/PA3, USART0 on PB6/PB7 (F10x through the USART0 remap), USART2 on
 /// PB10/PB11. Whether the chip carries the instance is the descriptor's answer.
+#[cfg(not(hal_gpio = "mm32"))]
 const USART_PINS: [UsartPin; 6] = [
     UsartPin {
         pin: 0x02,
@@ -85,6 +98,37 @@ const USART_PINS: [UsartPin; 6] = [
         remap: UsartRemap::Default,
     },
 ];
+
+/// The MM32SPIN05's UART pins, every one through the per-pin mux: UART1 (`Usart0`) TX on PB6 (AF0)
+/// and PB3 (AF3), RX on PB7 (AF0) and PB4 (AF3); UART2 (`Usart1`) TX on PA2 (AF1) and PB7 (AF4), RX
+/// on PA3 (AF1), PA6 (AF3), PA15 (AF1) and PB8 (AF4). A pair is any TX row and any RX row of the
+/// same instance (trondin's Gen2.4.5 link: PB6 TX, PB4 RX). UART1's PA9/PA10 are gate pins and
+/// PA14 is SWCLK, so they are not in the table.
+#[cfg(hal_gpio = "mm32")]
+const USART_PINS: [UsartPin; 10] = [
+    mm32_uart(0x16, PeriphLabel::Usart0, Dir::Tx, UsartAf::Af0),
+    mm32_uart(0x13, PeriphLabel::Usart0, Dir::Tx, UsartAf::Af3),
+    mm32_uart(0x17, PeriphLabel::Usart0, Dir::Rx, UsartAf::Af0),
+    mm32_uart(0x14, PeriphLabel::Usart0, Dir::Rx, UsartAf::Af3),
+    mm32_uart(0x02, PeriphLabel::Usart1, Dir::Tx, UsartAf::Af1),
+    mm32_uart(0x17, PeriphLabel::Usart1, Dir::Tx, UsartAf::Af4),
+    mm32_uart(0x03, PeriphLabel::Usart1, Dir::Rx, UsartAf::Af1),
+    mm32_uart(0x06, PeriphLabel::Usart1, Dir::Rx, UsartAf::Af3),
+    mm32_uart(0x0F, PeriphLabel::Usart1, Dir::Rx, UsartAf::Af1),
+    mm32_uart(0x18, PeriphLabel::Usart1, Dir::Rx, UsartAf::Af4),
+];
+
+/// One MM32 UART pin row: the mux routes it, so no remap.
+#[cfg(hal_gpio = "mm32")]
+const fn mm32_uart(pin: u8, usart: PeriphLabel, dir: Dir, af: UsartAf) -> UsartPin {
+    UsartPin {
+        pin,
+        usart,
+        dir,
+        af,
+        remap: UsartRemap::Default,
+    }
+}
 
 /// The AFIO remap a USART pin pair needs on the F10x (the F1x0 routes through the per-pin mux and
 /// always answers `Default`).
@@ -135,6 +179,7 @@ pub fn gate_set(chip: &Chip, hi: [u8; 3], lo: [u8; 3]) -> Option<PeriphLabel> {
 
 /// The ADC channel on the pin (the F1 map: PA0-7 = 0-7, PB0-1 = 8-9, PC0-5 = 10-15), or `None`
 /// when the pin is not an ADC input or not bonded.
+#[cfg(not(hal_gpio = "mm32"))]
 pub fn adc_channel(chip: &Chip, pin: u8) -> Option<u8> {
     if !pin_exists(chip, pin) {
         return None;
@@ -147,7 +192,26 @@ pub fn adc_channel(chip: &Chip, pin: u8) -> Option<u8> {
     }
 }
 
+/// The ADC channel on the pin, the MM32SPIN05 map (DS_MM32SPIN05 table 5, `ADC1_VIN[n]`): PA0-7 =
+/// 0-7, PB0-1 = 8-9, PB3 = 10, PB4 = 11. PB7 is `VIN[12]`, whose data register MindMotion's map
+/// leaves reserved (`reg_adc.h`, `RESERVED0` at `0x48`), so the HAL cannot read it and answers
+/// `None`.
+#[cfg(hal_gpio = "mm32")]
+pub fn adc_channel(chip: &Chip, pin: u8) -> Option<u8> {
+    if !pin_exists(chip, pin) {
+        return None;
+    }
+    match (pin >> 4, pin & 0x0F) {
+        (0, n) if n <= 7 => Some(n),
+        (1, n) if n <= 1 => Some(8 + n),
+        (1, 3) => Some(10),
+        (1, 4) => Some(11),
+        _ => None,
+    }
+}
+
 /// The I2C instance on an (SCL, SDA) pair, or `None`.
+#[cfg(not(hal_gpio = "mm32"))]
 pub fn i2c_instance(chip: &Chip, scl: u8, sda: u8) -> Option<PeriphLabel> {
     if (scl, sda) == I2C0_PAIR {
         return Some(PeriphLabel::I2c0);
@@ -156,6 +220,13 @@ pub fn i2c_instance(chip: &Chip, scl: u8, sda: u8) -> Option<PeriphLabel> {
         return Some(PeriphLabel::I2c1);
     }
     None
+}
+
+/// The I2C instance on an (SCL, SDA) pair, or `None`: `I2c0` on any of the MM32's AF1 pairs.
+#[cfg(hal_gpio = "mm32")]
+pub fn i2c_instance(chip: &Chip, scl: u8, sda: u8) -> Option<PeriphLabel> {
+    (MM32_I2C_PAIRS.contains(&(scl, sda)) && chip.has_i2c(PeriphLabel::I2c0))
+        .then_some(PeriphLabel::I2c0)
 }
 
 /// The USART a (TX, RX) pair routes to on this chip, or `None`.
@@ -167,7 +238,7 @@ pub fn usart_pins(chip: &Chip, tx: u8, rx: u8) -> Option<UsartMapping> {
     }
     // The F1x0 mux needs no remap; on the F10x both pins share the instance's remap by
     // construction of the table.
-    let remap = if cfg!(hal_gpio = "ctl") {
+    let remap = if cfg!(any(hal_gpio = "ctl", hal_gpio = "mm32")) {
         UsartRemap::Default
     } else {
         t.remap
@@ -272,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_gpio = "mm32"))]
     fn adc_channels_are_the_f1_map_on_bonded_pins_only() {
         assert_eq!(adc_channel(&chip(), 0x00), Some(0));
         assert_eq!(adc_channel(&chip(), 0x07), Some(7));
@@ -289,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_gpio = "mm32"))]
     fn i2c_pairs_need_the_instance() {
         assert_eq!(i2c_instance(&chip(), 0x16, 0x17), Some(PeriphLabel::I2c0));
         assert_eq!(i2c_instance(&chip(), 0x17, 0x16), None);
@@ -300,6 +373,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_gpio = "mm32"))]
     fn usart_pairs_resolve_per_chip() {
         let m = usart_pins(&chip(), 0x02, 0x03).expect("USART1 on PA2/PA3 everywhere");
         assert_eq!(m.usart, PeriphLabel::Usart1);
@@ -325,5 +399,64 @@ mod tests {
         assert_eq!(usart_pins(&chip(), 0x03, 0x02), None);
         // USART0's default PA9/PA10 are gate pins and not in the table.
         assert_eq!(usart_pins(&chip(), 0x09, 0x0A), None);
+    }
+
+    #[test]
+    #[cfg(hal_gpio = "mm32")]
+    fn mm32_adc_channels_follow_the_datasheet() {
+        let want = [
+            (0x00, Some(0)),
+            (0x07, Some(7)),
+            (0x10, Some(8)),
+            (0x11, Some(9)),
+            (0x12, None),
+            (0x13, Some(10)),
+            (0x14, Some(11)),
+            (0x17, None),
+            (0x2D, None),
+        ];
+        for (pin, ch) in want {
+            assert_eq!(adc_channel(&chip(), pin), ch, "{pin:#04x}");
+        }
+    }
+
+    #[test]
+    #[cfg(hal_gpio = "mm32")]
+    fn mm32_i2c_pairs_are_the_af1_pairs() {
+        // The Gen2.4.2 master's IMU: SCL PD1, SDA PD0.
+        assert_eq!(i2c_instance(&chip(), 0x31, 0x30), Some(PeriphLabel::I2c0));
+        assert_eq!(i2c_instance(&chip(), 0x16, 0x17), Some(PeriphLabel::I2c0));
+        assert_eq!(i2c_instance(&chip(), 0x30, 0x31), None);
+        // PA9/PA10 carry I2C1 at AF4 only.
+        assert_eq!(i2c_instance(&chip(), 0x09, 0x0A), None);
+    }
+
+    #[test]
+    #[cfg(hal_gpio = "mm32")]
+    fn mm32_uart_pairs_mix_rows_of_one_instance() {
+        let m = usart_pins(&chip(), 0x02, 0x03).expect("UART2 on PA2/PA3");
+        assert_eq!(
+            (m.usart, m.tx_af, m.rx_af),
+            (PeriphLabel::Usart1, UsartAf::Af1, UsartAf::Af1)
+        );
+        // trondin's link pins: UART1 TX PB6 (AF0), RX PB4 (AF3).
+        let m = usart_pins(&chip(), 0x16, 0x14).expect("UART1 on PB6/PB4");
+        assert_eq!(
+            (m.usart, m.tx_af, m.rx_af),
+            (PeriphLabel::Usart0, UsartAf::Af0, UsartAf::Af3)
+        );
+        assert_eq!(m.remap, UsartRemap::Default);
+        // PB7 is UART1's RX and UART2's TX.
+        assert_eq!(
+            usart_pins(&chip(), 0x17, 0x18).map(|m| m.usart),
+            Some(PeriphLabel::Usart1)
+        );
+        assert_eq!(
+            usart_pins(&chip(), 0x16, 0x17).map(|m| m.usart),
+            Some(PeriphLabel::Usart0)
+        );
+        // Mixed instances are no mapping, nor is the absent USART2's pair.
+        assert_eq!(usart_pins(&chip(), 0x02, 0x17), None);
+        assert_eq!(usart_pins(&chip(), 0x1A, 0x1B), None);
     }
 }

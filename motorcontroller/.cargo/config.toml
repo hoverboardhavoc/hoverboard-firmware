@@ -25,6 +25,13 @@ rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--icf=all"]
 # behind `required-features`) still exits 0 having run nothing, which is true of it on the host too.
 runner = "../tools/board-target-runner.sh"
 
+# The MM32SPIN05's Cortex-M0 builds (specs/hal.md section 3.1): the hal crate and the validators on
+# it with the `mm32spin05` feature, `--target thumbv6m-none-eabi`. The same link script and folding
+# as the thumbv7m images; no image is built for this target yet.
+[target.thumbv6m-none-eabi]
+rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--icf=all"]
+runner = "../tools/board-target-runner.sh"
+
 # The shipping images, one per chip (specs/hal.md section 6), here and in CI: `cargo image-f103`
 # and `cargo image-f130`. Each is the release build of `firmware` with one chip feature, in its own
 # target directory, so the two images never share (or overwrite) a build. The ELF is

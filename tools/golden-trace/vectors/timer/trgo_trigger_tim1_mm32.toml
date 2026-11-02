@@ -1,0 +1,113 @@
+# Mode: final_state over the whole TIM1 block: both sides do the full bring-up (the HAL has no path
+# to a PwmTimer without it), then the trigger. The trigger's part of the end state:
+#   CCMR2 = 0x00006868 (CH4 PWM mode 1 | CH4 preload, over CH3's bring-up byte)
+#   CCR4  = 0x000008C9 (2249, just under the top of the count)
+#   CR2   = 0x00003F20 (MMS = update, over the bring-up's idle levels; OIS4 stays 0)
+# CH4's output enable stays off, so CCER is the bring-up's.
+description = """
+TIM1's ADC trigger on the MM32SPIN05: CH4 as an output-compare channel (PWM mode 1, preload, compare
+value 2249) and the TRGO master mode set to the update event, the TIM1 TRGO the ADC's external
+trigger takes (adc/scan_bringup_adc1_mm32). CH4 drives no pin.
+
+Vendor: the bring-up of pwm_bringup_tim1_mm32, then TIM_OC4Init (PWM1, output off, pulse 2249, OC
+        polarity high, idle reset), TIM_OC4PreloadConfig(Enable),
+        TIM_SelectOutputTrigger(TIM_TRIGSource_Update).
+HAL: PwmTimer::configure(...) as pwm_bringup_tim1_mm32, then
+     configure_trigger(2249, Pwm0, no output, Update).
+"""
+family = "mm32spin05"
+mode = "final_state"
+
+[vendor]
+body = '''
+    TIM_TimeBaseInitTypeDef tb;
+    tb.TIM_Prescaler         = 0;
+    tb.TIM_CounterMode       = TIM_CounterMode_CenterAligned2;
+    tb.TIM_Period            = 2250;
+    tb.TIM_ClockDivision     = TIM_CKD_DIV2;
+    tb.TIM_RepetitionCounter = 0;
+    TIM_TimeBaseInit(TIM1, &tb);
+
+    TIM_OCInitTypeDef oc;
+    oc.TIM_OCMode       = TIM_OCMode_PWM1;
+    oc.TIM_OutputState  = TIM_OutputState_Enable;
+    oc.TIM_OutputNState = TIM_OutputNState_Enable;
+    oc.TIM_Pulse        = 0;
+    oc.TIM_OCPolarity   = TIM_OCPolarity_High;
+    oc.TIM_OCNPolarity  = TIM_OCNPolarity_Low;     /* inverted low side */
+    oc.TIM_OCIdleState  = TIM_OCIdleState_Set;     /* safe idle */
+    oc.TIM_OCNIdleState = TIM_OCNIdleState_Set;
+    TIM_OC1Init(TIM1, &oc);
+    TIM_OC1PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC2Init(TIM1, &oc);
+    TIM_OC2PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC3Init(TIM1, &oc);
+    TIM_OC3PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_ARRPreloadConfig(TIM1, ENABLE);
+
+    TIM_BDTRInitTypeDef bd;
+    bd.TIM_OSSRState       = TIM_OSSRState_Enable;
+    bd.TIM_OSSIState       = TIM_OSSIState_Enable;
+    bd.TIM_LOCKLevel       = TIM_LOCKLevel_OFF;
+    bd.TIM_DeadTime        = 0x1C;
+    bd.TIM_Break           = TIM_Break_Disable;
+    bd.TIM_BreakPolarity   = TIM_BreakPolarity_Low;
+    bd.TIM_AutomaticOutput = TIM_AutomaticOutput_Disable;
+    TIM_BDTRConfig(TIM1, &bd);
+    /* no TIM_CtrlPWMOutputs: MOE stays off */
+
+    TIM_OCInitTypeDef t;
+    t.TIM_OCMode       = TIM_OCMode_PWM1;
+    t.TIM_OutputState  = TIM_OutputState_Disable;
+    t.TIM_OutputNState = TIM_OutputNState_Disable;
+    t.TIM_Pulse        = 2249;
+    t.TIM_OCPolarity   = TIM_OCPolarity_High;
+    t.TIM_OCNPolarity  = TIM_OCNPolarity_High;
+    t.TIM_OCIdleState  = TIM_OCIdleState_Reset;
+    t.TIM_OCNIdleState = TIM_OCNIdleState_Reset;
+    TIM_OC4Init(TIM1, &t);
+    TIM_OC4PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_SelectOutputTrigger(TIM1, TIM_TRIGSource_Update);
+'''
+
+[hal]
+body = '''
+    use hal::config::{
+        BreakConfig, ClockDiv, OcMode, PwmAlign, PwmChannelConfig, PwmConfig, TrgoSource,
+    };
+    use hal::{Chip, PeriphLabel, PwmTimer};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        // Low side inverted (the vendor's OCN polarity low), both outputs idling high.
+        let pair = |high, low| PwmChannelConfig {
+            high,
+            low,
+            polarity: true,
+            idle_high: true,
+            idle_high_n: true,
+        };
+        let cfg = PwmConfig {
+            timer: PeriphLabel::Timer0,
+            channels: [pair(0x08, 0x1D), pair(0x09, 0x1E), pair(0x0A, 0x1F)],
+            period: 2250,
+            prescaler: 0,
+            dead_time: 0x1C,
+            brk: BreakConfig {
+                enabled: false,
+                level: false,
+            },
+            trigger_compare: 2249,
+            align: PwmAlign::Center2,
+            arse: true,
+            trigger_oc_mode: OcMode::Pwm0,
+            trigger_ch_enable: false,
+            crep: 0,
+            ckdiv: ClockDiv::Div2,
+            trgo_src: TrgoSource::Update,
+        };
+        let timer = PwmTimer::configure(&chip, &cfg).unwrap();
+        timer.configure_trigger(2249, OcMode::Pwm0, false, TrgoSource::Update);
+    }
+'''

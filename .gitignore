@@ -27,3 +27,7 @@ __pycache__/
 # Bench session scratch and evidence live in the private specs repo (specs/bench-work); a local
 # bench-work symlink to it keeps the bench-work/... paths the specs cite working, and stays untracked.
 /bench-work
+
+# MindMotion LibSamples (not redistributable): fetched and verified by tools/fetch-vendor.sh.
+/third_party/.cache/
+/third_party/mm32-libsamples/

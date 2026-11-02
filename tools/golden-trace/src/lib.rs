@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The golden register-trace harness (specs/hal.md, section 8.1).
 //!
-//! Each vector (`vectors/<area>/<name>.toml`) is one operation written twice: as C against
-//! GigaDevice's standard peripheral library (`third_party/gd32-spl/`) and as Rust against the HAL
-//! (`motorcontroller/hal`). Both run under Unicorn with the peripheral space hooked; the recorded
+//! Each vector (`vectors/<area>/<name>.toml`) is one operation written twice: as C against its
+//! family's vendor library (GigaDevice's standard peripheral libraries in `third_party/gd32-spl/`,
+//! MindMotion's LibSamples fetched into `third_party/mm32-libsamples/` by `tools/fetch-vendor.sh`)
+//! and as Rust against the HAL (`motorcontroller/hal`). Both run under Unicorn with the peripheral space hooked; the recorded
 //! accesses are compared in the vector's mode ([`compare`]).
 //!
 //! The vendor traces are generated from the pinned sources with the pinned compiler and checked in

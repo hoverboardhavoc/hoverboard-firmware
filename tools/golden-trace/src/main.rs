@@ -8,8 +8,9 @@
 //! ```
 //!
 //! `FILTER` keeps the vectors whose id (`<area>/<name>`) contains it. `check` needs the pinned
-//! nightly with the thumbv7m target; `regen` and `trace --vendor` also need arm-none-eabi-gcc from
-//! the Arm GNU Toolchain 15.2.Rel1.
+//! nightly with the thumbv7m target (and thumbv6m for the MM32SPIN05); `regen` and
+//! `trace --vendor` also need arm-none-eabi-gcc from the Arm GNU Toolchain 15.2.Rel1. Any command
+//! over an MM32 vector needs the verified LibSamples copy `tools/fetch-vendor.sh` leaves.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -70,6 +71,14 @@ fn context(filter: &str) -> Result<Context, String> {
     for f in Family::ALL {
         targets.insert(f, Target::load(&dir, f)?);
     }
+    // Every command over an MM32 vector, its HAL-only `check` included, runs on a verified
+    // LibSamples copy (specs/hal.md, section 8.1).
+    let repo = golden_trace::repo_dir();
+    for f in Family::ALL {
+        if vectors.iter().any(|v| v.family == f) {
+            vendor::require_verified(&repo, f)?;
+        }
+    }
     Ok(Context { vectors, targets })
 }
 
@@ -108,7 +117,7 @@ fn hal_images(ctx: &Context) -> Result<BTreeMap<&'static str, Image>, String> {
                 .filter(|v| v.chips.contains(chip))
                 .collect();
             eprintln!("building the HAL image for {chip}");
-            let elf = hal::build(&repo, &build, chip, &on_chip)?;
+            let elf = hal::build(&repo, &build, f, chip, &on_chip)?;
             let bytes = std::fs::read(&elf).map_err(|e| format!("{}: {e}", elf.display()))?;
             images.insert(*chip, Image::from_elf(&bytes)?);
         }
@@ -170,7 +179,7 @@ fn check(filter: &str) -> Result<bool, String> {
 
 /// The vendor trace file text for `v`.
 fn vendor_text(b: &vendor::Builder, v: &Vector, target: &Target) -> Result<String, String> {
-    let elf = b.build(&v.id, v.family, &v.vendor_body)?;
+    let elf = b.build(&v.id, v.family, v.vendor_prelude.as_deref(), &v.vendor_body)?;
     let image = Image::from_elf(&elf)?;
     let accesses =
         trace_of(&image, vendor::ENTRY, v, target).map_err(|e| format!("{}: {e}", v.id))?;
@@ -259,6 +268,7 @@ fn show(id: &str, chip: Option<&str>) -> Result<bool, String> {
             let elf = hal::build(
                 &golden_trace::repo_dir(),
                 &golden_trace::build_dir(),
+                v.family,
                 chip,
                 &[v],
             )?;

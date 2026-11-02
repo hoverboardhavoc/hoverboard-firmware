@@ -1,0 +1,46 @@
+# Mode: final_state over the ADC1 block. End state, from the vendor trace:
+#   ADCFG = PRE /6 | SAMCTL 239.5 (code 7 at 13:10) | TEN | VEN | ADEN
+#   ADCR  = single (IMM) mode, right alignment, TRGSEL 0, TRGEN clear
+#   ADCHS = channel 15 (VREFINT, bit 15)
+# LibSamples' ADC_RegularChannelConfig tests the channel NUMBER against the ADCHS internal-channel
+# bit masks (`channel & ADC_CHSR_CHT`), so for channel 14 or 15 it never sets TEN/VEN; the body
+# calls ADC_TempSensorVrefintCmd itself, as the samples do.
+description = """
+ADC1 configured for one software-started conversion of the internal VREFINT channel (15) at the
+slowest sample time, 239.5 cycles, right-aligned, on the MM32SPIN05; no conversion. The temperature
+sensor and VREFINT enables (ADCFG TEN/VEN) are one call that sets both.
+
+Vendor: ADC_Init (12-bit, PCLK2 / 6, ADC_Mode_Imm, right); ADC_RegularChannelConfig(channel 15,
+        239.5); ADC_TempSensorVrefintCmd(ENABLE); ADC_Cmd(ENABLE).
+HAL: chip.adc() then configure_single(15, 7).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = ["<ADC1_BASE>"]
+
+[vendor]
+body = '''
+    ADC_InitTypeDef a;
+    ADC_StructInit(&a);
+    a.ADC_Resolution       = ADC_Resolution_12b;
+    a.ADC_PRESCARE         = ADC_PCLK2_PRESCARE_6;
+    a.ADC_Mode             = ADC_Mode_Imm;
+    a.ADC_ExternalTrigConv = ADC1_ExternalTrigConv_T1_CC1;  /* no trigger: TRGEN stays clear */
+    a.ADC_DataAlign        = ADC_DataAlign_Right;
+    ADC_Init(ADC1, &a);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_Vrefint, 0, ADC_Samctl_239_5);
+    ADC_TempSensorVrefintCmd(ENABLE);
+    ADC_Cmd(ADC1, ENABLE);
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc();
+        adc.configure_single(15, 7); // VREFINT at 239.5 cycles
+    }
+'''

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The hoverboard HAL (specs/hal.md).
 //!
-//! One source drives the GD32F103C8, the GD32F130C8 and the GD32F103RC. The chip is chosen at
+//! One source drives the GD32F103C8, the GD32F130C8, the GD32F103RC and the MM32SPIN05. The chip is chosen at
 //! compile time by exactly one cargo feature; a call resolves to that chip's register model with no
 //! runtime selector. A chip is its [`descriptor::DESCRIPTOR`] plus one register model per
 //! peripheral, mapped in build.rs.
@@ -12,16 +12,27 @@
 #![cfg_attr(not(test), no_std)]
 #![warn(missing_docs)]
 
-#[cfg(not(any(feature = "gd32f103c8", feature = "gd32f130c8", feature = "gd32f103rc")))]
-compile_error!("hal: enable exactly one chip feature (gd32f103c8, gd32f130c8 or gd32f103rc)");
+#[cfg(not(any(
+    feature = "gd32f103c8",
+    feature = "gd32f130c8",
+    feature = "gd32f103rc",
+    feature = "mm32spin05"
+)))]
+compile_error!(
+    "hal: enable exactly one chip feature (gd32f103c8, gd32f130c8, gd32f103rc or mm32spin05)"
+);
 
 #[cfg(any(
     all(feature = "gd32f103c8", feature = "gd32f130c8"),
     all(feature = "gd32f103c8", feature = "gd32f103rc"),
+    all(feature = "gd32f103c8", feature = "mm32spin05"),
     all(feature = "gd32f130c8", feature = "gd32f103rc"),
+    all(feature = "gd32f130c8", feature = "mm32spin05"),
+    all(feature = "gd32f103rc", feature = "mm32spin05"),
 ))]
 compile_error!("hal: more than one chip feature is enabled; enable exactly one");
 
+#[cfg_attr(hal_adc = "mm32", path = "adc/mm32.rs")]
 pub mod adc;
 pub mod addr;
 #[cfg(hal_gpio = "crl")]
@@ -40,6 +51,7 @@ pub mod irq;
 pub mod pincap;
 pub mod reg;
 pub mod serial;
+#[cfg(hal_spi = "gd")]
 pub mod spi;
 pub mod timer;
 pub mod usart;
@@ -65,6 +77,7 @@ pub use i2c::{I2c, I2cMode};
 pub use irq::Interrupt as interrupt;
 pub use irq::Interrupt;
 pub use serial::SplitSerial;
+#[cfg(hal_spi = "gd")]
 pub use spi::Spi;
 pub use timer::{ArmGate, PwmHandle, PwmTimer};
 pub use usart::Usart;

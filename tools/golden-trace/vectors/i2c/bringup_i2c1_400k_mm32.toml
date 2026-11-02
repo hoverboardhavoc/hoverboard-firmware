@@ -1,0 +1,60 @@
+# Mode: final_state, narrowed with assert_only to the I2C1 block (the HAL's bring-up also enables
+# the clocks, clears the bus on the pins and routes them; those are compared by the clock and GPIO
+# vectors). End state, from the vendor trace:
+#   CR   = EMPINT | SLAVEDIS | REPEN | FAST | MASTER: the master at fast speed with restarts
+#   FSLR = 84, FSHR = 77: I2C_Init's SCL counts for 400 kHz at PCLK1 = 72 MHz, from its own formula
+#          (low = (PCLK1 / speed - 13 - 82 ns / PCLK1 period) / 2 + 4, high = the rest)
+#   IMR  = masked (I2C_Init's `IMR &= 0xC000` from reset 0), RXTLR = TXTLR = 0
+#   ENR  = ENABLE
+# Every access is a half-word (the vendor's 16-bit register fields), the HAL's must be too.
+description = """
+I2C1's bring-up on the MM32SPIN05 as the IMU's master at 400 kHz: disable, the fast-mode SCL counts
+from PCLK1, master mode at fast speed with restart enabled and the slave disabled, interrupts
+masked, both FIFO thresholds 0, enable.
+
+Vendor: I2C_StructInit; I2C_Init(I2C1, { master, own address 0, fast, 400000 }); I2C_Cmd(ENABLE),
+        LibSamples' I2C_MasterModeInit sample.
+HAL: I2c::new(&chip, &REFERENCE_72M_HSI, I2c0 (I2C1), (SCL PD1, SDA PD0), I2cMode::fast(400_000, ..)).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = ["<I2C1_BASE>"]
+
+# The running 72 MHz tree, not reset: I2C_Init derives its SCL counts from RCC_GetPCLK1Freq, which
+# reads RCC_CR (bit 20, the HSI's 72 MHz output) and RCC_CFGR (SWS = HSI, HPRE / 1, PPRE1 / 1). That
+# is the tree clock/tree_72m_hsi_mm32 ends in: PCLK1 = 72 MHz (see that vector for why APB1 is / 1).
+[reset_overrides]
+"<RCC_BASE>+0x00" = 0x0010_0003
+"<RCC_BASE>+0x04" = 0x0000_000A
+
+[vendor]
+body = '''
+    I2C_InitTypeDef s;
+    I2C_StructInit(&s);
+    s.Mode       = I2C_CR_MASTER;
+    s.OwnAddress = 0;
+    s.Speed      = I2C_CR_FAST;
+    s.ClockSpeed = 400000;
+    I2C_Init(I2C1, &s);
+    I2C_Cmd(I2C1, ENABLE);
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, ClockConfig, I2c, I2cMode, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let pins = (chip.pin(0x31).unwrap(), chip.pin(0x30).unwrap()); // SCL PD1, SDA PD0
+        let i2c = I2c::new(
+            &chip,
+            &ClockConfig::REFERENCE_72M_HSI,
+            PeriphLabel::I2c0,
+            pins,
+            I2cMode::fast(400_000, hal::i2c::FastDuty::Two),
+        )
+        .unwrap();
+        let _ = i2c;
+    }
+'''

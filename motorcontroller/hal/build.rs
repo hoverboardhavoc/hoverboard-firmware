@@ -2,7 +2,7 @@
 //! The chip table: which register model each peripheral of the compiled chip uses, and the chip's
 //! vendor vector list (specs/hal.md, sections 3.1 and 5).
 //!
-//! The chip is the one `gd32*` cargo feature that is enabled (src/lib.rs refuses none or two). From
+//! The chip is the one chip cargo feature that is enabled (src/lib.rs refuses none or two). From
 //! it this script:
 //!
 //! - emits one `hal_<peripheral> = "<model>"` cfg per peripheral whose model differs between the
@@ -36,6 +36,8 @@ struct ChipRow {
     models: &'static [(&'static str, &'static str)],
     /// The device vectors in IRQ-number order, `None` where the vendor table holds a reserved 0.
     vectors: &'static [Option<&'static str>],
+    /// Device-interrupt entries in the flash table (the list padded with reserved words).
+    table_entries: usize,
 }
 
 /// GD32F10x medium density, from GigaDevice's `startup_gd32f10x_md.s` (GD32F10x CMSIS, the pinned
@@ -237,26 +239,80 @@ const F1X0: &[Option<&str>] = &[
     Some("CAN1_SCE"),
 ];
 
+/// MM32SPIN05 (the MM32SPIN0x "q" series), from MindMotion's `startup_mm32spin0x_q_keil.s`
+/// (LibSamples V1.13, `Device/MM32SPIN0x_q/Source/KEIL_StartAsm`): IRQ 0 (`WWDG`) through 31, the
+/// vendor's reserved words where it has them. The vendor names its handlers `*_IRQHandler`; the
+/// stems are kept (`ADC1_COMP`, `UART1`, `DMA1_Channel2_3`).
+const MM32SPIN0X_Q: &[Option<&str>] = &[
+    Some("WWDG"),
+    Some("PVD"),
+    None,
+    Some("FLASH"),
+    Some("RCC"),
+    Some("EXTI0_1"),
+    Some("EXTI2_3"),
+    Some("EXTI4_15"),
+    Some("HWDIV"),
+    Some("DMA1_Channel1"),
+    Some("DMA1_Channel2_3"),
+    Some("DMA1_Channel4_5"),
+    Some("ADC1_COMP"),
+    Some("TIM1_BRK_UP_TRG_COM"),
+    Some("TIM1_CC"),
+    Some("TIM2"),
+    Some("TIM3"),
+    None,
+    None,
+    Some("TIM14"),
+    None,
+    Some("TIM16"),
+    Some("TIM17"),
+    Some("I2C1"),
+    None,
+    Some("SPI1"),
+    Some("SPI2"),
+    Some("UART1"),
+    Some("UART2"),
+    None,
+    None,
+    None,
+];
+
 /// The peripherals with more than one model, and the models each takes. The cfg names are declared
 /// to rustc's check-cfg from this list.
 const MODEL_CFGS: &[(&str, &[&str])] = &[
-    // CRL/CRH nibbles on APB2 vs CTL/OMODE/OSPD/PUD with the per-pin AFSEL mux on AHB.
-    ("hal_gpio", &["crl", "ctl"]),
+    // CRL/CRH nibbles on APB2 vs CTL/OMODE/OSPD/PUD with the per-pin AFSEL mux on AHB; the MM32
+    // has the CRL/CRH nibbles on AHB with a per-pin AFRL/AFRH mux.
+    ("hal_gpio", &["crl", "ctl", "mm32"]),
     // The F10x RCC and the F1x0 RCU: the enable-bit map, the flash wait states, the ADC clock.
-    ("hal_clock", &["f10x", "f1x0"]),
+    // The MM32 RCC: no PLL, the HSI's 72 MHz output, the ADC clock divider in the ADC itself.
+    ("hal_clock", &["f10x", "f1x0", "mm32"]),
     // The F10x USART (one DATA register) and the F1x0 USART (separate RDATA/TDATA, the ISR/ICR
     // style status).
-    ("hal_usart", &["f10x", "f1x0"]),
+    // The MM32 UART (`TDR`/`RDR`/`CSR`/`ISR`/`IER`/`ICR`/`GCR`/`CCR`/`BRR`/`FRA`).
+    ("hal_usart", &["f10x", "f1x0", "mm32"]),
     // The F10x ADC carries the ADC0/ADC1 sync mode (`CTL0.SYNCM`, bits 19:16, used on ADC0 only)
     // and the second instance it pairs with; the F1x0 ADC has one instance and no SYNCM field
     // (gd32f10x_adc.h, gd32f1x0_adc.h). Every other ADC register and bit the HAL programs is the
     // same on both, so the regular and injected groups are one model.
-    ("hal_adc", &["f10x", "f1x0"]),
+    // The MM32 ADC (`ADCFG`/`ADCR`/`ADCHS`/`ADSTA`, a data register per channel, no injected
+    // group) is its own model.
+    ("hal_adc", &["f10x", "f1x0", "mm32"]),
     // The DMA request map: which channel carries each USART's receive and transmit, and so which
     // vector (the F10x one vector per channel, the F1x0 channels grouped in pairs).
-    ("hal_dma", &["f10x", "f1x0"]),
+    // The MM32 DMA1 has the F1x0 request map for its two UARTs and its own vector names.
+    ("hal_dma", &["f10x", "f1x0", "mm32"]),
     // The vendor vector list the chip links.
-    ("hal_vectors", &["f10x_md", "f10x_hd", "f1x0"]),
+    ("hal_vectors", &["f10x_md", "f10x_hd", "f1x0", "mm32"]),
+    // The GD32 event-model I2C and the MM32's DesignWare-style I2C (`TAR`, the FIFOs, `TX_ABRT`).
+    ("hal_i2c", &["gd", "mm32"]),
+    // The debug block: `DBG_CTL0` at `0xE004_2004` on the GD32, `DBGMCU_CR` at `0x4001_3404`.
+    ("hal_dbg", &["gd", "mm32"]),
+    // The GD32 SPI. The MM32 SPI is another model this HAL does not carry (no image uses SPI).
+    ("hal_spi", &["gd"]),
+    // The core: the Cortex-M3 (the DWT cycle counter, four priority bits) or the Cortex-M0 (no
+    // DWT, two priority bits).
+    ("hal_core", &["m3", "m0"]),
 ];
 
 const CHIPS: &[ChipRow] = &[
@@ -272,8 +328,13 @@ const CHIPS: &[ChipRow] = &[
             ("hal_adc", "f10x"),
             ("hal_dma", "f10x"),
             ("hal_vectors", "f10x_md"),
+            ("hal_i2c", "gd"),
+            ("hal_dbg", "gd"),
+            ("hal_spi", "gd"),
+            ("hal_core", "m3"),
         ],
         vectors: F10X_MD,
+        table_entries: GD32_TABLE_ENTRIES,
     },
     ChipRow {
         feature: "gd32f103rc",
@@ -287,8 +348,13 @@ const CHIPS: &[ChipRow] = &[
             ("hal_adc", "f10x"),
             ("hal_dma", "f10x"),
             ("hal_vectors", "f10x_hd"),
+            ("hal_i2c", "gd"),
+            ("hal_dbg", "gd"),
+            ("hal_spi", "gd"),
+            ("hal_core", "m3"),
         ],
         vectors: F10X_HD,
+        table_entries: GD32_TABLE_ENTRIES,
     },
     ChipRow {
         feature: "gd32f130c8",
@@ -302,17 +368,46 @@ const CHIPS: &[ChipRow] = &[
             ("hal_adc", "f1x0"),
             ("hal_dma", "f1x0"),
             ("hal_vectors", "f1x0"),
+            ("hal_i2c", "gd"),
+            ("hal_dbg", "gd"),
+            ("hal_spi", "gd"),
+            ("hal_core", "m3"),
         ],
         vectors: F1X0,
+        table_entries: GD32_TABLE_ENTRIES,
+    },
+    ChipRow {
+        feature: "mm32spin05",
+        flash_kib: 32,
+        page_bytes: 1024,
+        ram_kib: 4,
+        models: &[
+            ("hal_gpio", "mm32"),
+            ("hal_clock", "mm32"),
+            ("hal_usart", "mm32"),
+            ("hal_adc", "mm32"),
+            ("hal_dma", "mm32"),
+            ("hal_vectors", "mm32"),
+            ("hal_i2c", "mm32"),
+            ("hal_dbg", "mm32"),
+            ("hal_core", "m0"),
+        ],
+        vectors: MM32SPIN0X_Q,
+        table_entries: MM32_TABLE_ENTRIES,
     },
 ];
 
-/// Device-interrupt entries in the flash table. With the 16 system words the `.vector_table`
+/// Device-interrupt entries in the GD32 flash tables. With the 16 system words the `.vector_table`
 /// section is 128 words, 512 B, so `.text` starts on a 512 B boundary. That alignment is a measured
 /// silicon constraint carried over from `motorcontroller/vectors`: these parts run 2 flash wait
 /// states with no cache or prefetch, and a shorter table moved the hot paths and cost the F130
 /// control ticks (silicon, 2026-07-26: 74 entries 0.9960, 96 entries 0.9997, 128 total 1.0000).
-const TABLE_ENTRIES: usize = 112;
+const GD32_TABLE_ENTRIES: usize = 112;
+
+/// The MM32SPIN05's device entries: its vendor list, 32 words. cortex-m-rt allows at most 32 device
+/// vectors on a Cortex-M0 (ARMv6-M has 32 external interrupts), and the part's flash and its
+/// zero-wait behaviour carry no alignment finding like the GD32's, so its table is not padded.
+const MM32_TABLE_ENTRIES: usize = 32;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -337,7 +432,11 @@ fn main() {
     }
 
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    fs::write(out.join("interrupts.rs"), interrupts_rs(chip.vectors)).expect("interrupts.rs");
+    fs::write(
+        out.join("interrupts.rs"),
+        interrupts_rs(chip.vectors, chip.table_entries),
+    )
+    .expect("interrupts.rs");
     let page = match chip.page_bytes {
         1024 => "PageSize::K1",
         2048 => "PageSize::K2",
@@ -365,9 +464,9 @@ fn main() {
     }
 }
 
-fn interrupts_rs(vectors: &[Option<&str>]) -> String {
+fn interrupts_rs(vectors: &[Option<&str>], table_entries: usize) -> String {
     assert!(
-        vectors.len() <= TABLE_ENTRIES,
+        vectors.len() <= table_entries,
         "vector list longer than the flash table"
     );
     let mut s = String::new();
@@ -397,9 +496,9 @@ fn interrupts_rs(vectors: &[Option<&str>]) -> String {
     s.push_str("/// The device part of the flash vector table, which cortex-m-rt's `device` feature links.\n");
     let _ = writeln!(
         s,
-        "#[cfg(target_arch = \"arm\")]\n#[doc(hidden)]\n#[link_section = \".vector_table.interrupts\"]\n#[no_mangle]\npub static __INTERRUPTS: [Vector; {TABLE_ENTRIES}] = ["
+        "#[cfg(target_arch = \"arm\")]\n#[doc(hidden)]\n#[link_section = \".vector_table.interrupts\"]\n#[no_mangle]\npub static __INTERRUPTS: [Vector; {table_entries}] = ["
     );
-    for n in 0..TABLE_ENTRIES {
+    for n in 0..table_entries {
         match vectors.get(n).copied().flatten() {
             Some(name) => {
                 let _ = writeln!(s, "    Vector {{ handler: {name} }},");

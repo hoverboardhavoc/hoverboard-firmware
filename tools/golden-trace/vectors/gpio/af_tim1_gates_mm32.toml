@@ -1,0 +1,50 @@
+# Mode: final_state, narrowed with assert_only to the two ports' CRH and AFRH (the gate pins are all in
+# the high halves). End state over the floating-input reset:
+#   GPIOA CRH  = 0x44444BBB (PA8-PA10: AF push-pull at 50 MHz)   GPIOA AFRH = 0x00000222 (AF2)
+#   GPIOB CRH  = 0xBBB44444 (PB13-PB15)                          GPIOB AFRH = 0x22200000 (AF2)
+description = """
+The routing of TIM1's complementary gate set on the MM32SPIN05: CH1-CH3 on PA8-PA10 and CH1N-CH3N
+on PB13-PB15, AF push-pull at 50 MHz, AF2 (datasheet tables 6 and 7). The same pins as the GD32
+TIMER0 set.
+
+Vendor: GPIO_PinAFConfig(.., GPIO_AF_2) per pin, then GPIO_Init(AF_PP, 50 MHz) on each port's three.
+HAL: chip.route_advanced_pwm_pin() for each of the six.
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = [
+    "<GPIOA_BASE>+0x04",
+    "<GPIOA_BASE>+0x24",
+    "<GPIOB_BASE>+0x04",
+    "<GPIOB_BASE>+0x24",
+]
+
+[vendor]
+body = '''
+    GPIO_InitTypeDef g;
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource8, GPIO_AF_2);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource9, GPIO_AF_2);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource10, GPIO_AF_2);
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource13, GPIO_AF_2);
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource14, GPIO_AF_2);
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource15, GPIO_AF_2);
+    g.GPIO_Speed = GPIO_Speed_50MHz;
+    g.GPIO_Mode  = GPIO_Mode_AF_PP;
+    g.GPIO_Pin   = GPIO_Pin_8 | GPIO_Pin_9 | GPIO_Pin_10;
+    GPIO_Init(GPIOA, &g);
+    g.GPIO_Pin   = GPIO_Pin_13 | GPIO_Pin_14 | GPIO_Pin_15;
+    GPIO_Init(GPIOB, &g);
+'''
+
+[hal]
+body = '''
+    use hal::Chip;
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        for pin in [0x08, 0x09, 0x0A, 0x1D, 0x1E, 0x1F] {
+            chip.route_advanced_pwm_pin(pin).unwrap();
+        }
+    }
+'''

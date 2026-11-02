@@ -25,10 +25,14 @@ use crate::vector::Response;
 const FLASH: (u64, u64) = (0x0800_0000, 512 * 1024);
 const RAM: (u64, u64) = (0x2000_0000, 64 * 1024);
 /// The peripheral windows mapped as plain memory (reads see what was last written or seeded).
-const MMIO_MAPS: [(u64, u64); 3] = [
+const MMIO_MAPS: [(u64, u64); 4] = [
     (0x4000_0000, 0x3_0000),
     (0x4800_0000, 0x1_0000),
     (0xE000_0000, 0x10_0000),
+    // The system-memory page with the factory words (the unique ID, the flash size, the MM32's HSI
+    // trim at 0x1FFF_F7FA): read by the clock and identity code, seeded by a family table, never
+    // recorded (not a peripheral).
+    (0x1FFF_F000, 0x1000),
 ];
 /// The windows whose accesses are recorded.
 const HOOKED: [(u64, u64); 2] = [(0x4000_0000, 0x5FFF_FFFF), (0xE000_0000, 0xE00F_FFFF)];
@@ -197,9 +201,14 @@ pub fn run(
 
     let mut uc = Unicorn::new_with_data(Arch::ARM, Mode::THUMB, state).map_err(e("open"))?;
     // The M-profile core: the default A-profile one refuses the system instructions (mrs/cpsid) the
-    // Rust side's critical sections use.
-    uc.ctl_set_cpu_model(ArmCpuModel::CORTEX_M3 as i32)
-        .map_err(e("cpu model"))?;
+    // Rust side's critical sections use. A Cortex-M0 family runs the M0 model, so a Thumb-2
+    // instruction in either image faults instead of running.
+    let model = if target.family.cortex_m0() {
+        ArmCpuModel::CORTEX_M0
+    } else {
+        ArmCpuModel::CORTEX_M3
+    };
+    uc.ctl_set_cpu_model(model as i32).map_err(e("cpu model"))?;
     for (base, size) in [FLASH, RAM, (SENTINEL, 0x1000)]
         .into_iter()
         .chain(MMIO_MAPS)

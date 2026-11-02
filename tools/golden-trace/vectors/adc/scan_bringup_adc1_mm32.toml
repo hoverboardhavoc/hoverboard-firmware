@@ -1,0 +1,72 @@
+# Mode: final_state over the ADC1 block. LibSamples builds ADCFG and ADCR with a read-modify-write
+# per helper; the HAL writes the fields in its own count and order. End state, from the vendor trace:
+#   ADCFG = PRE /6 (ADC_CFGR_PRE_6) | SAMCTL 7.5 (code 1 at 13:10) | ADEN
+#   ADCR  = SCAN mode | left alignment | TRGSEL = TIM1 TRIG (TRGO) | TRGEN | ADIE
+#   ADCHS = channels 2 and 6 (bits 2 and 6)
+# The SPIN05's ADC has no injected group: the motor's phase-current pair is the scan group, started
+# by TIM1's TRGO, read from the per-channel data registers ADDR2 and ADDR6 (scan_read_adc1_mm32). The
+# sample time is one field for every channel (ADCFG.SAMCTL), so the two channels share it. There is
+# no calibration step: the part's ADC has none (reg_adc.h carries no calibration bits).
+#
+# The bring-up ends, on both sides, with ADCR.ADST cleared (LibSamples' ADC_SoftwareStartConvCmd
+# DISABLE, a read-modify-write) and ADIF cleared (ADC_ClearFlag). That is a bench finding, not
+# LibSamples' sample: on the MM32SPIN05 the trigger enable started a scan at once and left ADST
+# set, after which the ADC took no trigger (specs/bench-work/mm32/hal-step3/logs/v08-adc-live.txt,
+# v16-motor-verify-adc-trace.txt); the HAL's bring-up clears both, so the vendor body does too.
+description = """
+ADC1's timer-triggered scan for the phase currents on the MM32SPIN05: channels 2 (PA2) and 6 (PA6),
+the PFOP part's op-amp outputs (specs/agent-runs/mm32-poc-report.md), at 7.5 cycles, left-aligned,
+ADC clock PCLK2 / 6, started by TIM1's TRGO (the update event, timer/trgo_trigger_tim1_mm32), the
+end-of-conversion interrupt enabled, ADC on. No conversion.
+
+Vendor: ADC_Init (12-bit, PCLK2 / 6, ADC_Mode_Scan, ADC1_ExternalTrigConv_T1_TRIG, left);
+        ADC_RegularChannelConfig(channel 2, then 6, 7.5); ADC_ITConfig(EOC); ADC_ExternalTrigConvCmd;
+        ADC_Cmd.
+HAL: InjectedAdcController::new().configure(&chip, &InjectedAdcConfig { Adc0 (ADC1), [2, 6] at
+     code 1, left-aligned, Timer0 (TIM1) Trgo, /6 }).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = ["<ADC1_BASE>"]
+
+[vendor]
+body = '''
+    ADC_InitTypeDef a;
+    ADC_StructInit(&a);
+    a.ADC_Resolution       = ADC_Resolution_12b;
+    a.ADC_PRESCARE         = ADC_PCLK2_PRESCARE_6;
+    a.ADC_Mode             = ADC_Mode_Scan;
+    a.ADC_ExternalTrigConv = ADC1_ExternalTrigConv_T1_TRIG;
+    a.ADC_DataAlign        = ADC_DataAlign_Left;
+    ADC_Init(ADC1, &a);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_2, 0, ADC_Samctl_7_5);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_6, 0, ADC_Samctl_7_5);
+    ADC_ITConfig(ADC1, ADC_IT_EOC, ENABLE);
+    ADC_ExternalTrigConvCmd(ADC1, ENABLE);
+    ADC_Cmd(ADC1, ENABLE);
+    ADC_SoftwareStartConvCmd(ADC1, DISABLE);
+    ADC_ClearFlag(ADC1, ADC_IT_EOC);
+'''
+
+[hal]
+body = '''
+    use hal::config::{AdcClockDiv, InjectedAdcConfig, InjectedChannel, TimerTriggerLink};
+    use hal::{Chip, InjectedAdcController, PeriphLabel, TriggeredAdc};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let mut channels = heapless::Vec::new();
+        channels.push(InjectedChannel { channel: 2, sample_time: 1 }).unwrap();
+        channels.push(InjectedChannel { channel: 6, sample_time: 1 }).unwrap();
+        let cfg = InjectedAdcConfig {
+            adc: PeriphLabel::Adc0,
+            channels,
+            left_aligned: true,
+            trigger_timer: PeriphLabel::Timer0,
+            trigger_link: TimerTriggerLink::Trgo,
+            clock_div: AdcClockDiv::Div6,
+        };
+        InjectedAdcController::new().configure(&chip, &cfg).unwrap();
+    }
+'''

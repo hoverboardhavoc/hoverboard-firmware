@@ -61,7 +61,7 @@ pub struct IrqMap {
 /// The facts of one part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McuDescriptor {
-    /// The part name, as GigaDevice marks it.
+    /// The part name, as its vendor marks it.
     pub name: &'static str,
     /// Peripheral base addresses; an instance the part lacks has none.
     pub addrs: AddrTable,
@@ -81,10 +81,12 @@ pub struct McuDescriptor {
     /// The interrupt numbers the drivers use.
     pub irqs: IrqMap,
     /// The `NODE_HELLO` mcu byte for this part (`net::walk::MCU_F10X` = 1 for the GD32F10x,
-    /// `MCU_F1X0` = 2 for the GD32F1x0).
+    /// `MCU_F1X0` = 2 for the GD32F1x0; 4 for the MM32SPIN05, the byte the MM32 proof of concept
+    /// put on the wire, which `net` names when the MM32 image is built).
     pub node_mcu: u8,
     /// The cyclic payload's chip tag (`linkctl::ChipTag`: 1 = GD32F103C8, 2 = GD32F130C8,
-    /// 3 = GD32F103RC).
+    /// 3 = GD32F103RC; 4 for the MM32SPIN05, which `linkctl::ChipTag` names when the MM32 image is
+    /// built).
     pub chip_tag: u8,
 }
 
@@ -106,6 +108,7 @@ impl McuDescriptor {
 // --- base addresses, from the GigaDevice user manuals' memory maps and the SPL headers ----------
 
 /// The peripherals at the same base on every GD32 this HAL drives.
+#[cfg(not(feature = "mm32spin05"))]
 const COMMON: AddrTable = AddrTable::new()
     // USART0 (ST USART1) on APB2, USART1 on APB1.
     .with(PeriphLabel::Usart0, 0x4001_3800)
@@ -217,6 +220,73 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     chip_tag: 2,
 };
 
+/// MM32SPIN05 (the "q" die, device ID `0xCC44_60B1`): 32 KiB flash in 1 KiB pages, 4 KiB SRAM,
+/// LQFP48 (the Gen2.4.2 split boards). MindMotion numbers its instances from 1; the labels are the
+/// HAL's, at the same addresses as the GD32 instances they stand in for (MindMotion's
+/// `reg_*.h`, LibSamples V1.13):
+///
+/// | label    | MM32 block | base          |
+/// |----------|------------|---------------|
+/// | `Usart0` | UART1      | `0x4001_3800` |
+/// | `Usart1` | UART2      | `0x4000_4400` |
+/// | `I2c0`   | I2C1       | `0x4000_5400` |
+/// | `Adc0`   | ADC1       | `0x4001_2400` |
+/// | `Timer0` | TIM1       | `0x4001_2C00` |
+/// | `Timer1` | TIM2 (32-bit) | `0x4000_0000` |
+/// | `Fwdgt`  | IWDG       | `0x4000_3000` |
+/// | `Dma0`   | DMA1       | `0x4002_0000` |
+///
+/// GPIO A-D on AHB at `0x4800_0000` (0x400 stride, no port F), and the factory unique ID at
+/// `0x1FFF_F7E8`. One advanced timer and one ADC. Bonded in LQFP48 (DS_MM32SPIN05 table 5): PA0-15,
+/// PB0-15, PC13-15 and PD0-3. SPI1 and SPI2 exist on the part and are not in the table: their
+/// register model is not this HAL's (`hal_spi`), so no bring-up may name them.
+#[cfg(feature = "mm32spin05")]
+pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
+    name: "MM32SPIN05",
+    addrs: AddrTable::new()
+        .with(PeriphLabel::Usart0, 0x4001_3800)
+        .with(PeriphLabel::Usart1, 0x4000_4400)
+        .with(PeriphLabel::Rcu, 0x4002_1000)
+        .with(PeriphLabel::I2c0, 0x4000_5400)
+        .with(PeriphLabel::Adc0, 0x4001_2400)
+        .with(PeriphLabel::Timer0, 0x4001_2C00)
+        .with(PeriphLabel::Fwdgt, 0x4000_3000)
+        .with(PeriphLabel::Timer1, 0x4000_0000)
+        .with(PeriphLabel::Dma0, 0x4002_0000)
+        .with(PeriphLabel::Gpioa, 0x4800_0000)
+        .with(PeriphLabel::Gpiob, 0x4800_0400)
+        .with(PeriphLabel::Gpioc, 0x4800_0800)
+        .with(PeriphLabel::Gpiod, 0x4800_0C00)
+        .with(PeriphLabel::UniqueId, 0x1FFF_F7E8),
+    flash_kib: FLASH_KIB,
+    flash_page: FLASH_PAGE,
+    ram_kib: RAM_KIB,
+    adv_timers: 1,
+    adc_count: 1,
+    bonding: [0xFFFF, 0xFFFF, 0xE000, 0x000F, 0, 0],
+    irqs: IrqMap {
+        period: Interrupt::ADC1_COMP,
+        usart: [
+            // UART1: DMA1 channel 3 receive and channel 2 transmit share the grouped Ch2/3
+            // vector (MindMotion's UART_DMA samples).
+            Some(UsartIrqs {
+                rx: Interrupt::UART1,
+                dma_rx: Interrupt::DMA1_Channel2_3,
+                dma_tx: Interrupt::DMA1_Channel2_3,
+            }),
+            // UART2: DMA1 channel 5 receive and channel 4 transmit share the grouped Ch4/5 vector.
+            Some(UsartIrqs {
+                rx: Interrupt::UART2,
+                dma_rx: Interrupt::DMA1_Channel4_5,
+                dma_tx: Interrupt::DMA1_Channel4_5,
+            }),
+            None,
+        ],
+    },
+    node_mcu: 4,
+    chip_tag: 4,
+};
+
 /// The GD32F10x driver interrupts (the same numbers at medium and high density).
 #[cfg(any(feature = "gd32f103c8", feature = "gd32f103rc"))]
 const F10X_IRQS: IrqMap = IrqMap {
@@ -291,6 +361,7 @@ mod tests {
             "GD32F103C8" => 37,
             "GD32F130C8" => 39,
             "GD32F103RC" => 51,
+            "MM32SPIN05" => 39,
             other => panic!("no datasheet count for {other}"),
         };
         assert_eq!(n, want);
@@ -302,6 +373,7 @@ mod tests {
             "GD32F103C8" => (1, 1),
             "GD32F130C8" => (2, 2),
             "GD32F103RC" => (1, 3),
+            "MM32SPIN05" => (4, 4),
             other => panic!("no identity for {other}"),
         };
         assert_eq!((DESCRIPTOR.node_mcu, DESCRIPTOR.chip_tag), (mcu, tag));

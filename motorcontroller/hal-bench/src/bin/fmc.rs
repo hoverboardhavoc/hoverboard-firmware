@@ -2,7 +2,7 @@
 //! `fmc`: `hal::fmc::Fmc` on silicon (specs/hal.md section 8.4).
 //!
 //! Scratch pages: the two pages below the store's two (on a 64 KiB part `0x0800_F000` and
-//! `0x0800_F400`), above any validator image and outside the store, which the bridge's flash path
+//! `0x0800_F400`, on the 32 KiB MM32SPIN05 `0x0800_7000` and `0x0800_7400`), above any validator image and outside the store, which the bridge's flash path
 //! also never reaches. Erases both, programs 32 bytes across their boundary, reads them back,
 //! re-programs a written half-word (must be refused), tries out-of-range and misaligned addresses
 //! (must be refused), and erases both again (must read back erased). Leaves both pages erased.

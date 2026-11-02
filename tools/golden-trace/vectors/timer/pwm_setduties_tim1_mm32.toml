@@ -1,0 +1,98 @@
+# Mode: final_state. The end state of pwm_bringup_tim1_mm32 with the three phase compares holding
+# the duties:
+#   CCR1 = 0x000002EE (750)    CCR2 = 0x00000465 (1125)    CCR3 = 0x000005DC (1500)
+#   BDTR = 0x00000C1C (MOE, bit 15, still clear)
+description = """
+TIM1's bring-up on the MM32SPIN05, then the three phase duties written through the PWM handle: the
+compare values land at CCR1-CCR3 at the width the vendor writes them (TIM_SetCompareN writes the
+32-bit register), and MOE stays off (the handle cannot arm the bridge).
+
+Vendor: the bring-up of pwm_bringup_tim1_mm32, then TIM_SetCompare1(750), 2(1125), 3(1500).
+HAL: PwmTimer::configure(...) as pwm_bringup_tim1_mm32, then handle().set_duties([750, 1125, 1500]).
+"""
+family = "mm32spin05"
+mode = "final_state"
+
+[vendor]
+body = '''
+    TIM_TimeBaseInitTypeDef tb;
+    tb.TIM_Prescaler         = 0;
+    tb.TIM_CounterMode       = TIM_CounterMode_CenterAligned2;
+    tb.TIM_Period            = 2250;
+    tb.TIM_ClockDivision     = TIM_CKD_DIV2;
+    tb.TIM_RepetitionCounter = 0;
+    TIM_TimeBaseInit(TIM1, &tb);
+
+    TIM_OCInitTypeDef oc;
+    oc.TIM_OCMode       = TIM_OCMode_PWM1;
+    oc.TIM_OutputState  = TIM_OutputState_Enable;
+    oc.TIM_OutputNState = TIM_OutputNState_Enable;
+    oc.TIM_Pulse        = 0;
+    oc.TIM_OCPolarity   = TIM_OCPolarity_High;
+    oc.TIM_OCNPolarity  = TIM_OCNPolarity_Low;     /* inverted low side */
+    oc.TIM_OCIdleState  = TIM_OCIdleState_Set;     /* safe idle */
+    oc.TIM_OCNIdleState = TIM_OCNIdleState_Set;
+    TIM_OC1Init(TIM1, &oc);
+    TIM_OC1PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC2Init(TIM1, &oc);
+    TIM_OC2PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_OC3Init(TIM1, &oc);
+    TIM_OC3PreloadConfig(TIM1, TIM_OCPreload_Enable);
+    TIM_ARRPreloadConfig(TIM1, ENABLE);
+
+    TIM_BDTRInitTypeDef bd;
+    bd.TIM_OSSRState       = TIM_OSSRState_Enable;
+    bd.TIM_OSSIState       = TIM_OSSIState_Enable;
+    bd.TIM_LOCKLevel       = TIM_LOCKLevel_OFF;
+    bd.TIM_DeadTime        = 0x1C;
+    bd.TIM_Break           = TIM_Break_Disable;
+    bd.TIM_BreakPolarity   = TIM_BreakPolarity_Low;
+    bd.TIM_AutomaticOutput = TIM_AutomaticOutput_Disable;
+    TIM_BDTRConfig(TIM1, &bd);
+    /* no TIM_CtrlPWMOutputs: MOE stays off */
+    TIM_SetCompare1(TIM1, 750);
+    TIM_SetCompare2(TIM1, 1125);
+    TIM_SetCompare3(TIM1, 1500);
+'''
+
+[hal]
+body = '''
+    use hal::config::{
+        BreakConfig, ClockDiv, OcMode, PwmAlign, PwmChannelConfig, PwmConfig, TrgoSource,
+    };
+    use hal::{Chip, PeriphLabel, PwmTimer};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        // Low side inverted (the vendor's OCN polarity low), both outputs idling high.
+        let pair = |high, low| PwmChannelConfig {
+            high,
+            low,
+            polarity: true,
+            idle_high: true,
+            idle_high_n: true,
+        };
+        let cfg = PwmConfig {
+            timer: PeriphLabel::Timer0,
+            channels: [pair(0x08, 0x1D), pair(0x09, 0x1E), pair(0x0A, 0x1F)],
+            period: 2250,
+            prescaler: 0,
+            dead_time: 0x1C,
+            brk: BreakConfig {
+                enabled: false,
+                level: false,
+            },
+            trigger_compare: 2249,
+            align: PwmAlign::Center2,
+            arse: true,
+            trigger_oc_mode: OcMode::Pwm0,
+            trigger_ch_enable: false,
+            crep: 0,
+            ckdiv: ClockDiv::Div2,
+            trgo_src: TrgoSource::Update,
+        };
+        let timer = PwmTimer::configure(&chip, &cfg).unwrap();
+        timer.handle().set_duties([750, 1125, 1500]).unwrap();
+    }
+'''

@@ -1,0 +1,47 @@
+# Mode: final_state, narrowed with assert_only to GPIOB's CRL and AFRL. End state over the
+# floating-input reset:
+#   CRL  = 0x4B444444 (PB6: AF push-pull at 50 MHz; PB4: floating input, its reset nibble)
+#   AFRL = 0x00030000 (PB6 AF0, PB4 AF3)
+description = """
+The routing of UART1 on the MM32SPIN05 split boards' inter-board link as trondin traced it, TX = PB6
+at AF0 and RX = PB4 at AF3 (datasheet table 7: UART1_TX is AF0 on PB6, UART1_RX AF3 on PB4): TX AF
+push-pull at 50 MHz, RX a floating input with its AF selected. The two pins of one instance take
+different AF numbers.
+
+Vendor: GPIO_PinAFConfig(PB6, GPIO_AF_0); GPIO_PinAFConfig(PB4, GPIO_AF_3); GPIO_Init(PB6, AF_PP,
+        50 MHz); GPIO_Init(PB4, FLOATING).
+HAL: Usart::new(Usart0, (PB6, PB4), 115200) (Usart0 is the HAL's label for UART1).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = [
+    "<GPIOB_BASE>+0x00",
+    "<GPIOB_BASE>+0x20",
+]
+
+[vendor]
+body = '''
+    GPIO_InitTypeDef g;
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource6, GPIO_AF_0);
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource4, GPIO_AF_3);
+    g.GPIO_Pin   = GPIO_Pin_6;
+    g.GPIO_Speed = GPIO_Speed_50MHz;
+    g.GPIO_Mode  = GPIO_Mode_AF_PP;
+    GPIO_Init(GPIOB, &g);
+    g.GPIO_Pin   = GPIO_Pin_4;
+    g.GPIO_Mode  = GPIO_Mode_FLOATING;
+    GPIO_Init(GPIOB, &g);
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, ClockConfig, PeriphLabel, Usart};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let pins = (chip.pin(0x16).unwrap(), chip.pin(0x14).unwrap()); // TX PB6, RX PB4
+        Usart::new(&chip, &ClockConfig::REFERENCE_72M_HSI, PeriphLabel::Usart0, pins, 115_200)
+            .unwrap();
+    }
+'''

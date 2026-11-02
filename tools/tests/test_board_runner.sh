@@ -24,8 +24,13 @@ chk "names the target"                  grep "$(printf '%s' "$out" | grep -c 'th
 # The config must actually point at it, or the script is a file nothing calls. Cargo resolves a
 # relative runner path against the directory that holds .cargo/, here motorcontroller/.
 mc="$(cd "$(dirname "$0")/../.." && pwd)/motorcontroller"
-runner=$(sed -n 's/^runner = "\(.*\)"$/\1/p' "$mc/.cargo/config.toml")
-chk "config.toml wires it up"           resolves "$(cd "$mc" && [ "$(cd "$(dirname "$runner")" && pwd)/$(basename "$runner")" = "$R" ] && echo yes)" yes
+# One `runner` line per board target (thumbv7m for the GD32 parts, thumbv6m for the MM32SPIN05),
+# each pointing at it.
+runners=$(sed -n 's/^runner = "\(.*\)"$/\1/p' "$mc/.cargo/config.toml")
+chk "config.toml has a runner per target"   lines "$(printf '%s\n' "$runners" | grep -c .)" 2
+while IFS= read -r runner; do
+  chk "config.toml wires it up ($runner)"   resolves "$(cd "$mc" && [ "$(cd "$(dirname "$runner")" && pwd)/$(basename "$runner")" = "$R" ] && echo yes)" yes
+done <<< "$runners"
 
 echo "-- $P passed, $F failed"
 [ "$F" = 0 ]

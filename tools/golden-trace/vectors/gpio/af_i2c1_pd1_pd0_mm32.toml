@@ -1,0 +1,52 @@
+# Mode: final_state, narrowed with assert_only to GPIOD's CRL and AFRL. The HAL routes I2C pins only
+# inside its I2C bring-up (clocks, I2C1, a bus clear on the pins first); the AF configuration is the
+# last write to each of these registers. End state over the floating-input reset:
+#   CRL  = 0x444444FF (PD0 and PD1: AF open-drain at 50 MHz, nibble 0xF)
+#   AFRL = 0x00000011 (AF1 at PD0 and PD1)
+# LibSamples' GPIO_Init read-modify-writes CRL once per selected pin and GPIO_PinAFConfig AFRL once
+# per pin; the HAL's write count is free, the end state is not.
+description = """
+The alternate-function configuration of the IMU's I2C1 pins on the MM32SPIN05 master, SCL = PD1 and
+SDA = PD0 (specs/bench-work/mm32/README.md): AF open-drain at 50 MHz, AF1 (datasheet table 9). The
+MM32 GPIO is the F1-style CRL/CRH nibble model at the AHB address with a per-pin AF mux (AFRL/AFRH).
+
+Vendor: GPIO_PinAFConfig(GPIOD, 0 and 1, GPIO_AF_1); GPIO_Init(GPIOD, PD0 | PD1, GPIO_Mode_AF_OD,
+        GPIO_Speed_50MHz), the order of LibSamples' I2C1_GPIO_Config sample.
+HAL: I2c::new on (SCL PD1, SDA PD0) (it routes both pins).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = [
+    "<GPIOD_BASE>+0x00",
+    "<GPIOD_BASE>+0x20",
+]
+
+[vendor]
+body = '''
+    GPIO_InitTypeDef g;
+    GPIO_PinAFConfig(GPIOD, GPIO_PinSource0, GPIO_AF_1);
+    GPIO_PinAFConfig(GPIOD, GPIO_PinSource1, GPIO_AF_1);
+    g.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1;
+    g.GPIO_Speed = GPIO_Speed_50MHz;
+    g.GPIO_Mode  = GPIO_Mode_AF_OD;
+    GPIO_Init(GPIOD, &g);
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, ClockConfig, I2c, I2cMode, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let pins = (chip.pin(0x31).unwrap(), chip.pin(0x30).unwrap()); // SCL PD1, SDA PD0
+        let _i2c = I2c::new(
+            &chip,
+            &ClockConfig::REFERENCE_72M_HSI,
+            PeriphLabel::I2c0,
+            pins,
+            I2cMode::standard(100_000),
+        )
+        .unwrap();
+    }
+'''

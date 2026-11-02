@@ -14,6 +14,13 @@
 //! | USART1 | channel 5 / channel 6         | channel 4 / channel 3 (one vector) |
 //! | USART2 | channel 2 / channel 1         | not carried                      |
 //!
+//! The MM32SPIN05's DMA1 (`hal_dma = "mm32"`) has the same block (MindMotion's `reg_dma.h`: `ISR`,
+//! `IFCR`, then `CCR`/`CNDTR`/`CPAR`/`CMAR` per channel at the same stride, channel 1 at the HAL's
+//! channel 0) and the F1x0 request map in the HAL's numbering: UART1 (`Usart0`) receive on channel
+//! 2 and transmit on 1 (MindMotion's 3 and 2, its UART_DMA samples), UART2 (`Usart1`) receive on 4
+//! and transmit on 3 (its 5 and 4, the map AILIFE's MM32 firmware runs its UART on), with the
+//! vectors `DMA1_Channel2_3` and `DMA1_Channel4_5`.
+//!
 //! (GD32F10x User Manual table 9-3; GD32F1x0 User Manual table 8-3, with the `SYSCFG_CFG0` USART0
 //! DMA remap bits at reset, which this HAL never changes: remapped, USART0 would collide with
 //! USART1 on channels 3 and 4.) The vector each channel raises is the descriptor's
@@ -73,7 +80,7 @@ const fn model_channels(usart: PeriphLabel) -> Option<UsartChannels> {
 }
 
 /// The request map of the model (the table in the module docs), before the descriptor's say.
-#[cfg(hal_dma = "f1x0")]
+#[cfg(any(hal_dma = "f1x0", hal_dma = "mm32"))]
 const fn model_channels(usart: PeriphLabel) -> Option<UsartChannels> {
     match usart {
         PeriphLabel::Usart0 => Some(UsartChannels { rx: 2, tx: 1 }),
@@ -400,6 +407,8 @@ dma_vectors!(
 );
 #[cfg(hal_dma = "f1x0")]
 dma_vectors!(DMA_Channel1_2, DMA_Channel3_4);
+#[cfg(hal_dma = "mm32")]
+dma_vectors!(DMA1_Channel2_3, DMA1_Channel4_5);
 
 #[cfg(test)]
 mod tests {
@@ -408,10 +417,17 @@ mod tests {
 
     /// The vendor's vector for a DMA channel (`IRQn_Type`): one per channel on the F10x DMA0
     /// (`DMA0_Channel0_IRQn` = 11), grouped on the F1x0 (`DMA_Channel0` = 9, `1_2` = 10, `3_4` =
-    /// 11, `5_6` = 48).
+    /// 11, `5_6` = 48) and on the MM32 (`DMA1_Channel1` = 9, `2_3` = 10, `4_5` = 11, the HAL's
+    /// channels 0, 1-2, 3-4).
     fn vendor_vector(ch: u8) -> u16 {
         if cfg!(hal_dma = "f10x") {
             11 + u16::from(ch)
+        } else if cfg!(hal_dma = "mm32") {
+            match ch {
+                0 => 9,
+                1 | 2 => 10,
+                _ => 11,
+            }
         } else {
             match ch {
                 0 => 9,
@@ -476,7 +492,7 @@ mod tests {
         let ch = usart_channels(PeriphLabel::Usart1).expect("USART1 everywhere");
         assert_eq!(u.rx[1], Some(ch.rx));
         assert!(u.metric);
-        if cfg!(hal_dma = "f1x0") {
+        if cfg!(any(hal_dma = "f1x0", hal_dma = "mm32")) {
             // One vector, both channels, and nothing of USART0's.
             assert_eq!(u.tx[1], Some(ch.tx));
             assert_eq!((u.rx[0], u.tx[0]), (None, None));

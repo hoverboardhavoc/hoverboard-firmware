@@ -6,12 +6,14 @@
 //! - `crl` (GD32F10x): the `CTL0`/`CTL1` nibbles (ST's `CRL`/`CRH`) on APB2; alternate functions
 //!   are fixed per pin, moved only by the AFIO remap ([`crate::afio`]).
 //! - `ctl` (GD32F1x0): `CTL`/`OMODE`/`OSPD`/`PUD` on AHB with the per-pin `AFSEL0`/`AFSEL1` mux.
+//! - `mm32` (MM32SPIN05): the `crl` model's nibbles (MindMotion's `CRL`/`CRH`, the same `IDR` and
+//!   `BSRR` offsets) on AHB, with the per-pin `AFRL`/`AFRH` mux the `crl` file adds for it.
 //!
 //! Both models expose the same crate-internal functions, so the code above them names no model.
 
 use core::marker::PhantomData;
 
-#[cfg(hal_gpio = "crl")]
+#[cfg(any(hal_gpio = "crl", hal_gpio = "mm32"))]
 #[path = "gpio/crl.rs"]
 mod model;
 #[cfg(hal_gpio = "ctl")]
@@ -25,14 +27,20 @@ pub(crate) use model::{
 
 use crate::reg::Reg32;
 
-/// The alternate-function number a USART pin takes on the F1x0 mux (`AFSEL` nibble). The F10x has
-/// no per-pin mux and ignores it.
+/// The alternate-function number a USART pin takes on the F1x0 or MM32 mux (`AFSEL`/`AFR`
+/// nibble). The F10x has no per-pin mux and ignores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsartAf {
     /// AF0 (USART0 on PB6/PB7).
     Af0,
     /// AF1 (USART1 on PA2/PA3).
     Af1,
+    /// AF3 (the MM32's UART1 on PB3/PB4, UART2 RX on PA6).
+    #[cfg(hal_gpio = "mm32")]
+    Af3,
+    /// AF4 (the MM32's UART2 on PB7/PB8).
+    #[cfg(hal_gpio = "mm32")]
+    Af4,
 }
 
 impl UsartAf {
@@ -42,6 +50,10 @@ impl UsartAf {
         match self {
             UsartAf::Af0 => 0,
             UsartAf::Af1 => 1,
+            #[cfg(hal_gpio = "mm32")]
+            UsartAf::Af3 => 3,
+            #[cfg(hal_gpio = "mm32")]
+            UsartAf::Af4 => 4,
         }
     }
 }
@@ -74,7 +86,7 @@ pub(crate) struct PinConfig {
     pub open_drain: bool,
     /// The pull-up on (the F1x0 `PUD`; the F10x AF modes have no pull).
     pub pull_up: bool,
-    /// The F1x0 `AFSEL` nibble.
+    /// The F1x0 `AFSEL` or MM32 `AFR` nibble.
     pub af: u32,
 }
 

@@ -11,6 +11,11 @@
 //!
 //! The bit positions inside `CTL0`/`CTL1`/`CTL2` and `STAT` that this driver uses are the same on
 //! both, so they live here; the models carry the offsets, the enable bit and the flag clear.
+//!
+//! - `mm32` (MM32SPIN05, MindMotion's `reg_uart.h`): another register set altogether (`TDR`, `RDR`,
+//!   `CSR`, `ISR`, `IER`, `ICR`, `GCR`, `CCR`, `BRR`, `FRA`), one DMA enable for both directions and
+//!   no idle-line detection. `usart/mm32.rs` carries the divisor, the programming, the flags and the
+//!   halves' register operations; the claim, the pin routing and the handles here are shared.
 
 #[cfg(hal_usart = "f10x")]
 #[path = "usart/f10x.rs"]
@@ -18,41 +23,66 @@ mod model;
 #[cfg(hal_usart = "f1x0")]
 #[path = "usart/f1x0.rs"]
 mod model;
+#[cfg(hal_usart = "mm32")]
+#[path = "usart/mm32.rs"]
+mod model;
+
+#[cfg(all(hal_usart = "mm32", target_arch = "arm"))]
+pub(crate) use model::service_rx_flags;
+#[cfg(hal_usart = "mm32")]
+use model::{divisor_for, program};
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::addr::PeriphLabel;
 use crate::chip::{Chip, ClockPath};
 use crate::clock::ClockConfig;
-use crate::config::{Oversampling, Parity, UsartConfig, UsartFrame, WordLen};
+use crate::config::{Oversampling, UsartConfig, UsartFrame};
+#[cfg(not(hal_usart = "mm32"))]
+use crate::config::{Parity, WordLen};
 use crate::error::DescriptorError;
 use crate::gpio::{configure_af, Pin, PinRole};
 use crate::pincap::{self, PinClaim, UsartRemap};
+#[cfg(not(hal_usart = "mm32"))]
 use crate::reg::Reg32;
 
+#[cfg(not(hal_usart = "mm32"))]
 const CTL0_REN: u32 = 1 << 2;
+#[cfg(not(hal_usart = "mm32"))]
 const CTL0_TEN: u32 = 1 << 3;
 /// The IDLE-line interrupt enable.
+#[cfg(not(hal_usart = "mm32"))]
 const CTL0_IDLEIE: u32 = 1 << 4;
+#[cfg(not(hal_usart = "mm32"))]
 const CTL0_PM: u32 = 1 << 9;
+#[cfg(not(hal_usart = "mm32"))]
 const CTL0_PCEN: u32 = 1 << 10;
+#[cfg(not(hal_usart = "mm32"))]
 const CTL0_WL: u32 = 1 << 12;
+#[cfg(not(hal_usart = "mm32"))]
 const CTL1_STB: u32 = 0b11 << 12;
 /// The error interrupt enable: under DMA reception it raises the USART vector on an overrun, a
 /// framing error or a noise error.
+#[cfg(not(hal_usart = "mm32"))]
 const CTL2_ERRIE: u32 = 1 << 0;
 /// DMA reception enable.
+#[cfg(not(hal_usart = "mm32"))]
 const CTL2_DENR: u32 = 1 << 6;
 /// DMA transmission enable.
+#[cfg(not(hal_usart = "mm32"))]
 const CTL2_DENT: u32 = 1 << 7;
 
 /// Parity, framing, noise and overrun errors (`STAT` bits 0-3).
+#[cfg(not(hal_usart = "mm32"))]
 #[cfg(target_arch = "arm")]
 pub(crate) const STAT_ERRORS: u32 = 0b1111;
 /// The IDLE line detected flag.
+#[cfg(not(hal_usart = "mm32"))]
 #[cfg(target_arch = "arm")]
 pub(crate) const STAT_IDLEF: u32 = 1 << 4;
+#[cfg(not(hal_usart = "mm32"))]
 const STAT_TC: u32 = 1 << 6;
+#[cfg(not(hal_usart = "mm32"))]
 const STAT_TBE: u32 = 1 << 7;
 
 /// The USART labels at their index (`PeriphLabel::index`), the index the per-USART state of the
@@ -109,6 +139,7 @@ const fn input_clock(clock: &ClockConfig, usart: PeriphLabel) -> Option<u32> {
 /// `(uclk + baud / 2) / baud`, whose low 16 bits are `INTDIV` (15:4) and `FRADIV` (3:0). `None`
 /// where the divider cannot express it: a zero baud, `INTDIV` of 0 (a baud above `uclk / 16`), or
 /// a divisor past 16 bits.
+#[cfg(not(hal_usart = "mm32"))]
 const fn baud_divisor(uclk: u32, baud: u32) -> Option<u32> {
     if baud == 0 {
         return None;
@@ -123,6 +154,7 @@ const fn baud_divisor(uclk: u32, baud: u32) -> Option<u32> {
 
 /// The `BAUD` value for a bring-up, or [`DescriptorError::UsartConfig`]. Oversampling by 8 is
 /// refused: the F10x USART has no `OVSMOD`, and no port on either chip uses it.
+#[cfg(not(hal_usart = "mm32"))]
 const fn divisor_for(
     clock: &ClockConfig,
     usart: PeriphLabel,
@@ -230,6 +262,8 @@ impl Usart {
         }
         let base = chip.base(cfg.usart)?;
         let brr = divisor_for(clock, cfg.usart, cfg.baud, cfg.oversampling)?;
+        #[cfg(hal_usart = "mm32")]
+        model::check_frame(&cfg.frame)?;
         claim(cfg.usart)?;
         program(base, brr, cfg.frame);
         Ok(Usart {
@@ -241,6 +275,7 @@ impl Usart {
     /// Write one byte and wait until it has left the shift register: poll `TBE`, write the data
     /// register, poll `TC`. Both waits are unbounded (a bring-up primitive; the link's write path
     /// is [`crate::serial::SplitSerial`], whose every wait is bounded).
+    #[cfg(not(hal_usart = "mm32"))]
     pub fn write_byte(&self, byte: u8) {
         let stat = Reg32::new(self.base, model::STAT);
         while stat.read() & STAT_TBE == 0 {}
@@ -265,6 +300,7 @@ impl Usart {
 }
 
 /// The register sequence of a bring-up, after every check has passed.
+#[cfg(not(hal_usart = "mm32"))]
 fn program(base: u32, brr: u32, frame: UsartFrame) {
     let ctl0 = Reg32::new(base, model::CTL0);
     ctl0.clear_bits(model::CTL0_UEN);
@@ -295,18 +331,21 @@ impl UsartTx {
     }
 
     /// The absolute address of the transmit data register (the DMA destination).
+    #[cfg(not(hal_usart = "mm32"))]
     #[inline]
     pub(crate) fn tdata_addr(&self) -> u32 {
         self.base + model::TDATA
     }
 
     /// Route the transmitter's byte fetches to the DMA controller (`DENT`).
+    #[cfg(not(hal_usart = "mm32"))]
     #[inline]
     pub(crate) fn enable_dma(&self) {
         Reg32::new(self.base, model::CTL2).set_bits(CTL2_DENT);
     }
 
     /// `TC`: the last byte has left the shift register.
+    #[cfg(not(hal_usart = "mm32"))]
     #[inline]
     pub(crate) fn tx_complete(&self) -> bool {
         Reg32::new(self.base, model::STAT).read() & STAT_TC != 0
@@ -321,6 +360,7 @@ impl UsartRx {
     }
 
     /// The absolute address of the receive data register (the DMA source).
+    #[cfg(not(hal_usart = "mm32"))]
     #[inline]
     pub(crate) fn rdata_addr(&self) -> u32 {
         self.base + model::RDATA
@@ -328,6 +368,7 @@ impl UsartRx {
 
     /// Hand received bytes to the DMA controller (`DENR`), raise the USART vector on a line error
     /// (`ERRIE`) and on an idle line (`IDLEIE`).
+    #[cfg(not(hal_usart = "mm32"))]
     #[inline]
     pub(crate) fn enable_dma_ring(&self) {
         Reg32::new(self.base, model::CTL2).set_bits(CTL2_DENR | CTL2_ERRIE);
@@ -341,7 +382,7 @@ impl UsartRx {
 /// The vector is level-sensitive, so a flag it raised and this left set re-enters it at once and
 /// for ever: every `ERRIE` source (overrun, framing, noise) and `IDLEF` is cleared. Parity is
 /// cleared with them for the same reason, though the 8N1 frame never raises it.
-#[cfg(target_arch = "arm")]
+#[cfg(all(not(hal_usart = "mm32"), target_arch = "arm"))]
 #[inline(always)]
 pub(crate) fn service_rx_flags(base: u32) -> bool {
     let stat = Reg32::new(base, model::STAT).read();
@@ -356,9 +397,11 @@ pub(crate) fn service_rx_flags(base: u32) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(not(hal_usart = "mm32"))]
     const TREE: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
 
     #[test]
+    #[cfg(not(hal_usart = "mm32"))]
     fn usart1_at_115200_on_the_72_mhz_tree_is_0x139() {
         // The golden bring-up's headline value: APB1 = 36 MHz, (36e6 + 57600) / 115200 = 313.
         assert_eq!(
@@ -372,6 +415,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_usart = "mm32"))]
     fn usart0_divides_the_apb2_clock() {
         // APB2 = 72 MHz: (72e6 + 57600) / 115200 = 625.
         assert_eq!(
@@ -381,6 +425,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_usart = "mm32"))]
     fn the_divisor_rounds_to_nearest() {
         // 36e6 / 460800 = 78.125 -> 78; 36e6 / 9600 = 3750 exactly; 36e6 / 230400 = 156.25 -> 156.
         assert_eq!(baud_divisor(36_000_000, 460_800), Some(78));
@@ -392,6 +437,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_usart = "mm32"))]
     fn unreachable_bauds_are_refused() {
         let refuse = |baud| divisor_for(&TREE, PeriphLabel::Usart1, baud, Oversampling::By16);
         assert_eq!(refuse(0), Err(DescriptorError::UsartConfig));
@@ -404,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_usart = "mm32"))]
     fn oversampling_by_8_and_non_usart_labels_are_refused() {
         assert_eq!(
             divisor_for(&TREE, PeriphLabel::Usart1, 115_200, Oversampling::By8),
@@ -429,6 +476,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(hal_usart = "mm32"))]
     fn the_model_offsets_are_the_vendor_headers() {
         // gd32f10x_usart.h / gd32f1x0_usart.h.
         let (stat, tdata, rdata, baud, ctl0, ctl1, ctl2, uen) = (

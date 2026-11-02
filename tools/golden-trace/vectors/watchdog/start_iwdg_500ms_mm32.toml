@@ -1,0 +1,55 @@
+# Mode: final_state, narrowed with assert_only to the IWDG block and RCC_CSR. The vendor sample
+# writes the access key before each of PR and RLR and polls PVU / RVU before and after each write;
+# the HAL unlocks once and polls once, so the write and poll counts differ and the end state is
+# compared:
+#   CSR = LSION, over the scripted LSIRDY
+#   PR  = 1 (LSI / 8), RLR = 2499: 500 ms at the nominal 40 kHz LSI is 20,000 ticks, 2,500 at / 8,
+#         the finest prescaler whose reload fits 12 bits (the HAL's WdgTimeout rule)
+#   KR  = 0xCCCC, the last key written (start, after the reload key 0xAAAA)
+# CSR reads with the OR form: LSIRDY (bit 1) set. IWDG SR reads 0: no update pending.
+description = """
+The independent watchdog started at 500 ms on the MM32SPIN05: the LSI on and its ready poll, the
+access key, prescaler / 8 and reload 2499 with their update polls, the reload key, the start key.
+The IWDG has the GD32 FWDGT's register layout and keys (reg_iwdg.h: KR, PR, RLR, SR at the same
+offsets), plus a CR the HAL does not use.
+
+Vendor: the sequence of LibSamples' IWDG_Reset sample (Write_Iwdg_ON): RCC_LSICmd(ENABLE), wait
+        RCC_FLAG_LSIRDY, PVU_CheckStatus, IWDG_WriteAccessCmd(0x5555), IWDG_SetPrescaler(/8),
+        RVU_CheckStatus, IWDG_WriteAccessCmd(0x5555), IWDG_SetReload(2499), IWDG_ReloadCounter,
+        IWDG_Enable.
+HAL: FreeWatchdog::start(&chip, WdgTimeout::from_millis(500)).
+"""
+family = "mm32spin05"
+mode = "final_state"
+assert_only = [
+    "<IWDG_BASE>",
+    "<RCC_BASE>+0x24",
+]
+
+[read_responses]
+"<RCC_BASE>+0x24" = { or = 0x0000_0002 }
+
+[vendor]
+body = '''
+    RCC_LSICmd(ENABLE);
+    while(RCC_GetFlagStatus(RCC_FLAG_LSIRDY) == RESET){}
+    PVU_CheckStatus();
+    IWDG_WriteAccessCmd(0x5555);
+    IWDG_SetPrescaler(IWDG_Prescaler_8);
+    RVU_CheckStatus();
+    IWDG_WriteAccessCmd(0x5555);
+    IWDG_SetReload(2499U & 0xFFFU);
+    IWDG_ReloadCounter();
+    IWDG_Enable();
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, FreeWatchdog, WdgTimeout};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let _wdg = FreeWatchdog::start(&chip, WdgTimeout::from_millis(500)).unwrap();
+    }
+'''

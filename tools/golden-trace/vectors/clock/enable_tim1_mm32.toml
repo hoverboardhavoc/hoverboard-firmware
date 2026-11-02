@@ -1,0 +1,27 @@
+# Mode: register_writes. One read-modify-write of APB2ENR on both sides:
+#   W4 APB2ENR = 0x00000800 (TIM1, bit 11)
+description = """
+The advanced timer's clock enable on the MM32SPIN05: TIM1 on APB2ENR bit 11 (RCC_APB2ENR_TIM1).
+
+Vendor: RCC_APB2PeriphClockCmd(RCC_APB2ENR_TIM1, ENABLE).
+HAL: clock::enable_timer(rcu, ClockPath, Timer0) (the HAL's label for TIM1, at 0x4001_2C00).
+"""
+family = "mm32spin05"
+mode = "register_writes"
+
+[vendor]
+body = '''
+    RCC_APB2PeriphClockCmd(RCC_APB2ENR_TIM1, ENABLE);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let rcu = chip.rcu_base().unwrap();
+        clock::enable_timer(rcu, chip.clock(), PeriphLabel::Timer0).unwrap();
+    }
+'''
