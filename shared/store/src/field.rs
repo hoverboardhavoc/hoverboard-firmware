@@ -229,6 +229,82 @@ impl BlobField {
     }
 }
 
+/// A pin field (`specs/config-read-once.md` section 3): one key whose value is a [`Type::Pin`],
+/// [`Type::PinAf`] or [`Type::PinAdc`] record, the register model of one pin. Not a [`Scalar`]:
+/// the host tools read and write it as a [`Value`] and the firmware decodes the stored bytes in its
+/// one boot pass.
+///
+/// **A key that is not stored is an absent function**, unless the field names a fleet pin as its
+/// default ([`PinField::or`]): the power latch, the buzzer and the LEDs, the pins every board in the
+/// fleet shares. A row's default with no pin is the bytes `0xFF` (port `0xFF`, no port), which no
+/// check lets a write store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PinField {
+    id: u8,
+    index: u8,
+    kind: Type,
+    default: Option<(u8, u8)>,
+}
+
+impl PinField {
+    /// A field of storage type `kind` (one of the three pin types), absent when not stored.
+    pub const fn new(id: u8, kind: Type) -> Self {
+        assert!(matches!(kind, Type::Pin | Type::PinAf | Type::PinAdc));
+        Self {
+            id,
+            index: 0,
+            kind,
+            default: None,
+        }
+    }
+
+    /// This field with the fleet pin `port`, `pin` as its default.
+    pub const fn or(self, port: u8, pin: u8) -> Self {
+        Self {
+            default: Some((port, pin)),
+            ..self
+        }
+    }
+
+    /// The same field at `index` (motor or link).
+    pub const fn at(self, index: u8) -> Self {
+        Self { index, ..self }
+    }
+
+    /// The field's id.
+    pub const fn id(self) -> u8 {
+        self.id
+    }
+
+    /// The key this handle names.
+    pub const fn key(self) -> Key {
+        Key {
+            field_id: self.id,
+            index: self.index,
+        }
+    }
+
+    /// The storage type.
+    pub const fn kind(self) -> Type {
+        self.kind
+    }
+
+    /// The fleet pin read when nothing is stored, as (port, pin); `None` = the function is absent.
+    pub const fn default(self) -> Option<(u8, u8)> {
+        self.default
+    }
+
+    /// This field's [`REGISTRY`] row. The default rides in `bits` as its bytes, little-endian
+    /// (port, pin, then 0 for the third byte), and `0xFFFF_FFFF` for no default.
+    pub const fn entry(self, effect: Effect) -> FieldEntry {
+        let bits = match self.default {
+            Some((port, pin)) => port as u32 | (pin as u32) << 8,
+            None => u32::MAX,
+        };
+        FieldEntry::new(self.id, self.index, self.kind, bits, effect)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The field set: the curated, minimal set of genuine tunables, single source of truth.
 //
@@ -386,58 +462,54 @@ pub const WIFI_TX_POWER_RANGE: core::ops::RangeInclusive<u8> = 8..=84;
 pub const NODE_ADDRESS: Field<u8> = Field::new(0x01, 0x00);
 
 /// The number of inter-board links a board can have (`specs/configured-links.md` section 2): the
-/// index of [`LINK_TX`] / [`LINK_RX`]. Two is the most a chain needs (end boards use one link,
+/// index of [`LINK_TX`], [`LINK_RX`], [`LINK_USART`] and [`LINK_REMAP`]. Two is the most a chain needs (end boards use one link,
 /// middle boards two) and the most an F1x0 part has (USART0 and USART1). Every per-link array is
 /// sized by it, so the count has one owner.
 pub const LINKS: u8 = 2;
 
 /// Each inter-board link's transmit pin, index = the link (`specs/configured-links.md` section 2).
-/// A link is configured when both its pins are set; unset (the default), the link does not exist
-/// and its pins are not touched, so a board with nothing stored brings up its SWD mailbox and no
-/// UART. Which USART a pair drives is the HAL pin model's answer (`pincap::usart_pins`).
-pub const LINK_TX: IndexedField<u8, 2> = IndexedField::new(0x0F, [PIN_ABSENT, PIN_ABSENT]);
+/// A link is configured when its two pins and its USART ([`LINK_USART`]) are stored; with any of
+/// them missing the link does not exist and its pins are not touched, so a board with nothing
+/// stored brings up its SWD mailbox and no UART.
+pub const LINK_TX: PinField = PinField::new(0x0F, Type::PinAf);
 /// Each inter-board link's receive pin, index = the link (see [`LINK_TX`]).
-pub const LINK_RX: IndexedField<u8, 2> = IndexedField::new(0x10, [PIN_ABSENT, PIN_ABSENT]);
-// The two handles are sized by [`LINKS`]: written as a literal so the Kotlin mirror's drift gate
-// reads them, and held to the count here.
-const _: () = assert!(LINK_TX.len() == LINKS as usize && LINK_RX.len() == LINKS as usize);
+pub const LINK_RX: PinField = PinField::new(0x10, Type::PinAf);
+/// Each inter-board link's USART instance, index = the link (`specs/config-read-once.md` section 3):
+/// the HAL's label number, `0` = USART0. The CLI checks that the two pins are this USART's.
+pub const LINK_USART: IndexedField<u8, 2> = IndexedField::new(0x1B, [0, 0]);
+/// Each inter-board link's AFIO remap on the GD32F10x (`specs/config-read-once.md` section 3), `0`
+/// = the USART's default pins; the CLI refuses it on a chip without AFIO. Not part of the link's
+/// group: unstored reads `0`.
+pub const LINK_REMAP: IndexedField<u8, 2> = IndexedField::new(0x1C, [0, 0]);
+// The per-link handles are sized by [`LINKS`]: written as a literal so the Kotlin mirror's drift
+// gate reads them, and held to the count here.
+const _: () = assert!(LINK_USART.len() == LINKS as usize && LINK_REMAP.len() == LINKS as usize);
 
 // ---------------------------------------------------------------------------
-// The board-layout fields (`specs/board-model.md`): the per-pin store fields (packed
-// `(port << 4) | pin` bytes, `0xFF` = unset = function absent) plus the non-pin board facts the
-// boot validator consumes. Registered here per the spec's registered-at-landing decision: the
-// validator (`motorcontroller/board`) is their first consumer; motor.current_sense/direction/align_offset
-// are now registered too (the `board::MotorPlan` fold-back of `specs/motor-integration.md` carries
-// them at boot for the motor bring-up). motor.pole_pairs and wheel.diameter_mm are registered too,
-// both defaulting to UNSET: they are the two facts a controller needs to turn counted hall edges
-// into a distance, and neither has a figure measured on a board of this fleet. Neither has a
-// firmware consumer, so neither is read at boot. Everything else here is read at boot only, through
-// the validator; a config
-// write never re-pins before reboot. The BENIGN functions carry the fleet-uniform defaults; the
-// motor groups and dead-time default to ABSENT (drive is an explicit configuration act), and so do
-// the three fields whose PIN is fleet-uniform but whose FUNCTION is not fitted on every board: the
-// battery sense and the two foot pads, each of which would otherwise read a fiction off a line
-// nothing drives.
+// The board-layout fields (`specs/board-model.md`, `specs/config-read-once.md` section 3): one
+// pin-typed key per pin, the instance and remap keys of each peripheral group, and the non-pin
+// board facts. Read once at boot, in one pass; a config write never re-pins before reboot. The
+// BENIGN functions carry the fleet-uniform pins as defaults; the motor groups and dead-time are
+// ABSENT until stored (drive is an explicit configuration act), and so are the three fields whose
+// PIN is fleet-uniform but whose FUNCTION is not fitted on every board: the battery sense and the
+// two foot pads, each of which would otherwise read a fiction off a line nothing drives.
+// motor.pole_pairs and wheel.diameter_mm default to UNSET and have no firmware consumer.
 // ---------------------------------------------------------------------------
 
-/// `0xFF` = unset = the function is absent (`specs/board-model.md`, "The field vocabulary").
-pub const PIN_ABSENT: u8 = 0xFF;
-
-/// The power-latch pin (fleet default PB12; also asserted pre-mount as the compiled early-boot
-/// value of this same default).
-pub const BOARD_SELF_HOLD: Field<u8> = Field::new(0x06, 0x1C);
+/// The power-latch pin (fleet default PB12).
+pub const BOARD_SELF_HOLD: PinField = PinField::new(0x06, Type::Pin).or(1, 12);
 /// Battery-sense pin. Default ABSENT (`specs/sensing-and-safety.md`, "The battery word"): the pin
 /// is fleet-uniform (PA4) but the SENSE is master-only, and a slave's PA4 reads stuck near 2.0 V,
 /// which through the divider is a fictitious 62 V. The firmware has no role fact to tell the two
 /// apart, so a defaulted pin would make every slave sense garbage; the master is CONFIGURED to
 /// sense (stage `0x04`), a non-sensing board relays its peer's word.
-pub const BOARD_BATTERY_PIN: Field<u8> = Field::new(0x07, PIN_ABSENT);
+pub const BOARD_BATTERY_PIN: PinField = PinField::new(0x07, Type::PinAdc);
 /// Buzzer pin (fleet default PB9).
-pub const BOARD_BUZZER: Field<u8> = Field::new(0x08, 0x19);
+pub const BOARD_BUZZER: PinField = PinField::new(0x08, Type::Pin).or(1, 9);
 /// Indicator LEDs (fleet defaults PB3 / PA15 / PB4).
-pub const LED_GREEN: Field<u8> = Field::new(0x09, 0x13);
-pub const LED_ORANGE: Field<u8> = Field::new(0x0A, 0x0F);
-pub const LED_RED: Field<u8> = Field::new(0x0B, 0x14);
+pub const LED_GREEN: PinField = PinField::new(0x09, Type::Pin).or(1, 3);
+pub const LED_ORANGE: PinField = PinField::new(0x0A, Type::Pin).or(0, 15);
+pub const LED_RED: PinField = PinField::new(0x0B, Type::Pin).or(1, 4);
 /// Foot-pad rider-detection inputs. Default ABSENT, for [`BOARD_BATTERY_PIN`]'s reason one step further
 /// on: the pins are fleet-uniform (PA11 / PC15) but the PADS are not, and no board in this fleet
 /// has pad hardware fitted. A defaulted pin leaves the line a floating input (the `InputGroup`
@@ -447,22 +519,34 @@ pub const LED_RED: Field<u8> = Field::new(0x0B, 0x14);
 /// which selects the RUN gain set and holds an engagement the rider is supposed to be able to end
 /// by stepping off. So a board with pads is CONFIGURED to have them (stage `0x0B` / `0x2F`), and a
 /// board without them reads no rider, which is the safe direction and the true one.
-pub const PAD_A: Field<u8> = Field::new(0x0C, PIN_ABSENT);
-pub const PAD_B: Field<u8> = Field::new(0x0D, PIN_ABSENT);
-/// IMU bus pins (VARIANT function: no safe fleet default; absent until configured).
-pub const IMU_SCL_PIN: Field<u8> = Field::new(0x11, PIN_ABSENT);
-pub const IMU_SDA_PIN: Field<u8> = Field::new(0x12, PIN_ABSENT);
+pub const PAD_A: PinField = PinField::new(0x0C, Type::Pin);
+pub const PAD_B: PinField = PinField::new(0x0D, Type::Pin);
+/// IMU bus pins (VARIANT function: no safe fleet default; absent until configured). The IMU is
+/// fitted when both pins and [`IMU_I2C`] are stored (`specs/decision-imu-detect.md`); the part is
+/// detected by its `WHO_AM_I`.
+pub const IMU_SCL_PIN: PinField = PinField::new(0x11, Type::PinAf);
+pub const IMU_SDA_PIN: PinField = PinField::new(0x12, Type::PinAf);
+/// The IMU bus's I2C instance (`specs/config-read-once.md` section 3), the HAL's label number.
+pub const IMU_I2C: Field<u8> = Field::new(0x13, 0);
+/// The IMU bus's AFIO remap on the GD32F10x, `0` = the I2C's default pins; not part of the group.
+pub const IMU_REMAP: Field<u8> = Field::new(0x1A, 0);
 /// Hall inputs, per-motor via `Key.index` (motor groups are CONFIGURED, never defaulted).
-pub const MOTOR_HALL_A: Field<u8> = Field::new(0x40, PIN_ABSENT);
-pub const MOTOR_HALL_B: Field<u8> = Field::new(0x41, PIN_ABSENT);
-pub const MOTOR_HALL_C: Field<u8> = Field::new(0x42, PIN_ABSENT);
+pub const MOTOR_HALL_A: PinField = PinField::new(0x40, Type::Pin);
+pub const MOTOR_HALL_B: PinField = PinField::new(0x41, Type::Pin);
+pub const MOTOR_HALL_C: PinField = PinField::new(0x42, Type::Pin);
 /// The advanced-timer gate set, per-motor via `Key.index` (configured, never defaulted).
-pub const MOTOR_GATE_HI_A: Field<u8> = Field::new(0x43, PIN_ABSENT);
-pub const MOTOR_GATE_HI_B: Field<u8> = Field::new(0x44, PIN_ABSENT);
-pub const MOTOR_GATE_HI_C: Field<u8> = Field::new(0x45, PIN_ABSENT);
-pub const MOTOR_GATE_LO_A: Field<u8> = Field::new(0x46, PIN_ABSENT);
-pub const MOTOR_GATE_LO_B: Field<u8> = Field::new(0x47, PIN_ABSENT);
-pub const MOTOR_GATE_LO_C: Field<u8> = Field::new(0x48, PIN_ABSENT);
+pub const MOTOR_GATE_HI_A: PinField = PinField::new(0x43, Type::PinAf);
+pub const MOTOR_GATE_HI_B: PinField = PinField::new(0x44, Type::PinAf);
+pub const MOTOR_GATE_HI_C: PinField = PinField::new(0x45, Type::PinAf);
+pub const MOTOR_GATE_LO_A: PinField = PinField::new(0x46, Type::PinAf);
+pub const MOTOR_GATE_LO_B: PinField = PinField::new(0x47, Type::PinAf);
+pub const MOTOR_GATE_LO_C: PinField = PinField::new(0x48, Type::PinAf);
+/// The gate set's advanced timer, per motor (`specs/config-read-once.md` section 3): `0` = TIMER0,
+/// `7` = TIMER7 on a part that has it.
+pub const MOTOR_GATE_TIMER: Field<u8> = Field::new(0x55, 0);
+/// The gate timer's AFIO remap on the GD32F10x, per motor, `0` = the default pins; not part of
+/// the group.
+pub const MOTOR_GATE_REMAP: Field<u8> = Field::new(0x56, 0);
 /// The two phase-current sense pins, per-motor via `Key.index` (configured, never defaulted).
 ///
 /// `specs/motor-integration.md` bring-up step 5: the injected ADC group is programmed with these
@@ -472,16 +556,14 @@ pub const MOTOR_GATE_LO_C: Field<u8> = Field::new(0x48, PIN_ABSENT);
 /// `Capabilities::adc_channel` query `battery_sense.pin` uses. Ordered A then B, matching the injected
 /// rank order (rank 0 = phase A, rank 1 = phase B) and the gate channel order (CH0 = phase A).
 ///
-/// Group rule: the pair is all-or-none, and phase sense is fitted exactly when both pins are set
-/// (`specs/machine-settings.md` section 3.3); one of the two is recorded as incomplete.
-pub const MOTOR_PHASE_A: Field<u8> = Field::new(0x49, PIN_ABSENT);
-pub const MOTOR_PHASE_B: Field<u8> = Field::new(0x4A, PIN_ABSENT);
+/// Group rule: the pair is all-or-none, and phase sense is fitted exactly when both pins are stored
+/// (`specs/machine-settings.md` section 3.3). Each stores its ADC channel.
+pub const MOTOR_PHASE_A: PinField = PinField::new(0x49, Type::PinAdc);
+pub const MOTOR_PHASE_B: PinField = PinField::new(0x4A, Type::PinAdc);
 /// The power-button sense pin (`specs/board-model.md` `power.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
-pub const BOARD_BUTTON: Field<u8> = Field::new(0x0E, PIN_ABSENT);
-/// The IMU model index (`specs/imu.md`: 0 = no IMU fitted; the imu crate owns the numbering).
-pub const IMU_MODEL: Field<u8> = Field::new(0x13, 0);
+pub const BOARD_BUTTON: PinField = PinField::new(0x0E, Type::Pin);
 /// Per-axis zero-rate gyro bias, raw counts, indexed 0/1/2 = x/y/z (`specs/imu.md`, "Board-config
 /// fields": the bench-captured calibration staged into `imu::Config.gyro_bias` at bring-up;
 /// default 0 = uncalibrated). i32: the imu crate's bias word (counts fit i16, the type matches
@@ -523,8 +605,8 @@ pub const IMU_AXIS_SIGN: IndexedField<i32, 3> = IndexedField::new(0x15, [0, 0, 0
 /// **0 = unset**, and the bring-up falls back to that index of the compiled roles (UP = Z,
 /// PITCH_RATE = Y, the stock flat mount, the identity), the [`IMU_AXIS_SIGN`] unset rule: a board with
 /// nothing staged decodes exactly as before the field existed. The resolved frame must be a proper
-/// rotation with distinct roles; `imu::Config::staged` refuses anything else at boot and the IMU is
-/// not brought up (`board::BoardErrorKind::ImuFrame` in `BOARD_OBS`).
+/// rotation with distinct roles, which the CLI checks before it writes (`specs/config-read-once.md`
+/// section 4); the firmware applies what is stored.
 pub const IMU_AXIS_ROLE: IndexedField<u8, 2> = IndexedField::new(0x16, [0, 0]);
 /// Per-motor dead-time (raw DTG; 0 = unset; a configured gate group requires it nonzero).
 pub const MOTOR_DEAD_TIME: Field<u8> = Field::new(0x4B, 0);
@@ -646,7 +728,7 @@ pub const MOTOR_ODOMETER: Field<u32> = Field::new(0x54, 0);
 /// reader cannot sanity-check from the result: a 20-pole-pair hub reads 25 percent long and still
 /// looks plausible. A wrong distance stated confidently is worse than no distance. 0 is not a
 /// motor, so it is an unambiguous sentinel, and it is the convention the field set already uses for
-/// a fact with no safe fleet value ([`IMU_MODEL`], [`IMU_AXIS_ROLE`]).
+/// a fact with no safe fleet value ([`IMU_AXIS_ROLE`]).
 ///
 /// **The value is a measurement.** Turn the wheel one full revolution, read the delta on this
 /// motor's [`MOTOR_ODOMETER`], and divide by six.
@@ -961,13 +1043,16 @@ field_ids! {
     0x10, // LINK_RX
     0x11, // IMU_SCL_PIN
     0x12, // IMU_SDA_PIN
-    0x13, // IMU_MODEL
+    0x13, // IMU_I2C
     0x14, // IMU_GYRO_BIAS
     0x15, // IMU_AXIS_SIGN
     0x16, // IMU_AXIS_ROLE
     0x17, // ATTITUDE_LEVEL_TRIM
     0x18, // BOARD_BATTERY_CAL
     0x19, // BOARD_INPUT_POLARITY
+    0x1A, // IMU_REMAP
+    0x1B, // LINK_USART
+    0x1C, // LINK_REMAP
     0x20, // CONTROL_MODE
     0x21, // CONTROL_FRAME
     0x22, // CONTROL_RIDER_REQUIRED
@@ -1001,6 +1086,8 @@ field_ids! {
     0x52, // MOTOR_POLE_PAIRS
     0x53, // WHEEL_DIAMETER_MM
     0x54, // MOTOR_ODOMETER
+    0x55, // MOTOR_GATE_TIMER
+    0x56, // MOTOR_GATE_REMAP
 }
 
 #[cfg(feature = "test-fields")]
@@ -1023,13 +1110,16 @@ field_ids! {
     0x10, // LINK_RX
     0x11, // IMU_SCL_PIN
     0x12, // IMU_SDA_PIN
-    0x13, // IMU_MODEL
+    0x13, // IMU_I2C
     0x14, // IMU_GYRO_BIAS
     0x15, // IMU_AXIS_SIGN
     0x16, // IMU_AXIS_ROLE
     0x17, // ATTITUDE_LEVEL_TRIM
     0x18, // BOARD_BATTERY_CAL
     0x19, // BOARD_INPUT_POLARITY
+    0x1A, // IMU_REMAP
+    0x1B, // LINK_USART
+    0x1C, // LINK_REMAP
     0x20, // CONTROL_MODE
     0x21, // CONTROL_FRAME
     0x22, // CONTROL_RIDER_REQUIRED
@@ -1063,6 +1153,8 @@ field_ids! {
     0x52, // MOTOR_POLE_PAIRS
     0x53, // WHEEL_DIAMETER_MM
     0x54, // MOTOR_ODOMETER
+    0x55, // MOTOR_GATE_TIMER
+    0x56, // MOTOR_GATE_REMAP
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1145,14 +1237,14 @@ pub struct FieldDef {
 }
 
 /// The number of ENTRIES in the registry: the declared field count plus the extra per-index
-/// entries the [`IndexedField`] families contribute (the link pins, the IMU's bias, signs and
-/// roles, the level trim, the battery-sense calibration, the gains and their maxima, the
+/// entries the per-index families contribute (the link pins, USARTs and remaps, the IMU's bias,
+/// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 58 + 17;
+pub const REGISTRY_LEN: usize = 63 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 60 + 17;
+pub const REGISTRY_LEN: usize = 65 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1254,6 +1346,18 @@ impl FieldEntry {
             Type::Bool => Value::Bool(self.bits != 0),
             Type::Str => Value::Str(BYTES_DEFAULTS[self.bits as usize]),
             Type::Blob => Value::Bytes(BYTES_DEFAULTS[self.bits as usize]),
+            Type::Pin => {
+                let b = self.bits.to_le_bytes();
+                Value::Pin([b[0], b[1]])
+            }
+            Type::PinAf => {
+                let b = self.bits.to_le_bytes();
+                Value::PinAf([b[0], b[1], b[2]])
+            }
+            Type::PinAdc => {
+                let b = self.bits.to_le_bytes();
+                Value::PinAdc([b[0], b[1], b[2]])
+            }
         };
         FieldDef {
             field_id: self.field_id,
@@ -1306,7 +1410,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     LINK_RX.at(1).entry(Boot),
     IMU_SCL_PIN.entry(Boot),
     IMU_SDA_PIN.entry(Boot),
-    IMU_MODEL.entry(Boot),
+    IMU_I2C.entry(Boot),
     IMU_GYRO_BIAS.at(0).entry(Boot),
     IMU_GYRO_BIAS.at(1).entry(Boot),
     IMU_GYRO_BIAS.at(2).entry(Boot),
@@ -1320,6 +1424,11 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     BOARD_BATTERY_CAL.at(0).entry(Boot),
     BOARD_BATTERY_CAL.at(1).entry(Boot),
     BOARD_INPUT_POLARITY.entry(Boot),
+    IMU_REMAP.entry(Boot),
+    LINK_USART.at(0).entry(Boot),
+    LINK_USART.at(1).entry(Boot),
+    LINK_REMAP.at(0).entry(Boot),
+    LINK_REMAP.at(1).entry(Boot),
     // Machine (`0x20..=0x3F`).
     CONTROL_MODE.entry(Arm),
     CONTROL_FRAME.entry(Arm),
@@ -1363,6 +1472,8 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_POLE_PAIRS.entry(Client),
     WHEEL_DIAMETER_MM.entry(Client),
     MOTOR_ODOMETER.entry(Boot),
+    MOTOR_GATE_TIMER.entry(Boot),
+    MOTOR_GATE_REMAP.entry(Boot),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY, Client),
     #[cfg(feature = "test-fields")]
@@ -1459,7 +1570,9 @@ pub mod names {
     /// the handle's; this is what the tools make of it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Kind {
-        /// A packed `(port << 4) | pin` byte, `"PC13"`, or `"none"` for `0xFF`.
+        /// A pin as its register model, an object: `{"port": "C", "pin": 13}`, with `"af"` for a
+        /// [`Type::PinAf`] (left out on a chip that remaps, stored as 0) and `"adc"` for a
+        /// [`Type::PinAdc`] (`specs/config-read-once.md` section 3).
         Pin,
         /// An integer, range-checked against the storage type.
         Int,
@@ -1489,9 +1602,6 @@ pub mod names {
         pub index: Index,
         /// How a value is written.
         pub kind: Kind,
-        /// An inclusive range the table states beyond the storage type (`align_offset`'s `0..5`),
-        /// which a tool refuses without `--force`.
-        pub range: Option<(i64, i64)>,
     }
 
     impl FieldName {
@@ -1502,7 +1612,6 @@ pub mod names {
                 path,
                 index,
                 kind,
-                range: None,
             }
         }
 
@@ -1534,6 +1643,11 @@ pub mod names {
             Self::new(f.id(), T::KIND, path, Index::Link, kind)
         }
 
+        /// A pin field ([`PinField`]) with index kind `index`.
+        pub const fn pin(f: PinField, path: &'static str, index: Index) -> Self {
+            Self::new(f.id(), f.kind(), path, index, Kind::Pin)
+        }
+
         /// A `STR` field.
         pub const fn text(f: StrField, path: &'static str) -> Self {
             Self::new(f.id(), Type::Str, path, Index::Single, Kind::Str)
@@ -1543,14 +1657,6 @@ pub mod names {
         #[cfg(feature = "test-fields")]
         pub const fn blob(f: BlobField, path: &'static str) -> Self {
             Self::new(f.id(), Type::Blob, path, Index::Single, Kind::Blob)
-        }
-
-        /// This row with the inclusive range `lo..=hi`.
-        pub const fn range(self, lo: i64, hi: i64) -> Self {
-            FieldName {
-                range: Some((lo, hi)),
-                ..self
-            }
         }
 
         /// Whether the board or the walk writes this field ([`BOARD_OWNED`]).
@@ -1597,30 +1703,30 @@ pub mod names {
         FieldName::text(DEVICE_NAME, "device.name"),
         FieldName::text(WIFI_SSID, "wifi.ssid"),
         FieldName::text(WIFI_PASS, "wifi.pass"),
-        FieldName::single(WIFI_TX_POWER, "wifi.tx_power", Kind::Int).range(
-            *WIFI_TX_POWER_RANGE.start() as i64,
-            *WIFI_TX_POWER_RANGE.end() as i64,
-        ),
-        FieldName::single(BOARD_SELF_HOLD, "power.self_hold", Kind::Pin),
-        FieldName::single(BOARD_BATTERY_PIN, "battery_sense.pin", Kind::Pin),
-        FieldName::single(BOARD_BUZZER, "buzzer", Kind::Pin),
-        FieldName::single(LED_GREEN, "leds.green", Kind::Pin),
-        FieldName::single(LED_ORANGE, "leds.orange", Kind::Pin),
-        FieldName::single(LED_RED, "leds.red", Kind::Pin),
-        FieldName::single(PAD_A, "pads.a", Kind::Pin),
-        FieldName::single(PAD_B, "pads.b", Kind::Pin),
-        FieldName::single(BOARD_BUTTON, "power.button", Kind::Pin),
-        FieldName::link(LINK_TX, "tx", Kind::Pin),
-        FieldName::link(LINK_RX, "rx", Kind::Pin),
-        FieldName::single(IMU_SCL_PIN, "imu.scl", Kind::Pin),
-        FieldName::single(IMU_SDA_PIN, "imu.sda", Kind::Pin),
-        FieldName::single(IMU_MODEL, "imu.model", Kind::Int),
+        FieldName::single(WIFI_TX_POWER, "wifi.tx_power", Kind::Int),
+        FieldName::pin(BOARD_SELF_HOLD, "power.self_hold", Index::Single),
+        FieldName::pin(BOARD_BATTERY_PIN, "battery_sense.pin", Index::Single),
+        FieldName::pin(BOARD_BUZZER, "buzzer", Index::Single),
+        FieldName::pin(LED_GREEN, "leds.green", Index::Single),
+        FieldName::pin(LED_ORANGE, "leds.orange", Index::Single),
+        FieldName::pin(LED_RED, "leds.red", Index::Single),
+        FieldName::pin(PAD_A, "pads.a", Index::Single),
+        FieldName::pin(PAD_B, "pads.b", Index::Single),
+        FieldName::pin(BOARD_BUTTON, "power.button", Index::Single),
+        FieldName::pin(LINK_TX, "tx", Index::Link),
+        FieldName::pin(LINK_RX, "rx", Index::Link),
+        FieldName::pin(IMU_SCL_PIN, "imu.scl", Index::Single),
+        FieldName::pin(IMU_SDA_PIN, "imu.sda", Index::Single),
+        FieldName::single(IMU_I2C, "imu.i2c", Kind::Int),
         FieldName::array(IMU_GYRO_BIAS, "imu.gyro_bias", Kind::Int),
         FieldName::array(IMU_AXIS_SIGN, "imu.axis_sign", Kind::Int),
         FieldName::array(IMU_AXIS_ROLE, "imu.axis_role", AXIS),
         FieldName::array(ATTITUDE_LEVEL_TRIM, "attitude.level_trim", Kind::Int),
         FieldName::array(BOARD_BATTERY_CAL, "battery_sense.cal", Kind::Int),
         FieldName::single(BOARD_INPUT_POLARITY, "active_high", ACTIVE_HIGH),
+        FieldName::single(IMU_REMAP, "imu.remap", Kind::Int),
+        FieldName::link(LINK_USART, "usart", Kind::Int),
+        FieldName::link(LINK_REMAP, "remap", Kind::Int),
         // Machine.
         FieldName::single(CONTROL_MODE, "machine.mode", MODE),
         FieldName::single(CONTROL_FRAME, "machine.frame", FRAME),
@@ -1639,27 +1745,29 @@ pub mod names {
         FieldName::single(CONTROL_POS_CLAMP, "machine.balance.pos_clamp", Kind::Int),
         FieldName::array(CONTROL_DRIVE_TURN, "machine.turn", Kind::Int),
         // Wheel.
-        FieldName::motor(MOTOR_HALL_A, "hall.a", Kind::Pin),
-        FieldName::motor(MOTOR_HALL_B, "hall.b", Kind::Pin),
-        FieldName::motor(MOTOR_HALL_C, "hall.c", Kind::Pin),
-        FieldName::motor(MOTOR_GATE_HI_A, "gate.hi_a", Kind::Pin),
-        FieldName::motor(MOTOR_GATE_HI_B, "gate.hi_b", Kind::Pin),
-        FieldName::motor(MOTOR_GATE_HI_C, "gate.hi_c", Kind::Pin),
-        FieldName::motor(MOTOR_GATE_LO_A, "gate.lo_a", Kind::Pin),
-        FieldName::motor(MOTOR_GATE_LO_B, "gate.lo_b", Kind::Pin),
-        FieldName::motor(MOTOR_GATE_LO_C, "gate.lo_c", Kind::Pin),
-        FieldName::motor(MOTOR_PHASE_A, "current.phase_a", Kind::Pin),
-        FieldName::motor(MOTOR_PHASE_B, "current.phase_b", Kind::Pin),
+        FieldName::pin(MOTOR_HALL_A, "hall.a", Index::Motor),
+        FieldName::pin(MOTOR_HALL_B, "hall.b", Index::Motor),
+        FieldName::pin(MOTOR_HALL_C, "hall.c", Index::Motor),
+        FieldName::pin(MOTOR_GATE_HI_A, "gate.hi_a", Index::Motor),
+        FieldName::pin(MOTOR_GATE_HI_B, "gate.hi_b", Index::Motor),
+        FieldName::pin(MOTOR_GATE_HI_C, "gate.hi_c", Index::Motor),
+        FieldName::pin(MOTOR_GATE_LO_A, "gate.lo_a", Index::Motor),
+        FieldName::pin(MOTOR_GATE_LO_B, "gate.lo_b", Index::Motor),
+        FieldName::pin(MOTOR_GATE_LO_C, "gate.lo_c", Index::Motor),
+        FieldName::pin(MOTOR_PHASE_A, "current.phase_a", Index::Motor),
+        FieldName::pin(MOTOR_PHASE_B, "current.phase_b", Index::Motor),
         FieldName::motor(MOTOR_DEAD_TIME, "gate.dead_time", Kind::Int),
         FieldName::motor(MOTOR_CURRENT_CAL, "current.cal", Kind::Int),
         FieldName::motor(MOTOR_NOISE_FLOOR, "current.noise_floor", Kind::Int),
         FieldName::motor(MOTOR_CURRENT_LIMIT, "current.limit", Kind::Int),
         FieldName::motor(MOTOR_DIRECTION, "direction", DIRECTION),
         FieldName::motor(CONTROL_SIDE, "side", SIDE),
-        FieldName::motor(MOTOR_ALIGN_OFFSET, "align_offset", Kind::Int).range(0, 5),
+        FieldName::motor(MOTOR_ALIGN_OFFSET, "align_offset", Kind::Int),
         FieldName::motor(MOTOR_POLE_PAIRS, "pole_pairs", Kind::Int),
         FieldName::motor(WHEEL_DIAMETER_MM, "wheel_diameter_mm", Kind::Int),
         FieldName::motor(MOTOR_ODOMETER, "odometer", Kind::Int),
+        FieldName::motor(MOTOR_GATE_TIMER, "gate.timer", Kind::Int),
+        FieldName::motor(MOTOR_GATE_REMAP, "gate.remap", Kind::Int),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -1669,6 +1777,118 @@ pub mod names {
     /// The row for `id`, if the table names it.
     pub fn by_id(id: u8) -> Option<&'static FieldName> {
         NAMES.iter().find(|r| r.id == id)
+    }
+
+    /// One row of [`RANGES`]: field `id`'s values at `index` (every index when `None`) lie in
+    /// `lo..=hi`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Range {
+        /// The field's id.
+        pub id: u8,
+        /// The index the row bounds, or `None` for every index.
+        pub index: Option<u8>,
+        /// The lowest value accepted.
+        pub lo: i64,
+        /// The highest value accepted.
+        pub hi: i64,
+    }
+
+    const fn every(id: u8, lo: i64, hi: i64) -> Range {
+        Range {
+            id,
+            index: None,
+            lo,
+            hi,
+        }
+    }
+
+    const fn at(id: u8, index: u8, lo: i64, hi: i64) -> Range {
+        Range {
+            id,
+            index: Some(index),
+            lo,
+            hi,
+        }
+    }
+
+    /// The range table (`specs/config-read-once.md` section 4): every arm-row and calibration
+    /// field's accepted values, and `wifi.tx_power`'s. The CLI and the app refuse a write outside
+    /// it; the firmware applies what is stored. The bounds are the firmware's own seams where one
+    /// exists (each named below), so a value the CLI accepts is a value the consumer takes as
+    /// written. Mirrored in `protocol-kotlin` and pinned to this source by `RustSourceDriftTest`.
+    pub static RANGES: &[Range] = &[
+        // `imu.axis_sign`: +-1, 0 = unset (the reference map's sign); the frame check is separate.
+        every(IMU_AXIS_SIGN.id(), -1, 1),
+        // `imu.axis_role`: chip axis 1..3, 0 = unset (the stock flat mount's role).
+        every(IMU_AXIS_ROLE.id(), 0, 3),
+        // `machine.mode`, `machine.frame`, `machine.rider_required`, `machine.method`: their
+        // labels.
+        every(CONTROL_MODE.id(), 0, 1),
+        every(CONTROL_FRAME.id(), 0, 1),
+        every(CONTROL_RIDER_REQUIRED.id(), 0, 1),
+        every(MOTOR_METHOD.id(), 0, 2),
+        // `machine.battery.floor`, centivolts: 0 = no floor, 6000 above any pack the firmware
+        // drives.
+        every(BOARD_BATTERY_FLOOR.id(), 0, 6000),
+        // `machine.balance.gain_max`: `control::GainShadow`'s non-negative floor.
+        every(CONTROL_GAIN_MAX.id(), 0, i16::MAX as i64),
+        // `machine.balance.pos_clamp`: `control::sf::pos_clamp`, 0..=POS_CLAMP_MAX.
+        every(CONTROL_POS_CLAMP.id(), 0, 450),
+        // `machine.turn`: `control::DriveTurn::new`, turn_max 0..=TORQUE_FULL_SCALE, turn_slew
+        // TURN_SLEW_MIN..=TURN_SLEW_MAX.
+        at(CONTROL_DRIVE_TURN.id(), 0, 0, 28500),
+        at(CONTROL_DRIVE_TURN.id(), 1, 1, 1000),
+        // `current.cal`: `firmware::motor`'s CURRENT_CAL_MIN..=CURRENT_CAL_MAX.
+        every(MOTOR_CURRENT_CAL.id(), 100, 819),
+        // `current.limit`, milliamps: `firmware::motor::LIMIT_REQUEST_CAP_MA`, the most the
+        // conversion takes as written.
+        every(MOTOR_CURRENT_LIMIT.id(), 0, 163_840),
+        every(MOTOR_DIRECTION.id(), 0, 1),
+        every(CONTROL_SIDE.id(), 0, 1),
+        // `align_offset`: six sectors.
+        every(MOTOR_ALIGN_OFFSET.id(), 0, 5),
+        // Calibration. `imu.gyro_bias`, raw counts: the sensor's i16 word.
+        every(IMU_GYRO_BIAS.id(), -32767, 32767),
+        // `attitude.level_trim`, centidegrees: a half turn either way.
+        every(ATTITUDE_LEVEL_TRIM.id(), -18000, 18000),
+        // `battery_sense.cal`: `orchestrator::battery::VbattCal::new`, slope 10000..=32000 and
+        // offset -500..=500.
+        at(BOARD_BATTERY_CAL.id(), 0, 10_000, 32_000),
+        at(BOARD_BATTERY_CAL.id(), 1, -500, 500),
+        // `current.noise_floor`: `firmware::motor`'s NOISE_FLOOR_MIN..=MAX_LIMIT_COUNTS.
+        every(MOTOR_NOISE_FLOOR.id(), 1_000, 16_383),
+        // `wifi.tx_power`: the radio's own range; not a check the app makes.
+        every(
+            WIFI_TX_POWER.id(),
+            *WIFI_TX_POWER_RANGE.start() as i64,
+            *WIFI_TX_POWER_RANGE.end() as i64,
+        ),
+    ];
+
+    /// The calibration fields (`specs/config-read-once.md` section 4): measured per-board facts
+    /// whose range checks, like the arm row's, `--force` does not override.
+    pub const CALIBRATION: &[u8] = &[
+        IMU_GYRO_BIAS.id(),
+        ATTITUDE_LEVEL_TRIM.id(),
+        BOARD_BATTERY_CAL.id(),
+        MOTOR_CURRENT_CAL.id(),
+        MOTOR_NOISE_FLOOR.id(),
+    ];
+
+    /// The range of `key`'s values: the row for its index, else the row for every index.
+    pub fn range_of(key: Key) -> Option<(i64, i64)> {
+        let mut any = None;
+        for r in RANGES {
+            if r.id != key.field_id {
+                continue;
+            }
+            match r.index {
+                Some(i) if i == key.index => return Some((r.lo, r.hi)),
+                None => any = Some((r.lo, r.hi)),
+                Some(_) => {}
+            }
+        }
+        any
     }
 
     #[cfg(test)]
@@ -1749,8 +1969,15 @@ pub mod names {
                 let def = lookup(r.id).unwrap();
                 assert_eq!(r.storage, def.kind, "{}", r.path);
                 let ok = match r.kind {
-                    Kind::Pin | Kind::Bool | Kind::Enum(_) | Kind::Bits(_) => r.storage == Type::U8,
-                    Kind::Int => r.storage.fixed_len().is_some() && r.storage != Type::Bool,
+                    Kind::Pin => matches!(r.storage, Type::Pin | Type::PinAf | Type::PinAdc),
+                    Kind::Bool | Kind::Enum(_) | Kind::Bits(_) => r.storage == Type::U8,
+                    Kind::Int => {
+                        r.storage.fixed_len().is_some()
+                            && !matches!(
+                                r.storage,
+                                Type::Bool | Type::Pin | Type::PinAf | Type::PinAdc
+                            )
+                    }
                     Kind::Str => r.storage == Type::Str,
                     Kind::Blob => r.storage == Type::Blob,
                 };
@@ -1766,6 +1993,41 @@ pub mod names {
                     assert!(bits.iter().all(|(b, _)| *b < 8), "{}", r.path);
                 }
             }
+        }
+
+        /// The range table covers exactly the arm row, the calibration fields and
+        /// `wifi.tx_power`, each with a lower bound below its upper one, inside its storage type.
+        #[test]
+        fn the_range_table_covers_the_arm_row_and_the_calibration() {
+            let mut want: Vec<u8> = REGISTRY
+                .iter()
+                .filter(|e| e.effect == Effect::Arm)
+                .map(|e| e.field_id)
+                .chain(CALIBRATION.iter().copied())
+                .chain([WIFI_TX_POWER.id()])
+                .collect();
+            want.sort_unstable();
+            want.dedup();
+            let mut have: Vec<u8> = RANGES.iter().map(|r| r.id).collect();
+            have.sort_unstable();
+            have.dedup();
+            assert_eq!(have, want);
+            for r in RANGES {
+                assert!(r.lo < r.hi, "{:#04x}", r.id);
+                let kind = lookup(r.id).unwrap().kind;
+                let (lo, hi) = match kind {
+                    Type::U8 => (0, u8::MAX as i64),
+                    Type::U16 => (0, u16::MAX as i64),
+                    Type::U32 => (0, u32::MAX as i64),
+                    Type::I16 => (i16::MIN as i64, i16::MAX as i64),
+                    Type::I32 => (i32::MIN as i64, i32::MAX as i64),
+                    other => panic!("{:#04x} is {other:?}", r.id),
+                };
+                assert!(lo <= r.lo && r.hi <= hi, "{:#04x}", r.id);
+            }
+            assert_eq!(range_of(CONTROL_DRIVE_TURN.at(1).key()), Some((1, 1000)));
+            assert_eq!(range_of(MOTOR_ALIGN_OFFSET.key()), Some((0, 5)));
+            assert_eq!(range_of(DEVICE_NAME.key()), None);
         }
 
         /// An array's count is the registry's: one row per index, each carrying its default.
@@ -1892,13 +2154,16 @@ mod registry_tests {
             (0x10, LINK_RX.id()),
             (0x11, IMU_SCL_PIN.id()),
             (0x12, IMU_SDA_PIN.id()),
-            (0x13, IMU_MODEL.id()),
+            (0x13, IMU_I2C.id()),
             (0x14, IMU_GYRO_BIAS.id()),
             (0x15, IMU_AXIS_SIGN.id()),
             (0x16, IMU_AXIS_ROLE.id()),
             (0x17, ATTITUDE_LEVEL_TRIM.id()),
             (0x18, BOARD_BATTERY_CAL.id()),
             (0x19, BOARD_INPUT_POLARITY.id()),
+            (0x1A, IMU_REMAP.id()),
+            (0x1B, LINK_USART.id()),
+            (0x1C, LINK_REMAP.id()),
             (0x20, CONTROL_MODE.id()),
             (0x21, CONTROL_FRAME.id()),
             (0x22, CONTROL_RIDER_REQUIRED.id()),
@@ -1932,6 +2197,8 @@ mod registry_tests {
             (0x52, MOTOR_POLE_PAIRS.id()),
             (0x53, WHEEL_DIAMETER_MM.id()),
             (0x54, MOTOR_ODOMETER.id()),
+            (0x55, MOTOR_GATE_TIMER.id()),
+            (0x56, MOTOR_GATE_REMAP.id()),
         ];
         for (want, got) in map {
             assert_eq!(want, got);
@@ -2118,19 +2385,34 @@ mod registry_tests {
         assert_eq!(ATTITUDE_LEVEL_TRIM.len(), 2);
     }
 
-    /// The inter-board link pins: two indices each, both unset by default.
+    /// The inter-board link pins: two indices each, `PinAf`, absent by default.
     #[test]
-    fn the_link_pins_are_two_unset_pin_families() {
+    fn the_link_pins_are_two_absent_pin_families() {
         assert_eq!((LINK_TX.id(), LINK_RX.id(), LINKS), (0x0F, 0x10, 2));
         for f in [LINK_TX, LINK_RX] {
             for i in 0..LINKS {
                 let d = lookup_key(f.at(i).key()).unwrap();
                 assert_eq!(
                     (d.index, d.kind, d.default),
-                    (i, Type::U8, Value::U8(PIN_ABSENT))
+                    (i, Type::PinAf, Value::PinAf([0xFF; 3]))
                 );
             }
         }
+    }
+
+    /// A pin row's default: the fleet pin as its bytes, or the absent bytes.
+    #[test]
+    fn pin_rows_default_to_the_fleet_pin_or_to_absent() {
+        let d = |f: PinField| lookup_key(f.key()).unwrap().default;
+        assert_eq!(d(BOARD_SELF_HOLD), Value::Pin([1, 12]));
+        assert_eq!(d(LED_ORANGE), Value::Pin([0, 15]));
+        assert_eq!(d(MOTOR_HALL_A), Value::Pin([0xFF; 2]));
+        assert_eq!(d(MOTOR_PHASE_A), Value::PinAdc([0xFF; 3]));
+        assert_eq!(d(MOTOR_GATE_HI_A), Value::PinAf([0xFF; 3]));
+        assert_eq!(
+            (BOARD_SELF_HOLD.default(), PAD_A.default()),
+            (Some((1, 12)), None)
+        );
     }
 
     /// The pin on [`BYTES_DEFAULTS`]: every `Str`/`Blob` row is checked against the handle it

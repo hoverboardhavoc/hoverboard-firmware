@@ -1870,7 +1870,8 @@ mod digest {
     fn node_and_wheel_fields_do_not_change_it() {
         let empty = machine(&mut MockFlash::erased(PS));
         let mut f = with(|s| {
-            s.set(BOARD_SELF_HOLD, 0x20).unwrap();
+            s.set_value(BOARD_SELF_HOLD.key(), Value::Pin([2, 0]))
+                .unwrap();
             s.set(CONTROL_SIDE, 1).unwrap();
             s.set(MOTOR_DIRECTION.at(1), 1).unwrap();
             s.set_str(DEVICE_NAME, "rover-left").unwrap();
@@ -1892,7 +1893,10 @@ mod digest {
         let (arm, boot, live) = digests(&mut MockFlash::erased(PS));
         let (a, b, l) = digests(&mut with(|s| s.set(CONTROL_DRIVE_TURN.at(0), 9).unwrap()));
         assert_eq!((a != arm, b, l), (true, boot, live));
-        let (a, b, l) = digests(&mut with(|s| s.set(BOARD_SELF_HOLD, 0x20).unwrap()));
+        let (a, b, l) = digests(&mut with(|s| {
+            s.set_value(BOARD_SELF_HOLD.key(), Value::Pin([2, 0]))
+                .unwrap()
+        }));
         assert_eq!((a, b != boot, l), (arm, true, live));
         let (a, b, l) = digests(&mut with(|s| s.set(CONTROL_SF_GAINS.at(1), 9).unwrap()));
         assert_eq!((a, b, l != live), (arm, boot, true));
