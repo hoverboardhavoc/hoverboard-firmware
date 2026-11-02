@@ -235,14 +235,23 @@ pub enum Command {
         /// The bridge.
         target: String,
     },
-    /// `bridge update`: a new bridge image over the link.
+    /// `bridge update`: a new bridge image over the link, from a bundle or an app image.
     BridgeUpdate {
         /// The bridge.
         target: String,
-        /// The image.
-        bin: String,
+        /// The bundle or the app image.
+        file: String,
+        /// `--yes`: no question for a bundle's image.
+        yes: bool,
         /// `--no-confirm`.
         no_confirm: bool,
+    },
+    /// `machine update`: every bridge and every board from a bundle.
+    MachineUpdate {
+        /// The bundle.
+        bundle: String,
+        /// `--yes`.
+        yes: bool,
     },
     /// `firmware info`: a bundle's manifest; no link.
     FirmwareInfo {
@@ -260,7 +269,7 @@ pub enum Command {
     },
     /// `bridge install`: the first install over USB.
     BridgeInstall {
-        /// The merged install image.
+        /// A bundle, or the merged install image.
         image: String,
         /// Files to apply after the first boot.
         files: Vec<String>,
@@ -294,7 +303,9 @@ pub const USAGE: &str =
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
   machine diff [--replace] [<file>] [--map <uid>=<board>]... [--force]
   machine watch <secs> [<board>...] | drive <value> <secs> [<board>...]
-  bridge info <bridge> | update <bridge> <bin> [--no-confirm] | install <image> [<file>...] [--yes]
+  machine update <bundle> [--yes]
+  bridge info <bridge> | update <bridge> <bundle|bin> [--yes] [--no-confirm]
+  bridge install <bundle|image> [<file>...] [--yes]
   bridge get|set|dump|apply|replace|diff, as under board
   firmware info <bundle> | pack <out.hbfw> <crate-dir>:<image-name>=<elf>... [--dirty]
 a board or bridge is an address (0x02), a device.name, or a uid prefix of 4 to 24 hex digits";
@@ -544,6 +555,13 @@ fn command(pos: &[&str], o: &Opts) -> Result<Command, String> {
                 maps: maps()?,
             }
         }
+        ["machine", "update", bundle] => {
+            ok(&["--yes"])?;
+            Command::MachineUpdate {
+                bundle: bundle.to_string(),
+                yes: o.has("--yes"),
+            }
+        }
         ["machine", "watch", secs, targets @ ..] => {
             ok(&[])?;
             Command::Watch {
@@ -693,11 +711,12 @@ fn node_command(
             ok(&[])?;
             Ok(Command::BridgeInfo { target: target(t) })
         }
-        ("update", [t, bin]) if !board => {
-            ok(&["--no-confirm"])?;
+        ("update", [t, file]) if !board => {
+            ok(&["--yes", "--no-confirm"])?;
             Ok(Command::BridgeUpdate {
                 target: target(t),
-                bin: bin.to_string(),
+                file: file.to_string(),
+                yes: o.has("--yes"),
                 no_confirm: o.has("--no-confirm"),
             })
         }
@@ -921,8 +940,27 @@ mod tests {
                 "bridge update rover-l b.bin --no-confirm",
                 Command::BridgeUpdate {
                     target: s("rover-l"),
-                    bin: s("b.bin"),
+                    file: s("b.bin"),
+                    yes: false,
                     no_confirm: true,
+                },
+            ),
+            (
+                "update-esp",
+                "bridge update rover-l firmware-1a2b3c4.hbfw --yes",
+                Command::BridgeUpdate {
+                    target: s("rover-l"),
+                    file: s("firmware-1a2b3c4.hbfw"),
+                    yes: true,
+                    no_confirm: false,
+                },
+            ),
+            (
+                "none",
+                "machine update firmware-1a2b3c4.hbfw --yes",
+                Command::MachineUpdate {
+                    bundle: s("firmware-1a2b3c4.hbfw"),
+                    yes: true,
                 },
             ),
             (
@@ -1057,7 +1095,10 @@ mod tests {
             "bridge flash 0x03 fw.elf",
             "board info 0x01",
             "board update 0x01 b.hbfw --dirty",
-            "bridge update 0x03 b.bin --yes",
+            "bridge update 0x03 b.bin --image x",
+            "machine update b.hbfw --image x",
+            "machine update b.hbfw --no-confirm",
+            "machine update",
             "machine nodes --yes",
             "scan --yes",
             "board erase 0x01 --image x",

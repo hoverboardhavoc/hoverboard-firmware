@@ -150,12 +150,16 @@ Configuration lives on the board, not in the build:
 
 ## Builds
 
-CI builds the motor-controller images on every push to `main` and packs them into one firmware
-bundle (`firmware-<commit>.hbfw`, `specs/firmware-bundle.md`), so you can flash without a local
-toolchain. `hoverboard-cli board update <board> <bundle>` reads the chip on the board and flashes
-the image built for it; `hoverboard-cli board flash <board> <elf>` flashes a development ELF as it
-is; `hoverboard-cli firmware info <bundle>` lists what the bundle holds. The bundle holds
-`mainboard-gd32f103c8` and `mainboard-gd32f130c8`.
+CI builds the motor-controller images and the bridge's on every push to `main` and packs them into
+one firmware bundle (`firmware-<commit>.hbfw`, `specs/firmware-bundle.md`), so you can flash without
+a local toolchain. `hoverboard-cli machine update <bundle>` updates every bridge of a machine and
+the board each one flashes, each through its own bridge. One device at a time:
+`hoverboard-cli board update <board> <bundle>` reads the chip on the board and flashes the image
+built for it, `hoverboard-cli bridge update <bridge> <bundle>` the bridge's app image, and
+`hoverboard-cli bridge install <bundle>` a new bridge over USB. `hoverboard-cli board flash <board>
+<elf>` flashes a development ELF as it is; `hoverboard-cli firmware info <bundle>` lists what the
+bundle holds. The bundle holds `mainboard-gd32f103c8`, `mainboard-gd32f130c8`, `bridge-esp32c3`
+and `bridge-esp32c3-install`.
 
 - **Latest `main` build** (no login): [download `firmware-bundle.zip`](https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware-bundle.zip)
   (the bundle from the most recent green `main` build, served by [nightly.link](https://nightly.link)).

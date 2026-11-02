@@ -55,8 +55,18 @@
 //!
 //! `bridge update` sends a bridge image into the bridge's other app slot, reconnects and confirms
 //! it; it needs no walk and no `IDENTIFY` for an address, so it reaches a bridge on an older image.
-//! `bridge install` makes a SuperMini a bridge over its own USB port
-//! (`specs/bridge-onboarding.md` section 3).
+//! From a bundle it takes the `bridge` image for the chip `ESP_INFO` reports and asks first, unless
+//! `--yes`; a single app image is sent with no question. `bridge install` makes a SuperMini a bridge
+//! over its own USB port (`specs/bridge-onboarding.md` section 3), from a bundle's
+//! `bridge-install` image or a merged install image.
+//!
+//! `machine update` (`specs/firmware-bundle.md` section 4.3) walks the machine over the given link,
+//! pairs each board with the bridge wired to it, reads every `ESP_INFO` and `TARGET_ID` and chooses
+//! every image before it asks once. Then it takes one pair at a time over that bridge's own link
+//! (`<name>.local:5333`, else BLE by name; the given link for its own bridge, which goes last):
+//! the bridge's update, a reconnect after its reboot, the board's update routed by its `uid`, and
+//! its boot report. It stops at the first failure, prints what was done, failed and not started,
+//! and reports each bridge's commit and the machine digests over the given link.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write as _};
@@ -69,12 +79,13 @@ use espsvc::{Ctrl, FAMILY_F1X0};
 use net::pdu::NO_ADDRESS;
 use net::walk::{Controller, CLASS_BRIDGE};
 
-use hoverboard_cli::bundle::{self, Bundle, FileKind, TreeEntry};
+use hoverboard_cli::bundle::{self, Bundle, FileKind, ImageKind, TreeEntry};
 use hoverboard_cli::cli::{self, Command, Link, Mode, Noun, Swd};
 use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::erase;
+use hoverboard_cli::fleet;
 use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
 use hoverboard_cli::install::{self, Answered, Given, Guard};
 use hoverboard_cli::machine::{self, MachineFile};
@@ -275,18 +286,82 @@ fn info_or_note(c: &mut EspClient) -> Result<Option<espsvc::EspInfo>, String> {
     Ok(i)
 }
 
-/// `bridge update`: send the image, reconnect after the reset, and confirm it unless `no_confirm`.
-/// It depends on no reply whose layout can change: the attach, `ESP_UPDATE_BEGIN`'s answer and
-/// `ESP_UPDATE_CONFIRM`'s `RESULT`; `ESP_INFO` is printed, and the new slot checked against it,
-/// only where it decodes (`specs/hoverboard-bridge.md`, "Installing and updating the bridge").
-fn bridge_update(link: &Link, spec: &str, path: &str, no_confirm: bool) -> Result<(), String> {
-    let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    let version = espsvc::app_version(&image).ok_or_else(|| {
-        format!("{path}: not an ESP32-C3 app image (make one with espflash save-image)")
-    })?;
-    let e = |e: ClientError| e.to_string();
+/// `bridge update` (`specs/firmware-bundle.md` section 4.2): from a bundle, the `bridge` image for
+/// the chip `ESP_INFO` reports, after a question unless `yes`; from a single app image, that image
+/// with no question. The file is read and checked before the link is opened.
+fn bridge_update(
+    link: &Link,
+    spec: &str,
+    path: &str,
+    yes: bool,
+    no_confirm: bool,
+) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    if !bundle::is_bundle(&bytes) {
+        let version = bundle::check_bridge_file(ImageKind::Bridge, &bytes)
+            .map_err(|e| format!("{path}: {e}"))?
+            .expect("an app image has a version");
+        let mut c = bridge_client(link, spec, false)?;
+        let before = info_or_note(&mut c)?;
+        return send_bridge_image(c, link, spec, &bytes, version, before, no_confirm);
+    }
+    let b = open_checked_bundle(path, &bytes)?;
     let mut c = bridge_client(link, spec, false)?;
     let before = info_or_note(&mut c)?;
+    let img = b
+        .select_bridge(ImageKind::Bridge, before.map(|i| i.chip))
+        .map_err(|e| e.to_string())?;
+    let (file, version) = b.bridge_file(img)?;
+    let version = version.expect("an app image has a version");
+    if before.is_none() {
+        eprintln!("the bridge's chip was not checked: its ESP_INFO did not decode, and the bundle has one bridge image");
+    }
+    let now = before.map_or("commit unknown".to_string(), |i| {
+        format!("commit {:08x}", i.commit)
+    });
+    println!(
+        "image {} for the bridge ({now}), from the bundle built from commit {}",
+        img.name, b.manifest.commit
+    );
+    ask(
+        yes,
+        &format!("Update the bridge to {}?", img.name),
+        "not updated",
+    )?;
+    send_bridge_image(c, link, spec, file, version, before, no_confirm)
+}
+
+/// The question a bundle's install asks (`specs/firmware-bundle.md` section 4): none with `yes`; a
+/// refusal without a terminal; otherwise `prompt`, refused with `no` unless answered yes.
+fn ask(yes: bool, prompt: &str, no: &str) -> Result<(), String> {
+    if yes {
+        return Ok(());
+    }
+    if !terminal() {
+        return Err("give --yes to install without a terminal".into());
+    }
+    if confirm(prompt) {
+        Ok(())
+    } else {
+        Err(no.into())
+    }
+}
+
+/// Send `image` (an app image of `version`) to the bridge `c` reaches, reconnect after the reset,
+/// and confirm it unless `no_confirm`. It depends on no reply whose layout can change: the attach,
+/// `ESP_UPDATE_BEGIN`'s answer and `ESP_UPDATE_CONFIRM`'s `RESULT`; `ESP_INFO` (`before`, and
+/// after) is printed, and the new slot checked against it, only where it decodes
+/// (`specs/hoverboard-bridge.md`, "Installing and updating the bridge").
+fn send_bridge_image(
+    mut c: EspClient,
+    link: &Link,
+    spec: &str,
+    image: &[u8],
+    version: [u8; 3],
+    before: Option<espsvc::EspInfo>,
+    no_confirm: bool,
+) -> Result<(), String> {
+    let e = |e: ClientError| e.to_string();
     let running = before
         .as_ref()
         .map_or_else(String::new, |b| format!("running {}; ", slot_name(b)));
@@ -299,7 +374,7 @@ fn bridge_update(link: &Link, spec: &str, path: &str, no_confirm: bool) -> Resul
     );
     let t0 = Instant::now();
     let total = image.len();
-    c.update_esp(&image, version, |done| {
+    c.update_esp(image, version, |done| {
         eprint!("\r{done}/{total} ({:.1} s)   ", t0.elapsed().as_secs_f32())
     })
     .map_err(e)?;
@@ -399,6 +474,27 @@ fn wait_for_bridge(
     None
 }
 
+/// `bridge install`'s image: from a bundle, its `bridge-install` image for the ESP32-C3, the only
+/// chip the install writes (`specs/firmware-bundle.md` section 4); otherwise the file, checked as a
+/// merged install image.
+fn install_image(path: &str) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    if !bundle::is_bundle(&bytes) {
+        install::check_image(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        return Ok(bytes);
+    }
+    let b = open_checked_bundle(path, &bytes)?;
+    let img = b
+        .select_bridge(ImageKind::BridgeInstall, Some(espsvc::CHIP_ESP32C3))
+        .map_err(|e| e.to_string())?;
+    let (file, _) = b.bridge_file(img)?;
+    println!(
+        "image {} from the bundle built from commit {}",
+        img.name, b.manifest.commit
+    );
+    Ok(file.to_vec())
+}
+
 /// `bridge install` (`specs/bridge-onboarding.md` section 3.2): check the image and the files,
 /// choose the port, ask before erasing a bridge that answers there, write the image, wait for the
 /// first boot, apply the files, and when they set an SSID, reset the bridge and wait for it to join.
@@ -408,9 +504,8 @@ fn bridge_install(
     files: &[String],
     yes: bool,
 ) -> Result<(), String> {
+    let image = install_image(image_path)?;
     let (port, found) = install::choose_port(given, &install::host_ports())?;
-    let image = std::fs::read(image_path).map_err(|e| format!("{image_path}: {e}"))?;
-    install::check_image(&image).map_err(|e| format!("{image_path}: {e}"))?;
     let files = if files.is_empty() {
         None
     } else {
@@ -797,6 +892,250 @@ fn guest_boards(wire: &mut impl Wire, targets: &[String]) -> Result<(u8, Vec<u8>
     }
 }
 
+/// The bridge's TCP console port (`specs/hoverboard-bridge.md`, "The Wi-Fi console").
+const CONSOLE_PORT: u16 = 5333;
+/// How long `machine update` waits for a flashed board's boot report.
+const STATUS_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether the node that answers an attach on `link` holds `addr`.
+fn reaches(link: &Link, addr: u8) -> Result<(), String> {
+    let mut wire = wire_on(link)?;
+    let at = attach(&mut wire)?;
+    match at.node {
+        Some(a) if a == addr => Ok(()),
+        Some(a) => Err(format!("the node there holds {a:#04x}, not {addr:#04x}")),
+        None => Err(format!("the node there holds no address, not {addr:#04x}")),
+    }
+}
+
+/// The direct link to the bridge `name` at `addr` (`specs/firmware-bundle.md` section 4.3, step 2):
+/// its TCP console at `<name>.local:5333`, else, with the `ble` feature, BLE by that name.
+fn bridge_link(name: &str, addr: u8) -> Result<Link, String> {
+    let tcp = Link::Tcp(format!("{name}.local:{CONSOLE_PORT}"));
+    let tried = match reaches(&tcp, addr) {
+        Ok(()) => return Ok(tcp),
+        Err(e) => format!("TCP {name}.local:{CONSOLE_PORT}: {e}"),
+    };
+    #[cfg(feature = "ble")]
+    {
+        let ble = Link::Ble(Some(name.to_string()));
+        match reaches(&ble, addr) {
+            Ok(()) => Ok(ble),
+            Err(e) => Err(format!("{tried}; BLE {name}: {e}")),
+        }
+    }
+    #[cfg(not(feature = "ble"))]
+    Err(format!("{tried}; no BLE in this build"))
+}
+
+/// `machine update`'s device steps on the real links.
+struct Machine<'a> {
+    given: &'a Link,
+    bundle: &'a Bundle,
+    plan: &'a fleet::Plan,
+}
+
+impl fleet::Steps for Machine<'_> {
+    type Link = Link;
+
+    fn open(&mut self, pair: &fleet::Pair) -> Result<Link, String> {
+        let b = &pair.bridge;
+        println!("== {}", pair.label());
+        if pair.given {
+            reaches(self.given, b.addr)?;
+            return Ok(self.given.clone());
+        }
+        let link = bridge_link(&b.name, b.addr)?;
+        eprintln!("{}: reached on its own link", b.name);
+        Ok(link)
+    }
+
+    fn bridge(&mut self, link: &Link, pair: &fleet::Pair) -> Result<(), String> {
+        let spec = format!("{:#04x}", pair.bridge.addr);
+        let mut c = bridge_client(link, &spec, false)?;
+        let before = info_or_note(&mut c)?;
+        let img = self
+            .bundle
+            .manifest
+            .images
+            .iter()
+            .find(|i| i.name == pair.bridge.image)
+            .expect("the plan's image");
+        let (file, version) = self.bundle.bridge_file(img)?;
+        let version = version.expect("an app image has a version");
+        send_bridge_image(c, link, &spec, file, version, before, false)
+    }
+
+    fn rejoin(&mut self, pair: &fleet::Pair) -> Result<Link, String> {
+        let b = &pair.bridge;
+        let t0 = Instant::now();
+        loop {
+            let link = if pair.given {
+                reaches(self.given, b.addr).map(|()| self.given.clone())
+            } else {
+                bridge_link(&b.name, b.addr)
+            };
+            match link {
+                Ok(l) => return Ok(l),
+                Err(e) if t0.elapsed() >= UPDATE_REBOOT => {
+                    return Err(format!(
+                        "{} did not answer within {} s of its update ({e})",
+                        b.name,
+                        UPDATE_REBOOT.as_secs()
+                    ))
+                }
+                Err(_) => std::thread::sleep(RECONNECT_GAP),
+            }
+        }
+    }
+
+    fn board(&mut self, link: &Link, board: &fleet::PlanBoard) -> Result<(), String> {
+        let uid = nodes::uid_hex(&board.uid);
+        let (mut c, r) = swd_route(link, &uid, Purpose::Other)?;
+        if !matches!(r.via, Via::Uid) {
+            return Err(format!(
+                "{} is not the SWD target of the bridge on this link",
+                board.name
+            ));
+        }
+        let id = c.target_id().map_err(|e| e.to_string())?;
+        let (img, chip) = self.bundle.select(&id, None).map_err(|e| e.to_string())?;
+        if img.name != board.image || chip != board.chip {
+            return Err(format!(
+                "{}: TARGET_ID now matches {} ({chip}), not the plan's {} ({})",
+                board.name, img.name, board.image, board.chip
+            ));
+        }
+        println!("{}", bundle::choice_line(&self.bundle.manifest, img, chip));
+        flash_board(&mut c, &self.plan.bins[&board.image])
+    }
+
+    fn status(&mut self, link: &Link, board: &fleet::PlanBoard) -> Result<(), String> {
+        let t0 = Instant::now();
+        loop {
+            let read = wire_on(link).and_then(|mut wire| {
+                let src = attach(&mut wire)?.guest;
+                board_status(&mut wire, src, board.addr)
+                    .ok_or_else(|| format!("{}: no STATUS answer", board.name))
+            });
+            match read {
+                Ok(v) => {
+                    let lines = hoverboard_cli::status::lines(&board.name, &v, |_| None);
+                    for l in &lines {
+                        println!("{l}");
+                    }
+                    return if v.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(lines.join("; "))
+                    };
+                }
+                Err(e) if t0.elapsed() >= STATUS_WAIT => return Err(e),
+                Err(_) => std::thread::sleep(RECONNECT_GAP),
+            }
+        }
+    }
+}
+
+/// `machine update` (`specs/firmware-bundle.md` section 4.3): open and check the bundle, walk and
+/// plan over the given link, ask once, take each pair over its bridge's own link with the given
+/// link's pair last, stop at the first failure, and report over the given link. Exits 1 unless
+/// every pair is done.
+fn machine_update(link: &Link, path: &str, yes: bool) -> Result<u8, String> {
+    let b = read_bundle(path)?;
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let src = w.src;
+    let gateway = w.topology.gateway;
+    let dst = |a: u8| if gateway == Some(a) { NO_ADDRESS } else { a };
+    let plan = {
+        let wire = std::cell::RefCell::new(&mut wire);
+        fleet::plan(
+            &w,
+            &b,
+            |bridge| {
+                let mut w = wire.borrow_mut();
+                Client::addressed(&mut **w, src, dst(bridge))
+                    .info_if_decodes()
+                    .map_err(|e| e.to_string())
+            },
+            |bridge, _board| {
+                let mut w = wire.borrow_mut();
+                Client::addressed(&mut **w, src, dst(bridge))
+                    .target_id()
+                    .map_err(|e| e.to_string())
+            },
+        )?
+    };
+    drop(wire);
+    for l in fleet::plan_lines(&plan) {
+        println!("{l}");
+    }
+    ask(
+        yes,
+        "Update every bridge and board above?",
+        "nothing updated",
+    )?;
+    let mut steps = Machine {
+        given: link,
+        bundle: &b,
+        plan: &plan,
+    };
+    let outcomes = fleet::run(&plan, &mut steps);
+    println!("== outcome");
+    for l in fleet::outcome_lines(&plan, &outcomes) {
+        println!("{l}");
+    }
+    println!("== report");
+    if let Err(e) = machine_report(link, &plan, &outcomes) {
+        println!("report: {e}");
+    }
+    Ok(u8::from(!fleet::all_done(&outcomes)))
+}
+
+/// `machine update`'s report over the given link (section 4.3, step 5): each bridge's commit from
+/// `ESP_INFO`, each board's image, and whether the boards' machine digests agree.
+fn machine_report(
+    link: &Link,
+    plan: &fleet::Plan,
+    outcomes: &[fleet::Outcome],
+) -> Result<(), String> {
+    let mut wire = wire_on(link)?;
+    let w = walk(&mut wire)?;
+    let src = w.src;
+    let gateway = w.topology.gateway;
+    for f in w.found.iter().filter(|f| f.class() == Some(CLASS_BRIDGE)) {
+        let dst = if gateway == Some(f.addr) {
+            NO_ADDRESS
+        } else {
+            f.addr
+        };
+        let commit = match Client::addressed(&mut wire, src, dst).info_if_decodes() {
+            Ok(Some(i)) => format!("commit {:08x}", i.commit),
+            Ok(None) => "ESP_INFO has another layout".into(),
+            Err(e) => format!("no ESP_INFO ({e})"),
+        };
+        println!("bridge {}: {commit}", node_name(f));
+    }
+    for (pair, o) in plan.pairs.iter().zip(outcomes) {
+        if let Some(d) = &pair.board {
+            let state = if *o == fleet::Outcome::Done {
+                format!("runs {}", d.image)
+            } else {
+                "not updated".into()
+            };
+            println!("board  {}: {state}", d.name);
+        }
+    }
+    let heard = listen(&mut wire);
+    let digests: Vec<(String, Option<u16>)> = motors(&w.found)
+        .into_iter()
+        .map(|f| (node_name(f), heard.last(f.addr).map(|s| s.machine)))
+        .collect();
+    println!("{}", machine::digest_line(&digests));
+    Ok(())
+}
+
 /// Listen for `CYCLIC_STATE` for [`LISTEN`].
 fn listen(wire: &mut impl Wire) -> Tally {
     let mut tally = Tally::new();
@@ -985,38 +1324,45 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
                     bin
                 }
             };
-            let t0 = Instant::now();
-            let mut stage = None;
-            let mut times = StageTimes::new();
-            c.flash(&image, |p: Progress| {
-                times.on(p, t0.elapsed());
-                if stage.is_some() && stage != Some(p.stage) {
-                    eprintln!();
-                }
-                stage = Some(p.stage);
-                eprint!(
-                    "\r{:?} {}/{} ({:.1} s)   ",
-                    p.stage,
-                    p.done,
-                    p.total,
-                    t0.elapsed().as_secs_f32()
-                );
-            })
-            .map_err(e)?;
-            eprintln!();
-            println!(
-                "booted ({} B in {:.1} s)",
-                image.len(),
-                t0.elapsed().as_secs_f32()
-            );
-            let stages: Vec<String> = times
-                .durations()
-                .iter()
-                .map(|(name, d)| format!("{name} {:.2} s", d.as_secs_f32()))
-                .collect();
-            println!("stages: {}", stages.join(", "));
+            flash_board(&mut c, &image)?;
         }
     }
+    Ok(())
+}
+
+/// Flash `image` through the bridge `c` reaches and wait for `booted`, printing the progress and
+/// each stage's time.
+fn flash_board(c: &mut EspClient, image: &[u8]) -> Result<(), String> {
+    let t0 = Instant::now();
+    let mut stage = None;
+    let mut times = StageTimes::new();
+    c.flash(image, |p: Progress| {
+        times.on(p, t0.elapsed());
+        if stage.is_some() && stage != Some(p.stage) {
+            eprintln!();
+        }
+        stage = Some(p.stage);
+        eprint!(
+            "\r{:?} {}/{} ({:.1} s)   ",
+            p.stage,
+            p.done,
+            p.total,
+            t0.elapsed().as_secs_f32()
+        );
+    })
+    .map_err(|e| e.to_string())?;
+    eprintln!();
+    println!(
+        "booted ({} B in {:.1} s)",
+        image.len(),
+        t0.elapsed().as_secs_f32()
+    );
+    let stages: Vec<String> = times
+        .durations()
+        .iter()
+        .map(|(name, d)| format!("{name} {:.2} s", d.as_secs_f32()))
+        .collect();
+    println!("stages: {}", stages.join(", "));
     Ok(())
 }
 
@@ -1061,7 +1407,12 @@ fn read_bundle(path: &str) -> Result<Bundle, String> {
         }
         Err(e) => return Err(format!("{path}: {e}")),
     }
-    let b = Bundle::open(&bytes).map_err(|e| e.to_string())?;
+    open_checked_bundle(path, &bytes)
+}
+
+/// Open the bundle `bytes` read from `path`, every file's SHA-256 checked, and say so.
+fn open_checked_bundle(path: &str, bytes: &[u8]) -> Result<Bundle, String> {
+    let b = Bundle::open(bytes).map_err(|e| format!("{path}: {e}"))?;
     eprintln!(
         "bundle built from commit {} at {}, {} image(s), SHA-256 checked",
         b.manifest.commit,
@@ -1689,9 +2040,11 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
         }
         Command::BridgeUpdate {
             target,
-            bin,
+            file,
+            yes,
             no_confirm,
-        } => bridge_update(link, &target, &bin, no_confirm)?,
+        } => bridge_update(link, &target, &file, yes, no_confirm)?,
+        Command::MachineUpdate { bundle, yes } => return machine_update(link, &bundle, yes),
         Command::BridgeInstall { image, files, yes } => bridge_install(given, &image, &files, yes)?,
         c @ (Command::FirmwareInfo { .. } | Command::FirmwarePack { .. }) => {
             firmware_cmd(&given, &c)?

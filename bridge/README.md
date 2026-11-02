@@ -55,15 +55,21 @@ driven by the bridge's own driver: `cargo test -p emulator-runner --features uni
 
 Over the C3's own USB port with `hoverboard-cli bridge install` (`specs/bridge-onboarding.md` section
 3), from one merged image holding the bootloader, the partition table and the app in `ota_0`, with
-`otadata` blank (the bootloader then runs `ota_0`). CI builds it as `hoverboard-bridge-install.bin`;
-locally:
+`otadata` blank (the bootloader then runs `ota_0`). CI puts it in the firmware bundle as
+`bridge-esp32c3-install` (`specs/firmware-bundle.md`), and `bridge install` takes the bundle:
+
+```
+hoverboard-cli bridge install firmware-<commit>.hbfw bridge.json
+```
+
+Locally:
 
 ```
 espflash save-image --chip esp32c3 --merge --flash-size 4mb \
   --bootloader bootloader/bootloader.bin --partition-table partitions.csv \
   --target-app-partition ota_0 \
-  target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/hoverboard-bridge-install.bin
-hoverboard-cli bridge install target/img/hoverboard-bridge-install.bin bridge.json
+  target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/bridge-esp32c3-install.bin
+hoverboard-cli bridge install target/img/bridge-esp32c3-install.bin bridge.json
 ```
 
 `bridge.json` names the new bridge and its network, in the file format of `cli-config.md`:
@@ -94,13 +100,23 @@ cp build/bootloader/bootloader.bin bootloader.bin
 
 ## Later updates
 
-The app image alone, as the slot holds it:
+The app image alone, as the slot holds it. From the firmware bundle, which holds it as
+`bridge-esp32c3` and asks before sending it (`--yes` skips the question):
+
+```
+hoverboard-cli --tcp <name>.local:5333 bridge update <bridge> firmware-<commit>.hbfw
+```
+
+or built locally, sent with no question:
 
 ```
 espflash save-image --chip esp32c3 \
-  target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/hoverboard-bridge.bin
-hoverboard-cli --tcp <name>.local:5333 bridge update <bridge> target/img/hoverboard-bridge.bin
+  target/riscv32imc-unknown-none-elf/release/hoverboard-bridge target/img/bridge-esp32c3.bin
+hoverboard-cli --tcp <name>.local:5333 bridge update <bridge> target/img/bridge-esp32c3.bin
 ```
+
+`hoverboard-cli machine update <bundle>` updates every bridge of a machine and the board each one
+flashes, each over the bridge's own link.
 
 `<bridge>` is the bridge's address (as `hoverboard-cli machine nodes` lists it), its `device.name`
 or a prefix of its `uid`; an address needs no walk. `bridge update` writes the slot not running, the

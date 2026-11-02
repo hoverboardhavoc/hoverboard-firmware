@@ -762,8 +762,8 @@ fn bundle_file(
         .map(|(name, table, guards, elf)| PackEntry {
             name,
             table: table.clone(),
-            guards: guards.clone(),
-            elf,
+            guards: Some(guards.clone()),
+            file: elf,
         })
         .collect();
     let z = pack(
@@ -827,15 +827,15 @@ fn the_binary_flashes_the_image_a_bundle_holds_for_the_chip() {
 
 #[test]
 fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
-    use hoverboard_cli::bundle::{Family as F, Target};
+    use hoverboard_cli::bundle::{BoardTarget, Family as F, Target};
     let img = image(1024);
     let path = bundle_file(
         "bundle-32k.hbfw",
         &img,
-        Some(vec![Target {
+        Some(vec![Target::Board(BoardTarget {
             family: F::Gd32f1x0,
             flash_kib: 32,
-        }]),
+        })]),
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -855,7 +855,7 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &other, "--yes"], limit);
     assert!(!ok);
     assert!(
-        err.contains("no image in the bundle is for the chip (gd32f1x0 32 KiB)"),
+        err.contains("no board image in the bundle is for the chip (gd32f1x0 32 KiB)"),
         "{err}"
     );
     let g = server.join().unwrap();
@@ -1125,4 +1125,106 @@ fn update_esp_over_tcp_confirms_the_new_slot_or_leaves_it_to_roll_back() {
         limit,
     );
     assert!(!ok && err.contains("not an ESP32-C3 app image"), "{err}");
+}
+
+/// A bundle file holding the GD32F130C8 mainboard image and, when given, the bridge's app image,
+/// packed against the crates' tables.
+fn bridge_bundle_file(name: &str, app: Option<&[u8]>) -> String {
+    use hoverboard_cli::bundle::{image_table, pack, PackEntry};
+    let firmware = include_str!("../../../motorcontroller/firmware/Cargo.toml");
+    let bridge = include_str!("../../../bridge/Cargo.toml");
+    let elf = common::flashable_elf(&image(64));
+    let mut entries = vec![PackEntry {
+        name: "mainboard-gd32f130c8",
+        table: image_table(firmware, "mainboard-gd32f130c8").unwrap(),
+        guards: Some(common::release_guards()),
+        file: &elf,
+    }];
+    if let Some(app) = app {
+        entries.push(PackEntry {
+            name: "bridge-esp32c3",
+            table: image_table(bridge, "bridge-esp32c3").unwrap(),
+            guards: None,
+            file: app,
+        });
+    }
+    let z = pack(
+        &entries,
+        "c0eb25917cd904d5d9ba9307f56cb8251cbb61dd",
+        "2026-11-01T17:03:58Z",
+    )
+    .unwrap();
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, z).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+#[test]
+fn bridge_update_takes_the_bundle_s_bridge_image_for_the_chip() {
+    use hoverboard_bridge_core::sim::OtaState;
+    use hoverboard_cli::bundle::{Bundle, ImageKind};
+    let img = esp_image(9_001, "0.2.0");
+    // Named .bin: the content says it is a bundle.
+    let path = bridge_bundle_file("bundle-with-bridge.bin", Some(&img));
+    let limit = Duration::from_secs(60);
+    let serve = |connections| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let esp = Esp::with_platform(Family::F1x0, SimPlatform::with_slots(16 * 1024));
+        let server =
+            std::thread::spawn(move || serve_console_resetting(listener, esp, connections));
+        (format!("--tcp={addr}"), server)
+    };
+    let line = "image bridge-esp32c3 for the bridge (commit d31c5bb0), from the bundle built from \
+                commit c0eb25917cd904d5d9ba9307f56cb8251cbb61dd";
+
+    // No terminal and no --yes: chosen from the chip ESP_INFO reports, then refused unsent.
+    let (tcp, server) = serve(1);
+    let (ok, out, err) = cli(&[&tcp, "bridge", "update", "0x03", &path], limit);
+    assert!(!ok, "{out}");
+    assert!(out.contains(line), "{out}");
+    assert!(err.contains("give --yes"), "{err}");
+    let mut esp = server.join().unwrap();
+    assert!(
+        esp.svc.platform().slots[1].iter().all(|&b| b == 0xFF),
+        "nothing sent"
+    );
+
+    // --yes: sent, rebooted into, reconnected and confirmed.
+    let (tcp, server) = serve(2);
+    let (ok, out, err) = cli(&[&tcp, "bridge", "update", "0x03", &path, "--yes"], limit);
+    assert!(ok, "{err}");
+    assert!(out.starts_with(line), "{out}");
+    assert!(err.contains("SHA-256 checked"), "{err}");
+    assert!(err.contains("sending 9001 B, version 0.2.0"), "{err}");
+    assert!(out.contains("slot        ota_1\n"), "{out}");
+    let mut esp = server.join().unwrap();
+    let p = esp.svc.platform();
+    assert_eq!(&p.slots[1][..img.len()], &img[..]);
+    assert_eq!(p.selected, Some((1, OtaState::Valid)));
+
+    // A bundle with no bridge image: refused once ESP_INFO names the chip.
+    let boards_only = bridge_bundle_file("bundle-boards-only.hbfw", None);
+    let (tcp, server) = serve(1);
+    let (ok, _, err) = cli(
+        &[&tcp, "bridge", "update", "0x03", &boards_only, "--yes"],
+        limit,
+    );
+    assert!(!ok);
+    assert!(
+        err.contains("no bridge image in the bundle is for the chip (esp32c3)"),
+        "{err}"
+    );
+    server.join().unwrap();
+
+    // bridge install takes the bundle's install image, and refuses one without it before it looks
+    // for a port.
+    let (ok, _, err) = cli(&["bridge", "install", &boards_only], limit);
+    assert!(!ok);
+    assert!(
+        err.contains("no bridge-install image in the bundle is for the chip (esp32c3)"),
+        "{err}"
+    );
+    let b = Bundle::open(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(b.select_bridge(ImageKind::BridgeInstall, None).is_err());
 }

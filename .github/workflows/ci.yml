@@ -14,7 +14,9 @@ name: CI
 #     own job), then clippy over both build surfaces of the motorcontroller and shared workspaces
 #     (thumbv7m and host --all-targets; without --all-targets clippy lints only the lib and skips
 #     every test) and over swd-bridge,
-#   - build the default embedded target (thumbv7m-none-eabi) in motorcontroller/,
+#   - build the default embedded target (thumbv7m-none-eabi) in motorcontroller/, and the per-chip
+#     images with their gates; the pack job then packs those and the bridge job's two images into
+#     the firmware bundle (specs/firmware-bundle.md section 5),
 #   - run the host tests (the motorcontroller and shared suites) on the runner's Linux host target,
 #   - run the tools' own test suites (python + bash, no cargo): the climit session driver, the
 #     FOC trace sampler, the robo-preset extraction, the imu-tilt word map, the armed-bridge verdict, the flash guard
@@ -242,10 +244,7 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
-          # tools/ for hoverboard-cli, which packs the firmware bundle at the end of this job.
-          workspaces: |
-            hoverboard-firmware/motorcontroller
-            hoverboard-firmware/tools
+          workspaces: hoverboard-firmware/motorcontroller
 
       - name: Build (default thumbv7m target)
         working-directory: hoverboard-firmware/motorcontroller
@@ -571,58 +570,111 @@ jobs:
           done
           exit "$fail"
 
-      # The firmware bundle (specs/firmware-bundle.md section 5): every image this job built, in one
-      # .hbfw (a zip of the stripped ELFs and a manifest), which `hoverboard-cli board update` takes
-      # and picks the image for the board's chip from. The packer is the CLI itself, built here for the
-      # runner without BLE (it needs no radio, and the D-Bus headers BLE wants are not installed in
-      # this job). It reads each image's table from its crate's Cargo.toml and its guards from
-      # tools/image-guard-syms.sh, strips the debug sections, and refuses an image those guards or
-      # the layout check refuse, so a bundle never carries an image the flash would refuse.
-      # `firmware info` then reads the bundle back, SHA-256 checks included.
-      - name: Build hoverboard-cli (the bundle packer)
-        working-directory: hoverboard-firmware/tools
-        run: cargo build --release -p hoverboard-cli --no-default-features --target ${{ env.HOST_TARGET }}
-
-      - name: Pack the firmware bundle
+      # The unstripped ELFs, by image name, for the tools that read symbols and DWARF from them
+      # (tools/swdobs.py and the others), and for the pack job, which strips them into the
+      # firmware bundle. Every CI build uploads them, so any commit's images can be downloaded from
+      # its Actions run without a local toolchain.
+      - name: Name the ELFs by image
         run: |
-          cli=tools/target/${HOST_TARGET}/release/hoverboard-cli
-          out=motorcontroller/target/bundle
-          mkdir -p "$out/elfs"
-          bundle="$out/firmware-$(git rev-parse --short=7 HEAD).hbfw"
-          "$cli" firmware pack "$bundle" \
-            motorcontroller/firmware:mainboard-gd32f103c8=motorcontroller/target/gd32f103c8/thumbv7m-none-eabi/release/firmware \
-            motorcontroller/firmware:mainboard-gd32f130c8=motorcontroller/target/gd32f130c8/thumbv7m-none-eabi/release/firmware
-          "$cli" firmware info "$bundle"
-          # The unstripped ELFs, by image name, for the tools that read symbols and DWARF from them
-          # (tools/swdobs.py and the others).
+          mkdir -p motorcontroller/target/elfs
           for chip in gd32f103c8 gd32f130c8; do
-            cp motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware "$out/elfs/mainboard-$chip.elf"
+            cp motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware "motorcontroller/target/elfs/mainboard-$chip.elf"
           done
-
-      # Every CI build uploads the bundle and the unstripped ELFs as workflow artifacts, so any
-      # commit's images can be downloaded from its Actions run without a local toolchain. The bundle
-      # is the install artifact; there is no .bin upload (the .bin above feeds the span gate only).
-      - name: Upload the firmware bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware-bundle
-          path: hoverboard-firmware/motorcontroller/target/bundle/firmware-*.hbfw
-          if-no-files-found: error
 
       - name: Upload the unstripped ELFs
         uses: actions/upload-artifact@v4
         with:
           name: firmware-elfs
-          path: hoverboard-firmware/motorcontroller/target/bundle/elfs/
+          path: hoverboard-firmware/motorcontroller/target/elfs/
           if-no-files-found: error
 
-      # A tagged release additionally attaches the bundle as a GitHub Release asset, the stable
-      # download.
+  # The firmware bundle (specs/firmware-bundle.md section 5): every image a commit builds, the two
+  # board ELFs from the build job (`firmware-elfs`) and the bridge's two images from the bridge job
+  # (`bridge-images`), in one .hbfw (a zip of the files and a manifest), which `hoverboard-cli board
+  # update`, `bridge update`, `bridge install` and `machine update` take and pick each device's
+  # image from. The packer is the CLI itself, built here without BLE (it needs no radio, and the
+  # D-Bus headers BLE wants are not installed). It reads each image's table from its crate's
+  # Cargo.toml and a board image's guards from tools/image-guard-syms.sh, strips the ELFs' debug
+  # sections, and refuses an image its install command would refuse (the guards and the layout
+  # check, an app image's version, a merged image's 4 MB and magic), so a bundle never carries one.
+  # `firmware info` then reads the bundle back, SHA-256 checks included. The bundle is the one
+  # install artifact: no .bin is uploaded, and a tagged release attaches the bundle.
+  pack:
+    name: Firmware bundle (pack the board and bridge images)
+    needs: [build, bridge]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Install Rust (pinned nightly) + host target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          targets: ${{ env.HOST_TARGET }}
+          components: rustfmt, clippy, rust-src
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware/tools
+
+      - name: Build hoverboard-cli (the bundle packer)
+        working-directory: hoverboard-firmware/tools
+        run: cargo build --release -p hoverboard-cli --no-default-features --target ${{ env.HOST_TARGET }}
+
+      - name: Download the board ELFs
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-elfs
+          path: hoverboard-firmware/target/images
+
+      - name: Download the bridge images
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-images
+          path: hoverboard-firmware/target/images
+
+      - name: Pack the firmware bundle
+        run: |
+          cli=tools/target/${HOST_TARGET}/release/hoverboard-cli
+          img=target/images
+          mkdir -p target/bundle
+          bundle="target/bundle/firmware-$(git rev-parse --short=7 HEAD).hbfw"
+          "$cli" firmware pack "$bundle" \
+            motorcontroller/firmware:mainboard-gd32f103c8=$img/mainboard-gd32f103c8.elf \
+            motorcontroller/firmware:mainboard-gd32f130c8=$img/mainboard-gd32f130c8.elf \
+            bridge:bridge-esp32c3=$img/bridge-esp32c3.bin \
+            bridge:bridge-esp32c3-install=$img/bridge-esp32c3-install.bin
+          "$cli" firmware info "$bundle"
+
+      # One artifact name from build to build, so its download link stays the same.
+      - name: Upload the firmware bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-bundle
+          path: hoverboard-firmware/target/bundle/firmware-*.hbfw
+          if-no-files-found: error
+
       - name: Attach the bundle to the GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: hoverboard-firmware/motorcontroller/target/bundle/firmware-*.hbfw
+          files: hoverboard-firmware/target/bundle/firmware-*.hbfw
+          # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
+          # same text, so whichever job runs last leaves it.
+          body: |
+            The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
+            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
+            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
+
+            A release promises no compatibility with any other release: a CLI, app, bridge image and
+            board image from different releases may not work together.
 
   # Host tests: the motorcontroller suite, then the shared suite. Run with an explicit host target so
   # they neither inherit the thumbv7m default nor the link.x flag scoped to it in
@@ -1000,8 +1052,8 @@ jobs:
   # workspace itself runs on the nightly. The hardware-free core's host tests and clippy
   # (all targets) first, then the firmware's release build with no Wi-Fi variables set (the network
   # is a store field, specs/bridge-onboarding.md section 2), then the two images with a pinned
-  # espflash binary release: the merged install image for install-esp (bootloader/bootloader.bin,
-  # partitions.csv, the app in ota_0, padded to 4 MB) and the app image for update-esp.
+  # espflash binary release: the merged install image for `bridge install` and the app image for
+  # `bridge update`, which the pack job puts in the firmware bundle.
   bridge:
     name: Hoverboard bridge (core tests + clippy, release images)
     runs-on: ubuntu-latest
@@ -1051,49 +1103,31 @@ jobs:
           chmod +x "$RUNNER_TEMP/espflash/espflash"
           echo "$RUNNER_TEMP/espflash" >> "$GITHUB_PATH"
 
+      # Named by image (specs/firmware-bundle.md section 3.2): the merged install image for
+      # `bridge install` (bootloader/bootloader.bin, partitions.csv, the app in ota_0, padded to
+      # 4 MB) and the app image for `bridge update`.
       - name: Images (install and update)
         run: |
           elf=target/riscv32imc-unknown-none-elf/release/hoverboard-bridge
           mkdir -p target/img
           espflash save-image --chip esp32c3 --merge --flash-size 4mb \
             --bootloader bootloader/bootloader.bin --partition-table partitions.csv \
-            --target-app-partition ota_0 "$elf" target/img/hoverboard-bridge-install.bin
-          espflash save-image --chip esp32c3 "$elf" target/img/hoverboard-bridge.bin
-          # What install-esp checks before it writes: the whole 4 MB, starting with the ESP image
-          # magic 0xE9 (tools/hoverboard-cli/src/install.rs, check_image).
-          size=$(wc -c < target/img/hoverboard-bridge-install.bin)
-          magic=$(head -c 1 target/img/hoverboard-bridge-install.bin | od -An -tx1 | tr -d ' ')
-          if [ "$size" -ne 4194304 ] || [ "$magic" != "e9" ]; then
-            echo "FAIL: the install image is ${size} B starting 0x${magic}, not 4194304 B starting 0xe9" >&2
-            exit 1
-          fi
-          ls -l target/img/hoverboard-bridge-install.bin target/img/hoverboard-bridge.bin
+            --target-app-partition ota_0 "$elf" target/img/bridge-esp32c3-install.bin
+          espflash save-image --chip esp32c3 "$elf" target/img/bridge-esp32c3.bin
+          ls -l target/img/bridge-esp32c3-install.bin target/img/bridge-esp32c3.bin
 
-      - name: Upload images
+      # Handed to the pack job, which checks each as its install command does (the install image's
+      # 4,194,304 B and 0xE9 magic, the app image's version) and packs them into the firmware
+      # bundle. Kept one day: the bundle is the install artifact.
+      - name: Upload the images for the pack job
         uses: actions/upload-artifact@v4
         with:
-          name: hoverboard-bridge
+          name: bridge-images
           path: |
-            hoverboard-firmware/bridge/target/img/hoverboard-bridge-install.bin
-            hoverboard-firmware/bridge/target/img/hoverboard-bridge.bin
+            hoverboard-firmware/bridge/target/img/bridge-esp32c3-install.bin
+            hoverboard-firmware/bridge/target/img/bridge-esp32c3.bin
+          retention-days: 1
           if-no-files-found: error
-
-      - name: Attach to GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            hoverboard-firmware/bridge/target/img/hoverboard-bridge-install.bin
-            hoverboard-firmware/bridge/target/img/hoverboard-bridge.bin
-          # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
-          # same text, so whichever job runs last leaves it.
-          body: |
-            The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
-            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
-            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
-
-            A release promises no compatibility with any other release: a CLI, app, bridge image and
-            board image from different releases may not work together.
 
   # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
   # flashes). emulator-runner is a tools/ workspace member (it links Unicorn's cmake-built native lib,

@@ -9,6 +9,22 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Hoverboard bridge firmware for the ESP32-C3 (specs/hoverboard-bridge.md): BLE peripheral, USB and Wi-Fi console, SWD engine, board flashing, the mailbox bridge and its own slot updates."
 
+# The two images made from this crate's release build, one table per image, keyed by image name
+# (specs/firmware-bundle.md section 3.3; the names are section 3.2's `bridge-<chip>` and
+# `bridge-<chip>-install`). `hoverboard-cli firmware pack` copies the name, kind and targets into
+# the bundle manifest; `bridge update` takes the `bridge` image and `bridge install` the
+# `bridge-install` one for the chip ESP_INFO reports. `features` are empty: `espflash save-image`
+# makes both files from the one build (the app image, and the merged 4 MB install image).
+[package.metadata.hoverboard-image.bridge-esp32c3]
+kind = "bridge"
+features = []
+targets = [{ chip = "esp32c3" }]
+
+[package.metadata.hoverboard-image.bridge-esp32c3-install]
+kind = "bridge-install"
+features = []
+targets = [{ chip = "esp32c3" }]
+
 [[bin]]
 name = "hoverboard-bridge"
 path = "src/main.rs"

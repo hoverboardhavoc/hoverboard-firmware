@@ -7,8 +7,9 @@ mod common;
 use common::{names_of, release_guards, Fixture};
 use espsvc::{TargetId, FAMILY_F10X, FAMILY_F1X0};
 use hoverboard_cli::bundle::{
-    self, check_name, file_kind, image_table, pack, Bundle, BundleError, Family, FileKind, Image,
-    ImageKind, ImageTable, Manifest, PackEntry, SelectError, Target, TreeEntry,
+    self, check_name, check_table, file_kind, image_table, is_bundle, pack, BoardTarget, Bundle,
+    BundleError, EspChip, Family, FileKind, Image, ImageKind, ImageTable, Manifest, PackEntry,
+    SelectError, Target, TreeEntry,
 };
 use hoverboard_cli::elf::{self, ElfError, Guards};
 use sha2::{Digest, Sha256};
@@ -25,18 +26,28 @@ fn chip(family: u8, flash_kib: u16) -> TargetId {
     }
 }
 
-fn t(family: Family, flash_kib: u16) -> Target {
-    Target { family, flash_kib }
+fn t(family: Family, flash_kib: u16) -> BoardTarget {
+    BoardTarget { family, flash_kib }
 }
 
-const F10X_64: Target = Target {
+const F10X_64: BoardTarget = BoardTarget {
     family: Family::Gd32f10x,
     flash_kib: 64,
 };
-const F1X0_64: Target = Target {
+const F1X0_64: BoardTarget = BoardTarget {
     family: Family::Gd32f1x0,
     flash_kib: 64,
 };
+
+/// Board targets as the manifest lists them.
+fn boards(t: &[BoardTarget]) -> Vec<Target> {
+    t.iter().copied().map(Target::Board).collect()
+}
+
+/// The bridge target of the ESP32-C3.
+const C3: Target = Target::Bridge(bundle::BridgeTarget {
+    chip: EspChip::Esp32c3,
+});
 
 fn sha(b: &[u8]) -> String {
     Sha256::digest(b)
@@ -61,15 +72,50 @@ fn small() -> (Guards, Vec<u8>) {
     (g, elf)
 }
 
-fn image(name: &str, targets: &[Target], guards: &Guards, elf: &[u8]) -> Image {
+fn image(name: &str, targets: &[BoardTarget], guards: &Guards, elf: &[u8]) -> Image {
     Image {
         name: name.into(),
         kind: ImageKind::Board,
         file: format!("{name}.elf"),
-        targets: targets.to_vec(),
-        guards: guards.clone(),
+        targets: boards(targets),
+        guards: Some(guards.clone()),
         sha256: sha(elf),
     }
+}
+
+/// A bridge image of `kind` for the ESP32-C3, holding `file`.
+fn bridge_image(name: &str, kind: ImageKind, file: &[u8]) -> Image {
+    Image {
+        name: name.into(),
+        kind,
+        file: format!("{name}.bin"),
+        targets: vec![C3],
+        guards: None,
+        sha256: sha(file),
+    }
+}
+
+/// An ESP32-C3 app image of `len` bytes whose app descriptor carries `version`, as
+/// `espflash save-image` writes one.
+fn app_image(len: usize, version: &str) -> Vec<u8> {
+    let mut img: Vec<u8> = (0..len as u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+        .collect();
+    img[0] = 0xE9;
+    img[12..14].copy_from_slice(&5u16.to_le_bytes());
+    img[0x20..0x24].copy_from_slice(&0xABCD_5432u32.to_le_bytes());
+    img[0x30..0x50].fill(0);
+    img[0x30..0x30 + version.len()].copy_from_slice(version.as_bytes());
+    img
+}
+
+/// A merged install image: the whole 4 MB, starting with the ESP image magic (the bootloader's
+/// header, which carries no app descriptor).
+fn install_image() -> Vec<u8> {
+    let mut img = vec![0xFF; hoverboard_cli::install::IMAGE_LEN];
+    img[..64].fill(0x11);
+    img[0] = 0xE9;
+    img
 }
 
 /// A bundle of `images`, each with its ELF, written without the packer's checks.
@@ -118,15 +164,16 @@ fn the_manifest_parses() {
     assert_eq!(i.name, "mainboard-gd32f130c8");
     assert_eq!(i.file, "mainboard-gd32f130c8.elf");
     assert_eq!(i.kind, ImageKind::Board);
-    assert_eq!(i.targets, vec![F1X0_64]);
-    assert_eq!(i.guards.code_floor, 40_000);
-    assert_eq!(i.guards.hot_symbols, Some(vec!["9run_shell".to_string()]));
+    assert_eq!(i.targets, boards(&[F1X0_64]));
+    let g = i.guards.as_ref().unwrap();
+    assert_eq!(g.code_floor, 40_000);
+    assert_eq!(g.hot_symbols, Some(vec!["9run_shell".to_string()]));
     // An image with no hot-window gate leaves the key out.
     let m = Manifest::parse(&manifest_text(|s| {
         s.replace(",\n        \"hot_symbols\": [\"9run_shell\"]", "")
     }))
     .unwrap();
-    assert_eq!(m.images[0].guards.hot_symbols, None);
+    assert_eq!(m.images[0].guards.as_ref().unwrap().hot_symbols, None);
 }
 
 #[test]
@@ -287,10 +334,16 @@ fn selection_with_no_match_names_the_chip_and_every_image() {
         SelectError::NoMatch {
             chip: t(Family::Gd32f10x, 128),
             images: vec![
-                ("mainboard-gd32f130c8".into(), vec![F1X0_64]),
-                ("mainboard-gd32f130c6".into(), vec![t(Family::Gd32f1x0, 32)]),
-                ("sideboard-gd32f130c6".into(), vec![t(Family::Gd32f1x0, 32)]),
-                ("mainboard-gd32f103c8".into(), vec![F10X_64]),
+                ("mainboard-gd32f130c8".into(), boards(&[F1X0_64])),
+                (
+                    "mainboard-gd32f130c6".into(),
+                    boards(&[t(Family::Gd32f1x0, 32)])
+                ),
+                (
+                    "sideboard-gd32f130c6".into(),
+                    boards(&[t(Family::Gd32f1x0, 32)])
+                ),
+                ("mainboard-gd32f103c8".into(), boards(&[F10X_64])),
             ],
         }
     );
@@ -330,7 +383,7 @@ fn image_cannot_override_the_match() {
         SelectError::NotForChip {
             name: "sideboard-gd32f130c6".into(),
             chip: F1X0_64,
-            targets: vec![t(Family::Gd32f1x0, 32)],
+            targets: boards(&[t(Family::Gd32f1x0, 32)]),
         }
     );
     assert_eq!(
@@ -363,16 +416,16 @@ fn the_guards_come_from_the_manifest() {
     let main = &b.manifest.images[0];
     let tiny = &b.manifest.images[1];
     // Each passes its own guards.
-    assert_eq!(b.prepare(main).unwrap(), elf::to_bin(b.elf(main)).unwrap());
+    assert_eq!(b.prepare(main).unwrap(), elf::to_bin(b.file(main)).unwrap());
     b.prepare(tiny).unwrap();
     // The small image fails the mainboard image's guards (its floor), and the mainboard image
     // fails the small one's (a required symbol it does not carry).
     assert!(matches!(
-        elf::check(b.elf(tiny), &main.guards),
+        elf::check(b.file(tiny), main.guards.as_ref().unwrap()),
         Err(ElfError::CodeFloor(_, 40_000))
     ));
     assert!(matches!(
-        elf::check(b.elf(main), &tiny.guards),
+        elf::check(b.file(main), tiny.guards.as_ref().unwrap()),
         Err(ElfError::MissingSymbols(m)) if m == vec!["cortex_m_rt_main".to_string()]
     ));
     // Each family's mainboard image carries its own chip's vectors: the F103 image fails the F130
@@ -380,12 +433,12 @@ fn the_guards_come_from_the_manifest() {
     let f103 = &b.manifest.images[3];
     b.prepare(f103).unwrap();
     assert!(matches!(
-        elf::check(b.elf(f103), &main.guards),
+        elf::check(b.file(f103), main.guards.as_ref().unwrap()),
         Err(ElfError::MissingSymbols(m)) if m == vec!["T DMA_Channel3_4$".to_string()]
     ));
     // The same ELF under another image's guards in the manifest is refused by prepare.
     let (sg, _) = small();
-    let elf = b.elf(main).to_vec();
+    let elf = b.file(main).to_vec();
     let swapped = Bundle::open(&bundle_of(vec![(
         image("mainboard-gd32f130c8", &[F1X0_64], &sg, &elf),
         elf.clone(),
@@ -409,7 +462,7 @@ fn the_image_tables_are_in_their_cargo_toml() {
             ImageTable {
                 kind: ImageKind::Board,
                 features: vec![chip.to_string()],
-                targets: vec![target],
+                targets: vec![Target::Board(target)],
             }
         );
     }
@@ -446,8 +499,8 @@ fn the_packer_round_trips() {
         &[PackEntry {
             name: "mainboard-gd32f130c8",
             table,
-            guards: g.clone(),
-            elf: &built,
+            guards: Some(g.clone()),
+            file: &built,
         }],
         "c0eb25917cd904d5d9ba9307f56cb8251cbb61dd",
         "2026-11-01T17:03:58Z",
@@ -464,15 +517,15 @@ fn the_packer_round_trips() {
                 name: "mainboard-gd32f130c8".into(),
                 kind: ImageKind::Board,
                 file: "mainboard-gd32f130c8.elf".into(),
-                targets: vec![F1X0_64],
-                guards: g,
+                targets: boards(&[F1X0_64]),
+                guards: Some(g),
                 sha256: sha(&stored),
             }],
         }
     );
     let img = &b.manifest.images[0];
-    assert_eq!(b.elf(img), &stored[..]);
-    assert!(b.elf(img).len() < built.len());
+    assert_eq!(b.file(img), &stored[..]);
+    assert!(b.file(img).len() < built.len());
     assert_eq!(b.prepare(img).unwrap(), elf::to_bin(&built).unwrap());
     let info = b.describe();
     assert!(info.starts_with("commit  c0eb2591"), "{info}");
@@ -486,11 +539,11 @@ fn the_packer_round_trips() {
 fn the_packer_refuses_an_elf_that_fails_its_guards() {
     let g = release_guards();
     let table = || image_table(FIRMWARE_TOML, "mainboard-gd32f130c8").unwrap();
-    let entry = |elf: &'static [u8]| PackEntry {
+    let entry = |file: &'static [u8]| PackEntry {
         name: "mainboard-gd32f130c8",
         table: table(),
-        guards: release_guards(),
-        elf,
+        guards: Some(release_guards()),
+        file,
     };
     // A required symbol gone.
     let (mut text, bss) = names_of(&g);
@@ -525,7 +578,7 @@ fn a_pack_argument_names_crate_image_and_elf() {
         TreeEntry {
             crate_dir: "motorcontroller/firmware".into(),
             name: "mainboard-gd32f130c8".into(),
-            elf: "target/x/firmware".into(),
+            file: "target/x/firmware".into(),
         }
     );
     // A drive letter's colon stays in the crate directory.
@@ -544,7 +597,7 @@ fn image_names_are_role_then_chip() {
         "sideboard-gd32f130c6",
         "mainboard-gd32f103rc",
     ] {
-        assert_eq!(check_name(ok, None), Ok(()), "{ok}");
+        assert!(check_name(ok, ImageKind::Board).is_ok(), "{ok}");
     }
     for bad in [
         "gd32f103c8-mainboard",
@@ -554,19 +607,30 @@ fn image_names_are_role_then_chip() {
         "mainboard-GD32F103C8",
         "mainboard-gd32f103c8-x",
     ] {
-        assert!(check_name(bad, None).is_err(), "{bad}");
+        assert!(check_name(bad, ImageKind::Board).is_err(), "{bad}");
     }
+    assert_eq!(
+        check_name("mainboard-gd32f103c8", ImageKind::Board),
+        Ok("gd32f103c8")
+    );
     // Against the table: the name's chip is the table's one chip feature.
-    let f = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    assert!(check_name("mainboard-gd32f103c8", Some(&f(&["gd32f103c8"]))).is_ok());
-    assert!(check_name("mainboard-gd32f103c8", Some(&f(&["gd32f130c8"]))).is_err());
-    assert!(check_name("mainboard-gd32f103c8", Some(&f(&[]))).is_err());
-    assert!(check_name("mainboard-gd32f103c8", Some(&f(&["gd32f103c8", "imu"]))).is_ok());
-    assert!(check_name(
-        "mainboard-gd32f103c8",
-        Some(&f(&["gd32f103c8", "gd32f130c8"]))
-    )
-    .is_err());
+    let f = |v: &[&str]| ImageTable {
+        kind: ImageKind::Board,
+        features: v.iter().map(|s| s.to_string()).collect(),
+        targets: boards(&[F10X_64]),
+    };
+    let name = "mainboard-gd32f103c8";
+    assert!(check_table(name, &f(&["gd32f103c8"])).is_ok());
+    assert!(check_table(name, &f(&["gd32f130c8"])).is_err());
+    assert!(check_table(name, &f(&[])).is_err());
+    assert!(check_table(name, &f(&["gd32f103c8", "imu"])).is_ok());
+    assert!(check_table(name, &f(&["gd32f103c8", "gd32f130c8"])).is_err());
+    // A board image's targets are board targets.
+    let mut c3 = f(&["gd32f103c8"]);
+    c3.targets = vec![C3];
+    assert!(check_table(name, &c3)
+        .unwrap_err()
+        .contains("not a board target"));
 }
 
 #[test]
@@ -594,4 +658,338 @@ fn the_build_time_is_utc() {
     assert_eq!(bundle::utc(0), "1970-01-01T00:00:00Z");
     assert_eq!(bundle::utc(1_793_552_638), "2026-11-01T17:03:58Z");
     assert_eq!(bundle::utc(951_782_400), "2000-02-29T00:00:00Z");
+}
+
+/// The bridge crate's image tables.
+const BRIDGE_TOML: &str = include_str!("../../../bridge/Cargo.toml");
+
+/// A bundle of the GD32F130C8 mainboard image and the bridge's two, packed from the crates' own
+/// tables.
+fn with_bridge(app: &[u8], install: &[u8]) -> Result<Vec<u8>, String> {
+    let elf = release_elf();
+    pack(
+        &[
+            PackEntry {
+                name: "mainboard-gd32f130c8",
+                table: image_table(FIRMWARE_TOML, "mainboard-gd32f130c8").unwrap(),
+                guards: Some(release_guards()),
+                file: &elf,
+            },
+            PackEntry {
+                name: "bridge-esp32c3",
+                table: image_table(BRIDGE_TOML, "bridge-esp32c3").unwrap(),
+                guards: None,
+                file: app,
+            },
+            PackEntry {
+                name: "bridge-esp32c3-install",
+                table: image_table(BRIDGE_TOML, "bridge-esp32c3-install").unwrap(),
+                guards: None,
+                file: install,
+            },
+        ],
+        "c0eb25917cd904d5d9ba9307f56cb8251cbb61dd",
+        "2026-11-01T17:03:58Z",
+    )
+}
+
+#[test]
+fn the_bridge_tables_are_in_the_bridge_crate() {
+    for (name, kind) in [
+        ("bridge-esp32c3", ImageKind::Bridge),
+        ("bridge-esp32c3-install", ImageKind::BridgeInstall),
+    ] {
+        assert_eq!(
+            image_table(BRIDGE_TOML, name).unwrap(),
+            ImageTable {
+                kind,
+                features: Vec::new(),
+                targets: vec![C3],
+            }
+        );
+    }
+}
+
+#[test]
+fn the_packer_round_trips_the_bridge_images() {
+    let app = app_image(9_001, "0.2.0");
+    let inst = install_image();
+    let z = with_bridge(&app, &inst).unwrap();
+    let b = Bundle::open(&z).unwrap();
+    let m = &b.manifest;
+    assert_eq!(
+        m.images[1],
+        Image {
+            name: "bridge-esp32c3".into(),
+            kind: ImageKind::Bridge,
+            file: "bridge-esp32c3.bin".into(),
+            targets: vec![C3],
+            guards: None,
+            sha256: sha(&app),
+        }
+    );
+    assert_eq!(m.images[2].kind, ImageKind::BridgeInstall);
+    assert_eq!(m.images[2].file, "bridge-esp32c3-install.bin");
+    // Stored as built, and checked as its install command checks it.
+    assert_eq!(b.file(&m.images[1]), &app[..]);
+    assert_eq!(
+        b.bridge_file(&m.images[1]).unwrap(),
+        (&app[..], Some([0, 2, 0]))
+    );
+    assert_eq!(b.bridge_file(&m.images[2]).unwrap(), (&inst[..], None));
+    // The manifest carries no guards for a bridge image, and the kind's name.
+    let mut a = zip::ZipArchive::new(std::io::Cursor::new(&z)).unwrap();
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut a.by_name("manifest.json").unwrap(), &mut text).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(json["images"][0].get("guards").is_some());
+    assert!(json["images"][1].get("guards").is_none());
+    assert_eq!(json["images"][2]["kind"], "bridge-install");
+    assert_eq!(json["images"][2]["targets"][0]["chip"], "esp32c3");
+    // The mostly erased install image deflates to a fraction of its size.
+    assert!(z.len() < inst.len() / 100, "{} B", z.len());
+    let info = b.describe();
+    assert!(
+        info.contains("image   bridge-esp32c3 (bridge): esp32c3; 9001 B\n"),
+        "{info}"
+    );
+    assert!(
+        info.contains("image   bridge-esp32c3-install (bridge-install): esp32c3; 4194304 B\n"),
+        "{info}"
+    );
+    assert_eq!(b.commit_word(), Some(0xc0eb_2591));
+}
+
+#[test]
+fn the_packer_refuses_a_bridge_image_its_install_would_refuse() {
+    let app = app_image(9_001, "0.2.0");
+    let inst = install_image();
+    // The two files swapped: each fails the other's check.
+    let e = with_bridge(&inst, &inst).unwrap_err();
+    assert!(
+        e.contains("bridge-esp32c3: not an ESP32-C3 app image"),
+        "{e}"
+    );
+    let e = with_bridge(&app, &app).unwrap_err();
+    assert!(
+        e.contains("bridge-esp32c3-install: not a merged install image: 9001 B"),
+        "{e}"
+    );
+    // A bridge image has no guards.
+    let e = pack(
+        &[PackEntry {
+            name: "bridge-esp32c3",
+            table: image_table(BRIDGE_TOML, "bridge-esp32c3").unwrap(),
+            guards: Some(release_guards()),
+            file: &app,
+        }],
+        "c",
+        "b",
+    )
+    .unwrap_err();
+    assert!(e.contains("a bridge image has no guards"), "{e}");
+}
+
+#[test]
+fn bridge_image_names_are_bridge_then_chip() {
+    assert_eq!(
+        check_name("bridge-esp32c3", ImageKind::Bridge),
+        Ok("esp32c3")
+    );
+    assert_eq!(
+        check_name("bridge-esp32c3-install", ImageKind::BridgeInstall),
+        Ok("esp32c3")
+    );
+    for (bad, kind) in [
+        ("bridge-esp32c3-install", ImageKind::Bridge),
+        ("bridge-esp32c3", ImageKind::BridgeInstall),
+        ("mainboard-gd32f130c8", ImageKind::Bridge),
+        ("bridge-gd32f130c8", ImageKind::Board),
+        ("esp32c3-bridge", ImageKind::Bridge),
+        ("bridge-", ImageKind::Bridge),
+    ] {
+        assert!(check_name(bad, kind).is_err(), "{bad} as {kind:?}");
+    }
+    // Against the table: the name's chip is every target's chip, and a target is a bridge one.
+    let table = ImageTable {
+        kind: ImageKind::Bridge,
+        features: Vec::new(),
+        targets: vec![C3],
+    };
+    assert!(check_table("bridge-esp32c3", &table).is_ok());
+    let e = check_table("bridge-esp32s3", &table).unwrap_err();
+    assert!(
+        e.contains("names the chip esp32s3, but it lists the target esp32c3"),
+        "{e}"
+    );
+    let board = ImageTable {
+        targets: boards(&[F1X0_64]),
+        ..table
+    };
+    let e = check_table("bridge-esp32c3", &board).unwrap_err();
+    assert!(e.contains("not a bridge target"), "{e}");
+}
+
+/// A manifest with the spec's two bridge entries and one board image, with `edit` applied.
+fn bridge_manifest(edit: impl Fn(String) -> String) -> String {
+    let h = "ab".repeat(32);
+    let s = format!(
+        r#"{{
+  "commit": "c0eb25917cd904d5d9ba9307f56cb8251cbb61dd",
+  "built": "2026-11-01T17:03:58Z",
+  "images": [
+    {{ "name": "mainboard-gd32f130c8", "kind": "board", "file": "m.elf",
+       "targets": [ {{ "family": "gd32f1x0", "flash_kib": 64 }} ],
+       "guards": {{ "code_floor": 40000, "required_symbols": ["T main$"] }},
+       "sha256": "{h}" }},
+    {{ "name": "bridge-esp32c3", "kind": "bridge", "file": "bridge-esp32c3.bin",
+       "targets": [ {{ "chip": "esp32c3" }} ], "sha256": "{h}" }},
+    {{ "name": "bridge-esp32c3-install", "kind": "bridge-install",
+       "file": "bridge-esp32c3-install.bin", "targets": [ {{ "chip": "esp32c3" }} ],
+       "sha256": "{h}" }}
+  ]
+}}"#
+    );
+    edit(s)
+}
+
+#[test]
+fn a_manifest_s_bridge_entries_are_checked() {
+    let m = Manifest::parse(&bridge_manifest(|s| s)).unwrap();
+    assert_eq!(m.images[1].kind, ImageKind::Bridge);
+    assert_eq!(m.images[1].targets, vec![C3]);
+    assert_eq!(m.images[2].kind, ImageKind::BridgeInstall);
+    assert_eq!(m.images[2].guards, None);
+    let edits: &[(&str, &str)] = &[
+        // A bridge image with guards.
+        (
+            r#""targets": [ { "chip": "esp32c3" } ], "sha256""#,
+            r#""targets": [ { "chip": "esp32c3" } ], "guards": { "code_floor": 1, "required_symbols": [] }, "sha256""#,
+        ),
+        // A board image without them.
+        (
+            r#""guards": { "code_floor": 40000, "required_symbols": ["T main$"] },"#,
+            "",
+        ),
+        // A board target on a bridge image, and a bridge target on a board image.
+        (
+            r#"{ "chip": "esp32c3" }"#,
+            r#"{ "family": "gd32f1x0", "flash_kib": 64 }"#,
+        ),
+        (
+            r#"{ "family": "gd32f1x0", "flash_kib": 64 }"#,
+            r#"{ "chip": "esp32c3" }"#,
+        ),
+        // An unknown chip, and a target with both sorts of field.
+        (r#""chip": "esp32c3""#, r#""chip": "esp32s3""#),
+        (
+            r#"{ "chip": "esp32c3" }"#,
+            r#"{ "chip": "esp32c3", "flash_kib": 64 }"#,
+        ),
+        // The install image named as the app image, and the install kind on the app image.
+        (
+            r#""name": "bridge-esp32c3-install""#,
+            r#""name": "bridge-esp32c3x""#,
+        ),
+        (r#""kind": "bridge","#, r#""kind": "bridge-install","#),
+    ];
+    for (from, to) in edits {
+        let text = bridge_manifest(|s| s.replacen(from, to, 1));
+        assert_ne!(
+            text,
+            bridge_manifest(|s| s),
+            "{from} is not in the manifest"
+        );
+        assert!(
+            matches!(Manifest::parse(&text), Err(BundleError::Manifest(_))),
+            "{from} -> {to} was accepted"
+        );
+    }
+}
+
+#[test]
+fn a_bridge_image_is_chosen_by_the_esp_chip() {
+    use espsvc::CHIP_ESP32C3;
+    let b =
+        Bundle::open(&with_bridge(&app_image(9_001, "0.2.0"), &install_image()).unwrap()).unwrap();
+    let pick = |kind, chip| b.select_bridge(kind, chip).map(|i| i.name.as_str());
+    assert_eq!(
+        pick(ImageKind::Bridge, Some(CHIP_ESP32C3)),
+        Ok("bridge-esp32c3")
+    );
+    assert_eq!(
+        pick(ImageKind::BridgeInstall, Some(CHIP_ESP32C3)),
+        Ok("bridge-esp32c3-install")
+    );
+    // An ESP_INFO that does not decode: the one image of the kind.
+    assert_eq!(pick(ImageKind::Bridge, None), Ok("bridge-esp32c3"));
+    assert_eq!(
+        pick(ImageKind::Bridge, Some(9)),
+        Err(SelectError::UnknownChip(9))
+    );
+    // The board selection is not confused by the bridge images.
+    let (img, _) = b.select(&chip(FAMILY_F1X0, 64), None).unwrap();
+    assert_eq!(img.name, "mainboard-gd32f130c8");
+    assert_eq!(
+        b.select(&chip(FAMILY_F1X0, 64), Some("bridge-esp32c3")),
+        Err(SelectError::NotInBundle("bridge-esp32c3".into()))
+    );
+    // A bundle of board images only.
+    let boards_only = fleet();
+    let e = boards_only
+        .select_bridge(ImageKind::Bridge, Some(CHIP_ESP32C3))
+        .unwrap_err();
+    assert_eq!(
+        e,
+        SelectError::NoBridgeImage {
+            kind: ImageKind::Bridge,
+            chip: Some(EspChip::Esp32c3),
+            images: Vec::new(),
+        }
+    );
+    assert_eq!(
+        e.to_string(),
+        "REFUSED: no bridge image in the bundle is for the chip (esp32c3)"
+    );
+    assert_eq!(
+        boards_only
+            .select_bridge(ImageKind::BridgeInstall, None)
+            .unwrap_err()
+            .to_string(),
+        "REFUSED: the bundle has no bridge-install image"
+    );
+}
+
+#[test]
+fn a_bridge_image_is_told_from_a_bundle_by_its_content() {
+    let app = app_image(9_001, "0.2.0");
+    let inst = install_image();
+    let z = with_bridge(&app, &inst).unwrap();
+    assert!(is_bundle(&z));
+    assert!(!is_bundle(&app));
+    assert!(!is_bundle(&inst));
+    // Both bridge images start with the ESP image magic; the install check tells them apart.
+    assert_eq!(app[0], inst[0]);
+    assert_eq!(
+        bundle::check_bridge_file(ImageKind::Bridge, &app),
+        Ok(Some([0, 2, 0]))
+    );
+    assert!(bundle::check_bridge_file(ImageKind::Bridge, &inst).is_err());
+    assert_eq!(
+        bundle::check_bridge_file(ImageKind::BridgeInstall, &inst),
+        Ok(None)
+    );
+    assert!(bundle::check_bridge_file(ImageKind::BridgeInstall, &app).is_err());
+    // A damaged bridge image in a bundle written without the packer is refused when it is used.
+    let junk = vec![0x5Au8; 300];
+    let raw = Bundle::open(&bundle_of(vec![(
+        bridge_image("bridge-esp32c3", ImageKind::Bridge, &junk),
+        junk.clone(),
+    )]))
+    .unwrap();
+    let e = raw.bridge_file(&raw.manifest.images[0]).unwrap_err();
+    assert!(
+        e.contains("bridge-esp32c3: not an ESP32-C3 app image"),
+        "{e}"
+    );
 }
