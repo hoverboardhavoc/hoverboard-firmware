@@ -6,28 +6,36 @@
 //!
 //! The port interleaves the two sides as the hardware does: every access the driver makes lets the
 //! core run a slice of instructions while it is not halted.
+//!
+//! Each test runs on two rows of the part table (`specs/bridge-chip-support.md`, section 10): a
+//! Cortex-M0 with 4 KiB of SRAM and a 2 KiB ring (the MM32SPIN05, the GD32F130C6's layout), and a
+//! Cortex-M3 with 8 KiB and a 4 KiB ring (the GD32F130C8). The loader is ARMv6-M code, so the M0
+//! model faults on any ARMv7-M instruction in it.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use emulator_runner::fmc_board::{attach, FLASH_BASE};
 use emulator_runner::fmc_model::{FmcModel, FMC_BASE, FMC_WINDOW};
-use hoverboard_bridge_core::loader::{self, Outcome, Poll, Run};
+use hoverboard_bridge_core::loader::{self, Layout, Outcome, Poll, Run};
+use hoverboard_bridge_core::part::{self, Core, Part};
 use hoverboard_bridge_core::swd::MemPort;
 use hoverboard_bridge_core::target::{DCRDR, DCRSR, DHCSR};
 use unicorn_engine::{Arch, ArmCpuModel, Mode, Prot, RegisterARM, Unicorn};
 
-const FLASH_SIZE: u64 = 64 * 1024;
 const RAM_BASE: u64 = 0x2000_0000;
-const RAM_SIZE: u64 = 8 * 1024;
 const PAGE: u32 = 1024;
+/// The rows the tests run on: the M0 with 4 KiB, the M3 with 8 KiB.
+const ROWS: [&Part; 2] = [&part::MM32SPIN05, &part::GD32F130C8];
 /// Instructions the core runs per access while it runs: a few halfwords' worth, so the driver
 /// sees the ring fill and drain rather than a loader that keeps up instantly.
 const SLICE: usize = 40;
 
-/// A Cortex-M3 under Unicorn with the GD32's flash and FMC, seen through its debug registers.
+/// A part's core under Unicorn with the GD32's flash and FMC, seen through its debug registers.
 struct EmuPort {
     emu: Unicorn<'static, ()>,
+    ram_size: u64,
+    layout: Layout,
     fmc: Rc<RefCell<FmcModel>>,
     halted: bool,
     /// Set by the `bkpt` hook.
@@ -51,13 +59,18 @@ fn core_reg(sel: u32) -> RegisterARM {
 }
 
 impl EmuPort {
-    /// A halted core, flash erased, the FMC unlocked as the bridge leaves it before a run.
-    fn new() -> Self {
+    /// A halted core of `row`'s kind, its flash erased and its SRAM mapped, the FMC unlocked as
+    /// the bridge leaves it before a run.
+    fn new(row: &Part) -> Self {
         let mut emu = Unicorn::new(Arch::ARM, Mode::THUMB).expect("unicorn init");
-        emu.ctl_set_cpu_model(ArmCpuModel::CORTEX_M3 as i32)
-            .expect("cortex-m3");
-        let fmc = attach(&mut emu, FLASH_SIZE, PAGE);
-        emu.mem_map(RAM_BASE, RAM_SIZE, Prot::ALL).expect("map ram");
+        let model = match row.core {
+            Core::M0 { .. } => ArmCpuModel::CORTEX_M0,
+            Core::M3 => ArmCpuModel::CORTEX_M3,
+        };
+        emu.ctl_set_cpu_model(model as i32).expect("cpu model");
+        let fmc = attach(&mut emu, row.flash_kib as u64 * 1024, PAGE);
+        let ram_size = row.sram_kib as u64 * 1024;
+        emu.mem_map(RAM_BASE, ram_size, Prot::ALL).expect("map ram");
         let bkpt = Rc::new(Cell::new(false));
         let hit = bkpt.clone();
         emu.add_intr_hook(move |uc, _intno| {
@@ -67,6 +80,8 @@ impl EmuPort {
         .expect("bkpt hook");
         let mut p = EmuPort {
             emu,
+            ram_size,
+            layout: Layout::of(row),
             fmc,
             halted: true,
             bkpt,
@@ -151,7 +166,7 @@ impl MemPort for EmuPort {
             self.dcrdr = v;
         } else if let Some(off) = Self::fmc_reg(addr) {
             self.fmc.borrow_mut().write_reg(off, v);
-        } else if (RAM_BASE..RAM_BASE + RAM_SIZE).contains(&(addr as u64)) {
+        } else if (RAM_BASE..RAM_BASE + self.ram_size).contains(&(addr as u64)) {
             self.emu.mem_write(addr as u64, &v.to_le_bytes()).unwrap();
         } else {
             return Err(format!("the driver wrote {addr:#x}"));
@@ -173,7 +188,12 @@ const STAT_ERR: u32 = 1 << 2 | 1 << 4;
 
 /// One run of `data` at `addr`, driven to the halt: the run and what the loader left in `r0`, `r2`.
 fn run(p: &mut EmuPort, addr: u32, data: &[u8]) -> (Run, Outcome) {
-    let mut run = Run::start(p, addr, data.len() as u32).expect("start");
+    let layout = p.layout;
+    assert!(
+        layout.stack_top as u64 <= RAM_BASE + p.ram_size,
+        "the stack lies in the part's SRAM"
+    );
+    let mut run = Run::start(p, layout, addr, data.len() as u32).expect("start");
     for _ in 0..1_000_000 {
         if let Poll::Done(o) = run.poll(p, data).expect("poll") {
             return (run, o);
@@ -190,28 +210,37 @@ fn image(len: usize) -> Vec<u8> {
 
 #[test]
 fn the_loader_programs_an_image_across_three_pages_and_it_reads_back() {
-    let mut p = EmuPort::new();
-    loader::load(&mut p).unwrap();
-    let base = FLASH_BASE as u32 + PAGE;
-    // Three pages and part of a fourth, then a run that goes round the 4 KiB ring.
-    for (addr, len) in [(base, 3 * 1024 + 301), (base + 4 * PAGE, 9 * 1024 + 2)] {
-        let img = image(len);
-        let (r, o) = run(&mut p, addr, &img);
-        assert_eq!(o.stat & STAT_ERR, 0, "{o:?}");
-        assert_eq!(o.addr, r.end(), "r2 is the address after the last halfword");
-        let mut want = img.clone();
-        if len % 2 == 1 {
-            want.push(0xFF);
+    for row in ROWS {
+        let mut p = EmuPort::new(row);
+        loader::load(&mut p).unwrap();
+        let base = FLASH_BASE as u32 + PAGE;
+        // Three pages and part of a fourth, then a run that goes round the ring more than twice.
+        let ring = p.layout.ring_len as usize;
+        for (addr, len) in [(base, 3 * 1024 + 301), (base + 4 * PAGE, 2 * ring + 1026)] {
+            let img = image(len);
+            let (r, o) = run(&mut p, addr, &img);
+            assert_eq!(o.stat & STAT_ERR, 0, "{}: {o:?}", row.name);
+            assert_eq!(o.addr, r.end(), "r2 is the address after the last halfword");
+            let mut want = img.clone();
+            if len % 2 == 1 {
+                want.push(0xFF);
+            }
+            assert_eq!(p.flash(addr, want.len()), want, "{}", row.name);
         }
-        assert_eq!(p.flash(addr, want.len()), want);
+        assert!(p.halted);
+        assert!(!p.fmc.borrow().programming(), "the loader cleared PG");
     }
-    assert!(p.halted);
-    assert!(!p.fmc.borrow().programming(), "the loader cleared PG");
 }
 
 #[test]
 fn a_reprogram_under_the_loader_ends_in_pgerr_at_the_failing_halfword() {
-    let mut p = EmuPort::new();
+    for row in ROWS {
+        reprogram_fails(row);
+    }
+}
+
+fn reprogram_fails(row: &Part) {
+    let mut p = EmuPort::new(row);
     loader::load(&mut p).unwrap();
     let base = FLASH_BASE as u32 + PAGE;
     // A high halfword: one already programmed at a low halfword would instead close the halfword

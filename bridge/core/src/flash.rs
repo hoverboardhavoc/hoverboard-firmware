@@ -1,15 +1,16 @@
 //! Flashing (`specs/hoverboard-bridge.md`, "Flashing"): erase and program only the pages an image covers,
-//! never the store's last 2 KB, so the stored configuration survives; erasing the store, the one
-//! operation that reaches its pages ([`erase_store`]); and clearing read protection with the
-//! USER-byte check.
+//! never the store's two pages at the top of the part's flash, so the stored configuration
+//! survives; erasing the store, the one operation that reaches its pages ([`erase_store`]); and
+//! clearing read protection, with the USER-byte check on a GD32. Every limit comes from the part's
+//! row in [`crate::part`] (`specs/bridge-chip-support.md`).
 //!
 //! The sequence, as [`FlashJob`] runs it in bounded pieces per [`FlashJob::step`] so the caller can
 //! keep the radio serviced:
 //!
-//! 1. Connect, identify, refuse a protected or unsupported part, then reset and halt (disarm and
-//!    debug hold first): the loader runs the core, and only a reset stops what the firmware left
-//!    running (its free watchdog, which `FWDGT_HOLD` freezes only while halted, its DMA, its
-//!    interrupts).
+//! 1. Connect, identify, refuse a protected or unsupported part or an image that reaches the
+//!    part's store, then reset and halt (disarm and the part's debug hold first): the loader runs
+//!    the core, and only a reset stops what the firmware left running (its free watchdog, which
+//!    the hold freezes only while halted, its DMA, its interrupts).
 //! 2. Unlock the flash controller.
 //! 3. Erase each 1 KB page the image covers, page 0 last.
 //! 4. Program through the RAM loader ([`crate::loader`]): one run for pages 1 and up, then one for
@@ -27,25 +28,26 @@
 use espsvc::Status;
 
 use crate::loader::{self, Poll, Run};
+use crate::part::{self, Part};
 use crate::swd::{Swd, SwdError, SwdPins};
 use crate::target::{self, PortError, TargetError, RDP_OFF};
 
 /// Main flash base.
-pub const FLASH_BASE: u32 = store::geometry::FLASH_BASE;
-/// The erase page.
+pub const FLASH_BASE: u32 = part::FLASH_BASE;
+/// The erase page, the same on every row.
 pub const PAGE: u32 = 1024;
-/// The only flash size this version flashes. The 12-FET's store address is an open question
-/// (`specs/hoverboard-bridge.md`, "Open questions"), so a part reporting more than 64 KiB is refused rather
-/// than guessed at; a smaller part would put the store elsewhere and is refused too.
-pub const SUPPORTED_KIB: u16 = 64;
-/// The store's first byte on the part [`check_part`] lets through: the store crate's placement rule
-/// (`shared/store/src/geometry.rs`), the one the firmware mounts its store with. The flash guard
-/// and [`erase_store`] both read it, so they cannot disagree.
-pub const STORE_START: u32 = store::geometry::store_base(SUPPORTED_KIB as u32 * 1024, PAGE);
-/// The store region's length: two pages.
-pub const STORE_LEN: u32 = store::geometry::region_len(PAGE as usize) as u32;
-/// The largest image: everything below the store (63,488 B, the firmware's link limit).
-pub const MAX_IMAGE: usize = (STORE_START - FLASH_BASE) as usize;
+const _: () = {
+    let mut i = 0;
+    while i < part::PARTS.len() {
+        assert!(part::PARTS[i].page == PAGE);
+        i += 1;
+    }
+};
+/// The largest image any row takes (63,488 B, the 64 KiB rows' link limit): the image buffer's
+/// size. A part's own limit is [`Part::max_image`], everything below its store; the job and
+/// `FLASH_BEGIN` check that one. The 12-FET's store address is an open question
+/// (`specs/hoverboard-bridge.md`, "Open questions"), so its 256 KiB part is in no row and refused.
+pub const MAX_IMAGE: usize = part::MAX_IMAGE;
 
 const FMC_KEY: u32 = 0x4002_2004;
 const FMC_OBKEY: u32 = 0x4002_2008;
@@ -59,6 +61,7 @@ const STAT_PGERR: u32 = 1 << 2;
 const STAT_WPERR: u32 = 1 << 4;
 const STAT_ENDF: u32 = 1 << 5;
 const CTL_PER: u32 = 1 << 1;
+const CTL_MER: u32 = 1 << 2;
 const CTL_OBPG: u32 = 1 << 4;
 const CTL_OBER: u32 = 1 << 5;
 const CTL_START: u32 = 1 << 6;
@@ -80,8 +83,9 @@ pub enum FlashError {
     Target(TargetError),
     /// The protection byte is not `0xA5`.
     Protected,
-    /// The part's flash size is not [`SUPPORTED_KIB`].
-    UnsupportedPart(u16),
+    /// The part is in no row of [`crate::part`]: its family is unsupported, or its family and
+    /// flash size match no row.
+    UnsupportedPart,
     /// The image reaches the store's pages, or is empty.
     StoreRange,
     /// `BUSY` did not clear.
@@ -144,7 +148,7 @@ impl FlashError {
             FlashError::Target(TargetError::Swd(_)) => Status::NoTarget,
             FlashError::Target(TargetError::Timeout) => Status::Timeout,
             FlashError::Protected => Status::Protected,
-            FlashError::UnsupportedPart(_) => Status::TooLarge,
+            FlashError::UnsupportedPart => Status::UnsupportedPart,
             FlashError::StoreRange => Status::StoreRange,
             FlashError::Busy | FlashError::Boot | FlashError::Loader => Status::Timeout,
             FlashError::Unlock
@@ -156,7 +160,8 @@ impl FlashError {
     }
 }
 
-/// Refuse a range that is empty or reaches the store's pages.
+/// Refuse a range that is empty or larger than the image buffer ([`MAX_IMAGE`]). The part's own
+/// limit is [`check_image`]'s, once the part is known.
 pub fn check_range(len: usize) -> Result<(), FlashError> {
     if len == 0 || len > MAX_IMAGE {
         return Err(FlashError::StoreRange);
@@ -164,16 +169,35 @@ pub fn check_range(len: usize) -> Result<(), FlashError> {
     Ok(())
 }
 
-/// Connect, identify, and refuse a part this version must not flash.
-pub fn check_part<P: SwdPins>(swd: &mut Swd<P>) -> Result<espsvc::TargetId, FlashError> {
+/// Refuse an image that is empty or reaches `part`'s store.
+pub fn check_image(part: &Part, len: usize) -> Result<(), FlashError> {
+    if len == 0 || len > part.max_image() {
+        return Err(FlashError::StoreRange);
+    }
+    Ok(())
+}
+
+/// The row of an identified part, or [`FlashError::UnsupportedPart`].
+pub fn row(id: &espsvc::TargetId) -> Result<&'static Part, FlashError> {
+    if id.family == espsvc::FAMILY_UNSUPPORTED {
+        return Err(FlashError::UnsupportedPart);
+    }
+    part::lookup(id.family, id.flash_kib).ok_or(FlashError::UnsupportedPart)
+}
+
+/// Connect, identify, and refuse a part this version must not flash: one in no row, or one with
+/// read protection on. Returns the identity and the part's row.
+pub fn check_part<P: SwdPins>(
+    swd: &mut Swd<P>,
+) -> Result<(espsvc::TargetId, &'static Part), FlashError> {
     let id = target::identify(swd)?;
+    if id.family == espsvc::FAMILY_UNSUPPORTED {
+        return Err(FlashError::UnsupportedPart);
+    }
     if id.rdp != RDP_OFF {
         return Err(FlashError::Protected);
     }
-    if id.flash_kib != SUPPORTED_KIB {
-        return Err(FlashError::UnsupportedPart(id.flash_kib));
-    }
-    Ok(id)
+    Ok((id, row(&id)?))
 }
 
 fn wait_idle<P: SwdPins>(swd: &mut Swd<P>) -> Result<u32, FlashError> {
@@ -205,9 +229,9 @@ fn lock<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
     Ok(swd.write_word(FMC_CTL, CTL_LK)?)
 }
 
-/// Erase one page of an image: refuses the store's pages.
-pub fn erase_page<P: SwdPins>(swd: &mut Swd<P>, addr: u32) -> Result<(), FlashError> {
-    if addr >= STORE_START {
+/// Erase one page of an image on `part`: refuses the store's pages.
+pub fn erase_page<P: SwdPins>(swd: &mut Swd<P>, part: &Part, addr: u32) -> Result<(), FlashError> {
+    if addr >= part.store_start() {
         return Err(FlashError::StoreRange);
     }
     erase(swd, addr)
@@ -228,15 +252,21 @@ fn erase<P: SwdPins>(swd: &mut Swd<P>, addr: u32) -> Result<(), FlashError> {
     Ok(())
 }
 
-/// Start a loader run programming `len` bytes at flash address `addr` (the loader's code already
-/// in SRAM, the core halted, the controller unlocked). Refuses a range that reaches the store.
-pub fn start_run<P: SwdPins>(swd: &mut Swd<P>, addr: u32, len: u32) -> Result<Run, FlashError> {
-    if addr < FLASH_BASE || addr + len > STORE_START {
+/// Start a loader run programming `len` bytes at flash address `addr` on `part` (the loader's
+/// code already in SRAM, the core halted, the controller unlocked), with the row's ring and stack.
+/// Refuses a range that reaches the store.
+pub fn start_run<P: SwdPins>(
+    swd: &mut Swd<P>,
+    part: &Part,
+    addr: u32,
+    len: u32,
+) -> Result<Run, FlashError> {
+    if addr < FLASH_BASE || addr + len > part.store_start() {
         return Err(FlashError::StoreRange);
     }
     wait_idle(swd)?;
     clear_stat(swd)?;
-    Ok(Run::start(swd, addr, len)?)
+    Ok(Run::start(swd, loader::Layout::of(part), addr, len)?)
 }
 
 /// Judge a finished run: an error bit is the failing halfword's error; a halt short of the range's
@@ -298,10 +328,13 @@ pub struct FlashJob {
     pages: u32,
     finish: Finish,
     step: Step,
+    /// The part's row, from the identify in [`Step::Prepare`]; `None` before it.
+    part: Option<&'static Part>,
 }
 
 impl FlashJob {
-    /// A job for an image of `len` bytes; refuses a range that reaches the store.
+    /// A job for an image of `len` bytes; refuses one larger than the image buffer here, and one
+    /// that reaches the part's store once the part is identified.
     pub fn new(len: usize, finish: Finish) -> Result<Self, FlashError> {
         check_range(len)?;
         Ok(FlashJob {
@@ -309,7 +342,13 @@ impl FlashJob {
             pages: (len as u32).div_ceil(PAGE),
             finish,
             step: Step::Prepare,
+            part: None,
         })
+    }
+
+    /// The part's row, once [`Step::Prepare`] has identified it.
+    fn part(&self) -> Result<&'static Part, FlashError> {
+        self.part.ok_or(FlashError::UnsupportedPart)
     }
 
     /// The `i`-th page in the job's order: 1, 2, .. last, then 0.
@@ -334,7 +373,7 @@ impl FlashJob {
 
     fn start_segment<P: SwdPins>(&mut self, swd: &mut Swd<P>, seg: u32) -> Result<(), FlashError> {
         let (addr, _, len) = self.segment(seg).ok_or(FlashError::Loader)?;
-        let run = start_run(swd, addr, len)?;
+        let run = start_run(swd, self.part()?, addr, len)?;
         self.step = Step::Program {
             seg,
             run,
@@ -360,14 +399,16 @@ impl FlashJob {
         use espsvc::Stage;
         Ok(match self.step {
             Step::Prepare => {
-                check_part(swd)?;
+                let (_, part) = check_part(swd)?;
+                check_image(part, self.len as usize)?;
+                self.part = Some(part);
                 target::reset_halt(swd)?;
                 unlock(swd)?;
                 self.step = Step::Erase(0);
                 Event::Progress(Stage::Erasing, 0)
             }
             Step::Erase(i) => {
-                erase_page(swd, FLASH_BASE + self.page(i) * PAGE)?;
+                erase_page(swd, self.part()?, FLASH_BASE + self.page(i) * PAGE)?;
                 let done = i + 1;
                 self.step = if done == self.pages {
                     Step::Load
@@ -480,23 +521,25 @@ fn restart<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
 
 /// Erase the store (`specs/hoverboard-bridge.md`, "Erasing the store"): the one operation that
 /// reaches the store's pages, for a store change that reuses ids. The flash job's steps in its
-/// order: [`check_part`] (refused on a protected part or any part but the 64 KiB one), reset and
+/// order: [`check_part`] (refused on a protected part or one in no row), reset and
 /// halt (refused while the disarm does not take), unlock, erase the two pages, lock; then read both
 /// pages back, every word `0xFFFF_FFFF` or [`FlashError::NotErased`] with the first other address;
 /// then reset and release. On an error the core is left halted and the controller locked, as a
 /// failed flash leaves it. The board boots on registry defaults: no address, no link pins, no
 /// odometer total.
 pub fn erase_store<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
-    check_part(swd)?;
+    let (_, part) = check_part(swd)?;
+    let store = part.store_start()..part.store_start() + part.store_len();
     target::reset_halt(swd)?;
     unlock(swd)?;
-    let erased = (STORE_START..STORE_START + STORE_LEN)
+    let erased = store
+        .clone()
         .step_by(PAGE as usize)
         .try_for_each(|page| erase(swd, page));
     lock(swd)?;
     erased?;
     let mut words = [0u32; (PAGE / 4) as usize];
-    for page in (STORE_START..STORE_START + STORE_LEN).step_by(PAGE as usize) {
+    for page in store.step_by(PAGE as usize) {
         swd.read_words(page, &mut words)?;
         if let Some(k) = words.iter().position(|&w| w != 0xFFFF_FFFF) {
             return Err(FlashError::NotErased {
@@ -507,18 +550,28 @@ pub fn erase_store<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
     restart(swd)
 }
 
-/// Clear read protection (`specs/hoverboard-bridge.md`, "First install on a read-protected board"). This
-/// mass-erases the chip. Records the USER byte (and the two DATA bytes) first, erases the option
-/// bytes, writes the protection byte `0xA5` and writes USER and DATA back, each halfword with its
-/// complement (the F1x0 does not generate it). Returns the recorded USER byte; the check that it
-/// took is the next identify after the board is power-cycled by hand.
+/// Clear read protection (`specs/hoverboard-bridge.md`, "First install on a read-protected board").
+/// This mass-erases the chip. Returns the USER byte recorded before the clear, for [`clear_took`].
+/// The part's family picks the sequence: [`clear_protection_mm32`] on the MM32SPIN05, the GD32
+/// option-byte clear on a GD32; an unsupported part is refused.
+pub fn clear_protection<P: SwdPins>(swd: &mut Swd<P>) -> Result<u8, FlashError> {
+    let id = target::identify(swd)?;
+    match id.family {
+        espsvc::FAMILY_MM32SPIN05 => clear_protection_mm32(swd).map(|()| id.user),
+        espsvc::FAMILY_F10X | espsvc::FAMILY_F1X0 => clear_protection_gd32(swd, id.user),
+        _ => Err(FlashError::UnsupportedPart),
+    }
+}
+
+/// The GD32 clear. Records the USER byte (and the two DATA bytes) first, erases the option bytes,
+/// writes the protection byte `0xA5` and writes USER and DATA back, each halfword with its
+/// complement (the F1x0 does not generate it). The check that it took is the next identify after
+/// the board is power-cycled by hand.
 ///
 /// `OBWEN` is preserved in every `CTL` write. It is set by the `OBKEY` sequence and only ever
 /// cleared by software, so the `CTL = OBER` write `gdf130backup` makes clears it and the erase does
 /// not happen, which is how that clear could report success without taking effect.
-pub fn clear_protection<P: SwdPins>(swd: &mut Swd<P>) -> Result<u8, FlashError> {
-    let id = target::identify(swd)?;
-    let user = id.user;
+fn clear_protection_gd32<P: SwdPins>(swd: &mut Swd<P>, user: u8) -> Result<u8, FlashError> {
     let data = swd.read_word(target::OPTION_BYTES + 4)?;
     let (data0, data1) = (data as u8, (data >> 16) as u8);
     target::halt(swd)?;
@@ -556,6 +609,80 @@ pub fn clear_protection<P: SwdPins>(swd: &mut Swd<P>) -> Result<u8, FlashError> 
     result
 }
 
+/// The MM32's secure option block, erased in the clear (`specs/bench-work/mm32/README.md`).
+pub const MM32_SECURE_BLOCK: u32 = 0x1FFE_0000;
+/// The MM32 halfword that turns read protection off: stored as `0x5AA5`.
+const MM32_RDP_OFF: u16 = 0xFFA5;
+/// `SR` `EOP`, which the MM32 clear checks after every step.
+const STAT_EOP: u32 = STAT_ENDF;
+
+/// The MM32SPIN05 clear (`specs/bridge-chip-support.md`, section 6), in the sequence the bench
+/// proved (`unlock2.tcl`, after MindMotion's `MM32_M0_npq_OPT.FLM`). Every `CR` write keeps
+/// `OPTWRE` (bit 9): only the `OPTKEYR` sequence sets it, and any `CR` write without it clears it,
+/// after which `STRT` does nothing. `FLASH_AR` holds the target before each mass or option erase;
+/// without it `STRT` stays set and nothing happens. Each step waits on `BSY`, checks `EOP` and
+/// clears `SR`.
+///
+/// Reset and halt first (the debug hold before it, as the flash job does), then: both keys, mass
+/// erase, option erase of the main block, the protection halfword, option erase of the secure
+/// block, lock, and a system reset, which reloads the option bytes (no power cycle). The check is
+/// the next identify: `FLASH_OBR` `RDPRT` clear.
+pub fn clear_protection_mm32<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), FlashError> {
+    target::reset_halt(swd)?;
+    unlock(swd)?;
+    swd.write_word(FMC_OBKEY, KEY1)?;
+    swd.write_word(FMC_OBKEY, KEY2)?;
+    if swd.read_word(FMC_CTL)? & CTL_OBWEN == 0 {
+        lock(swd)?;
+        return Err(FlashError::Unlock);
+    }
+    let result = (|| {
+        wait_idle(swd)?;
+        clear_stat(swd)?;
+        mm32_erase(swd, FLASH_BASE, CTL_MER)?;
+        mm32_erase(swd, target::OPTION_BYTES, CTL_OBER)?;
+        swd.write_word(FMC_CTL, CTL_OBWEN | CTL_OBPG)?;
+        swd.write_halfwords(target::OPTION_BYTES, &[MM32_RDP_OFF])?;
+        mm32_step_done(swd, target::OPTION_BYTES, true)?;
+        swd.write_word(FMC_CTL, CTL_OBWEN)?;
+        mm32_erase(swd, MM32_SECURE_BLOCK, CTL_OBER)
+    })();
+    lock(swd)?;
+    result?;
+    target::reset(swd)?;
+    target::release(swd)?;
+    Ok(())
+}
+
+/// One MM32 mass or option erase: `FLASH_AR` = `addr`, `CR` = `OPTWRE | op`, then with `STRT`;
+/// wait, check, and `CR` = `OPTWRE`.
+fn mm32_erase<P: SwdPins>(swd: &mut Swd<P>, addr: u32, op: u32) -> Result<(), FlashError> {
+    swd.write_word(FMC_ADDR, addr)?;
+    swd.write_word(FMC_CTL, CTL_OBWEN | op)?;
+    swd.write_word(FMC_CTL, CTL_OBWEN | op | CTL_START)?;
+    mm32_step_done(swd, addr, false)?;
+    swd.write_word(FMC_CTL, CTL_OBWEN)?;
+    Ok(())
+}
+
+/// Wait on `BSY`, then require `EOP` and no error bit, and clear `SR`.
+fn mm32_step_done<P: SwdPins>(
+    swd: &mut Swd<P>,
+    addr: u32,
+    program: bool,
+) -> Result<(), FlashError> {
+    let st = wait_idle(swd)?;
+    clear_stat(swd)?;
+    if st & STAT_EOP == 0 || st & (STAT_PGERR | STAT_WPERR) != 0 {
+        return Err(if program {
+            FlashError::Program { addr, stat: st }
+        } else {
+            FlashError::Erase { addr, stat: st }
+        });
+    }
+    Ok(())
+}
+
 fn program_option<P: SwdPins>(swd: &mut Swd<P>, offset: u32, b: u8) -> Result<(), FlashError> {
     let addr = target::OPTION_BYTES + offset;
     swd.write_halfwords(addr, &[((!b as u16) << 8) | b as u16])?;
@@ -567,8 +694,12 @@ fn program_option<P: SwdPins>(swd: &mut Swd<P>, offset: u32, b: u8) -> Result<()
     Ok(())
 }
 
-/// The check of a protection clear after the power cycle: the protection byte is `0xA5` and the
-/// USER byte is the one recorded before the clear.
+/// The check of a protection clear: on a GD32, after the power cycle, the protection byte is
+/// `0xA5` and the USER byte is the one recorded before the clear; on the MM32SPIN05, whose USER
+/// byte has no equivalent, `FLASH_OBR` `RDPRT` is clear (`rdp` `0xA5`).
 pub fn clear_took(id: &espsvc::TargetId, recorded_user: u8) -> bool {
-    id.rdp == RDP_OFF && id.user == recorded_user
+    match id.family {
+        espsvc::FAMILY_MM32SPIN05 => id.rdp == RDP_OFF,
+        _ => id.rdp == RDP_OFF && id.user == recorded_user,
+    }
 }

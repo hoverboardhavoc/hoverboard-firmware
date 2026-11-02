@@ -118,7 +118,7 @@ pub enum Status {
     Protected = 5,
     /// The write reaches the stored configuration's pages, which the bridge never writes.
     StoreRange = 6,
-    /// The image is larger than the flash buffer, or the part is one this version does not flash.
+    /// The image is larger than the flash buffer.
     TooLarge = 7,
     /// The received image's SHA-256 does not match `FLASH_BEGIN`'s.
     ShaMismatch = 8,
@@ -134,6 +134,9 @@ pub enum Status {
     /// The update is not an ESP32-C3 app image, or its app descriptor's version is not the one
     /// `ESP_UPDATE_BEGIN` announced.
     BadImage = 13,
+    /// The target is a part the bridge does not support (`specs/bridge-chip-support.md`, the part
+    /// table): its family is [`FAMILY_UNSUPPORTED`], or its family and flash size are in no row.
+    UnsupportedPart = 14,
 }
 
 impl Status {
@@ -155,6 +158,7 @@ impl Status {
             11 => Timeout,
             12 => ClearFailed,
             13 => BadImage,
+            14 => UnsupportedPart,
             _ => return None,
         })
     }
@@ -171,9 +175,7 @@ impl Status {
             Status::Armed => "armed: MOE is still set after the disarm write; cut the rail",
             Status::Protected => "read protection is on; run clear-protection first",
             Status::StoreRange => "refused: the range reaches the stored configuration's pages",
-            Status::TooLarge => {
-                "too large for the flash buffer, or a part this version does not flash"
-            }
+            Status::TooLarge => "too large for the flash buffer",
             Status::ShaMismatch => "the received image's SHA-256 does not match",
             Status::FlashError => "the flash controller reported an error",
             Status::VerifyMismatch => "the read-back differs from the image",
@@ -184,6 +186,7 @@ impl Status {
             Status::BadImage => {
                 "not an ESP32-C3 app image, or not the version announced at the start"
             }
+            Status::UnsupportedPart => "a part the bridge does not support",
         }
     }
 }
@@ -388,13 +391,16 @@ impl MailboxState {
 /// The target's identity (`TARGET_ID`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TargetId {
-    /// The debug port ID (`0x1BA01477` on both parts).
+    /// The debug port ID (`0x1BA01477` on the GD32s, `0x0BB11477` on the MM32SPIN05).
     pub dpidr: u32,
-    /// The debug MCU ID at `0xE004_2000` (does not tell the families apart).
+    /// The ID register the part has: the debug MCU ID at `0xE004_2000` on a GD32 (it does not
+    /// tell the families apart), the device ID at `0x4001_3400` on a Cortex-M0; 0 on an
+    /// unsupported core.
     pub mcu_id: u32,
     /// `CPUID` at `0xE000_ED00`.
     pub cpuid: u32,
-    /// [`FAMILY_F10X`] or [`FAMILY_F1X0`], told by where the UID is.
+    /// [`FAMILY_F10X`] or [`FAMILY_F1X0`] (told by where the UID is), [`FAMILY_MM32SPIN05`]
+    /// (told by its ID register), or [`FAMILY_UNSUPPORTED`].
     pub family: u8,
     /// The 96-bit unique ID.
     pub uid: [u8; 12],
@@ -404,7 +410,8 @@ pub struct TargetId {
     pub user: u8,
     /// The check of the last protection clear: [`CLEAR_NONE`], [`CLEAR_PASS`] or [`CLEAR_FAIL`].
     pub clear_check: u8,
-    /// The flash size register, in KiB.
+    /// The flash size in KiB: the flash size register on a GD32, the part table's on the
+    /// MM32SPIN05 (it has no such register); 0 on an unsupported part.
     pub flash_kib: u16,
     /// Timer 0's `MOE` is set.
     pub armed: bool,
@@ -414,6 +421,12 @@ pub struct TargetId {
 pub const FAMILY_F10X: u8 = 0;
 /// `TargetId::family`: GD32F1x0 (UID at `0x1FFF_F7AC`).
 pub const FAMILY_F1X0: u8 = 1;
+/// `TargetId::family`: MM32SPIN05 (a Cortex-M0 whose ID register at `0x4001_3400` reads
+/// `0xCC44_60B1`).
+pub const FAMILY_MM32SPIN05: u8 = 2;
+/// `TargetId::family`: a core other than the Cortex-M0 and M3, or a Cortex-M0 whose ID register is
+/// in no row of the part table. The bridge identifies it and refuses everything else.
+pub const FAMILY_UNSUPPORTED: u8 = 0xFF;
 /// `TargetId::clear_check`: no protection clear recorded since the bridge booted.
 pub const CLEAR_NONE: u8 = 0;
 /// `TargetId::clear_check`: the protection byte is `0xA5` and the USER byte is the one recorded.

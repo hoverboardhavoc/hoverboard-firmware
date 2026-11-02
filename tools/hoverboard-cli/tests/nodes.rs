@@ -42,8 +42,8 @@ struct After {
 
 /// The store pages' first halfword in the simulated GD32's flash.
 fn store_half() -> usize {
-    use hoverboard_bridge_core::flash::{FLASH_BASE, STORE_START};
-    ((STORE_START - FLASH_BASE) / 2) as usize
+    use hoverboard_bridge_core::part::{FLASH_BASE, GD32F130C8};
+    ((GD32F130C8.store_start() - FLASH_BASE) / 2) as usize
 }
 
 /// The bytes a client sent, framed back into packets for [`After::ops`].

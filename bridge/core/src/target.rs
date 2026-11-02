@@ -6,16 +6,17 @@
 //! halts: a halt freezes timer 0 with its outputs at their last level, so a phase can sit at 100%
 //! duty (`tools/swd-disarm-halt.sh` carries the standing rule and the incident).
 
-use espsvc::{TargetId, FAMILY_F10X, FAMILY_F1X0};
+use espsvc::{TargetId, FAMILY_F10X, FAMILY_F1X0, FAMILY_UNSUPPORTED};
 
+use crate::part;
 use crate::swd::{MemPort, Swd, SwdError, SwdPins};
 
-/// The debug MCU ID.
+/// The GD32 debug MCU ID.
 pub const DBGMCU_ID: u32 = 0xE004_2000;
-/// `DBG_CTL0`.
-pub const DBG_CTL0: u32 = 0xE004_2004;
-/// `DBG_CTL0` `FWDGT_HOLD` (bit 8) and `TIMER0_HOLD` (bit 10), the same bits on F1x0 and F10x.
-pub const DEBUG_HOLD: u32 = 1 << 8 | 1 << 10;
+/// The MM32's `FLASH_OBR`: the option bytes as loaded, readable while protected.
+pub const MM32_FLASH_OBR: u32 = 0x4002_201C;
+/// `FLASH_OBR` `RDPRT`: read protection on.
+pub const MM32_OBR_RDPRT: u32 = 1 << 1;
 /// `CPUID`.
 pub const CPUID: u32 = 0xE000_ED00;
 /// `DHCSR`.
@@ -35,7 +36,8 @@ const S_REGRDY: u32 = 1 << 16;
 /// `DHCSR` reads before a core register transfer counts as stuck. It finishes in a few core
 /// cycles, well inside one SWD transfer.
 const REG_POLLS: u32 = 16;
-/// Timer 0 `CCHP`; `MOE` is bit 15.
+/// Timer 0 `CCHP`; `MOE` is bit 15. The MM32's TIM1 `BDTR` is at the same address with `MOE` at
+/// the same bit (MindMotion `reg_tim.h`).
 pub const CCHP: u32 = 0x4001_2C44;
 const MOE: u32 = 1 << 15;
 const DBGKEY: u32 = 0xA05F_0000;
@@ -79,9 +81,9 @@ pub const DWT_COMP0: u32 = 0xE000_1020;
 const DWT_MATCHED: u32 = 1 << 24;
 /// The option byte block: the protection byte, then USER.
 pub const OPTION_BYTES: u32 = 0x1FFF_F800;
-/// The flash size register (KiB in the low half), the same address on both families.
+/// The GD32 flash size register (KiB in the low half), the same address on both families.
 pub const FLASH_SIZE: u32 = 0x1FFF_F7E0;
-/// The F10x UID. On an F1x0 this word reads all ones.
+/// The F10x UID, and the MM32's. On an F1x0 this word reads all ones.
 pub const UID_F10X: u32 = 0x1FFF_F7E8;
 /// The F1x0 UID.
 pub const UID_F1X0: u32 = 0x1FFF_F7AC;
@@ -175,9 +177,19 @@ pub fn ensure_connected_background<P: SwdPins>(swd: &mut Swd<P>) -> Result<u32, 
     }
 }
 
-/// Identify the target: `DPIDR`, the debug MCU ID, `CPUID`, the option bytes, the flash size, the
-/// armed state, and the UID by family. The debug MCU ID does not tell the families apart (it reads
-/// `0x13030410` on both); the UID's location does: `0x1FFF_F7E8` reads all ones on an F1x0.
+/// Identify the target (`specs/bridge-chip-support.md`, section 3). It reads, in this order, only
+/// addresses every supported part decodes: `CPUID` first, then
+///
+/// - on a Cortex-M0, the ID register at [`part::M0_ID`]; for the MM32SPIN05 `FLASH_OBR`,
+///   [`CCHP`] and the UID at `0x1FFF_F7E8` (0 while protected). The flash size is the row's: the
+///   MM32 has no flash size register. `rdp` is `0xA5` with `FLASH_OBR` `RDPRT` clear and 0 with it
+///   set; `user` is `0xFF` (unreadable while protected, and the clear does not restore it);
+/// - on a Cortex-M3, a GD32: the debug MCU ID, the option bytes, the flash size, [`CCHP`], then
+///   the UID by family. The debug MCU ID does not tell the families apart (it reads `0x13030410`
+///   on both); the UID's location does: `0x1FFF_F7E8` reads all ones on an F1x0;
+/// - on any other core, or a Cortex-M0 in no row: nothing more, [`FAMILY_UNSUPPORTED`], with
+///   `cpuid`, `mcu_id` (the M0's ID register, else 0) and `dpidr` filled and the rest 0.
+///
 /// `clear_check` is the caller's.
 ///
 /// It connects afresh every time (line reset, `DPIDR`, power-up), so each `TARGET_ID` is one
@@ -185,8 +197,35 @@ pub fn ensure_connected_background<P: SwdPins>(swd: &mut Swd<P>) -> Result<u32, 
 /// were, so a mailbox session running beside it carries on.
 pub fn identify<P: SwdPins>(swd: &mut Swd<P>) -> Result<TargetId, SwdError> {
     let dpidr = swd.connect()?;
-    let mcu_id = swd.read_word(DBGMCU_ID)?;
     let cpuid = swd.read_word(CPUID)?;
+    let unsupported = |mcu_id| TargetId {
+        dpidr,
+        mcu_id,
+        cpuid,
+        family: FAMILY_UNSUPPORTED,
+        clear_check: espsvc::CLEAR_NONE,
+        ..TargetId::default()
+    };
+    match part::partno(cpuid) {
+        part::PARTNO_M0 => {
+            let mcu_id = swd.read_word(part::M0_ID)?;
+            match part::m0(mcu_id) {
+                Some(row) => identify_mm32(swd, dpidr, cpuid, mcu_id, row),
+                None => Ok(unsupported(mcu_id)),
+            }
+        }
+        part::PARTNO_M3 => identify_gd32(swd, dpidr, cpuid),
+        _ => Ok(unsupported(0)),
+    }
+}
+
+/// The GD32 reads, in the order `identify` has always made them.
+fn identify_gd32<P: SwdPins>(
+    swd: &mut Swd<P>,
+    dpidr: u32,
+    cpuid: u32,
+) -> Result<TargetId, SwdError> {
+    let mcu_id = swd.read_word(DBGMCU_ID)?;
     let ob = swd.read_word(OPTION_BYTES)?;
     let flash_kib = swd.read_word(FLASH_SIZE)? as u16;
     let armed = swd.read_word(CCHP)? & MOE != 0;
@@ -196,24 +235,57 @@ pub fn identify<P: SwdPins>(swd: &mut Swd<P>) -> Result<TargetId, SwdError> {
     } else {
         (FAMILY_F10X, UID_F10X)
     };
-    let mut words = [0u32; 3];
-    swd.read_words(uid_addr, &mut words)?;
-    let mut uid = [0u8; 12];
-    for (i, w) in words.iter().enumerate() {
-        uid[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
-    }
     Ok(TargetId {
         dpidr,
         mcu_id,
         cpuid,
         family,
-        uid,
+        uid: read_uid(swd, uid_addr)?,
         rdp: ob as u8,
         user: (ob >> 16) as u8,
         clear_check: espsvc::CLEAR_NONE,
         flash_kib,
         armed,
     })
+}
+
+/// The MM32SPIN05 reads: `FLASH_OBR`, [`CCHP`], the UID. Nothing at `0xE004_2000`,
+/// `0x1FFF_F7E0` or `0x1FFF_F800`.
+fn identify_mm32<P: SwdPins>(
+    swd: &mut Swd<P>,
+    dpidr: u32,
+    cpuid: u32,
+    mcu_id: u32,
+    row: &part::Part,
+) -> Result<TargetId, SwdError> {
+    let obr = swd.read_word(MM32_FLASH_OBR)?;
+    let armed = swd.read_word(CCHP)? & MOE != 0;
+    Ok(TargetId {
+        dpidr,
+        mcu_id,
+        cpuid,
+        family: row.family,
+        uid: read_uid(swd, UID_F10X)?,
+        rdp: if obr & MM32_OBR_RDPRT == 0 {
+            RDP_OFF
+        } else {
+            0
+        },
+        user: 0xFF,
+        clear_check: espsvc::CLEAR_NONE,
+        flash_kib: row.flash_kib,
+        armed,
+    })
+}
+
+fn read_uid<P: SwdPins>(swd: &mut Swd<P>, addr: u32) -> Result<[u8; 12], SwdError> {
+    let mut words = [0u32; 3];
+    swd.read_words(addr, &mut words)?;
+    let mut uid = [0u8; 12];
+    for (i, w) in words.iter().enumerate() {
+        uid[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    Ok(uid)
 }
 
 /// Is timer 0's `MOE` set (the bridge can switch)?
@@ -233,12 +305,29 @@ pub fn disarm<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
     Ok(())
 }
 
-/// Set `FWDGT_HOLD` and `TIMER0_HOLD` in `DBG_CTL0`. Set again before every halt: the register
-/// resets at power-on, and the bridge cannot tell whether the board has been power-cycled since.
+/// The debug hold of the part on the line, picked per call (`specs/bridge-chip-support.md`,
+/// section 4, "Where the row comes from on a halt"): `CPUID`, and on a Cortex-M0 the ID register.
+/// `None` on an unsupported part. Nothing is kept between calls, so a halt after a board swap
+/// uses the new board's hold.
+pub fn hold<P: SwdPins>(swd: &mut Swd<P>) -> Result<Option<part::Hold>, SwdError> {
+    Ok(match part::partno(swd.read_word(CPUID)?) {
+        part::PARTNO_M3 => Some(part::M3_DEBUG.hold()),
+        part::PARTNO_M0 => part::m0(swd.read_word(part::M0_ID)?).map(|p| p.hold()),
+        _ => None,
+    })
+}
+
+/// Set the part's debug hold (the free watchdog and timer 0 frozen while halted): `DBG_CTL0` at
+/// `0xE004_2004` on a GD32, `DBGMCU_CR` at `0x4001_3404` on the MM32SPIN05, nothing on an
+/// unsupported part ([`hold`]). Set again before every halt: the register resets at power-on,
+/// and the bridge cannot tell whether the board has been power-cycled since.
 pub fn debug_hold<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), SwdError> {
-    let v = swd.read_word(DBG_CTL0)?;
-    if v & DEBUG_HOLD != DEBUG_HOLD {
-        swd.write_word(DBG_CTL0, v | DEBUG_HOLD)?;
+    let Some(h) = hold(swd)? else {
+        return Ok(());
+    };
+    let v = swd.read_word(h.addr)?;
+    if v & h.bits != h.bits {
+        swd.write_word(h.addr, v | h.bits)?;
     }
     Ok(())
 }

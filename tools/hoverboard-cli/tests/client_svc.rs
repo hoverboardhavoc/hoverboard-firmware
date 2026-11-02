@@ -830,18 +830,18 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     use hoverboard_cli::bundle::{BoardTarget, Family as F, Target};
     let img = image(1024);
     let path = bundle_file(
-        "bundle-32k.hbfw",
+        "bundle-256k.hbfw",
         &img,
         Some(vec![Target::Board(BoardTarget {
-            family: F::Gd32f1x0,
-            flash_kib: 32,
+            family: F::Gd32f10x,
+            flash_kib: 256,
         })]),
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let prep: Prep = |g| {
-        g.family = Family::F1x0;
-        g.flash_kib = 32;
+        g.family = Family::F10x;
+        g.flash_kib = 256;
     };
     let server =
         std::thread::spawn(move || serve_machine_with(listener, vec![0xFFFF; 1024], 2, prep));
@@ -849,13 +849,16 @@ fn a_bundle_match_the_bridge_would_refuse_streams_nothing() {
     let limit = Duration::from_secs(30);
     let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &path, "--yes"], limit);
     assert!(!ok);
-    assert!(err.contains("would refuse a gd32f1x0 32 KiB part"), "{err}");
+    assert!(
+        err.contains("would refuse a gd32f10x 256 KiB part"),
+        "{err}"
+    );
     // The chip is not the image's: refused naming both.
     let other = bundle_file("bundle-64k.hbfw", &img, None);
     let (ok, _, err) = cli(&[&tcp, "board", "update", "0x01", &other, "--yes"], limit);
     assert!(!ok);
     assert!(
-        err.contains("no board image in the bundle is for the chip (gd32f1x0 32 KiB)"),
+        err.contains("no board image in the bundle is for the chip (gd32f10x 256 KiB)"),
         "{err}"
     );
     let g = server.join().unwrap();

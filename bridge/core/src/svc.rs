@@ -386,8 +386,10 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                 result(out, src, op, r.map_or_else(|e| e.status(), |()| Status::Ok));
             }
             Msg::FlashBegin { len, sha256 } => {
-                let checked = flash::check_range(len as usize)
-                    .and_then(|()| flash::check_part(port.swd()).map(|_| ()));
+                let checked = flash::check_range(len as usize).and_then(|()| {
+                    let (_, part) = flash::check_part(port.swd())?;
+                    flash::check_image(part, len as usize)
+                });
                 match checked {
                     Ok(()) => {
                         // `check_range` bounds `len` by the buffer.

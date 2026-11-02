@@ -7,6 +7,7 @@
 //! | [`gdb`] | the GDB server: the `gdbstub` target on the board operations, the monitor commands, the armed-breakpoint rule |
 //! | [`flash`] | page erase, programming through the RAM loader, verify, clearing protection |
 //! | [`loader`] | the RAM loader: its code, its SRAM layout, the bridge's side of its ring protocol |
+//! | [`part`] | the part table: each supported part's flash, store, loader layout and debug hold |
 //! | [`mailbox`] | the mailbox session, `MemAp` on [`swd`] |
 //! | [`router`] | the L2 stream decoders on the BLE, USB and TCP bytes |
 //! | [`node`] | the bridge as an L3 node: the walk responder, the forwarding table, `IDENTITY`, its store, dispatch of the frames addressed to it |
@@ -23,6 +24,7 @@ pub mod gdb;
 pub mod loader;
 pub mod mailbox;
 pub mod node;
+pub mod part;
 pub mod router;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
