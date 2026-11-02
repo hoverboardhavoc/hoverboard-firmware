@@ -97,7 +97,8 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-20
-          targets: thumbv7m-none-eabi, x86_64-unknown-linux-gnu
+          # thumbv6m: the MM32SPIN05's hal and validators (a Cortex-M0).
+          targets: thumbv7m-none-eabi, thumbv6m-none-eabi, x86_64-unknown-linux-gnu
           components: rustfmt, clippy, rust-src
 
       - name: Cache cargo + target
@@ -180,6 +181,11 @@ jobs:
             cargo clippy -p wdg-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
             cargo clippy -p l2-uart-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
           done
+          # The MM32SPIN05 (a Cortex-M0): the HAL on both surfaces and its validators. No image or
+          # test image is built for it yet (specs/hal.md section 9, step 3).
+          cargo clippy -p hal --features mm32spin05 --target thumbv6m-none-eabi -- -D warnings
+          cargo clippy -p hal --features mm32spin05 --all-targets --target ${{ env.HOST_TARGET }} -- -D warnings
+          cargo clippy -p hal-bench --features mm32spin05 --target thumbv6m-none-eabi -- -D warnings
 
       - name: clippy (shared, thumbv7m build surface)
         working-directory: hoverboard-firmware/shared
@@ -235,11 +241,11 @@ jobs:
 
       # rust-src is needed in THIS job: the image builds (`cargo image-f103`, `cargo image-f130`) are
       # -Z build-std and compile core from source.
-      - name: Install Rust (pinned nightly) + thumbv7m target + rust-src
+      - name: Install Rust (pinned nightly) + thumbv7m and thumbv6m targets + rust-src
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-20
-          targets: thumbv7m-none-eabi
+          targets: thumbv7m-none-eabi, thumbv6m-none-eabi
           components: rustfmt, clippy, rust-src
 
       - name: Cache cargo + target
@@ -541,6 +547,24 @@ jobs:
             cargo build --release -p imu-bench --features "hardware $chip"
             cargo build --release -p wdg-bench --features "$chip"
             cargo build --release -p l2-uart-bench --features "$chip"
+          done
+
+      # The MM32SPIN05 validators (probe, fmc, coldpath, motor-verify), the link check of the
+      # thumbv6m hal: each image is linked into the part's 30 KiB below the store and refused if it
+      # carries a wfi or wfe (the validators busy-spin; whether a bare wfi locks SWD re-attach on
+      # this part is not known, specs/hal.md section 8.4).
+      - name: Build the MM32SPIN05 validators (thumbv6m)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: |
+          cargo build --release -p hal-bench --features mm32spin05 --target thumbv6m-none-eabi
+          for v in probe fmc coldpath motor-verify; do
+            elf=target/thumbv6m-none-eabi/release/$v
+            test -f "$elf"
+            if arm-none-eabi-objdump -d "$elf" | grep -qwE 'wfi|wfe'; then
+              echo "$v carries a wfi or wfe" >&2
+              exit 1
+            fi
+            arm-none-eabi-size "$elf"
           done
 
       # The per-chip size gate (specs/hal.md section 6): each image's flashed span against its
