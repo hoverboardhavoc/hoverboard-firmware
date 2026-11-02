@@ -69,11 +69,18 @@ const _: () = assert!(COUNT >= 1 && COUNT <= 2);
 // The handoff words, one per motor (index = motor). One writer each; `Relaxed` throughout. On a
 // one-motor image each is an array of one at the symbol the tools name, the same address and size
 // as the single word it replaces; motor 1's word is at the symbol plus its stride.
+//
+// On the two-motor image (the GD32F103RC's) each is `#[used]`: a word only the bench reads over SWD
+// has no reader in the image, and without it LTO splits the array and drops motor 1's element
+// (measured on the first RC build: `PERIODS`, `EDGES` and eleven others came out 4 B long), so the
+// stride the tools rely on would point at another word. The one-motor images keep what LTO keeps,
+// as they did before the arrays (a word nothing reads, `ANGLE`, is not in them).
 // -------------------------------------------------------------------------------------------
 
 /// The signed drive demand: the +-28500 stock-native torque word, verbatim (`specs/control.md`'s
 /// demand-scale contract: no rescaling anywhere). Written by the 250 Hz control task, read by the
 /// period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static DEMAND: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// Demand write sequence: bumped by the 250 Hz task on every demand write, so the ISR can tell a
 /// fresh write from a repeated one WITHOUT the writer having to touch a second data word (a demand
@@ -81,22 +88,27 @@ pub static DEMAND: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// periods since this last changed.
 pub static DEMAND_SEQ: AtomicU32 = AtomicU32::new(0);
 /// The wrapping electrical angle (u16 in a u32 cell). Written by the period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static ANGLE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The signed edge count per 320-period window, raw (the pole-pair fold to speed units is the
 /// Phase-D consumer's). Written by the period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static SPEED: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The period-based wheel rate (`specs/control.md` (o)): the commutator's `rate_q`, the
 /// reciprocal of the periods between two same-direction hall edges in 1/4096 of a count (one
 /// count = one edge per 320-period window, [`SPEED`]'s unit), decaying as `1/t` between edges
 /// and 0 across a reversal. The outer speed loop's measurement; copied into the block beside the
 /// count, published as `CTRL_OBS` word 39. Written by the period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static WHEEL_RATE_Q12: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The wheel's SIGNED edge position (`specs/state-feedback.md` section 3): the commutator's
 /// `pos_edges`, +1 or -1 per counted hall edge in the counter's own sense, never cleared, wrapping.
 /// Copied into the block's `wheel_pos` by the 250 Hz shell beside [`WHEEL_RATE_Q12`]; the cyclic carries
 /// its low 16 bits to the peer. Written by the period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static POS_EDGES: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The free-running period counter: the liveness signal. Written by the period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static PERIODS: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// This boot's ABSOLUTE hall-edge count, the odometer's raw material (`specs/odometer.md`): the
 /// commutator's own `edges_total`, which adds 1 on every counted edge whichever way the wheel
@@ -105,16 +117,20 @@ pub static PERIODS: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 ///
 /// It counts THIS BOOT and it wraps. The total a board keeps is this folded as deltas onto the
 /// value its store holds, which is [`crate::odometer::Odometer`]'s job and not this cell's.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static EDGES: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Motor fault bits ([`FAULT_HALL`], [`FAULT_DUTY_RANGE`], [`FAULT_DEMAND_STALE`],
 /// [`FAULT_INIT_CAL`], [`FAULT_METHOD`]). Written by the period ISR (sticky within a boot), seeded
 /// by the bring-up with the two bits it can raise before the ISR exists.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static FAULT: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The invalid-hall dwell count from the commutator's front end. Written by the period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static INVALID_DWELL: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed: `hall_code | enables << 8 | method << 16 | flags << 24`. Written by the
 /// period ISR (the flags' `configured` / `current_sense` / `cal-accepted` bits are set once at
 /// bring-up).
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_STATE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The MEASURED quiet-bridge phase-current offsets, packed `offset_a | offset_b << 16`
 /// (`specs/motor-integration.md`, bring-up step 9 and silicon stage 3). Written ONCE, by the
@@ -133,11 +149,14 @@ pub static OBS_STATE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// so a bench read sees WHERE an out-of-window board actually sits rather than only that it was
 /// refused. Acceptance is the [`OBS_CAL_ACCEPTED`] flag; refusal is [`FAULT_INIT_CAL`]; a zero
 /// word with the refusal set means no conversion completed.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_CAL: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The last applied duties, packed `d0 | d1 << 16`. Written by the period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_DUTY01: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The last applied duty 2 plus the electrical angle, packed `d2 | angle << 16`. Written by the
 /// period ISR.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_DUTY2_ANGLE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Whether the TIMER0 counter is turning, and therefore whether the period ISR should be firing.
 /// Set by the bring-up's `StartCounter`, on the boot thread, and never written again: the counter
@@ -549,10 +568,12 @@ pub const OVER_CURRENT_TRIP_PERIODS: u32 = 64;
 
 /// The over-current trip count: the period ISR increments it on each trip and is its sole
 /// writer; the 250 Hz task raises the motor-0 fault latch when it sees it change.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OVER_CURRENT_TRIPS: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_motor_current`]: the last completed 64-period window's peak
 /// phase-current magnitude, the periods the soft limit floated in it, and the trip count's low
 /// byte. Written by the period ISR at each window boundary (`CTRL_OBS` word 31).
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_CURRENT: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_motor_mean_duty`]: the MEAN magnitude of the same window
 /// [`OBS_CURRENT`] closes, and the on-duty of the period that closed it
@@ -566,6 +587,7 @@ pub static OBS_CURRENT: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT
 ///
 /// Not folded into [`OBS_CURRENT`]: that word's 32 bits are spoken for (peak, chop count, trip
 /// byte), and its layout is `CTRL_OBS` word 31, which is append-only.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_MEAN_DUTY: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the window's MEAN conditioned phase currents, `ia`
 /// low half and `ib` high half, in current counts (`specs/foc-torque.md` section 7, `CTRL_OBS`
@@ -573,15 +595,18 @@ pub static OBS_MEAN_DUTY: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COU
 /// the sensed pair the FOC arm's frame is built from, so a bench host can run Clarke and Park over
 /// it at a held rotor's angle whatever method drives (gate O2 does, in sine). Written by the
 /// period ISR at each window boundary.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_FOC_PHASE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the FOC arm's window means of the measured currents,
 /// `id` low half and `iq` high half ([`commutation::foc::FocState::take_window`]; `CTRL_OBS` word
 /// 48). Written by the period ISR at each window boundary; 0 while the method is not FOC.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_FOC_DQ: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the FOC arm's `iq` reference of the period that
 /// closed the window, low half, and the window's mean `vq` after the circular limit, high half
 /// (`CTRL_OBS` word 49). Written by the period ISR at each window boundary; 0 while the method is
 /// not FOC.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_FOC_REF: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_foc_hold`]: the hold word (`specs/foc-torque.md` section 7, round
 /// 3, `CTRL_OBS` word 50): the periods of the closing window on which each sensed phase's sample
@@ -589,6 +614,7 @@ pub static OBS_FOC_REF: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT
 /// cause byte naming which of the float's three conditions the window saw, whether a period had
 /// both sensed phases held, and the offset calibration's block-pair count and verdict for this
 /// boot. Written by the period ISR at each window boundary, in every method.
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_FOC_HOLD: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The battery-sense count (`specs/sensing-and-safety.md`, "The battery word", acquisition): the
 /// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
@@ -1083,6 +1109,7 @@ const _: () = assert!(
 /// `commutation::ARR`, which no compare exceeds: nothing held. The bake rule applies once gate
 /// N2 confirms a value.
 #[no_mangle]
+#[cfg_attr(feature = "gd32f103rc", used)]
 pub static FOC_HOLD_COMPARE: [AtomicU32; COUNT] =
     [const { AtomicU32::new(commutation::ARR as u32) }; COUNT];
 
