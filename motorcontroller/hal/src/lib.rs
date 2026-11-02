@@ -34,7 +34,6 @@ compile_error!(
 compile_error!("hal: more than one chip feature is enabled; enable exactly one");
 
 #[cfg(hal_chip)]
-#[cfg_attr(hal_adc = "mm32", path = "adc/mm32.rs")]
 pub mod adc;
 #[cfg(hal_chip)]
 pub mod addr;
