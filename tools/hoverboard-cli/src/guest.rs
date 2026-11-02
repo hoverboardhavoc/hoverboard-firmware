@@ -1,15 +1,17 @@
 //! The console as an L3 guest (`specs/hoverboard-bridge.md`, "`watch` and `drive`"; `machine watch`
 //! and `machine drive` on the command line): attach with `NODE_HELLO` to the node on the link, tally
 //! the `CYCLIC_STATE` frames the board emits on its mailbox port (the bridge re-publishes them on
-//! every controller link), and build the `DRIVE_CMD` and `INPUTS` frames `drive` sends.
+//! every controller link), and build the `DRIVE_CMD` and `INPUTS` frames `drive` sends: one
+//! `DRIVE_CMD` per wheel and one `INPUTS` per node (`specs/twelve-fet.md` section 6.3).
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use linkctl::{CyclicState, DriveCmd, DriveKind, Inputs, OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS};
 use net::pdu::Pdu;
-use net::walk::Controller;
+use net::walk::{Controller, CFG_OK};
 
+use crate::nodes;
 use crate::wire::Wire;
 
 /// What an attach learned from the `NODE_HELLO` reply.
@@ -199,6 +201,89 @@ pub fn inputs_pdu(src: u8, dst: u8, inputs: &Inputs) -> Vec<u8> {
     control_pdu(OP_INPUTS, src, dst, &b[..n])
 }
 
+/// One wheel: motor `motor` of the node at `node`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Wheel {
+    /// The node's address.
+    pub node: u8,
+    /// The motor on that node.
+    pub motor: u8,
+}
+
+/// A `machine drive` target as the command line gives it: a board (its name, address or `uid`
+/// prefix), which drives every motor the board has, or `<board>:<motor>`, which drives one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WheelTarget<'a> {
+    /// The board, as `target::parse` reads it.
+    pub board: &'a str,
+    /// The one motor, `None` for all of them.
+    pub motor: Option<u8>,
+}
+
+impl<'a> WheelTarget<'a> {
+    /// Read `spec`: a decimal after the last `:` is the motor, and anything else is the whole of
+    /// it a board.
+    pub fn parse(spec: &'a str) -> Result<Self, String> {
+        match spec.rsplit_once(':') {
+            Some((board, m)) if !m.is_empty() && m.bytes().all(|b| b.is_ascii_digit()) => {
+                if board.is_empty() {
+                    return Err(format!("no board before the motor: {spec}"));
+                }
+                let motor = m
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|&m| m < store::MOTORS)
+                    .ok_or_else(|| {
+                        format!("not a motor (0..{}): {m} in {spec}", store::MOTORS - 1)
+                    })?;
+                Ok(WheelTarget {
+                    board,
+                    motor: Some(motor),
+                })
+            }
+            _ => Ok(WheelTarget {
+                board: spec,
+                motor: None,
+            }),
+        }
+    }
+}
+
+/// How many motors the board at `dst` has, asked from `src`: two when `motors.1.gate.hi_a` is
+/// stored, else one. The pin has no default, so a board that stores none answers it unstored and
+/// has no motor 1 (`specs/twelve-fet.md` section 6.3).
+pub fn motor_count<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<u8, String> {
+    let r = nodes::read(wire, src, dst, store::MOTOR_GATE_HI_A.at(1).key())?;
+    Ok(if r.status == CFG_OK { 2 } else { 1 })
+}
+
+/// The wheels `picked` names, each board with the motor it names or all of them, given each
+/// board's motor count. A wheel named twice is driven once; a motor a board does not have is
+/// refused.
+pub fn wheels(picked: &[(u8, Option<u8>)], count: impl Fn(u8) -> u8) -> Result<Vec<Wheel>, String> {
+    let mut out: Vec<Wheel> = Vec::new();
+    for &(node, motor) in picked {
+        let n = count(node);
+        let motors = match motor {
+            Some(m) if m < n => m..m + 1,
+            Some(m) => {
+                return Err(format!(
+                    "{node:#04x} has no motor {m}: it has {n} (motors.1.gate.hi_a {})",
+                    if n > 1 { "stored" } else { "not stored" }
+                ))
+            }
+            None => 0..n,
+        };
+        for motor in motors {
+            let w = Wheel { node, motor };
+            if !out.contains(&w) {
+                out.push(w);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// `DRIVE_CMD` period while driving (20 Hz).
 pub const DRIVE_PERIOD: Duration = Duration::from_millis(50);
 /// `INPUTS` period while driving (2 Hz).
@@ -206,11 +291,14 @@ pub const INPUTS_PERIOD: Duration = Duration::from_millis(500);
 /// How many times each stop frame goes out.
 pub const STOP_REPEATS: usize = 3;
 
-/// `drive`'s schedule: `DRIVE_CMD` (throttle, `value`, steer 0) every [`DRIVE_PERIOD`] and
-/// `INPUTS` (power 1) every [`INPUTS_PERIOD`] to each node, from `src`. Times are offsets from the
-/// start of the run.
+/// `drive`'s schedule: `DRIVE_CMD` (throttle, `value`, steer 0) to each wheel every
+/// [`DRIVE_PERIOD`] and `INPUTS` (power 1) to each wheel's node every [`INPUTS_PERIOD`], from
+/// `src`. Arming is per node, because each board runs one mode machine for its motors. Times are
+/// offsets from the start of the run.
 pub struct Drive {
     src: u8,
+    wheels: Vec<Wheel>,
+    /// The wheels' nodes, each once, in the wheels' order.
     nodes: Vec<u8>,
     value: i16,
     next_drive: Duration,
@@ -219,9 +307,16 @@ pub struct Drive {
 
 impl Drive {
     /// A schedule whose first frames are due at once.
-    pub fn new(src: u8, nodes: Vec<u8>, value: i16) -> Self {
+    pub fn new(src: u8, wheels: Vec<Wheel>, value: i16) -> Self {
+        let mut nodes: Vec<u8> = Vec::new();
+        for w in &wheels {
+            if !nodes.contains(&w.node) {
+                nodes.push(w.node);
+            }
+        }
         Drive {
             src,
+            wheels,
             nodes,
             value,
             next_drive: Duration::ZERO,
@@ -247,30 +342,36 @@ impl Drive {
             self.next_inputs = next_after(self.next_inputs, INPUTS_PERIOD, at);
         }
         if at >= self.next_drive {
-            let d = DriveCmd {
-                kind: DriveKind::Throttle,
-                value: self.value,
-                steer: 0,
-            };
-            out.extend(self.nodes.iter().map(|&n| drive_pdu(self.src, n, &d)));
+            out.extend(self.wheels.iter().map(|w| {
+                let d = DriveCmd {
+                    kind: DriveKind::Throttle,
+                    value: self.value,
+                    steer: 0,
+                    motor: w.motor,
+                };
+                drive_pdu(self.src, w.node, &d)
+            }));
             self.next_drive = next_after(self.next_drive, DRIVE_PERIOD, at);
         }
         out
     }
 
-    /// One round of stop frames: `DRIVE_CMD` neutral, then `INPUTS` power 0, to each node. The
-    /// round goes out [`STOP_REPEATS`] times.
+    /// One round of stop frames: `DRIVE_CMD` neutral to each wheel, then `INPUTS` power 0 to each
+    /// node. The round goes out [`STOP_REPEATS`] times.
     pub fn stop(&self) -> Vec<Vec<u8>> {
-        let neutral = DriveCmd {
-            kind: DriveKind::Neutral,
-            value: 0,
-            steer: 0,
-        };
         let off = Inputs {
             buttons: 0,
             rider: 0,
         };
-        let drives = self.nodes.iter().map(|&n| drive_pdu(self.src, n, &neutral));
+        let drives = self.wheels.iter().map(|w| {
+            let neutral = DriveCmd {
+                kind: DriveKind::Neutral,
+                value: 0,
+                steer: 0,
+                motor: w.motor,
+            };
+            drive_pdu(self.src, w.node, &neutral)
+        });
         let inputs = self.nodes.iter().map(|&n| inputs_pdu(self.src, n, &off));
         drives.chain(inputs).collect()
     }

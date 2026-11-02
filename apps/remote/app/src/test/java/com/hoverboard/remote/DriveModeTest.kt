@@ -10,6 +10,7 @@ import com.hoverboard.remote.model.DriveMix
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.model.Wheel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -68,7 +69,7 @@ class DriveModeTest : RiderVmTest() {
         assertEquals(DriveMode.SINGLE, state.driveMode)
         assertNull(state.drive.refusal)
         assertFalse(state.turnAxisApplies, "one board has nowhere to spend a turn")
-        assertEquals(setOf(0x01), transport.frames.last().commands.keys)
+        assertEquals(setOf(0x01), transport.frames.last().boards.toSet())
     }
 
     @Test
@@ -109,7 +110,7 @@ class DriveModeTest : RiderVmTest() {
         val armed = currentState()
         assertEquals(DriveMode.BOUND, armed.driveMode, "the armed mode holds")
         val frame = transport.frames.last()
-        assertEquals(frame.commands.getValue(0x01), frame.commands.getValue(0x02))
+        assertEquals(frame.commands.getValue(wheel0(0x01)), frame.commands.getValue(wheel0(0x02)))
 
         viewModel.onArmToggle()
         runCurrent()
@@ -124,9 +125,9 @@ class DriveModeTest : RiderVmTest() {
         viewModel.onThrottleMove(y = 0.25f * h, height = h)
 
         val frame = transport.frames.last()
-        assertEquals(setOf(0x01, 0x02), frame.commands.keys)
-        val one = frame.commands.getValue(0x01)
-        assertEquals(one, frame.commands.getValue(0x02))
+        assertEquals(setOf(0x01, 0x02), frame.boards.toSet())
+        val one = frame.commands.getValue(wheel0(0x01))
+        assertEquals(one, frame.commands.getValue(wheel0(0x02)))
         assertTrue(one.armed)
         assertEquals(Throttle.speedFor(0.25f * h, h), one.demand)
         assertEquals(DriveMode.BOUND, currentState().driveMode)
@@ -152,16 +153,16 @@ class DriveModeTest : RiderVmTest() {
         viewModel.onJoystickMove(x = 0.75f * w, y = 0.5f * h, width = w, height = h)
 
         val frame = transport.frames.last()
-        assertEquals(setOf(0x01, 0x02), frame.commands.keys)
-        val right = frame.commands.getValue(0x01)
-        val left = frame.commands.getValue(0x02)
+        assertEquals(setOf(0x01, 0x02), frame.boards.toSet())
+        val right = frame.commands.getValue(wheel0(0x01))
+        val left = frame.commands.getValue(wheel0(0x02))
         val steer = Throttle.steerFor(0.75f * w, w)
         assertTrue(steer > 0, "the right half of the pad is a turn to the right")
         assertEquals(DriveMix.of(forward = 0, steer = steer).right, right.demand)
         assertEquals(DriveMix.of(forward = 0, steer = steer).left, left.demand)
         assertEquals(steer, left.demand - right.demand, "the pair differs by the whole turn")
         assertTrue(right.armed && left.armed)
-        assertTrue(right.drive.steer == 0 && left.drive.steer == 0)
+        assertTrue(right.drive(0).steer == 0 && left.drive(0).steer == 0)
     }
 
     /** The right wheel is each board's own setting: swap the sides and the wheels swap with them. */
@@ -176,8 +177,36 @@ class DriveModeTest : RiderVmTest() {
 
         val frame = transport.frames.last()
         val steer = Throttle.steerFor(0.75f * w, w)
-        assertEquals(DriveMix.of(forward = 0, steer = steer).right, frame.commands.getValue(0x02).demand)
-        assertEquals(DriveMix.of(forward = 0, steer = steer).left, frame.commands.getValue(0x01).demand)
+        assertEquals(DriveMix.of(forward = 0, steer = steer).right, frame.commands.getValue(wheel0(0x02)).demand)
+        assertEquals(DriveMix.of(forward = 0, steer = steer).left, frame.commands.getValue(wheel0(0x01)).demand)
+    }
+
+    /**
+     * A 12-FET alone (`specs/twelve-fet.md` section 6.2): the board stores motor 1's gate pin, so the
+     * session reads motor 1's `control.side` and the board is two wheels. DIFFERENTIAL places the
+     * right share on the motor whose own side is right, here motor 1, and the one board is armed.
+     */
+    @Test
+    fun `a two-motor board drives its two wheels from their own sides`() = runTest(dispatcher) {
+        transport.store[0x01 to Fields.MOTOR_GATE_HI_A.key(1)] = Value.PinAf(2, 6, 0)
+        transport.store[0x01 to Fields.CONTROL_SIDE.key(0)] = Value.U8(Fields.ControlSide.LEFT)
+        transport.store[0x01 to Fields.CONTROL_SIDE.key(1)] = Value.U8(Fields.ControlSide.RIGHT)
+        settings.setTurnAxis(true)
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01)
+        reporting(0x01)
+
+        val state = currentState()
+        assertEquals(DriveMode.DIFFERENTIAL, state.driveMode)
+        assertEquals(Wheel(0x01, 1), state.drive.targets.right)
+        assertEquals(listOf(0x01), state.drive.targets.boards)
+
+        viewModel.onArmToggle()
+        viewModel.onJoystickMove(x = 0.75f * w, y = 0.5f * h, width = w, height = h)
+        val frame = transport.frames.last()
+        val steer = Throttle.steerFor(0.75f * w, w)
+        assertEquals(DriveMix.of(forward = 0, steer = steer).right, frame.commands.getValue(Wheel(0x01, 1)).demand)
+        assertEquals(DriveMix.of(forward = 0, steer = steer).left, frame.commands.getValue(Wheel(0x01, 0)).demand)
     }
 
     /**
@@ -192,8 +221,8 @@ class DriveModeTest : RiderVmTest() {
         viewModel.onJoystickMove(x = w, y = 0f, width = w, height = h)
 
         val frame = transport.frames.last()
-        val right = frame.commands.getValue(0x01).demand
-        val left = frame.commands.getValue(0x02).demand
+        val right = frame.commands.getValue(wheel0(0x01)).demand
+        val left = frame.commands.getValue(wheel0(0x02)).demand
         val asked = 2 * (Throttle.MAX_SPEED / 2)
         assertEquals(asked, left - right, "the turn survives the clamp")
         assertEquals(Throttle.MAX_SPEED, left, "the outer wheel is on the rail")
@@ -207,12 +236,12 @@ class DriveModeTest : RiderVmTest() {
         viewModel.onArmToggle()
 
         val armedFrame = transport.frames.last()
-        assertEquals(setOf(0x01, 0x02), armedFrame.commands.keys)
+        assertEquals(setOf(0x01, 0x02), armedFrame.boards.toSet())
         assertTrue(armedFrame.commands.values.all { it.armed && it.demand == 0 })
 
         viewModel.onArmToggle()
         val disarmedFrame = transport.frames.last()
-        assertEquals(setOf(0x01, 0x02), disarmedFrame.commands.keys)
+        assertEquals(setOf(0x01, 0x02), disarmedFrame.boards.toSet())
         assertTrue(disarmedFrame.commands.values.all { it == RiderCommand.DISARMED })
     }
 
@@ -277,12 +306,12 @@ class DriveModeTest : RiderVmTest() {
         }
         assertTrue(transport.frames.isNotEmpty())
         for (frame in transport.frames) {
-            val turning = frame.commands.values.filter { it.drive.steer != 0 }
+            val turning = frame.commands.values.filter { it.drive(0).steer != 0 }
             assertTrue(turning.isEmpty() || frame.driven.size == 1, "a mixed pair states no turn")
         }
-        assertTrue(transport.frames.any { 0x02 in it.commands })
+        assertTrue(transport.frames.any { 0x02 in it.boards })
         assertTrue(
-            transport.frames.any { f -> f.commands.values.any { it.drive.steer != 0 } },
+            transport.frames.any { f -> f.commands.values.any { it.drive(0).steer != 0 } },
             "the rigid mode does put a turn on the wire, so the rule above is not vacuous",
         )
     }
@@ -316,14 +345,14 @@ class DriveModeTest : RiderVmTest() {
         viewModel.onJoystickMove(x = 0.75f * w, y = 0.25f * h, width = w, height = h)
 
         val frame = transport.frames.last()
-        assertEquals(setOf(0x01, 0x02), frame.commands.keys)
-        assertEquals(setOf(0x01), frame.driven, "only the leader is driven")
+        assertEquals(setOf(0x01, 0x02), frame.boards.toSet())
+        assertEquals(setOf(wheel0(0x01)), frame.driven, "only the leader is driven")
 
-        val leader = frame.commands.getValue(0x01).drive
+        val leader = frame.commands.getValue(wheel0(0x01)).drive(0)
         assertEquals(Throttle.speedFor(0.25f * h, h), leader.value, "the lean is the stick's y")
         assertEquals(Throttle.steerFor(0.75f * w, w), leader.steer, "the turn is the stick's x")
 
-        val follower = frame.commands.getValue(0x02)
+        val follower = frame.commands.getValue(wheel0(0x02))
         assertTrue(follower.armed, "the follower runs its own mode machine and holds its own level")
         assertEquals(0, follower.demand)
         assertEquals(0, follower.steer)
@@ -342,10 +371,10 @@ class DriveModeTest : RiderVmTest() {
         viewModel.onJoystickMove(x = 0.75f * w, y = 0.25f * h, width = w, height = h)
 
         val frame = transport.frames.last()
-        assertEquals(setOf(0x02), frame.driven)
+        assertEquals(setOf(wheel0(0x02)), frame.driven)
         assertEquals(0x02, currentState().leader)
-        assertTrue(frame.commands.getValue(0x02).drive.steer > 0)
-        assertEquals(0, frame.commands.getValue(0x01).drive.steer)
+        assertTrue(frame.commands.getValue(wheel0(0x02)).drive(0).steer > 0)
+        assertEquals(0, frame.commands.getValue(wheel0(0x01)).drive(0).steer)
     }
 
     /**
@@ -465,8 +494,8 @@ class DriveModeTest : RiderVmTest() {
         assertEquals(listOf(0x02, 0x03), state.motorControllers.map { it.address })
         assertEquals(DriveMode.BOUND, state.driveMode)
         assertEquals(listOf(0x02, 0x03), state.driving.boards)
-        assertTrue(transport.frames.none { 0x01 in it.commands }, "the bridge is never told anything")
-        assertEquals(setOf(0x02, 0x03), transport.frames.last().commands.keys)
+        assertTrue(transport.frames.none { 0x01 in it.boards }, "the bridge is never told anything")
+        assertEquals(setOf(0x02, 0x03), transport.frames.last().boards.toSet())
         assertTrue(transport.frames.last().commands.values.all { it.armed })
     }
 
@@ -479,7 +508,7 @@ class DriveModeTest : RiderVmTest() {
         viewModel.onArmToggle()
 
         assertEquals(DriveMode.SINGLE, currentState().driveMode)
-        assertEquals(setOf(0x02), transport.frames.last().commands.keys)
+        assertEquals(setOf(0x02), transport.frames.last().boards.toSet())
     }
 
     /** The mode is derived again on a reconnect, from the boards and the app's own setting. */

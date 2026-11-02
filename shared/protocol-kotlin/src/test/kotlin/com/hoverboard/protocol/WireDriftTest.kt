@@ -17,6 +17,7 @@ import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_INPUTS
+import com.hoverboard.protocol.linkctl.decodeControl
 import com.hoverboard.protocol.store.Type
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -154,7 +155,7 @@ class WireDriftTest {
     @Test
     fun committedPayloadLengthsMatchTheFirmware() {
         assertEquals(16, CyclicState.LEN, "shared/linkctl/src/lib.rs, CyclicState::LEN")
-        assertEquals(5, DriveCmd.LEN, "shared/linkctl/src/lib.rs, DriveCmd::LEN")
+        assertEquals(6, DriveCmd.LEN, "shared/linkctl/src/lib.rs, DriveCmd::LEN")
         assertEquals(2, Inputs.LEN, "shared/linkctl/src/lib.rs, Inputs::LEN")
     }
 
@@ -331,9 +332,9 @@ class WireDriftTest {
     /** From `drive_cmd_wire_layout_is_little_endian` in `shared/linkctl/src/lib.rs`. */
     @Test
     fun driveCmdWireLayoutMatchesTheRustGoldenVector() {
-        val cmd = DriveCmd(kind = DriveKind.Throttle, value = -300, steer = 0x1234)
+        val cmd = DriveCmd(kind = DriveKind.Throttle, value = -300, steer = 0x1234, motor = 1)
         val expected =
-            byteArrayOf(0x01, 0xD4.toByte(), 0xFE.toByte(), 0x34, 0x12)
+            byteArrayOf(0x01, 0xD4.toByte(), 0xFE.toByte(), 0x34, 0x12, 0x01)
         assertArrayEquals(expected, cmd.encode())
         assertEquals(cmd, DriveCmd.decode(expected))
     }
@@ -607,9 +608,19 @@ class WireDriftTest {
         assertEquals(inputs, Inputs.decode(inputs.encode() + byteArrayOf(0x00)))
         assertNull(Inputs.decode(ByteArray(Inputs.LEN - 1)))
 
-        val drive = DriveCmd(DriveKind.Throttle, 10, 20)
+        val drive = DriveCmd(DriveKind.Throttle, 10, 20, motor = 1)
         assertEquals(drive, DriveCmd.decode(drive.encode() + byteArrayOf(0x00)))
         assertNull(DriveCmd.decode(ByteArray(DriveCmd.LEN - 1)))
+    }
+
+    /**
+     * A 5-byte payload is the format before `motor`: refused, with no fallback to motor 0
+     * (`shared/linkctl/src/lib.rs`, `a_five_byte_drive_cmd_is_too_short`).
+     */
+    @Test
+    fun aFiveByteDriveCmdIsRefused() {
+        assertNull(DriveCmd.decode(byteArrayOf(0x01, 0xD4.toByte(), 0xFE.toByte(), 0x34, 0x12)))
+        assertNull(decodeControl(OP_DRIVE_CMD, byteArrayOf(0x01, 0xD4.toByte(), 0xFE.toByte(), 0x34, 0x12)))
     }
 
     /**
@@ -620,7 +631,7 @@ class WireDriftTest {
      */
     @Test
     fun anUnknownDriveKindIsNeutralNotAnError() {
-        val raw = byteArrayOf(0x7F, 0x10, 0x00, 0x20, 0x00)
+        val raw = byteArrayOf(0x7F, 0x10, 0x00, 0x20, 0x00, 0x00)
         val decoded = DriveCmd.decode(raw)
         assertNotNull(decoded)
         assertEquals(DriveKind.Neutral, decoded!!.kind)

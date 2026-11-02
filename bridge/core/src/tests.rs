@@ -1407,12 +1407,17 @@ fn a_full_ring_keeps_frames_for_the_next_poll_and_drive_frames_are_latest_wins()
         assert!(sent < 40, "the ring never filled");
     }
     let held = port.queued();
-    // Three drive frames to one node collapse into one queued frame, the newest.
+    // Three drive frames to one wheel collapse into one queued frame, the newest; the other
+    // motor's frames on the same node collapse into their own.
+    let drive =
+        |speed: u8, motor: u8| [linkctl::OP_DRIVE_CMD, 0x80, 0x01, 1, speed, 0, 0, 0, motor];
     for speed in 1..=3u8 {
-        port.send(&[linkctl::OP_DRIVE_CMD, 0x80, 0x01, speed]);
+        port.send(&drive(speed, 0));
+        port.send(&drive(speed + 10, 1));
     }
-    assert_eq!(port.queued(), held + 1);
-    // The board drains: everything still queued arrives, the drive frame once with speed 3.
+    assert_eq!(port.queued(), held + 2);
+    // The board drains: everything still queued arrives, each wheel's drive frame once, the
+    // newest.
     let mut all = Vec::new();
     for _ in 0..50 {
         all.extend(fw.poll());
@@ -1422,12 +1427,12 @@ fn a_full_ring_keeps_frames_for_the_next_poll_and_drive_frames_are_latest_wins()
         .iter()
         .filter(|p| p[0] == linkctl::OP_DRIVE_CMD)
         .collect();
-    assert_eq!(drives, vec![&vec![linkctl::OP_DRIVE_CMD, 0x80, 0x01, 3]]);
+    assert_eq!(drives, vec![&drive(3, 0).to_vec(), &drive(13, 1).to_vec()]);
     assert_eq!(port.queued(), 0);
     assert_eq!(
         all.len() as u32,
-        sent + 1,
-        "every config frame and one drive frame"
+        sent + 2,
+        "every config frame and one drive frame per wheel"
     );
     assert_eq!(port.dropped, 0);
 }
@@ -2680,7 +2685,7 @@ fn a_drive_frame_from_a_console_guest_floods_to_the_board_then_follows_the_learn
     let drive = |m: &mut Rig| {
         m.send(
             Port::Usb,
-            &frame(linkctl::OP_DRIVE_CMD, me, 0x01, &[1, 0x10, 0x00, 0, 0]),
+            &frame(linkctl::OP_DRIVE_CMD, me, 0x01, &[1, 0x10, 0x00, 0, 0, 0]),
         );
         m.settle();
     };

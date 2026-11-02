@@ -76,19 +76,20 @@ data class RiderCommand private constructor(
         )
 
     /**
-     * The drive demand, and the turn beside it. Disarmed sends [DriveKind.Neutral], which the
-     * firmware reads as a literal `(0, 0)` regardless of the words carried
-     * (`motorcontroller/orchestrator/src/dispatch.rs`, `effective_drive`), so the neutral frame is inert
-     * twice over: neutral kind AND a zero value.
+     * The drive demand for motor [motor] of the addressed board, and the turn beside it. Disarmed
+     * sends [DriveKind.Neutral], which the firmware reads as a literal `(0, 0)` regardless of the
+     * words carried (`motorcontroller/orchestrator/src/dispatch.rs`, `effective_drive`), so the
+     * neutral frame is inert twice over: neutral kind AND a zero value.
      *
-     * [steer] is zero on every command but a rigid leader's ([withTurn]). Which board may carry
+     * [steer] is zero on every command but a rigid leader's ([withTurn]). Which wheel may carry
      * one, and what it costs to carry one anywhere else, is [DriveFrame]'s rule.
      */
-    val drive: DriveCmd
-        get() = DriveCmd(
+    fun drive(motor: Int): DriveCmd =
+        DriveCmd(
             kind = if (armed) DriveKind.Throttle else DriveKind.Neutral,
             value = demand,
             steer = steer,
+            motor = motor,
         )
 
     /**
@@ -130,7 +131,7 @@ data class RiderCommand private constructor(
      * testable off-device. The defect this replaces was precisely an opcode choice: the app streamed
      * `INPUTS` alone, and no host test could see that the one word that moves a wheel was missing.
      */
-    fun pdus(src: Int, dst: Int): List<ByteArray> = listOf(inputsPdu(src, dst), drivePdu(src, dst))
+    fun pdus(src: Int, dst: Int, motor: Int): List<ByteArray> = listOf(inputsPdu(src, dst), drivePdu(src, dst, motor))
 
     /**
      * The arm level alone. Sent on change and as a slow keepalive rather than every tick, because
@@ -140,9 +141,12 @@ data class RiderCommand private constructor(
     fun inputsPdu(src: Int, dst: Int): ByteArray =
         Pdu(OP_INPUTS, src, dst, inputs.encode()).encode()
 
-    /** The demand alone. This is the one that has to keep arriving, because it decays. */
-    fun drivePdu(src: Int, dst: Int): ByteArray =
-        Pdu(OP_DRIVE_CMD, src, dst, drive.encode()).encode()
+    /**
+     * The demand alone, to motor [motor] of the board at [dst]. This is the one that has to keep
+     * arriving, because it decays.
+     */
+    fun drivePdu(src: Int, dst: Int, motor: Int): ByteArray =
+        Pdu(OP_DRIVE_CMD, src, dst, drive(motor).encode()).encode()
 
     companion object {
         /**

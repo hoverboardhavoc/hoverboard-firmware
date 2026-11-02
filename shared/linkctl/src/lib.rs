@@ -509,7 +509,7 @@ impl CyclicState {
 // the compiler rather than by whoever edits either number next.
 const _: () = assert!(CyclicState::ENCODED_LEN == CyclicState::LEN + CyclicObs::LEN + 4 + 2);
 
-// --- DRIVE_CMD (5 B): a controller's drive reference -------------------------------------------
+// --- DRIVE_CMD (6 B): a controller's drive reference -------------------------------------------
 
 /// The `DRIVE_CMD.kind` discriminant. An unknown kind byte decodes as [`DriveKind::Neutral`]
 /// (fail-safe).
@@ -522,9 +522,10 @@ pub enum DriveKind {
     Throttle = 1,
 }
 
-/// A controller's drive reference. Consumer: the throttle-mode reference producer
-/// (`specs/integration.md`). Consumed from any port via normal L3 delivery; the firmware never
-/// originates it.
+/// A controller's drive reference for one motor of the addressed node. Consumer: the
+/// throttle-mode reference producer (`specs/integration.md`). Consumed from any port via normal
+/// L3 delivery; the firmware never originates it. A two-motor board takes one per motor
+/// (`specs/twelve-fet.md` section 6.1); a sender drives each wheel with its own frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DriveCmd {
     /// Command kind; see [`DriveKind`].
@@ -533,11 +534,20 @@ pub struct DriveCmd {
     pub value: i16,
     /// Steer demand, same scale.
     pub steer: i16,
+    /// The motor on the addressed node, `0..` its motor count. A board drops a frame whose
+    /// motor it does not drive.
+    pub motor: u8,
 }
 
 impl DriveCmd {
-    /// On-wire length of the committed prefix.
-    pub const LEN: usize = 5;
+    /// On-wire length of the committed prefix. A 5-byte payload (the format before `motor`) is
+    /// [`DecodeError::TooShort`]: no compatibility path, and the dropped frame lets that motor's
+    /// demand decay to neutral.
+    pub const LEN: usize = 6;
+
+    /// Offset of `motor` in the payload: the byte a latest-wins queue keys on beside the
+    /// destination, so one wheel's frame never replaces another's.
+    pub const MOTOR_OFF: usize = 5;
 
     /// Encode into `out`, returning the byte count ([`Self::LEN`]).
     pub fn encode(&self, out: &mut [u8]) -> usize {
@@ -545,6 +555,7 @@ impl DriveCmd {
         out[0] = self.kind as u8;
         out[1..3].copy_from_slice(&self.value.to_le_bytes());
         out[3..5].copy_from_slice(&self.steer.to_le_bytes());
+        out[Self::MOTOR_OFF] = self.motor;
         Self::LEN
     }
 
@@ -563,6 +574,7 @@ impl DriveCmd {
             kind,
             value: rd_i16(b, 1),
             steer: rd_i16(b, 3),
+            motor: b[Self::MOTOR_OFF],
         })
     }
 }
@@ -685,7 +697,7 @@ mod tests {
     #[test]
     fn committed_lengths_pinned() {
         assert_eq!(CyclicState::LEN, 16);
-        assert_eq!(DriveCmd::LEN, 5);
+        assert_eq!(DriveCmd::LEN, 6);
         assert_eq!(Inputs::LEN, 2);
     }
 
@@ -766,10 +778,11 @@ mod tests {
             kind: DriveKind::Throttle,
             value: -300,   // 0xFED4
             steer: 0x1234, // LE 34 12
+            motor: 1,
         };
         let mut buf = [0u8; DriveCmd::LEN];
         assert_eq!(cmd.encode(&mut buf), DriveCmd::LEN);
-        assert_eq!(buf, [0x01, 0xD4, 0xFE, 0x34, 0x12]);
+        assert_eq!(buf, [0x01, 0xD4, 0xFE, 0x34, 0x12, 0x01]);
     }
 
     #[test]
@@ -861,15 +874,29 @@ mod tests {
     #[test]
     fn drive_cmd_round_trip_both_kinds() {
         for kind in [DriveKind::Neutral, DriveKind::Throttle] {
-            let orig = DriveCmd {
-                kind,
-                value: -12345,
-                steer: 6789,
-            };
-            let mut buf = [0u8; DriveCmd::LEN];
-            orig.encode(&mut buf);
-            assert_eq!(DriveCmd::decode(&buf), Ok(orig));
+            for motor in [0u8, 1, 0xFF] {
+                let orig = DriveCmd {
+                    kind,
+                    value: -12345,
+                    steer: 6789,
+                    motor,
+                };
+                let mut buf = [0u8; DriveCmd::LEN];
+                orig.encode(&mut buf);
+                assert_eq!(DriveCmd::decode(&buf), Ok(orig));
+            }
         }
+    }
+
+    /// A 5-byte payload is the format before `motor`: refused, with no fallback to motor 0
+    /// (`specs/twelve-fet.md` section 6.1).
+    #[test]
+    fn a_five_byte_drive_cmd_is_too_short() {
+        assert_eq!(
+            DriveCmd::decode(&[0x01, 0xD4, 0xFE, 0x34, 0x12]),
+            Err(DecodeError::TooShort)
+        );
+        assert_eq!(decode(OP_DRIVE_CMD, &[0x01, 0xD4, 0xFE, 0x34, 0x12]), None);
     }
 
     #[test]
@@ -896,6 +923,7 @@ mod tests {
             kind: DriveKind::Throttle,
             value: 5,
             steer: -5,
+            motor: 1,
         };
         cmd.encode(&mut buf);
         assert_eq!(DriveCmd::decode(&buf), Ok(cmd));
@@ -929,7 +957,7 @@ mod tests {
     #[test]
     fn unknown_drive_kind_decodes_as_neutral() {
         for kind_byte in [2u8, 0x7F, 0xFF] {
-            let buf = [kind_byte, 0xD4, 0xFE, 0x34, 0x12];
+            let buf = [kind_byte, 0xD4, 0xFE, 0x34, 0x12, 0x00];
             let got = DriveCmd::decode(&buf).unwrap();
             assert_eq!(got.kind, DriveKind::Neutral, "kind byte {kind_byte:#04x}");
             // The words are carried through (not live under Neutral).
@@ -938,11 +966,11 @@ mod tests {
         }
         // The defined kind bytes map exactly.
         assert_eq!(
-            DriveCmd::decode(&[0, 0, 0, 0, 0]).unwrap().kind,
+            DriveCmd::decode(&[0, 0, 0, 0, 0, 0]).unwrap().kind,
             DriveKind::Neutral
         );
         assert_eq!(
-            DriveCmd::decode(&[1, 0, 0, 0, 0]).unwrap().kind,
+            DriveCmd::decode(&[1, 0, 0, 0, 0, 0]).unwrap().kind,
             DriveKind::Throttle
         );
     }
@@ -1041,6 +1069,7 @@ mod tests {
             kind: DriveKind::Throttle,
             value: 1,
             steer: 2,
+            motor: 1,
         };
         cmd.encode(&mut buf);
         assert_eq!(

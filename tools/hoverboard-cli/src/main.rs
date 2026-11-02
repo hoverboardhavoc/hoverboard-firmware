@@ -87,7 +87,7 @@ use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::erase;
 use hoverboard_cli::fleet;
-use hoverboard_cli::guest::{self, Drive, Tally, STOP_REPEATS};
+use hoverboard_cli::guest::{self, Drive, Tally, Wheel, WheelTarget, STOP_REPEATS};
 use hoverboard_cli::install::{self, Answered, Given, Guard};
 use hoverboard_cli::machine::{self, MachineFile};
 use hoverboard_cli::names;
@@ -924,6 +924,41 @@ fn guest_boards(wire: &mut impl Wire, targets: &[String]) -> Result<(u8, Vec<u8>
             Ok((w.src, b))
         }
     }
+}
+
+/// The wheels `machine drive`'s targets name (`specs/twelve-fet.md` section 6.3): each board's
+/// motor count read from it first, then a bare board as all its motors and `<board>:<motor>` as
+/// one; every wheel of every motor controller when none is given.
+fn drive_wheels(wire: &mut impl Wire, targets: &[String]) -> Result<(u8, Vec<Wheel>), String> {
+    let wanted = targets
+        .iter()
+        .map(|t| WheelTarget::parse(t))
+        .collect::<Result<Vec<_>, _>>()?;
+    let boards: Vec<String> = wanted.iter().map(|w| w.board.to_string()).collect();
+    let (src, addrs) = guest_boards(wire, &boards)?;
+    // `guest_boards` answers one address per target, in order, or every motor controller.
+    let picked: Vec<(u8, Option<u8>)> = if wanted.is_empty() {
+        addrs.iter().map(|&a| (a, None)).collect()
+    } else {
+        addrs
+            .iter()
+            .zip(&wanted)
+            .map(|(&a, w)| (a, w.motor))
+            .collect()
+    };
+    let mut counts = BTreeMap::new();
+    for &(a, _) in &picked {
+        if let std::collections::btree_map::Entry::Vacant(e) = counts.entry(a) {
+            e.insert(guest::motor_count(wire, src, a).map_err(|_| no_answer(a))?);
+        }
+    }
+    let wheels = guest::wheels(&picked, |a| counts[&a])?;
+    let listed: Vec<String> = wheels
+        .iter()
+        .map(|w| format!("{:#04x}:{}", w.node, w.motor))
+        .collect();
+    eprintln!("driving {}", listed.join(" "));
+    Ok((src, wheels))
 }
 
 /// The bridge's TCP console port (`specs/hoverboard-bridge.md`, "The Wi-Fi console").
@@ -2235,8 +2270,8 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed))
                 .map_err(|e| e.to_string())?;
             let mut wire = wire_on(link)?;
-            let (src, boards) = guest_boards(&mut wire, &targets)?;
-            let mut drive = Drive::new(src, boards, value);
+            let (src, wheels) = drive_wheels(&mut wire, &targets)?;
+            let mut drive = Drive::new(src, wheels, value);
             let (tally, elapsed) = session(&mut wire, Tally::new(), secs, Some(&mut drive), &stop);
             for _ in 0..STOP_REPEATS {
                 for f in drive.stop() {

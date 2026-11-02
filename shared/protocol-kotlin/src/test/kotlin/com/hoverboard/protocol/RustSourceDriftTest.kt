@@ -826,6 +826,17 @@ class RustSourceDriftTest {
             "CyclicState::MACHINE_OFF",
         )
         assertEquals(CyclicState.WHEEL_RATE_OFF + 4, CyclicState.MACHINE_OFF)
+
+        // `motor`'s offset, which the encode and decode on both sides index by.
+        val motorOff = num(
+            findOne(
+                implBlock(linkctl, "DriveCmd"),
+                """pub const MOTOR_OFF: usize = (\d+);""",
+                "DriveCmd::MOTOR_OFF",
+            ).groupValues[1],
+        )
+        assertEquals(motorOff, DriveCmd.MOTOR_OFF, "DriveCmd::MOTOR_OFF drifted")
+        assertEquals(DriveCmd.LEN - 1, DriveCmd.MOTOR_OFF, "motor is the last byte")
     }
 
     /**
@@ -880,7 +891,9 @@ class RustSourceDriftTest {
                 "phasePeak" to "i16", "phaseMean" to "i16", "dutyOn" to "u16",
                 "bootTag" to "u8", "chip" to "ChipTag", "odometer" to "u32",
             ),
-            "DriveCmd" to listOf("kind" to "DriveKind", "value" to "i16", "steer" to "i16"),
+            "DriveCmd" to listOf(
+                "kind" to "DriveKind", "value" to "i16", "steer" to "i16", "motor" to "u8",
+            ),
             "Inputs" to listOf("buttons" to "u8", "rider" to "u8"),
         )
         // The ENCODED length for the payload that has an appended block, because that is what its

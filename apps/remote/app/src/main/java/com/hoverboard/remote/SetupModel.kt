@@ -266,6 +266,12 @@ data class BoardSetup(
      * `imu.model` write runs on them ([SetupModel]'s enqueue).
      */
     val imuBus: Map<Key, Value>? = null,
+    /**
+     * How many motors the board drives (`specs/twelve-fet.md` section 6.2): 2 when it stores
+     * `motors.1.gate.hi_a`, a pin with no default, else 1; null until read. A board with motor 1
+     * also has motor 1's `control.side` read into [values], at index 1.
+     */
+    val motors: Int? = null,
 ) {
     /** Whether any field's write is queued or in flight. */
     val writing: Boolean get() = writes.values.any { it.sending }
@@ -382,6 +388,7 @@ data class BoardSetup(
         identity = null,
         rearm = null,
         reboot = null,
+        motors = null,
     )
 }
 
@@ -912,6 +919,7 @@ class SetupModel(
                 }
                 val mcs = _state.value.motorControllers
                 for (field in SetupFields.MOTOR_FACTS) readFact(mcs, field.key)
+                for (node in mcs) readMotors(node)
                 for (node in mcs) readCountsPerAmp(node)
                 for (node in mcs) readWheelGeometry(node)
                 for (node in mcs) readBoardStatus(node)
@@ -989,6 +997,22 @@ class SetupModel(
     private suspend fun readOne(node: Int, key: Key) {
         if (node !in _state.value.addresses) return
         awaitSlot { transport.readConfig(key, node) }?.let { record(node, key, it) }
+    }
+
+    /**
+     * Read how many motors [node] drives into [BoardSetup.motors], from `motors.1.gate.hi_a`: a
+     * board that answers it with its default stores no motor 1 (`specs/twelve-fet.md` section 6.2).
+     * A board with motor 1 then has motor 1's `control.side` read, which places that wheel in
+     * DIFFERENTIAL. Not [readOne], for [readCountsPerAmp]'s reason: neither key has a row on the
+     * Setup screen. A read that fails leaves the count unknown, which refuses the drive
+     * ([com.hoverboard.remote.model.DriveRefusal.UNREAD]).
+     */
+    private suspend fun readMotors(node: Int) {
+        val board = node.takeIf { it in _state.value.addresses } ?: return
+        val r = awaitSlot { transport.readConfig(MOTOR_ONE, board) } as? ReadValue ?: return
+        if (r.isDefault) return update(node) { it.copy(motors = 1) }
+        val side = awaitSlot { transport.readConfig(SIDE_ONE, board) } as? ReadValue
+        update(node) { b -> b.copy(motors = 2, values = side?.let { b.values + (SIDE_ONE to it.value) } ?: b.values) }
     }
 
     /**
@@ -1580,6 +1604,12 @@ class SetupModel(
          * not the ones passed through on the way.
          */
         const val EDIT_SETTLE_MS = TuneModel.DRAG_SEND_INTERVAL_MS
+
+        /** The key whose presence is motor 1's: its gate pin, which has no default. */
+        val MOTOR_ONE: Key = Fields.MOTOR_GATE_HI_A.key(1)
+
+        /** Motor 1's `control.side`, the second wheel's place in DIFFERENTIAL. */
+        val SIDE_ONE: Key = Fields.CONTROL_SIDE.key(1)
 
         /** The bus `imu.model` switches on: its group's pins and instance key ([Checks.GROUPS]). */
         val IMU_BUS: List<Key> = Checks.GROUPS.first { it.switch == SetupFields.IMU_MODEL.key }

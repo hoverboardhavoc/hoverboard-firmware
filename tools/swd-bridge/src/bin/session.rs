@@ -40,7 +40,8 @@
 //! ```
 //!
 //! Until the first `value`, no `DRIVE_CMD` is sent at all, so the arm-and-soak phase of a gate puts
-//! exactly the traffic on the link that `swd-mailbox-inputs --hold` put there.
+//! exactly the traffic on the link that `swd-mailbox-inputs --hold` put there. The demand is for
+//! motor 0 of the addressed board; `swd-mailbox-drive --motor` drives another.
 //!
 //! # Ending
 //!
@@ -285,6 +286,7 @@ fn drive_of(value: i16, steer: i16, neutral: bool) -> DriveCmd {
         },
         value: if neutral { 0 } else { value },
         steer: if neutral { 0 } else { steer },
+        motor: 0,
     }
 }
 
@@ -603,15 +605,16 @@ mod tests {
             kind: DriveKind::Throttle,
             value: 1000,
             steer: 0,
+            motor: 0,
         };
         assert_eq!(
             encode_drive_pdu(0x80, 0x02, &cmd),
-            vec![0x11, 0x80, 0x02, 0x01, 0xe8, 0x03, 0x00, 0x00]
+            vec![0x11, 0x80, 0x02, 0x01, 0xe8, 0x03, 0x00, 0x00, 0x00]
         );
         let neutral = drive_of(0, 0, true);
         assert_eq!(
             encode_drive_pdu(0x80, 0x02, &neutral),
-            vec![0x11, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00]
+            vec![0x11, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
     }
 

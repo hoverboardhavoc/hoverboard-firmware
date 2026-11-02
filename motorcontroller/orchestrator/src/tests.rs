@@ -453,6 +453,7 @@ fn drive_staleness_at_51_ticks_and_never_received() {
             kind: DriveKind::Throttle,
             value: 500,
             steer: 0,
+            motor: 0,
         }),
     );
     assert!(!s.inbox.drive_stale(), "fresh on receipt");
@@ -468,6 +469,7 @@ fn drive_staleness_at_51_ticks_and_never_received() {
             kind: DriveKind::Neutral,
             value: 0,
             steer: 0,
+            motor: 0,
         }),
     );
     assert!(!s.inbox.drive_stale());
@@ -586,6 +588,7 @@ fn demand(value: i16) -> Payload {
         kind: DriveKind::Throttle,
         value,
         steer: 0,
+        motor: 0,
     })
 }
 
@@ -1497,6 +1500,7 @@ fn feed_drive(s: &mut OrchestratorState, value: i16, steer: i16) {
             kind: DriveKind::Throttle,
             value,
             steer,
+            motor: 0,
         }),
     );
 }

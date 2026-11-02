@@ -9,7 +9,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use hoverboard_cli::guest::{
-    attach, drive_pdu, inputs_pdu, Drive, Tally, DRIVE_PERIOD, INPUTS_PERIOD,
+    attach, drive_pdu, inputs_pdu, wheels, Drive, Tally, Wheel, WheelTarget, DRIVE_PERIOD,
+    INPUTS_PERIOD,
 };
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 use linkctl::{
@@ -17,10 +18,14 @@ use linkctl::{
     OP_INPUTS,
 };
 use net::pdu::{Opcode, Pdu, GUEST_FIRST, NO_ADDRESS};
-use net::walk::{KIND_CONTROLLER, PROTO_VER};
+use net::walk::{CFG_OK, KIND_CONTROLLER, PROTO_VER};
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
+}
+
+fn w(node: u8, motor: u8) -> Wheel {
+    Wheel { node, motor }
 }
 
 fn state(mode: u8, peer_demand: i16, battery: u16) -> CyclicState {
@@ -77,6 +82,7 @@ fn the_tally_counts_each_source_with_its_rate_and_longest_gap() {
         kind: DriveKind::Neutral,
         value: 0,
         steer: 0,
+        motor: 0,
     }
     .encode(&mut d);
     assert!(!t.feed(&pdu(OP_DRIVE_CMD, 0x01, 0x02, &d), ms(900)));
@@ -118,6 +124,7 @@ fn drive_frames_decode_with_the_linkctl_codecs() {
         kind: DriveKind::Throttle,
         value: -1200,
         steer: 0,
+        motor: 1,
     };
     let f = drive_pdu(0x88, 0x02, &cmd);
     let p = Pdu::decode(&f).unwrap();
@@ -146,7 +153,7 @@ fn parts(f: &[u8]) -> (u8, u8, Vec<u8>) {
 
 #[test]
 fn drive_sends_throttle_at_20_hz_and_power_at_2_hz_to_each_node() {
-    let mut d = Drive::new(0x88, vec![0x01, 0x02], 500);
+    let mut d = Drive::new(0x88, vec![w(0x01, 0), w(0x02, 0)], 500);
     let mut sent = Vec::new();
     let mut at = Duration::ZERO;
     while at < ms(1000) {
@@ -170,14 +177,17 @@ fn drive_sends_throttle_at_20_hz_and_power_at_2_hz_to_each_node() {
         let (op, _, payload) = parts(f);
         if op == OP_DRIVE_CMD {
             let c = DriveCmd::decode(&payload).unwrap();
-            assert_eq!((c.kind, c.value, c.steer), (DriveKind::Throttle, 500, 0));
+            assert_eq!(
+                (c.kind, c.value, c.steer, c.motor),
+                (DriveKind::Throttle, 500, 0, 0)
+            );
         } else {
             assert_eq!(op, OP_INPUTS);
             assert!(Inputs::decode(&payload).unwrap().power_request());
         }
     }
     // The first frames go out at once, power before throttle.
-    let first: Vec<_> = Drive::new(0x88, vec![0x01], 500)
+    let first: Vec<_> = Drive::new(0x88, vec![w(0x01, 0)], 500)
         .due(Duration::ZERO)
         .iter()
         .map(|f| parts(f).0)
@@ -187,7 +197,7 @@ fn drive_sends_throttle_at_20_hz_and_power_at_2_hz_to_each_node() {
 
 #[test]
 fn a_late_drive_call_sends_once_and_resumes_the_cadence() {
-    let mut d = Drive::new(0x88, vec![0x01], 500);
+    let mut d = Drive::new(0x88, vec![w(0x01, 0)], 500);
     assert_eq!(d.due(Duration::ZERO).len(), 2);
     // 300 ms late: one throttle frame, not six.
     let late = d.due(ms(350));
@@ -199,7 +209,7 @@ fn a_late_drive_call_sends_once_and_resumes_the_cadence() {
 
 #[test]
 fn the_stop_round_is_neutral_then_power_0_to_each_node() {
-    let d = Drive::new(0x88, vec![0x01, 0x02], 500);
+    let d = Drive::new(0x88, vec![w(0x01, 0), w(0x02, 0)], 500);
     let round: Vec<_> = d.stop().iter().map(|f| parts(f)).collect();
     assert_eq!(round.len(), 4);
     for (i, (op, dst, payload)) in round.iter().enumerate() {
@@ -213,6 +223,103 @@ fn the_stop_round_is_neutral_then_power_0_to_each_node() {
             assert!(!p.power_request() && !p.rider_present());
         }
     }
+}
+
+/// A target is a board (all its motors) or `<board>:<motor>` (one); a name may hold a `:` that is
+/// not followed by a motor number.
+#[test]
+fn a_drive_target_is_a_board_or_a_board_and_a_motor() {
+    let t = |s| WheelTarget::parse(s).unwrap();
+    assert_eq!(
+        t("12-FET"),
+        WheelTarget {
+            board: "12-FET",
+            motor: None
+        }
+    );
+    assert_eq!(
+        t("12-FET:1"),
+        WheelTarget {
+            board: "12-FET",
+            motor: Some(1)
+        }
+    );
+    assert_eq!(
+        t("0x01:0"),
+        WheelTarget {
+            board: "0x01",
+            motor: Some(0)
+        }
+    );
+    assert_eq!(
+        t("a:b"),
+        WheelTarget {
+            board: "a:b",
+            motor: None
+        }
+    );
+    assert_eq!(
+        t("rover:"),
+        WheelTarget {
+            board: "rover:",
+            motor: None
+        }
+    );
+    assert!(WheelTarget::parse(":1").is_err());
+    assert!(
+        WheelTarget::parse("12-FET:2").is_err(),
+        "store::MOTORS is 2"
+    );
+    assert!(WheelTarget::parse("12-FET:300").is_err());
+}
+
+/// A bare board is every motor it has; `<board>:<motor>` one of them; a wheel named twice is
+/// driven once; a motor the board lacks is refused. No target is every motor controller, which
+/// the caller hands in as bare boards.
+#[test]
+fn drive_targets_expand_to_wheels_by_each_boards_motor_count() {
+    let count = |a: u8| if a == 0x03 { 2 } else { 1 };
+    assert_eq!(
+        wheels(&[(0x01, None), (0x03, None)], count).unwrap(),
+        [w(0x01, 0), w(0x03, 0), w(0x03, 1)]
+    );
+    assert_eq!(wheels(&[(0x03, Some(1))], count).unwrap(), [w(0x03, 1)]);
+    assert_eq!(
+        wheels(&[(0x03, Some(0)), (0x03, None)], count).unwrap(),
+        [w(0x03, 0), w(0x03, 1)]
+    );
+    let e = wheels(&[(0x01, Some(1))], count).unwrap_err();
+    assert!(e.contains("0x01 has no motor 1"), "{e}");
+}
+
+/// Two wheels on one node: two `DRIVE_CMD`s per cadence, one per motor, and one `INPUTS`; the stop
+/// round is a neutral per wheel, then one power 0.
+#[test]
+fn drive_sends_one_drive_cmd_per_wheel_and_one_inputs_per_node() {
+    let mut d = Drive::new(0x88, vec![w(0x01, 0), w(0x01, 1)], 700);
+    let first: Vec<_> = d.due(Duration::ZERO).iter().map(|f| parts(f)).collect();
+    assert_eq!(first.len(), 3);
+    assert_eq!((first[0].0, first[0].1), (OP_INPUTS, 0x01));
+    for (i, (op, dst, payload)) in first[1..].iter().enumerate() {
+        assert_eq!((*op, *dst), (OP_DRIVE_CMD, 0x01));
+        let c = DriveCmd::decode(payload).unwrap();
+        assert_eq!(
+            (c.kind, c.value, c.motor),
+            (DriveKind::Throttle, 700, i as u8)
+        );
+    }
+    // The next cadence before INPUTS falls due again: the two drive frames alone.
+    assert_eq!(d.due(DRIVE_PERIOD).len(), 2);
+
+    let round: Vec<_> = d.stop().iter().map(|f| parts(f)).collect();
+    assert_eq!(round.len(), 3);
+    for (i, (op, _, payload)) in round[..2].iter().enumerate() {
+        assert_eq!(*op, OP_DRIVE_CMD);
+        let c = DriveCmd::decode(payload).unwrap();
+        assert_eq!((c.kind, c.motor), (DriveKind::Neutral, i as u8));
+    }
+    assert_eq!(round[2].0, OP_INPUTS);
+    assert!(!Inputs::decode(&round[2].2).unwrap().power_request());
 }
 
 /// A board behind the bridge: it answers the `answer_on`th `NODE_HELLO` with a grant, after a
@@ -301,9 +408,10 @@ impl ByteLink for Sock {
     }
 }
 
-/// Serve one console connection for `run`: grant `0x88` to the first `NODE_HELLO`, then emit the
-/// master's `CYCLIC_STATE` (src `0x01`, 5 Hz) and its peer's forward (src `0x02`, 2.5 Hz), dst
-/// `0x00`. Returns every frame the console sent.
+/// Serve one console connection for `run`: grant `0x88` to the first `NODE_HELLO`, answer a
+/// `CONFIG_READ` of `motors.1.gate.hi_a` as stored (a two-motor board), then emit the master's
+/// `CYCLIC_STATE` (src `0x01`, 5 Hz) and its peer's forward (src `0x02`, 2.5 Hz), dst `0x00`.
+/// Returns every frame the console sent.
 fn serve_board(listener: TcpListener, run: Duration) -> Vec<Vec<u8>> {
     let (sock, _) = listener.accept().unwrap();
     let mut w = Framed::new(Sock(sock));
@@ -323,6 +431,12 @@ fn serve_board(listener: TcpListener, run: Duration) -> Vec<Vec<u8>> {
                 );
                 w.send(&g);
                 t0 = Some(Instant::now());
+            }
+            let hi_a = store::MOTOR_GATE_HI_A.at(1).key();
+            if p.known() == Some(Opcode::ConfigRead) && p.payload == [hi_a.field_id, hi_a.index] {
+                let mut resp = vec![hi_a.field_id, hi_a.index, CFG_OK, store::Type::PinAf.tag()];
+                resp.extend_from_slice(&[2, 6, 0]);
+                w.send(&pdu(Opcode::ConfigResp.to_u8(), 0x01, p.src, &resp));
             }
             got.push(f);
         }
@@ -361,6 +475,7 @@ fn the_binary_drives_over_tcp_and_prints_the_watch_line() {
     let (ok, out, err) = cli(&[&tcp, "machine", "drive", "300", "2", "0x01"]);
     assert!(ok, "{err}");
     assert!(err.contains("attached as guest 0x88"), "{err}");
+    assert!(err.contains("driving 0x01:0 0x01:1"), "{err}");
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("t=1s  0x01 "), "{out}");
     assert!(lines[0].contains(" | 0x02 "), "{out}");
@@ -372,6 +487,7 @@ fn the_binary_drives_over_tcp_and_prints_the_watch_line() {
     let sent = board.join().unwrap();
     let after_hello: Vec<(u8, u8, Vec<u8>)> = sent[1..]
         .iter()
+        .filter(|f| Pdu::decode(f).unwrap().known() != Some(Opcode::ConfigRead))
         .map(|f| {
             let p = Pdu::decode(f).unwrap();
             assert_eq!((p.src, p.dst), (0x88, 0x01));
@@ -384,23 +500,29 @@ fn the_binary_drives_over_tcp_and_prints_the_watch_line() {
             .filter(|(o, _, pl)| *o == op && pick(pl))
             .count()
     };
-    let throttle = n(OP_DRIVE_CMD, &|pl| {
-        DriveCmd::decode(pl).unwrap().kind == DriveKind::Throttle
-    });
     let power = n(OP_INPUTS, &|pl| Inputs::decode(pl).unwrap().power_request());
-    // 2 s at 20 Hz and 2 Hz, give or take the scheduling at the edges.
-    assert!((38..=41).contains(&throttle), "{throttle} throttle frames");
-    assert!((4..=5).contains(&power), "{power} power frames");
-    // The last six: neutral then power 0, three rounds.
-    let tail = &after_hello[after_hello.len() - 6..];
-    for pair in tail.chunks(2) {
-        assert_eq!(pair[0].0, OP_DRIVE_CMD);
-        assert_eq!(
-            DriveCmd::decode(&pair[0].2).unwrap().kind,
-            DriveKind::Neutral
+    // 2 s at 20 Hz and 2 Hz, give or take the scheduling at the edges, per wheel.
+    for motor in 0..2u8 {
+        let throttle = n(OP_DRIVE_CMD, &|pl| {
+            let c = DriveCmd::decode(pl).unwrap();
+            c.kind == DriveKind::Throttle && c.motor == motor
+        });
+        assert!(
+            (38..=41).contains(&throttle),
+            "{throttle} throttle frames to motor {motor}"
         );
-        assert_eq!(pair[1].0, OP_INPUTS);
-        assert!(!Inputs::decode(&pair[1].2).unwrap().power_request());
+    }
+    assert!((4..=5).contains(&power), "{power} power frames");
+    // The last nine: neutral to each wheel then power 0, three rounds.
+    let tail = &after_hello[after_hello.len() - 9..];
+    for round in tail.chunks(3) {
+        for (motor, f) in round[..2].iter().enumerate() {
+            assert_eq!(f.0, OP_DRIVE_CMD);
+            let c = DriveCmd::decode(&f.2).unwrap();
+            assert_eq!((c.kind, c.motor), (DriveKind::Neutral, motor as u8));
+        }
+        assert_eq!(round[2].0, OP_INPUTS);
+        assert!(!Inputs::decode(&round[2].2).unwrap().power_request());
     }
 }
 

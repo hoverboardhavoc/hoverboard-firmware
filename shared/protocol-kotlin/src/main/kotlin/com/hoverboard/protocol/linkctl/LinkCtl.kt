@@ -526,7 +526,7 @@ data class CyclicState(
     }
 }
 
-// --- DRIVE_CMD (5 B) ----------------------------------------------------------------------------
+// --- DRIVE_CMD (6 B) ----------------------------------------------------------------------------
 
 /** The `DRIVE_CMD.kind` discriminant. `shared/linkctl/src/lib.rs`, `DriveKind`. */
 enum class DriveKind(val value: Int) {
@@ -547,28 +547,38 @@ enum class DriveKind(val value: Int) {
 }
 
 /**
- * A controller's drive reference. Mirror of `shared/linkctl/src/lib.rs`, `DriveCmd`.
+ * A controller's drive reference for one motor of the addressed node. Mirror of
+ * `shared/linkctl/src/lib.rs`, `DriveCmd`. A two-motor board takes one per motor
+ * (`specs/twelve-fet.md` section 6.1).
  *
- * Wire layout, 5 bytes (`shared/linkctl/src/lib.rs`, `DriveCmd::encode`):
+ * Wire layout, 6 bytes (`shared/linkctl/src/lib.rs`, `DriveCmd::encode`):
  * ```
  * off 0      u8      kind
  * off 1..3   i16 LE  value
  * off 3..5   i16 LE  steer
+ * off 5      u8      motor
  * ```
  */
-data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
+data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int, val motor: Int) {
     /** Encode the committed prefix. `shared/linkctl/src/lib.rs`, `DriveCmd::encode`. */
     fun encode(): ByteArray {
         val out = ByteArray(LEN)
         out[0] = kind.value.toByte()
         wrU16(out, 1, value)
         wrU16(out, 3, steer)
+        out[MOTOR_OFF] = motor.toByte()
         return out
     }
 
     companion object {
-        /** On-wire length of the committed prefix. `shared/linkctl/src/lib.rs`, `DriveCmd::LEN`. */
-        const val LEN = 5
+        /**
+         * On-wire length of the committed prefix. `shared/linkctl/src/lib.rs`, `DriveCmd::LEN`. A
+         * 5-byte payload (the format before `motor`) decodes as null.
+         */
+        const val LEN = 6
+
+        /** The offset of [motor]. `shared/linkctl/src/lib.rs`, `DriveCmd::MOTOR_OFF`. */
+        const val MOTOR_OFF = 5
 
         /**
          * Full-scale magnitude of [value] and [steer]: the demand word is a fraction of this,
@@ -606,6 +616,7 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int) {
                 kind = DriveKind.fromU8(rdU8(b, 0)),
                 value = rdI16(b, 1),
                 steer = rdI16(b, 3),
+                motor = rdU8(b, MOTOR_OFF),
             )
         }
     }

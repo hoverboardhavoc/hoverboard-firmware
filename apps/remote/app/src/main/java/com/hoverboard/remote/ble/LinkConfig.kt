@@ -52,10 +52,11 @@ object LinkConfig {
      * Doubling the rate did not double the traffic, because the `INPUTS` half stopped going out
      * every tick; see [INPUTS_KEEPALIVE_TICKS]. A stream frame is
      * `SOF + len + frag-hdr + PDU + CRC16` = PDU + 5
-     * (`com.hoverboard.protocol.l2.StreamFrame`), so `DRIVE_CMD` (5-byte payload, 8-byte PDU) is
-     * 13 bytes on the wire and `INPUTS` (2-byte payload, 5-byte PDU) is 10. That is 260 B/s of
-     * demand plus ~20 B/s of keepalive, ~280 B/s armed, of the CC2541's ~960 B/s metered UART,
-     * against 250 B/s for the 10 Hz build that sent both payloads every tick. The module's known
+     * (`com.hoverboard.protocol.l2.StreamFrame`), so `DRIVE_CMD` (6-byte payload, 9-byte PDU) is
+     * 14 bytes on the wire and `INPUTS` (2-byte payload, 5-byte PDU) is 10. That is 280 B/s of
+     * demand per wheel plus ~20 B/s of keepalive per board, ~300 B/s armed for one wheel, of the
+     * CC2541's ~960 B/s metered UART, against 250 B/s for the 10 Hz build that sent both payloads
+     * every tick (when `DRIVE_CMD` was 5 bytes, before its `motor` byte). The module's known
      * ceiling is the ~360 B/s (30 Hz x 12 B) at which the old INPUTS-only build overran its
      * BLE-to-UART buffer, measured when that frame was still 12 bytes.
      *

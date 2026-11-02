@@ -400,9 +400,10 @@ class BleHoverboardTransport(
 
             pump = CommandPump(scope, LinkConfig.SEND_INTERVAL_MS) { ticks ->
                 // Stage this tick's PDUs; the session loop is the link's single writer and puts
-                // them on the wire. The INPUTS and DRIVE_CMD payloads are 4 and 5 bytes, so 7 and 8
-                // as PDUs, and 12 and 13 on the wire (a stream frame is PDU + 5: SOF, len,
-                // frag-hdr, CRC16): one fragment and one ATT write each, per board. The pump
+                // them on the wire. The INPUTS and DRIVE_CMD payloads are 2 and 6 bytes, so 5 and 9
+                // as PDUs, and 10 and 14 on the wire (a stream frame is PDU + 5: SOF, len,
+                // frag-hdr, CRC16): one fragment and one ATT write each, one INPUTS per board and
+                // one DRIVE_CMD per wheel. The pump
                 // decides which of them this tick carries, and swallows ordinary exceptions to
                 // retry, so don't rethrow here; that would kill the coroutine on the first hiccup.
                 stageCommand(engine, attached, ticks)
@@ -570,15 +571,12 @@ class BleHoverboardTransport(
     /**
      * Stage one tick of rider commands on the session link, each to the board address it is keyed
      * by (relayed by the nodes between where that board is not on the phone's own link).
-     * [com.hoverboard.remote.model.RiderCommand.pdus] owns which opcodes and what order; this owns
-     * only the addressing and the lock. Staged as one unit under [linkLock] so no probe reply can be
-     * interleaved between a board's two PDUs.
+     * [NodeTick.pdus] owns which opcodes and what order (the board's one `INPUTS`, then one
+     * `DRIVE_CMD` per motor); this owns only the addressing and the lock. Staged as one unit under
+     * [linkLock] so no probe reply can be interleaved between a board's PDUs.
      */
     private fun stageCommand(engine: BleWalkEngine, at: Attachment, ticks: List<NodeTick>) = synchronized(linkLock) {
-        for (t in ticks) {
-            if (t.frames != TickFrames.DRIVE_ONLY) engine.sendPacket(t.command.inputsPdu(at.guestAddr, t.node))
-            if (t.frames != TickFrames.INPUTS_ONLY) engine.sendPacket(t.command.drivePdu(at.guestAddr, t.node))
-        }
+        for (t in ticks) t.pdus(at.guestAddr).forEach { engine.sendPacket(it) }
     }
 
     /**

@@ -1069,9 +1069,11 @@ class MainViewModel(
         val suspects = if (!local.value.armed) {
             emptySet()
         } else {
-            frame.commands.filter { (board, c) ->
-                abs(c.demand) >= NOT_TURNING_DEMAND && telemetry[board]?.wheelRateQ12 == 0
-            }.keys
+            // A board's `CYCLIC_STATE` carries motor 0's wheel words alone (`specs/twelve-fet.md`
+            // section 6.1), so motor 0 is the wheel that can be judged.
+            frame.commands.filter { (wheel, c) ->
+                wheel.motor == 0 && abs(c.demand) >= NOT_TURNING_DEMAND && telemetry[wheel.node]?.wheelRateQ12 == 0
+            }.keys.map { it.node }.toSet()
         }
         for (board in turningWaits.keys - suspects) turningWaits.remove(board)?.cancel()
         notTurning.update { it intersect suspects }
