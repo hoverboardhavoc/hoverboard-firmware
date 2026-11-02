@@ -115,6 +115,17 @@ pub struct AdcInput {
     pub channel: u8,
 }
 
+/// A motor phase, as a phase-current sense pin names it (`current.phase_a` to `current.phase_c`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Phase A, on the gate timer's channel 0.
+    A,
+    /// Phase B, on channel 1.
+    B,
+    /// Phase C, on channel 2.
+    C,
+}
+
 /// One chip's pins.
 #[derive(Debug)]
 pub struct Table {
@@ -124,6 +135,11 @@ pub struct Table {
     pub routes: &'static [Route],
     /// Every ADC input.
     pub adc: &'static [AdcInput],
+    /// The phase pairs a motor's current sense may store on this chip: the pairs its image reads
+    /// (`specs/twelve-fet.md` section 5.3). An image with one advanced timer reads phases A and B
+    /// as injected ranks 0 and 1; the two-motor image also reads B and C. A and C is on no board and
+    /// in no table.
+    pub sense_pairs: &'static [[Phase; 2]],
 }
 
 /// The SWD pins, PA13 (SWDIO) and PA14 (SWCLK), as (port, pin): never given to a function, because
@@ -220,6 +236,7 @@ const GD32F103C8: Table = Table {
     bonding: [0xFFFF, 0xFFFF, 0xE000, 0x0003, 0, 0],
     routes: &F10X_ROUTES,
     adc: &GD32_ADC,
+    sense_pairs: &[[Phase::A, Phase::B]],
 };
 
 /// GD32F103RC, LQFP64: PA, PB, PC and PD0-2 bonded.
@@ -227,6 +244,7 @@ const GD32F103RC: Table = Table {
     bonding: [0xFFFF, 0xFFFF, 0xFFFF, 0x0007, 0, 0],
     routes: &F10X_HD_ROUTES,
     adc: &GD32_ADC,
+    sense_pairs: &[[Phase::A, Phase::B], [Phase::B, Phase::C]],
 };
 
 /// GD32F130C8, LQFP48: PA, PB, PC13-15, PF0-1 and PF6-7 bonded. TIMER0 is AF2 on PA8-10 and
@@ -251,6 +269,7 @@ const GD32F130C8: Table = Table {
         route(1, 11, Sda(1), 1),
     ],
     adc: &GD32_ADC,
+    sense_pairs: &[[Phase::A, Phase::B]],
 };
 
 /// MM32SPIN05, LQFP48: PA0-15, PB0-15, PC13-15 and PD0-3 bonded (DS_MM32SPIN05 table 5). TIM1 is
@@ -302,6 +321,7 @@ const MM32SPIN05: Table = Table {
         adc(1, 3, 10),
         adc(1, 4, 11),
     ],
+    sense_pairs: &[[Phase::A, Phase::B]],
 };
 
 impl Table {
@@ -346,6 +366,11 @@ impl Table {
     /// Whether the chip carries I2C `n`.
     pub fn has_i2c(&self, n: u8) -> bool {
         self.routes.iter().any(|r| r.func == Scl(n))
+    }
+
+    /// Whether a motor's current sense may store the pair `first`, `second` (in phase order).
+    pub fn senses(&self, first: Phase, second: Phase) -> bool {
+        self.sense_pairs.contains(&[first, second])
     }
 }
 
@@ -441,6 +466,17 @@ mod tests {
         let mm32 = Chip::Mm32spin05.table();
         assert_eq!(mm32.adc_channel(1, 3), Some(10));
         assert_eq!(mm32.adc_channel(1, 7), None);
+    }
+
+    #[test]
+    fn the_sense_pairs_are_a_and_b_on_one_timer_and_b_and_c_beside_it_on_two() {
+        use Phase::{A, B, C};
+        for chip in Chip::ALL {
+            let t = chip.table();
+            assert!(t.senses(A, B), "{chip:?}");
+            assert!(!t.senses(A, C), "{chip:?}: A and C is on no board");
+            assert_eq!(t.senses(B, C), t.has_timer(7), "{chip:?}");
+        }
     }
 
     #[test]

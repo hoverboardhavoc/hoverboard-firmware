@@ -5,7 +5,8 @@ import com.hoverboard.protocol.linkctl.ChipTag
 /**
  * What each pin of each chip the HAL drives can do: a mirror of `motorcontroller/hal/src/pincap.rs`
  * (`specs/config-read-once.md` section 4), the table the configuration checks run against. Every
- * table, route and ADC input here is pinned to the Rust by `RustSourceDriftTest`, both ways.
+ * table, route, ADC input and sense pair here is pinned to the Rust by `RustSourceDriftTest`, both
+ * ways.
  *
  * On a chip with a per-pin mux (GD32F1x0, MM32SPIN05) a route's selector is the AF number a `PinAf`
  * stores; on the GD32F10x it is the AFIO remap value the group's `remap` key stores, and the stored
@@ -36,14 +37,23 @@ data class Route(val port: Int, val pin: Int, val func: Func, val sel: Int)
 /** One ADC input: pin [pin] of port [port] is ADC0 channel [channel]. */
 data class AdcInput(val port: Int, val pin: Int, val channel: Int)
 
+/** A motor phase, as a phase-current sense pin names it (`pincap::Phase`). */
+enum class Phase { A, B, C }
+
 /** The SWD pins, PA13 and PA14, as (port, pin): never given to a function. */
 val SWD: List<Pair<Int, Int>> = listOf(0 to 13, 0 to 14)
 
 /**
  * One chip's pins (`pincap::Table`): the bonded pins per port `A` to `F` (bit `n` = pin `n`), every
- * route the HAL drives, and every ADC input.
+ * route the HAL drives, every ADC input, and the phase pairs a motor's current sense may store
+ * there, the pairs the chip's image reads (`specs/twelve-fet.md` section 5.3), each in phase order.
  */
-class PinTable(val bonding: List<Int>, val routes: List<Route>, val adc: List<AdcInput>) {
+class PinTable(
+    val bonding: List<Int>,
+    val routes: List<Route>,
+    val adc: List<AdcInput>,
+    val sensePairs: List<Pair<Phase, Phase>>,
+) {
     /** Whether pin [pin] of port [port] is bonded out. */
     fun bonded(port: Int, pin: Int): Boolean =
         pin in 0..15 && port >= 0 && (bonding.getOrNull(port) ?: 0) and (1 shl pin) != 0
@@ -66,6 +76,9 @@ class PinTable(val bonding: List<Int>, val routes: List<Route>, val adc: List<Ad
 
     /** Whether the chip carries I2C [n]. */
     fun hasI2c(n: Int): Boolean = routes.any { it.func == Func(FuncKind.SCL, n) }
+
+    /** Whether a motor's current sense may store the pair [first], [second] (in phase order). */
+    fun senses(first: Phase, second: Phase): Boolean = (first to second) in sensePairs
 }
 
 private fun route(port: Int, pin: Int, func: Func, sel: Int) = Route(port, pin, func, sel)
@@ -111,9 +124,17 @@ private val F10X_HD_ROUTES = F10X_ROUTES + listOf(
 private val GD32_ADC = (0..7).map { adc(0, it, it) } + listOf(adc(1, 0, 8), adc(1, 1, 9)) +
     (0..5).map { adc(2, it, 10 + it) }
 
-private val GD32F103C8_TABLE = PinTable(listOf(0xFFFF, 0xFFFF, 0xE000, 0x0003, 0, 0), F10X_ROUTES, GD32_ADC)
+/** The pair an image with one advanced timer reads: phases A and B, injected ranks 0 and 1. */
+private val PAIR_AB = listOf(Phase.A to Phase.B)
 
-private val GD32F103RC_TABLE = PinTable(listOf(0xFFFF, 0xFFFF, 0xFFFF, 0x0007, 0, 0), F10X_HD_ROUTES, GD32_ADC)
+private val GD32F103C8_TABLE = PinTable(listOf(0xFFFF, 0xFFFF, 0xE000, 0x0003, 0, 0), F10X_ROUTES, GD32_ADC, PAIR_AB)
+
+private val GD32F103RC_TABLE = PinTable(
+    listOf(0xFFFF, 0xFFFF, 0xFFFF, 0x0007, 0, 0),
+    F10X_HD_ROUTES,
+    GD32_ADC,
+    PAIR_AB + (Phase.B to Phase.C),
+)
 
 private val GD32F130C8_TABLE = PinTable(
     listOf(0xFFFF, 0xFFFF, 0xE000, 0, 0, 0x00C3),
@@ -134,6 +155,7 @@ private val GD32F130C8_TABLE = PinTable(
         route(1, 11, sda(1), 1),
     ),
     GD32_ADC,
+    PAIR_AB,
 )
 
 private val MM32SPIN05_TABLE = PinTable(
@@ -165,6 +187,7 @@ private val MM32SPIN05_TABLE = PinTable(
         route(3, 0, sda(0), 1),
     ),
     (0..7).map { adc(0, it, it) } + listOf(adc(1, 0, 8), adc(1, 1, 9), adc(1, 3, 10), adc(1, 4, 11)),
+    PAIR_AB,
 )
 
 /**

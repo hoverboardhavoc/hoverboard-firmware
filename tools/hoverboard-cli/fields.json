@@ -933,5 +933,16 @@
     "scope": "wheel",
     "effect": "boot",
     "board_owned": false
+  },
+  {
+    "id": 87,
+    "path": "current.phase_c",
+    "type": "pinadc",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "scope": "wheel",
+    "effect": "boot",
+    "board_owned": false
   }
 ]

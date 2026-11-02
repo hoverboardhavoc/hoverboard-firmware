@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use hal::pincap::{Chip, Func, Table, SWD};
+use hal::pincap::{Chip, Func, Phase, Table, SWD};
 use serde_json::Value as Json;
 use store::{Key, PinField, Type, Value};
 
@@ -53,6 +53,11 @@ pub enum Check {
     Adc,
     /// A configured gate group's dead time is at or above the floor.
     DeadTime,
+    /// A motor's sensed phase pair is one the chip's image reads.
+    PhasePair,
+    /// Motor 1 is stored only beside motor 0, and on a two-motor chip each motor's gates are on
+    /// its own timer.
+    MotorTimer,
     /// An arm-row or calibration value is in its range.
     Range,
     /// The IMU axis signs and roles form a proper rotation.
@@ -63,7 +68,7 @@ pub enum Check {
 
 impl Check {
     /// Every check.
-    pub const ALL: [Check; 15] = [
+    pub const ALL: [Check; 17] = [
         Check::PinExists,
         Check::Swd,
         Check::PinTwice,
@@ -76,6 +81,8 @@ impl Check {
         Check::RemapChip,
         Check::Adc,
         Check::DeadTime,
+        Check::PhasePair,
+        Check::MotorTimer,
         Check::Range,
         Check::Frame,
         Check::Leader,
@@ -96,6 +103,8 @@ impl Check {
             Check::RemapChip => "remap_chip",
             Check::Adc => "adc",
             Check::DeadTime => "dead_time",
+            Check::PhasePair => "phase_pair",
+            Check::MotorTimer => "motor_timer",
             Check::Range => "range",
             Check::Frame => "frame",
             Check::Leader => "leader",
@@ -182,12 +191,14 @@ impl Periph {
 /// A function's keys: its pins with their roles, and for a peripheral group its instance key and
 /// its remap key. Complete when every pin and the instance are stored, absent when none is. A group
 /// with a `switch` (the IMU's `imu.model`) is all or none with the switch: off (0 or not stored),
-/// its pins and instance may be stored or not.
+/// its pins and instance may be stored or not. A group with a `pick` (a motor's phase-current
+/// sense) is complete when exactly that many of its pins are stored.
 struct Group {
     pins: Vec<(PinField, Role)>,
     instance: Option<(Key, Periph)>,
     remap: Option<Key>,
     switch: Option<Key>,
+    pick: Option<usize>,
 }
 
 impl Group {
@@ -197,6 +208,7 @@ impl Group {
             instance: None,
             remap: None,
             switch: None,
+            pick: None,
         }
     }
 }
@@ -221,6 +233,7 @@ fn groups() -> Vec<Group> {
             instance: Some((store::IMU_I2C.key(), Periph::I2c)),
             remap: Some(store::IMU_REMAP.key()),
             switch: Some(store::IMU_MODEL.key()),
+            pick: None,
         },
     ];
     for i in 0..store::LINKS {
@@ -232,6 +245,7 @@ fn groups() -> Vec<Group> {
             instance: Some((store::LINK_USART.at(i).key(), Periph::Usart)),
             remap: Some(store::LINK_REMAP.at(i).key()),
             switch: None,
+            pick: None,
         });
     }
     for m in 0..store::MOTORS {
@@ -244,6 +258,7 @@ fn groups() -> Vec<Group> {
             instance: None,
             remap: None,
             switch: None,
+            pick: None,
         });
         g.push(Group {
             pins: vec![
@@ -257,19 +272,34 @@ fn groups() -> Vec<Group> {
             instance: Some((store::MOTOR_GATE_TIMER.at(m).key(), Periph::Timer)),
             remap: Some(store::MOTOR_GATE_REMAP.at(m).key()),
             switch: None,
+            pick: None,
         });
         g.push(Group {
-            pins: vec![
-                (store::MOTOR_PHASE_A.at(m), Role::Adc),
-                (store::MOTOR_PHASE_B.at(m), Role::Adc),
-            ],
+            pins: SENSE_PHASES
+                .iter()
+                .map(|(f, _)| (f.at(m), Role::Adc))
+                .collect(),
             instance: None,
             remap: None,
             switch: None,
+            pick: Some(2),
         });
     }
     g
 }
+
+/// A motor's phase-current sense pins with the phase each names, in phase order: a motor senses
+/// the two that are stored (`specs/twelve-fet.md` section 5.3).
+const SENSE_PHASES: [(PinField, Phase); 3] = [
+    (store::MOTOR_PHASE_A, Phase::A),
+    (store::MOTOR_PHASE_B, Phase::B),
+    (store::MOTOR_PHASE_C, Phase::C),
+];
+
+/// The advanced timer each motor's gates use where the chip drives two (`specs/twelve-fet.md`
+/// section 5.2): TIMER0 triggers the injected ADC group and starts TIMER7, so motor 0 is on TIMER0
+/// and motor 1 on TIMER7.
+const MOTOR_TIMER: [u8; store::MOTORS as usize] = [0, 7];
 
 /// The stored bytes of a pin field, or `None` when it is not stored (an absent function).
 fn pin_of(state: &State, f: PinField) -> Option<Vec<u8>> {
@@ -358,8 +388,10 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
             .map(|(f, _)| state.contains_key(&f.key()))
             .collect();
         let instance = g.instance.map(|(k, p)| (k, p, byte_of(state, k)));
-        let all = set.iter().all(|s| *s) && instance.is_none_or(|(_, _, n)| n.is_some());
-        let none = !set.iter().any(|s| *s) && instance.is_none_or(|(_, _, n)| n.is_none());
+        let stored = set.iter().filter(|s| **s).count();
+        let all = g.pick.map_or(stored == set.len(), |n| stored == n)
+            && instance.is_none_or(|(_, _, n)| n.is_some());
+        let none = stored == 0 && instance.is_none_or(|(_, _, n)| n.is_none());
         // A switched group: on, it is all or none with its switch, so it needs every key; off, its
         // keys may be stored or not, and a whole bus is still routed below.
         let on = g.switch.map(|k| byte_of(state, k).unwrap_or(0) != 0);
@@ -370,6 +402,24 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
             continue;
         }
         if !all {
+            let head = g
+                .pins
+                .first()
+                .map(|(f, _)| f.key())
+                .expect("a group has a pin");
+            if let Some(n) = g.pick {
+                let paths: Vec<String> = g.pins.iter().map(|(f, _)| path_of(f.key())).collect();
+                refuse(
+                    &mut out,
+                    Check::Group,
+                    head,
+                    format!(
+                        "{n} of {} are stored together, not {stored}",
+                        paths.join(", ")
+                    ),
+                );
+                continue;
+            }
             let missing = g
                 .pins
                 .iter()
@@ -378,11 +428,6 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
                 .map(|((f, _), _)| f.key())
                 .or(instance.map(|(k, _, _)| k))
                 .expect("an incomplete group misses a key");
-            let head = g
-                .pins
-                .first()
-                .map(|(f, _)| f.key())
-                .expect("a group has a pin");
             refuse(
                 &mut out,
                 Check::Group,
@@ -468,6 +513,74 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
                     ),
                 );
             }
+        }
+    }
+    // Each motor's sensed pair is one the chip's image reads.
+    for m in 0..store::MOTORS {
+        let sensed: Vec<(PinField, Phase)> = SENSE_PHASES
+            .iter()
+            .map(|(f, p)| (f.at(m), *p))
+            .filter(|(f, _)| state.contains_key(&f.key()))
+            .collect();
+        let [(_, first), (second_field, second)] = sensed[..] else {
+            continue;
+        };
+        if !t.senses(first, second) {
+            let pairs: Vec<String> = t
+                .sense_pairs
+                .iter()
+                .map(|[a, b]| format!("{a:?} and {b:?}"))
+                .collect();
+            refuse(
+                &mut out,
+                Check::PhasePair,
+                second_field.key(),
+                format!(
+                    "the {} image senses phases {}, not {first:?} and {second:?}",
+                    chip.name(),
+                    pairs.join(" or ")
+                ),
+            );
+        }
+    }
+    // Motor 1 runs only beside motor 0, and on a two-motor chip each motor is on its own timer. A
+    // motor is stored when its gate group is complete.
+    let present: Vec<bool> = (0..store::MOTORS)
+        .map(|m| {
+            groups()
+                .iter()
+                .find(|g| g.pins[0].0.key() == store::MOTOR_GATE_HI_A.at(m).key())
+                .is_some_and(|g| {
+                    g.pins.iter().all(|(f, _)| state.contains_key(&f.key()))
+                        && g.instance.is_some_and(|(k, _)| byte_of(state, k).is_some())
+                })
+        })
+        .collect();
+    if present[1] && !present[0] {
+        refuse(
+            &mut out,
+            Check::MotorTimer,
+            store::MOTOR_GATE_HI_A.at(1).key(),
+            "motor 1 is stored without motor 0, whose TIMER0 triggers the ADC and starts motor 1's \
+             timer"
+                .to_string(),
+        );
+    }
+    if MOTOR_TIMER.iter().all(|&n| t.has_timer(n)) {
+        for (m, want) in (0..store::MOTORS).zip(MOTOR_TIMER) {
+            let key = store::MOTOR_GATE_TIMER.at(m).key();
+            let Some(n) = byte_of(state, key).filter(|n| present[m as usize] && *n != want) else {
+                continue;
+            };
+            refuse(
+                &mut out,
+                Check::MotorTimer,
+                key,
+                format!(
+                    "motor {m}'s gates are on advanced timer {want} on the {}, not {n}",
+                    chip.name()
+                ),
+            );
         }
     }
     // A remap key is a GD32F10x key.

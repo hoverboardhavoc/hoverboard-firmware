@@ -286,3 +286,25 @@ fn file_state(files: &crate::config::Files) -> State {
     }
     state
 }
+
+/// `specs/twelve-fet.md` sections 9 and 12.1: the 12-FET's machine file passes every check on the
+/// GD32F103RC, its two motors' pairs (B and C on motor 0, A and B on motor 1) and timers included.
+/// Its one board is filed under a blank uid, which matches no board, so `machine apply` offers the
+/// entry to the one motor controller on the bridge (or takes `--map`).
+#[test]
+fn the_twelve_fet_machine_file_passes_on_the_gd32f103rc() {
+    let text = std::fs::read_to_string(dir().join("machines/twelve-fet.json")).unwrap();
+    let file = crate::machine::read_machine_file("twelve-fet", &text).unwrap();
+    assert_eq!(file.entries.len(), 1);
+    let files = file.board_files(Some(0));
+    assert!(files.problems.is_empty(), "{:?}", files.problems);
+    let got = file_refusals(Chip::Gd32f103rc, &files);
+    assert!(got.is_empty(), "{got:?}");
+    let state = file_state(&files);
+    for (m, phases) in [(0, [false, true, true]), (1, [true, true, false])] {
+        for ((f, _), want) in SENSE_PHASES.iter().zip(phases) {
+            assert_eq!(state.contains_key(&f.at(m).key()), want, "motor {m}");
+        }
+    }
+    assert!(check_leader(&[(0x01, &state)]).is_none());
+}

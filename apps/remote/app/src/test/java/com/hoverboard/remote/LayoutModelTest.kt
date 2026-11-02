@@ -139,6 +139,32 @@ class LayoutModelTest {
     }
 
     /**
+     * The sensed pair (`shared/config-checks/phase_pair.json`, `specs/twelve-fet.md` section 5.3):
+     * phases B and C are refused on a one-motor chip, whose image reads A and B, and written on the
+     * 12-FET's GD32F103RC.
+     */
+    @Test
+    fun aBAndCPairIsRefusedOnTheF130AndWrittenOnTheRc() = runTest {
+        for ((tag, refused) in listOf(ChipTag.F130C8 to true, ChipTag.F103RC to false)) {
+            val rig = layoutRig(BOARD, chip = tag)
+            rig.stage(Fields.MOTOR_PHASE_B, Value.PinAdc(1, 0, 8), motor = 0)
+            rig.stage(Fields.MOTOR_PHASE_C, Value.PinAdc(1, 1, 9), motor = 0)
+            rig.model.apply()
+            runCurrent()
+
+            if (refused) {
+                val notice = rig.state.notice as LayoutNotice.CheckRefused
+                assertEquals(Check.PHASE_PAIR, notice.refusal.check)
+                assertEquals(Fields.MOTOR_PHASE_C.key(0), notice.refusal.key)
+                assertEquals(emptyList<Any>(), rig.written)
+            } else {
+                assertNull(rig.state.notice)
+                assertEquals(listOf(Fields.MOTOR_PHASE_B.key(0), Fields.MOTOR_PHASE_C.key(0)), rig.written)
+            }
+        }
+    }
+
+    /**
      * The `af` form (`shared/config-checks/af_form.json`): on the F103, which routes by its remap
      * and stores 0 in the `af` byte, a staged pin with a non-zero `af` gives one, and the form
      * check refuses it as the CLI refuses a GD32F103 file with an `af`.

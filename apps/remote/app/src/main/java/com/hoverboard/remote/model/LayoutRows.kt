@@ -157,6 +157,7 @@ object LayoutRows {
                 note = R.string.layout_note_phase,
             )
             row(Fields.MOTOR_PHASE_B, m, R.string.layout_field_phase_b, LayoutGroup.MOTOR)
+            row(Fields.MOTOR_PHASE_C, m, R.string.layout_field_phase_c, LayoutGroup.MOTOR)
         }
     }
 

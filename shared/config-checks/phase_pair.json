@@ -1,0 +1,187 @@
+[
+  {
+    "name": "A and B on the F130",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_a": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            },
+            "phase_b": {
+              "port": "B",
+              "pin": 1,
+              "adc": 9
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "B and C on the RC, motor 0",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_b": {
+              "port": "C",
+              "pin": 4,
+              "adc": 14
+            },
+            "phase_c": {
+              "port": "C",
+              "pin": 5,
+              "adc": 15
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "A and B on the RC, motor 1",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {},
+        {
+          "current": {
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "C",
+              "pin": 3,
+              "adc": 13
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "B and C on the F103C8",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_b": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            },
+            "phase_c": {
+              "port": "B",
+              "pin": 1,
+              "adc": 9
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.phase_c"
+  },
+  {
+    "name": "B and C on the F130",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_b": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            },
+            "phase_c": {
+              "port": "B",
+              "pin": 1,
+              "adc": 9
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.phase_c"
+  },
+  {
+    "name": "B and C on the MM32",
+    "chip": "mm32spin05",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_b": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            },
+            "phase_c": {
+              "port": "B",
+              "pin": 1,
+              "adc": 9
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.phase_c"
+  },
+  {
+    "name": "A and C on the RC",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_c": {
+              "port": "C",
+              "pin": 5,
+              "adc": 15
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.phase_c"
+  },
+  {
+    "name": "A and C on the F103C8",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_c": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.phase_c"
+  }
+]

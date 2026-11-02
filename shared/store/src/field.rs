@@ -327,8 +327,8 @@ pub const MOTOR_CURRENT_LIMIT: Field<u32> = Field::new(0x4E, 10_000);
 /// re-read"), so a write while disarmed takes effect at the next ARM.
 ///
 /// `Foc` is a CAPABILITY request, like Balance in [`CONTROL_MODE`]: it is honoured only on a board
-/// that senses phase current (both phase pins set, [`MOTOR_PHASE_A`] and [`MOTOR_PHASE_B`]) and
-/// whose boot offset calibration was accepted. Elsewhere it is demoted to six-step with the
+/// that senses phase current (a sensed pair stored, two of [`MOTOR_PHASE_A`], [`MOTOR_PHASE_B`] and
+/// [`MOTOR_PHASE_C`]) and whose boot offset calibration was accepted. Elsewhere it is demoted to six-step with the
 /// method-demotion fault (`firmware::motor::running_method`), never run on no current.
 ///
 /// **What `Foc` makes of the demand word** (`specs/foc-torque.md`): a q-axis CURRENT reference, not
@@ -539,10 +539,16 @@ pub const MOTOR_GATE_REMAP: Field<u8> = Field::new(0x56, 0);
 /// `Capabilities::adc_channel` query `battery_sense.pin` uses. Ordered A then B, matching the injected
 /// rank order (rank 0 = phase A, rank 1 = phase B) and the gate channel order (CH0 = phase A).
 ///
-/// Group rule: the pair is all-or-none, and phase sense is fitted exactly when both pins are stored
+/// Group rule: a motor's sensed pair is the two of [`MOTOR_PHASE_A`], [`MOTOR_PHASE_B`] and
+/// [`MOTOR_PHASE_C`] that are stored, and phase sense is fitted exactly when two are
 /// (`specs/machine-settings.md` section 3.3). Each stores its ADC channel.
 pub const MOTOR_PHASE_A: PinField = PinField::new(0x49, Type::PinAdc);
 pub const MOTOR_PHASE_B: PinField = PinField::new(0x4A, Type::PinAdc);
+/// The third phase-current sense pin, per motor (`specs/twelve-fet.md` section 5.3): the 12-FET's
+/// motor 0 senses phases B and C. Only the two-motor image (the GD32F103RC) reads it, and the CLI
+/// refuses it on every other chip (`phase_pair`, from `hal::pincap`'s sense pairs), so the one-motor
+/// images' A-and-B ranks never meet a pair they would read wrongly.
+pub const MOTOR_PHASE_C: PinField = PinField::new(0x57, Type::PinAdc);
 /// The power-button sense pin (`specs/board-model.md` `power.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
@@ -1073,6 +1079,7 @@ field_ids! {
     0x54, // MOTOR_ODOMETER
     0x55, // MOTOR_GATE_TIMER
     0x56, // MOTOR_GATE_REMAP
+    0x57, // MOTOR_PHASE_C
 }
 
 #[cfg(feature = "test-fields")]
@@ -1142,6 +1149,7 @@ field_ids! {
     0x54, // MOTOR_ODOMETER
     0x55, // MOTOR_GATE_TIMER
     0x56, // MOTOR_GATE_REMAP
+    0x57, // MOTOR_PHASE_C
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1228,10 +1236,10 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 65 + 19;
+pub const REGISTRY_LEN: usize = 66 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 67 + 19;
+pub const REGISTRY_LEN: usize = 68 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1463,6 +1471,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_ODOMETER.entry(Boot),
     MOTOR_GATE_TIMER.entry(Boot),
     MOTOR_GATE_REMAP.entry(Boot),
+    MOTOR_PHASE_C.entry(Boot),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY, Client),
     #[cfg(feature = "test-fields")]
@@ -1759,6 +1768,7 @@ pub mod names {
         FieldName::motor(MOTOR_ODOMETER, "odometer", Kind::Int),
         FieldName::motor(MOTOR_GATE_TIMER, "gate.timer", Kind::Int),
         FieldName::motor(MOTOR_GATE_REMAP, "gate.remap", Kind::Int),
+        FieldName::pin(MOTOR_PHASE_C, "current.phase_c", Index::Motor),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -2198,6 +2208,7 @@ mod registry_tests {
             (0x54, MOTOR_ODOMETER.id()),
             (0x55, MOTOR_GATE_TIMER.id()),
             (0x56, MOTOR_GATE_REMAP.id()),
+            (0x57, MOTOR_PHASE_C.id()),
         ];
         for (want, got) in map {
             assert_eq!(want, got);

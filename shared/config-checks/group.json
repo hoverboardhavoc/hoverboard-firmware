@@ -191,5 +191,51 @@
       }
     },
     "refused": null
+  },
+  {
+    "name": "one phase of a pair",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_b": {
+              "port": "B",
+              "pin": 1,
+              "adc": 9
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.phase_a"
+  },
+  {
+    "name": "three phases on the RC",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "C",
+              "pin": 4,
+              "adc": 14
+            },
+            "phase_c": {
+              "port": "C",
+              "pin": 5,
+              "adc": 15
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.phase_a"
   }
 ]

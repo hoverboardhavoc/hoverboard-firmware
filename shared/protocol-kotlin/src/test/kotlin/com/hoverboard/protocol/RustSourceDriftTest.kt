@@ -27,6 +27,7 @@ import com.hoverboard.protocol.pincap.AdcInput
 import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.pincap.Func
 import com.hoverboard.protocol.pincap.FuncKind
+import com.hoverboard.protocol.pincap.Phase
 import com.hoverboard.protocol.pincap.Route
 import com.hoverboard.protocol.pincap.SWD
 import com.hoverboard.protocol.store.Names
@@ -2331,9 +2332,9 @@ class RustSourceDriftTest {
 
     /**
      * The pin tables ([com.hoverboard.protocol.pincap]), against `motorcontroller/hal/src/pincap.rs`:
-     * the chips by name, which of them remap, and each chip's bonding, routes and ADC inputs, in
-     * order, both ways; and the SWD pair. Every `route(` and `adc(` in a table is read or the gate
-     * fails, so a route added to the Rust is a route the app's checks know.
+     * the chips by name, which of them remap, and each chip's bonding, routes, ADC inputs and sense
+     * pairs, in order, both ways; and the SWD pair. Every `route(`, `adc(` and sense pair in a table
+     * is read or the gate fails, so a route added to the Rust is a route the app's checks know.
      */
     @Test
     fun thePinTablesAgreeWithTheRustSource() {
@@ -2397,6 +2398,12 @@ class RustSourceDriftTest {
                 .toList()
             assertEquals(Regex("""\badc\(""").findAll(adcText).count(), adc.size, "${chip.id}: an ADC input this gate does not read")
             assertEquals(adc, chip.table.adc, "${chip.id}'s ADC inputs drifted")
+            val pairText = findOne(table, """sense_pairs:\s*&\[(.*)\],""", "${chip.id}'s sense pairs").groupValues[1]
+            val pairs = Regex("""\[\s*Phase::(\w)\s*,\s*Phase::(\w)\s*\]""").findAll(pairText)
+                .map { Phase.valueOf(it.groupValues[1]) to Phase.valueOf(it.groupValues[2]) }
+                .toList()
+            assertEquals(Regex("""\[""").findAll(pairText).count(), pairs.size, "${chip.id}: a sense pair this gate does not read")
+            assertEquals(pairs, chip.table.sensePairs, "${chip.id}'s sense pairs drifted")
         }
         val swd = findOne(pincap, """^pub const SWD: \[\(u8, u8\); 2\] = \[(.*)\];""", "pincap::SWD").groupValues[1]
         assertEquals(

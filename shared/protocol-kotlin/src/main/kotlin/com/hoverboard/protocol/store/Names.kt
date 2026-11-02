@@ -124,6 +124,7 @@ object Names {
         motor(Fields.MOTOR_ODOMETER, "odometer"),
         motor(Fields.MOTOR_GATE_TIMER, "gate.timer"),
         motor(Fields.MOTOR_GATE_REMAP, "gate.remap"),
+        pin(Fields.MOTOR_PHASE_C, "current.phase_c", IndexKind.MOTOR),
     )
 
     /** The row for field [id], or null when the table names none. */
