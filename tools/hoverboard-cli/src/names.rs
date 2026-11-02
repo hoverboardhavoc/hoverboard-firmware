@@ -375,6 +375,9 @@ pub fn to_json(row: Option<&FieldName>, tag: u8, bytes: &[u8]) -> Json {
         Value::I64(x) => i128::from(x),
         Value::Bool(b) => return Json::Bool(b),
         Value::Str(s) => return Json::String(String::from_utf8_lossy(s).into_owned()),
+        Value::Bytes(b) if row.is_some_and(|r| r.kind == Kind::Tune) => {
+            return Json::String(crate::tune::render(b))
+        }
         Value::Bytes(b) => return Json::String(hex(b)),
         Value::Pin(b) => return pin_json(Type::Pin, &b),
         Value::PinAf(b) => return pin_json(Type::PinAf, &b),
@@ -433,8 +436,10 @@ pub fn from_text(row: Option<&FieldName>, storage: Type, text: &str) -> Json {
     if row.is_some_and(|r| r.kind == Kind::Pin) {
         return serde_json::from_str(text).unwrap_or_else(|_| Json::String(text.into()));
     }
-    let textual = matches!(row.map(|r| r.kind), Some(Kind::Str | Kind::Blob))
-        || (row.is_none() && matches!(storage, Type::Str | Type::Blob));
+    let textual = matches!(
+        row.map(|r| r.kind),
+        Some(Kind::Str | Kind::Blob | Kind::Tune)
+    ) || (row.is_none() && matches!(storage, Type::Str | Type::Blob));
     if textual {
         return Json::String(text.into());
     }
@@ -567,6 +572,13 @@ pub fn encode(
             let s = v.as_str().ok_or_else(|| bad("a string"))?;
             return fits(key, s.as_bytes().to_vec()).map(|b| (Some(b), warn));
         }
+        (Some(Kind::Tune), _) => {
+            let t = v
+                .as_str()
+                .ok_or_else(|| bad("a tune, hz/dur notes or RTTTL"))?;
+            let b = crate::tune::parse(t).map_err(|e| Problem::stop(format!("{path}: {e}")))?;
+            return fits(key, b).map(|b| (Some(b), warn));
+        }
         (Some(Kind::Blob), _) | (None, _) if storage == Type::Blob => {
             let h = v.as_str().ok_or_else(|| bad("a hex string"))?;
             let h = h.strip_prefix("0x").unwrap_or(h);
@@ -659,6 +671,7 @@ pub fn table_json() -> Json {
             Kind::Bits(b) => ("bits", Some(b)),
             Kind::Str => ("str", None),
             Kind::Blob => ("blob", None),
+            Kind::Tune => ("tune", None),
         };
         o.insert("kind".into(), kind.into());
         if let Some(l) = labels {
@@ -966,9 +979,30 @@ mod tests {
             (k(0x18, 1), json!(-5)),
             (k(0x4E, 0), json!(4_000_000_000u32)),
             (k(0x02, 0), json!("rover-left")),
+            (k(0x2C, 0), json!(3300)),
+            (k(0x2F, 0), json!("2000/15 0/10 2000/15 0/100")),
+            (k(0x2D, 0), json!("")),
         ] {
             assert_eq!(round(key, v.clone()), v, "{}", path_of(key));
         }
+        // A tune written as RTTTL reads back as its raw notes.
+        assert_eq!(
+            round(k(0x2D, 0), json!("t:d=4,o=5,b=120:c6,8p")),
+            json!("1047/50 0/25")
+        );
+        assert_eq!(path_of(k(0x2E, 0)), "machine.tone.battery_low");
+        assert_eq!(
+            from_text(row_of(k(0x2D, 0)), Type::Blob, "2000/50"),
+            json!("2000/50")
+        );
+        // A refusal names the field and the note.
+        let e = encode(k(0x2D, 0), Type::Blob, &json!("2000/0")).unwrap_err();
+        assert!(
+            e.msg.starts_with("machine.tone.horn: note 1 (2000/0)"),
+            "{}",
+            e.msg
+        );
+        assert!(e.stops(true));
         // A blob: no named field is one, so an id the table does not name with the board's type.
         let raw = k(0x99, 0);
         let (bytes, _) = encode(raw, Type::Blob, &json!("deadbeef")).unwrap();

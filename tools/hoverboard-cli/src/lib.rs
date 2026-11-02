@@ -24,4 +24,5 @@ pub mod route;
 pub mod status;
 pub mod target;
 pub mod transport;
+pub mod tune;
 pub mod wire;

@@ -11,7 +11,7 @@ object Names {
     enum class IndexKind { SINGLE, ARRAY, MOTOR, LINK }
 
     /** How a file writes a field's value (`store::Kind`). */
-    enum class Kind { PIN, INT, BOOL, ENUM, BITS, STR }
+    enum class Kind { PIN, INT, BOOL, ENUM, BITS, STR, TUNE }
 
     /**
      * One row: field [id] at [path], indexed as [index], its value written as [kind]. [labels] are
@@ -107,6 +107,10 @@ object Names {
         array(Fields.CONTROL_REFERENCE, "machine.balance.reference"),
         single(Fields.CONTROL_POS_CLAMP, "machine.balance.pos_clamp"),
         array(Fields.CONTROL_DRIVE_TURN, "machine.turn"),
+        single(Fields.BOARD_BATTERY_WARN, "machine.battery.warn"),
+        single(Fields.TONE_HORN, "machine.tone.horn", Kind.TUNE),
+        single(Fields.TONE_BATTERY_LOW, "machine.tone.battery_low", Kind.TUNE),
+        single(Fields.TONE_BATTERY_CRITICAL, "machine.tone.battery_critical", Kind.TUNE),
         // Wheel.
         pin(Fields.MOTOR_HALL_A, "hall.a", IndexKind.MOTOR),
         pin(Fields.MOTOR_HALL_B, "hall.b", IndexKind.MOTOR),

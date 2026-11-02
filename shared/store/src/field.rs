@@ -907,6 +907,35 @@ pub const ATTITUDE_LEVEL_TRIM: IndexedField<i16, 2> = IndexedField::new(0x17, [0
 /// [`IndexedField`] because its two indices default differently.
 pub const CONTROL_DRIVE_TURN: IndexedField<i16, 2> = IndexedField::new(0x2B, [0, 24]);
 
+/// The low-battery warning threshold in centivolts (`specs/tones.md` section 4.4): the board plays
+/// [`TONE_BATTERY_LOW`] while the effective battery word is known and below it. **`<= 0` = no
+/// warning** (the default), so an unstaged board never beeps. An absolute threshold, the
+/// [`BOARD_BATTERY_FLOOR`] rule: the firmware reads neither the cell count nor the chemistry. Read
+/// once at boot.
+pub const BOARD_BATTERY_WARN: Field<i16> = Field::new(0x2C, 0);
+
+/// The horn's tune (`specs/tones.md` sections 3 and 4): played while the `INPUTS` mirror carries
+/// `linkctl::Inputs::BUTTON_HORN`. A tune is a sequence of 3-byte notes ([`crate::tune`]), at most
+/// 19 (what one `CONFIG_RESP` returns); empty mutes the horn. Default one 2000 Hz note of 0.5 s,
+/// which loops, so it sounds continuous while held. Re-read at each note start.
+pub const TONE_HORN: BlobField = BlobField::new(0x2D, &[0xD0, 0x07, 50]);
+
+/// The low-battery warning's tune (`specs/tones.md` section 4), played while the battery word is
+/// below [`BOARD_BATTERY_WARN`]: default one 150 ms beep at 2000 Hz every 5 s (`2000/15 0/255
+/// 0/230`). Re-read at each note start.
+pub const TONE_BATTERY_LOW: BlobField =
+    BlobField::new(0x2E, &[0xD0, 0x07, 15, 0x00, 0x00, 255, 0x00, 0x00, 230]);
+
+/// The battery-critical alarm's tune (`specs/tones.md` section 4), played while the battery word
+/// is below [`BOARD_BATTERY_FLOOR`]: default two 150 ms beeps at 2000 Hz per 1.4 s (`2000/15 0/10
+/// 2000/15 0/100`). Re-read at each note start.
+pub const TONE_BATTERY_CRITICAL: BlobField = BlobField::new(
+    0x2F,
+    &[
+        0xD0, 0x07, 15, 0x00, 0x00, 10, 0xD0, 0x07, 15, 0x00, 0x00, 100,
+    ],
+);
+
 /// The state-feedback balance law's four gains (`specs/state-feedback.md` sections 2 and 6),
 /// indexed `0 = gp` (numerator counts per degree of pitch), `1 = gr` (per 0.1 rad/s of pitch
 /// rate), `2 = gx` (per hall edge of position error) and `3 = gv` (per sixteenth of a count of
@@ -1103,6 +1132,10 @@ field_ids! {
     0x29, // CONTROL_REFERENCE
     0x2A, // CONTROL_POS_CLAMP
     0x2B, // CONTROL_DRIVE_TURN
+    0x2C, // BOARD_BATTERY_WARN
+    0x2D, // TONE_HORN
+    0x2E, // TONE_BATTERY_LOW
+    0x2F, // TONE_BATTERY_CRITICAL
     0x40, // MOTOR_HALL_A
     0x41, // MOTOR_HALL_B
     0x42, // MOTOR_HALL_C
@@ -1181,6 +1214,10 @@ field_ids! {
     0x29, // CONTROL_REFERENCE
     0x2A, // CONTROL_POS_CLAMP
     0x2B, // CONTROL_DRIVE_TURN
+    0x2C, // BOARD_BATTERY_WARN
+    0x2D, // TONE_HORN
+    0x2E, // TONE_BATTERY_LOW
+    0x2F, // TONE_BATTERY_CRITICAL
     0x40, // MOTOR_HALL_A
     0x41, // MOTOR_HALL_B
     0x42, // MOTOR_HALL_C
@@ -1254,8 +1291,9 @@ impl Scope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Effect {
-    /// Applied as it is written: the tune lane's fields, whose persisted write the gain shadow
-    /// re-reads.
+    /// Applied as it is written, with no arm and no reboot: the tune lane's fields, whose
+    /// persisted write the gain shadow re-reads, and the three tone tunes, which the player
+    /// re-reads at each note start (`specs/tones.md` section 4.2).
     Live,
     /// Read at boot and again at every arm: exactly the keys of the firmware's arm-time row
     /// (`firmware::arm::ARM_ROW`, which a test holds to this attribute).
@@ -1299,18 +1337,19 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 74 + 19;
+pub const REGISTRY_LEN: usize = 78 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 76 + 19;
+pub const REGISTRY_LEN: usize = 80 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
 /// [`FieldDef`] holds its default as a [`Value`], whose `U64`/`I64` variants give it an 8-byte
 /// alignment and make the descriptor 24 B. That alignment is flash spent on padding and on a
 /// pointer-sized slot that no registered field needs: every scalar field in the set is 32 bits or
-/// narrower, and the only `Str`/`Blob` defaults are one literal and the empty slice. A row
-/// therefore carries the default as a 32-bit `bits` word (measured: -928 B of flashed span,
+/// narrower, and a `Str`/`Blob` default is named by its slot in [`BYTES_DEFAULTS`] (the device
+/// name, the empty slice and the three default tunes). A row therefore carries the default as a
+/// 32-bit `bits` word (measured: -928 B of flashed span,
 /// `specs/decision-flash-budget.md`, shrink round 4).
 ///
 /// The handles stay the single source of truth: every row is a handle's own `entry()`, and
@@ -1338,12 +1377,24 @@ pub struct FieldEntry {
 /// It is not a second place to declare a default: each slot is the handle's own `default()`, and
 /// `every_bytes_row_resolves_to_its_handles_default` walks the registry and fails if a row's slot
 /// stops agreeing with the handle it belongs to.
-static BYTES_DEFAULTS: [&[u8]; 2] = [DEVICE_NAME.default(), &[]];
+static BYTES_DEFAULTS: [&[u8]; 5] = [
+    DEVICE_NAME.default(),
+    &[],
+    TONE_HORN.default(),
+    TONE_BATTERY_LOW.default(),
+    TONE_BATTERY_CRITICAL.default(),
+];
 
 /// [`DEVICE_NAME`]'s slot in [`BYTES_DEFAULTS`].
 const BYTES_DEVICE_NAME: u32 = 0;
 /// The empty default, shared by every `STR` and `BLOB` field that declares one.
 const BYTES_EMPTY: u32 = 1;
+/// [`TONE_HORN`]'s slot in [`BYTES_DEFAULTS`].
+const BYTES_TONE_HORN: u32 = 2;
+/// [`TONE_BATTERY_LOW`]'s slot in [`BYTES_DEFAULTS`].
+const BYTES_TONE_BATTERY_LOW: u32 = 3;
+/// [`TONE_BATTERY_CRITICAL`]'s slot in [`BYTES_DEFAULTS`].
+const BYTES_TONE_BATTERY_CRITICAL: u32 = 4;
 
 impl FieldEntry {
     /// Build a row. Called by the handles' `entry()`, which is what fixes `bits`' meaning for the
@@ -1454,8 +1505,9 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     WIFI_TX_POWER.entry(Boot),
     BOARD_SELF_HOLD.entry(Boot),
     BOARD_BATTERY_PIN.entry(Boot),
-    // No firmware reader drives the buzzer or the LEDs yet: client only until one does.
-    BOARD_BUZZER.entry(Client),
+    // The buzzer's own bring-up reads its pin once (`specs/tones.md` section 2); no firmware
+    // reader drives the LEDs yet: client only until one does.
+    BOARD_BUZZER.entry(Boot),
     LED_GREEN.entry(Client),
     LED_ORANGE.entry(Client),
     LED_RED.entry(Client),
@@ -1510,6 +1562,10 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     CONTROL_POS_CLAMP.entry(Arm),
     CONTROL_DRIVE_TURN.at(0).entry(Arm),
     CONTROL_DRIVE_TURN.at(1).entry(Arm),
+    BOARD_BATTERY_WARN.entry(Boot),
+    TONE_HORN.entry(BYTES_TONE_HORN, Live),
+    TONE_BATTERY_LOW.entry(BYTES_TONE_BATTERY_LOW, Live),
+    TONE_BATTERY_CRITICAL.entry(BYTES_TONE_BATTERY_CRITICAL, Live),
     // Wheel (`0x40..=0x7F`), one row per field at motor 0.
     MOTOR_HALL_A.entry(Boot),
     MOTOR_HALL_B.entry(Boot),
@@ -1655,6 +1711,9 @@ pub mod names {
         Str,
         /// Bytes, as hex.
         Blob,
+        /// A tune ([`crate::tune`], `specs/tones.md` section 5): read as raw `hz/dur` notes
+        /// separated by spaces, written as those or as RTTTL.
+        Tune,
     }
 
     /// One row of [`NAMES`]: a field's id and storage type (from its handle), its path, index kind
@@ -1720,6 +1779,11 @@ pub mod names {
         /// A `STR` field.
         pub const fn text(f: StrField, path: &'static str) -> Self {
             Self::new(f.id(), Type::Str, path, Index::Single, Kind::Str)
+        }
+
+        /// A tune: a `BLOB` field read and written as notes.
+        pub const fn tune(f: BlobField, path: &'static str) -> Self {
+            Self::new(f.id(), Type::Blob, path, Index::Single, Kind::Tune)
         }
 
         /// A `BLOB` field.
@@ -1822,6 +1886,10 @@ pub mod names {
         FieldName::array(CONTROL_REFERENCE, "machine.balance.reference", Kind::Int),
         FieldName::single(CONTROL_POS_CLAMP, "machine.balance.pos_clamp", Kind::Int),
         FieldName::array(CONTROL_DRIVE_TURN, "machine.turn", Kind::Int),
+        FieldName::single(BOARD_BATTERY_WARN, "machine.battery.warn", Kind::Int),
+        FieldName::tune(TONE_HORN, "machine.tone.horn"),
+        FieldName::tune(TONE_BATTERY_LOW, "machine.tone.battery_low"),
+        FieldName::tune(TONE_BATTERY_CRITICAL, "machine.tone.battery_critical"),
         // Wheel.
         FieldName::pin(MOTOR_HALL_A, "hall.a", Index::Motor),
         FieldName::pin(MOTOR_HALL_B, "hall.b", Index::Motor),
@@ -2086,7 +2154,7 @@ pub mod names {
                             )
                     }
                     Kind::Str => r.storage == Type::Str,
-                    Kind::Blob => r.storage == Type::Blob,
+                    Kind::Blob | Kind::Tune => r.storage == Type::Blob,
                 };
                 assert!(ok, "{} is {:?} over {:?}", r.path, r.kind, r.storage);
                 if let Kind::Enum(labels) | Kind::Bits(labels) = r.kind {
@@ -2415,13 +2483,15 @@ mod registry_tests {
                 (0x27, 2),
                 (0x27, 3),
                 (0x29, 0),
-                (0x29, 1)
+                (0x29, 1),
+                (0x2D, 0),
+                (0x2E, 0),
+                (0x2F, 0)
             ]
         );
         assert_eq!(
             with(Effect::Client),
             [
-                (0x08, 0),
                 (0x09, 0),
                 (0x0A, 0),
                 (0x0B, 0),
@@ -2571,6 +2641,27 @@ mod registry_tests {
         }
     }
 
+    /// The three default tunes are the notes `specs/tones.md` section 4 names.
+    #[test]
+    fn the_default_tunes_are_the_specs_notes() {
+        use crate::tune::{count, note_at, Note};
+        let notes = |b: &[u8]| -> Vec<(u16, u8)> {
+            assert_eq!(b.len() % 3, 0);
+            (0..count(b))
+                .map(|i| note_at(b, i).map(|Note { hz, dur }| (hz, dur)).unwrap())
+                .collect()
+        };
+        assert_eq!(notes(TONE_HORN.default()), [(2000, 50)]);
+        assert_eq!(
+            notes(TONE_BATTERY_LOW.default()),
+            [(2000, 15), (0, 255), (0, 230)]
+        );
+        assert_eq!(
+            notes(TONE_BATTERY_CRITICAL.default()),
+            [(2000, 15), (0, 10), (2000, 15), (0, 100)]
+        );
+    }
+
     /// The pin on [`BYTES_DEFAULTS`]: every `Str`/`Blob` row is checked against the handle it
     /// belongs to, and the count is checked too.
     #[test]
@@ -2579,6 +2670,9 @@ mod registry_tests {
             (DEVICE_NAME.id(), DEVICE_NAME.default()),
             (WIFI_SSID.id(), WIFI_SSID.default()),
             (WIFI_PASS.id(), WIFI_PASS.default()),
+            (TONE_HORN.id(), TONE_HORN.default()),
+            (TONE_BATTERY_LOW.id(), TONE_BATTERY_LOW.default()),
+            (TONE_BATTERY_CRITICAL.id(), TONE_BATTERY_CRITICAL.default()),
             #[cfg(feature = "test-fields")]
             (T_BLOB.id(), T_BLOB.default()),
         ];

@@ -1576,6 +1576,20 @@ class RustSourceDriftTest {
                 assertEquals(default, def.default, "$name default drifted")
                 continue
             }
+            // `pub const NAME: BlobField = BlobField::new(0x2D, &[0xD0, 0x07, 50]);`, which rustfmt
+            // may break across lines: the id and the byte literal.
+            val blob = Regex(
+                """^pub\s+const\s+$name\s*:\s*BlobField\s*=\s*BlobField::new\(\s*([^,]+?)\s*,\s*&\[([^\]]*)\]\s*,?\s*\)\s*;""",
+                RegexOption.MULTILINE,
+            ).find(field)
+            if (blob != null) {
+                assertEquals(Type.Blob, def.type, "$name storage type drifted")
+                assertEquals(literal(name, blob.groupValues[1], "field id"), def.id, "$name id drifted")
+                val bytes = blob.groupValues[2].split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                    .map { literal(name, it, "blob byte").toByte() }.toByteArray()
+                assertEquals(Value.Bytes(bytes), def.default, "$name default drifted")
+                continue
+            }
             // `pub const NAME: Field<u32> = Field::new(0x20, 10_000);` or `StrField::new(0x10, "Hoverboard")`
             val m = findOne(
                 field,
@@ -2309,6 +2323,7 @@ class RustSourceDriftTest {
                 "array" -> Names.IndexKind.ARRAY to kind(arg)
                 "link" -> Names.IndexKind.LINK to kind(arg)
                 "text" -> Names.IndexKind.SINGLE to (Names.Kind.STR to emptyList())
+                "tune" -> Names.IndexKind.SINGLE to (Names.Kind.TUNE to emptyList())
                 "pin" -> Names.IndexKind.valueOf(arg.removePrefix("Index::").uppercase()) to (Names.Kind.PIN to emptyList())
                 else -> error("a `FieldName::$ctor` row, which this gate does not map yet")
             }

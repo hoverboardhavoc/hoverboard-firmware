@@ -82,6 +82,8 @@ class SharedCheckCasesTest {
         into.state[key] = when (row.kind) {
             Names.Kind.PIN -> pin(key, type, v.asJsonObject, into)
             Names.Kind.STR -> Value.Str(v.asString)
+            // No check reads a tune, so no shared case writes one.
+            Names.Kind.TUNE -> error("${row.path}: a tune in a shared check case")
             Names.Kind.BOOL -> integer(type, if (v.asBoolean) 1 else 0)
             Names.Kind.ENUM -> integer(
                 type,

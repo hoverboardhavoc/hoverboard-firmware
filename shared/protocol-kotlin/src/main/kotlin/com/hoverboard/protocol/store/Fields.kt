@@ -35,7 +35,7 @@ enum class Scope {
  * `RustSourceDriftTest` pins field by field.
  */
 enum class Effect {
-    /** Applied as it is written: the tune lane's fields. */
+    /** Applied as it is written: the tune lane's fields, and the three tone tunes (re-read at each note start). */
     LIVE,
 
     /** Read at boot and again at every arm (`firmware::arm::ARM_ROW`). */
@@ -94,12 +94,16 @@ const val NO_PORT = 0xFF
 /**
  * The registered store fields (`shared/store/src/field.rs`, `REGISTRY`), plus the value vocabularies the
  * firmware gives the byte-valued ones. The ids sit in the blocks of `specs/machine-settings.md`
- * section 3: node `0x01..=0x1E`, machine `0x20..=0x2B`, wheel `0x40..=0x56`.
+ * section 3: node `0x01..=0x1E`, machine `0x20..=0x2F`, wheel `0x40..=0x56`.
  *
  * Every registered field is here but the store-test fields. The live tune lane's keys, ranges and
  * ramp are in [Gains].
  */
 object Fields {
+    /** A tune's bytes (`store::tune`): each (hz, dur) note as `hz` u16 little-endian, then `dur`. */
+    private fun tune(vararg notes: Pair<Int, Int>): Value.Bytes =
+        Value.Bytes(notes.flatMap { (hz, dur) -> listOf(hz and 0xFF, hz shr 8, dur) }.map { it.toByte() }.toByteArray())
+
     /**
      * A pin field of [type] (`store::PinField`): its default is the bytes `0xFF`, which is what the
      * registry row holds. Every pin function is absent until stored.
@@ -184,6 +188,23 @@ object Fields {
     val BOARD_BATTERY_FLOOR = FieldDef(0x26, Type.I16, Value.I16(2400), Effect.ARM)
 
     /**
+     * The low-battery warning threshold, centivolts (`specs/tones.md` section 4.4): the board plays
+     * [TONE_BATTERY_LOW] while the effective battery word is known and below it. `<= 0` = no
+     * warning (the default). Read once at boot.
+     */
+    val BOARD_BATTERY_WARN = FieldDef(0x2C, Type.I16, Value.I16(0), Effect.BOOT)
+
+    /**
+     * The three tone tunes (`specs/tones.md` sections 3 and 4): a sequence of 3-byte notes (`hz`
+     * u16 LE, then `dur` in 10 ms units), at most 19; empty mutes the event. Mirrored for the drift
+     * gate; editing tunes in the app is out of scope.
+     */
+    val TONE_HORN = FieldDef(0x2D, Type.Blob, tune(2000 to 50), Effect.LIVE)
+    val TONE_BATTERY_LOW = FieldDef(0x2E, Type.Blob, tune(2000 to 15, 0 to 255, 0 to 230), Effect.LIVE)
+    val TONE_BATTERY_CRITICAL =
+        FieldDef(0x2F, Type.Blob, tune(2000 to 15, 0 to 10, 2000 to 15, 0 to 100), Effect.LIVE)
+
+    /**
      * The machine's frame ([ControlFrame]): pivoting platforms, or one rigid body balanced from the
      * board set as its leader ([CONTROL_LEADER], `specs/rigid-leader.md` section 4). A machine
      * field, the same on every motor controller; a Balance board resolves it with its leader flag
@@ -222,7 +243,8 @@ object Fields {
 
     /** Battery sense. Absent by default: the pin is fleet-uniform but the SENSE is master-only. */
     val BOARD_BATTERY_PIN = pin(0x07, Type.PinAdc)
-    val BOARD_BUZZER = pin(0x08, Type.Pin, effect = Effect.CLIENT)
+    /** The buzzer: read once at boot by its own bring-up (`specs/tones.md` section 2). */
+    val BOARD_BUZZER = pin(0x08, Type.Pin)
     val LED_GREEN = pin(0x09, Type.Pin, effect = Effect.CLIENT)
     val LED_ORANGE = pin(0x0A, Type.Pin, effect = Effect.CLIENT)
     val LED_RED = pin(0x0B, Type.Pin, effect = Effect.CLIENT)
@@ -558,6 +580,10 @@ object Fields {
         "CONTROL_MODE" to CONTROL_MODE,
         "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
         "BOARD_BATTERY_FLOOR" to BOARD_BATTERY_FLOOR,
+        "BOARD_BATTERY_WARN" to BOARD_BATTERY_WARN,
+        "TONE_HORN" to TONE_HORN,
+        "TONE_BATTERY_LOW" to TONE_BATTERY_LOW,
+        "TONE_BATTERY_CRITICAL" to TONE_BATTERY_CRITICAL,
         "CONTROL_FRAME" to CONTROL_FRAME,
         "CONTROL_LEADER" to CONTROL_LEADER,
         "CONTROL_SIDE" to CONTROL_SIDE,
