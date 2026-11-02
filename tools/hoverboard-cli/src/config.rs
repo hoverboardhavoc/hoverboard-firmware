@@ -567,6 +567,24 @@ pub fn state_after(reads: &Reads, plan: &Plan) -> crate::checks::State {
     state
 }
 
+/// The plan a `set` of `key` to `text` makes, for a key the table names: one write, or an un-store
+/// for `null`. What the leader check applies to the board's read before the write
+/// (`specs/rigid-leader.md` section 6.1).
+pub fn set_plan(key: Key, text: &str) -> Result<Plan, String> {
+    let row = row_of(key).ok_or_else(|| format!("{}: not in the table", path_of(key)))?;
+    let value = crate::names::from_text(Some(row), row.storage, text);
+    let (bytes, _) = encode(key, row.storage, &value).map_err(|p| p.msg)?;
+    Ok(Plan {
+        steps: vec![Step {
+            key,
+            act: Act::Change,
+            storage: row.storage,
+            bytes,
+        }],
+        ..Plan::default()
+    })
+}
+
 /// The checks of `specs/config-read-once.md` section 4 on the board as `plan` would leave it: the
 /// value checks always, the pin checks with the board's `chip`, and the `af` rule of the files'
 /// pins. `Err` lists every refusal; `--force` overrides none. A plan that changes a pin, instance,

@@ -62,6 +62,7 @@ internal class Recorder : SetupActions {
     override fun retry(key: Key) { calls += "retry:$key" }
     override fun chooseFrame(value: Int) { calls += "chooseFrame:$value" }
     override fun chooseRightWheel(address: Int) { calls += "chooseRightWheel:$address" }
+    override fun chooseLeader(address: Int) { calls += "chooseLeader:$address" }
     override fun editFrame(roles: List<Int>, signs: List<Int>) { calls += "frame:$roles:$signs" }
     override fun setLevel() { calls += "setLevel" }
     override fun checkLevel() { calls += "checkLevel" }

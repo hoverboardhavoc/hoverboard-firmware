@@ -251,6 +251,10 @@ pub struct ArmValues {
     /// (`specs/rover-one-imu.md` section 5: in the row so staging a frame costs a re-arm, not a
     /// power cycle).
     pub frame_byte: u8,
+    /// `store::CONTROL_LEADER` (0x1E, `control.leader`) raw: whether this board leads a rigid
+    /// balance machine, resolved beside the mode and frame bytes by the same owner
+    /// (`specs/rigid-leader.md` section 4: in the row so a moved flag takes effect at the next arm).
+    pub leader_byte: u8,
     /// `store::CONTROL_SIDE` (0x50, `side`) at motor 0, raw: which wheel of a rigid machine this
     /// board's motor drives, the
     /// owner of the control block's `role_right` word (`specs/rover-one-imu.md` section 5). In
@@ -303,12 +307,13 @@ pub struct ArmValues {
 /// **Adding a field here costs one key and one match arm, not one page walk.** That is the point
 /// of the row, and it is why the list is written out rather than assembled somewhere clever: the
 /// next person moving a value into the arm-time read should see exactly what it contains.
-pub const ARM_ROW: [store::Key; 22] = [
+pub const ARM_ROW: [store::Key; 23] = [
     store::IMU_AXIS_SIGN.at(0).key(),
     store::IMU_AXIS_SIGN.at(1).key(),
     store::IMU_AXIS_SIGN.at(2).key(),
     store::IMU_AXIS_ROLE.at(0).key(),
     store::IMU_AXIS_ROLE.at(1).key(),
+    store::CONTROL_LEADER.key(),
     store::CONTROL_MODE.key(),
     store::CONTROL_FRAME.key(),
     store::CONTROL_RIDER_REQUIRED.key(),
@@ -337,6 +342,7 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
         align_offset_byte: store::MOTOR_ALIGN_OFFSET.at(0).default(),
         control_mode_byte: store::CONTROL_MODE.default(),
         frame_byte: store::CONTROL_FRAME.default(),
+        leader_byte: store::CONTROL_LEADER.default(),
         side_byte: store::CONTROL_SIDE.at(0).default(),
         current_limit_ma: store::MOTOR_CURRENT_LIMIT.at(0).default(),
         current_cal: store::MOTOR_CURRENT_CAL.at(0).default(),
@@ -377,6 +383,8 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             v.control_mode_byte = store::scalar_or_default(store::CONTROL_MODE, tag, b);
         } else if k == store::CONTROL_FRAME.key() {
             v.frame_byte = store::scalar_or_default(store::CONTROL_FRAME, tag, b);
+        } else if k == store::CONTROL_LEADER.key() {
+            v.leader_byte = store::scalar_or_default(store::CONTROL_LEADER, tag, b);
         } else if k == store::CONTROL_SIDE.at(0).key() {
             v.side_byte = store::scalar_or_default(store::CONTROL_SIDE.at(0), tag, b);
         } else if k == store::MOTOR_CURRENT_LIMIT.at(0).key() {
@@ -423,6 +431,8 @@ pub struct Rederived {
     pub control_mode_byte: u8,
     /// `CONTROL_FRAME` raw, resolved with the mode byte by the same owner.
     pub frame_byte: u8,
+    /// `CONTROL_LEADER` raw, resolved with the mode and frame bytes by the same owner.
+    pub leader_byte: u8,
     /// `CONTROL_SIDE` raw, decoded by the control block's owner into `role_right`.
     pub side_byte: u8,
     /// `CONTROL_RIDER_REQUIRED` raw, for `control::ControlDispatch` to decode by its own rule.
@@ -463,6 +473,7 @@ pub fn rederive(
         imu: imu_bias.map(|bias| imu::Config::staged(values.imu_sign, bias, values.imu_roles)),
         control_mode_byte: values.control_mode_byte,
         frame_byte: values.frame_byte,
+        leader_byte: values.leader_byte,
         side_byte: values.side_byte,
         rider_required_byte: values.rider_required_byte,
         battery_floor: values.battery_floor,
@@ -1111,6 +1122,22 @@ mod tests {
         accepted_offsets: None,
     };
 
+    /// **`control.leader` is read stored and unstored** (`specs/rigid-leader.md` section 9): an
+    /// erased board reads 0 (not the leader), a stored 1 reads 1, and a later 0 wins.
+    #[test]
+    fn the_leader_flag_is_read_stored_and_unstored() {
+        assert_eq!(with_store(|_| {}).leader_byte, 0);
+        assert_eq!(
+            with_store(|s| s.set(store::CONTROL_LEADER, 1).unwrap()).leader_byte,
+            1
+        );
+        let v = with_store(|s| {
+            s.set(store::CONTROL_LEADER, 1).unwrap();
+            s.set(store::CONTROL_LEADER, 0).unwrap();
+        });
+        assert_eq!(v.leader_byte, 0, "newest wins");
+    }
+
     /// **A value written while disarmed is picked up by the re-read.** Every one of the
     /// value-row fields, written to a real mounted store and read back through the one read site.
     #[test]
@@ -1121,6 +1148,7 @@ mod tests {
             s.set(store::MOTOR_ALIGN_OFFSET.at(0), 4).unwrap();
             s.set(store::CONTROL_MODE, 1).unwrap();
             s.set(store::CONTROL_FRAME, 1).unwrap();
+            s.set(store::CONTROL_LEADER, 1).unwrap();
             s.set(store::CONTROL_SIDE.at(0), 1).unwrap();
             s.set(store::MOTOR_CURRENT_LIMIT.at(0), 7_500).unwrap();
             s.set(store::MOTOR_CURRENT_CAL.at(0), 300).unwrap();
@@ -1147,6 +1175,7 @@ mod tests {
                 align_offset_byte: 4,
                 control_mode_byte: 1,
                 frame_byte: 1,
+                leader_byte: 1,
                 side_byte: 1,
                 current_limit_ma: 7_500,
                 current_cal: 300,
@@ -1228,9 +1257,10 @@ mod tests {
     }
 
     /// The field ids of the arm row, as [`read_arm_values`] reads them.
-    const ROW_IDS: [u8; 15] = [
+    const ROW_IDS: [u8; 16] = [
         0x15, // IMU_AXIS_SIGN
         0x16, // IMU_AXIS_ROLE
+        0x1E, // CONTROL_LEADER
         0x20, // CONTROL_MODE
         0x21, // CONTROL_FRAME
         0x22, // CONTROL_RIDER_REQUIRED
@@ -1318,6 +1348,7 @@ mod tests {
             align_offset_byte: 2,
             control_mode_byte: 1,
             frame_byte: 0,
+            leader_byte: 0,
             side_byte: 0,
             current_limit_ma: 10_000,
             current_cal: 455,
@@ -1354,6 +1385,7 @@ mod tests {
             // is not this function's business.
             control_mode_byte: 1,
             frame_byte: 0,
+            leader_byte: 0,
             side_byte: 0,
             current_limit_ma: 12_000,
             current_cal: 455,
@@ -1399,6 +1431,7 @@ mod tests {
             align_offset_byte: 2,
             control_mode_byte: 0,
             frame_byte: 0,
+            leader_byte: 0,
             side_byte: 0,
             current_limit_ma: 10_000,
             current_cal: 455,
@@ -1609,9 +1642,10 @@ mod tests {
     /// [`ARM_ROW`]'s ids, so a field added to the row without its name here fails.
     #[test]
     fn the_arm_row_function_is_the_only_reader_of_the_arm_row() {
-        let handles: [(&str, u8); 15] = [
+        let handles: [(&str, u8); 16] = [
             ("IMU_AXIS_SIGN", store::IMU_AXIS_SIGN.id()),
             ("IMU_AXIS_ROLE", store::IMU_AXIS_ROLE.id()),
+            ("CONTROL_LEADER", store::CONTROL_LEADER.id()),
             ("CONTROL_MODE", store::CONTROL_MODE.id()),
             ("CONTROL_FRAME", store::CONTROL_FRAME.id()),
             ("CONTROL_RIDER_REQUIRED", store::CONTROL_RIDER_REQUIRED.id()),

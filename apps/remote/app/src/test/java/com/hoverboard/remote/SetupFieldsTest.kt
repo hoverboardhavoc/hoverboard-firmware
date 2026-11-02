@@ -92,6 +92,7 @@ class SetupFieldsTest {
             SetupFields.BATTERY_FLOOR,
             SetupFields.CONTROL_FRAME,
             SetupFields.CONTROL_SIDE,
+            SetupFields.CONTROL_LEADER,
         ).map { it.key } + (SetupFields.AXIS_SIGN + SetupFields.AXIS_ROLE + SetupFields.GAIN_MAX).map { it.key }
         assertEquals(expected.toSet(), armTime)
 

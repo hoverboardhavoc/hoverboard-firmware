@@ -372,7 +372,7 @@ class CommandPumpTest {
         val writes = mutableListOf<List<NodeTick>>()
         val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
         pump.start()
-        pump.set(DriveFrame.of(RIGID, RiderCommand.armed(500), steer = 300, leader = A))
+        pump.set(DriveFrame.of(RIGID, RiderCommand.armed(500), steer = 300))
         advanceTimeBy(INTERVAL * (LinkConfig.INPUTS_KEEPALIVE_TICKS + LinkConfig.INPUTS_CHANGE_REPEATS) + 1)
         runCurrent()
 
@@ -400,12 +400,12 @@ class CommandPumpTest {
         val writes = mutableListOf<List<NodeTick>>()
         val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
         pump.start()
-        pump.set(DriveFrame.of(RIGID, RiderCommand.armed(500), leader = A))
+        pump.set(DriveFrame.of(RIGID, RiderCommand.armed(500)))
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
         runCurrent()
         writes.clear()
 
-        pump.set(DriveFrame.of(RIGID, RiderCommand.DISARMED, leader = A))
+        pump.set(DriveFrame.of(RIGID, RiderCommand.DISARMED))
         advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
         runCurrent()
 
@@ -430,7 +430,7 @@ class CommandPumpTest {
         const val B = 0x02
 
         val BOUND = DriveTargets(DriveMode.BOUND, listOf(A, B))
-        val RIGID = DriveTargets(DriveMode.RIGID, listOf(A, B))
+        val RIGID = DriveTargets(DriveMode.RIGID, listOf(A, B), leader = A)
 
         const val INTERVAL = 33L
 

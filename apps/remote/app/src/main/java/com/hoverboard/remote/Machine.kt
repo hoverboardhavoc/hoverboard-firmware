@@ -1,12 +1,12 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.checks.Checks
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Scope
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.SetupFields
-import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.asLong
 
 /**
@@ -54,6 +54,25 @@ sealed interface SidePair {
 }
 
 /**
+ * What `control.leader` reads across the motor controllers (`specs/rigid-leader.md` section 7). A
+ * node fact that wants to DIFFER: a rigid balance machine needs exactly one board flagged. Any
+ * nonzero byte reads as set, as the firmware reads it.
+ */
+sealed interface LeaderPair {
+    /** A copy has not been read this session, or the walk found fewer than two motor controllers. */
+    data object Unknown : LeaderPair
+
+    /** The board at [leader] is flagged and the other is not. */
+    data class One(val leader: Int) : LeaderPair
+
+    /** Neither board is flagged: the default, and all a machine needs outside rigid balance. */
+    data object None : LeaderPair
+
+    /** Both boards are flagged, which the picker cannot express and a raw edit past the check can. */
+    data object Both : LeaderPair
+}
+
+/**
  * What the arm control says about the machine before it will arm (`specs/remote-ui.md` 3.7a,
  * "Disagreement: refuse for the frame, warn for the side").
  *
@@ -92,6 +111,7 @@ data class Machine(
     val frame: FramePair,
     val side: SidePair,
     val peerFound: Boolean = false,
+    val leader: LeaderPair = LeaderPair.Unknown,
 ) {
 
     /**
@@ -135,8 +155,35 @@ val SetupState.machine: Machine
     get() {
         if (attached == null) return Machine.UNKNOWN
         val mcs = motorControllers
-        return Machine(framePair(mcs), sidePair(mcs), peerFound = mcs.size >= 2)
+        return Machine(framePair(mcs), sidePair(mcs), peerFound = mcs.size >= 2, leader = leaderPair(mcs))
     }
+
+private fun SetupState.leaderPair(mcs: List<Int>): LeaderPair {
+    if (mcs.size < 2) return LeaderPair.Unknown
+    val set = mcs.filter { (storedByte(it, SetupFields.CONTROL_LEADER.key) ?: return LeaderPair.Unknown) != 0 }
+    return when (set.size) {
+        0 -> LeaderPair.None
+        1 -> LeaderPair.One(set.single())
+        else -> LeaderPair.Both
+    }
+}
+
+/**
+ * Whether the machine as stored fails the leader check (`specs/rigid-leader.md` section 6.1): a
+ * Balance machine in the rigid frame without exactly one board flagged, reachable only by a write
+ * past the clients. False while any of the three keys is unread on a motor controller.
+ */
+val SetupState.leaderCheckFails: Boolean
+    get() {
+        val boards = motorControllers.map { a ->
+            a to Checks.LEADER_KEYS.associateWith { setupOf(a).values[it] ?: return false }
+        }
+        return boards.isNotEmpty() && Checks.checkLeader(boards) != null
+    }
+
+/** The board a write in flight is making the rigid frame's leader, or null while none is. */
+val SetupState.leaderSending: Int?
+    get() = motorControllers.firstOrNull { sendingByte(it, SetupFields.CONTROL_LEADER.key) == 1 }
 
 private fun SetupState.framePair(mcs: List<Int>): FramePair {
     if (mcs.size < 2) return FramePair.Unknown
@@ -182,10 +229,10 @@ private fun SetupState.sendingByte(address: Int, key: Key): Int? =
  * The drive mode in force on the machine this session sees (`specs/remote-ui.md` section 2 and 3.2;
  * `specs/machine-settings.md` section 7), derived from the stored `machine.mode` and `machine.frame`
  * on the motor controllers, the number of them, the Ride screen's turn-axis setting [turnAxis], each
- * board's motor 0 `side`, and the rigid-frame leader flags in each board's own [telemetry].
- * [DriveInForce.NONE] while no node is attached.
+ * board's motor 0 `side`, and each board's stored `control.leader` (`specs/rigid-leader.md` section
+ * 7). [DriveInForce.NONE] while no node is attached.
  */
-fun SetupState.driveInForce(telemetry: Map<Int, TelemetryUi>, turnAxis: Boolean): DriveInForce =
+fun SetupState.driveInForce(turnAxis: Boolean): DriveInForce =
     if (attached == null) {
         DriveInForce.NONE
     } else {
@@ -194,7 +241,7 @@ fun SetupState.driveInForce(telemetry: Map<Int, TelemetryUi>, turnAxis: Boolean)
             mode = { storedByte(it, SetupFields.CONTROL_MODE.key) },
             frame = { storedByte(it, SetupFields.CONTROL_FRAME.key) },
             side = { storedByte(it, SetupFields.CONTROL_SIDE.key) },
-            leaders = telemetry.filterValues { it.leadsRigidFrame }.keys,
+            leader = { storedByte(it, SetupFields.CONTROL_LEADER.key) },
             turnAxis = turnAxis,
         )
     }

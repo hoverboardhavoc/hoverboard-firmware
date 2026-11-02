@@ -8,6 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import com.hoverboard.remote.FramePair
+import com.hoverboard.remote.LeaderPair
 import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupState
 import com.hoverboard.remote.SidePair
@@ -59,6 +60,15 @@ internal fun sideVerdict(state: SetupState, pair: SidePair): String = when (pair
     SidePair.NoneRight -> stringResource(R.string.setup_machine_side_none)
     SidePair.BothRight -> stringResource(R.string.setup_machine_side_both)
     is SidePair.OneRight -> stringResource(R.string.setup_machine_side_right, boardLabel(state, pair.right))
+}
+
+/** Which board is set as the rigid frame's leader, or why none is. */
+@Composable
+internal fun leaderVerdict(state: SetupState, pair: LeaderPair): String = when (pair) {
+    LeaderPair.Unknown -> stringResource(R.string.setup_machine_unknown)
+    LeaderPair.None -> stringResource(R.string.setup_machine_leader_none)
+    LeaderPair.Both -> stringResource(R.string.setup_machine_leader_both)
+    is LeaderPair.One -> stringResource(R.string.setup_machine_leader_one, boardLabel(state, pair.leader))
 }
 
 /** A board's label: its node label ([nodeLabel]), or its address while it is not among the nodes. */

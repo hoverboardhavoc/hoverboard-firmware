@@ -106,7 +106,7 @@ val FieldDef.fleetPin: Pair<Int, Int>?
 /**
  * The registered store fields (`shared/store/src/field.rs`, `REGISTRY`), plus the value vocabularies the
  * firmware gives the byte-valued ones. The ids sit in the blocks of `specs/machine-settings.md`
- * section 3: node `0x01..=0x1D`, machine `0x20..=0x2B`, wheel `0x40..=0x56`.
+ * section 3: node `0x01..=0x1E`, machine `0x20..=0x2B`, wheel `0x40..=0x56`.
  *
  * Every registered field is here but the store-test fields. The live tune lane's keys, ranges and
  * ramp are in [Gains].
@@ -199,11 +199,19 @@ object Fields {
 
     /**
      * The machine's frame ([ControlFrame]): pivoting platforms, or one rigid body balanced from the
-     * one board that has an IMU (`specs/rover-one-imu.md`, the one-IMU rover). A machine field, the
-     * same on every motor controller; a Balance board resolves it with its IMU fact into leader or
-     * follower.
+     * board set as its leader ([CONTROL_LEADER], `specs/rigid-leader.md` section 4). A machine
+     * field, the same on every motor controller; a Balance board resolves it with its leader flag
+     * into leader or follower.
      */
     val CONTROL_FRAME = FieldDef(0x21, Type.U8, Value.U8(0), Effect.ARM)
+
+    /**
+     * Whether this board leads a rigid balance machine (`specs/rigid-leader.md` section 4): 1 = the
+     * leader, 0 = not (the default). A node field: the two boards of a rigid pair hold different
+     * values. Read only in balance with the rigid frame; a flagged board with no IMU up raises the
+     * mode fault and never engages.
+     */
+    val CONTROL_LEADER = FieldDef(0x1E, Type.U8, Value.U8(0), Effect.ARM)
 
     /**
      * Which side of the machine a wheel is on ([ControlSide]), per motor: `Key.index` is the motor
@@ -506,6 +514,7 @@ object Fields {
         "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
         "BOARD_BATTERY_FLOOR" to BOARD_BATTERY_FLOOR,
         "CONTROL_FRAME" to CONTROL_FRAME,
+        "CONTROL_LEADER" to CONTROL_LEADER,
         "CONTROL_SIDE" to CONTROL_SIDE,
         "BOARD_SELF_HOLD" to BOARD_SELF_HOLD,
         "BOARD_BATTERY_PIN" to BOARD_BATTERY_PIN,
@@ -654,6 +663,7 @@ object Fields {
         Range(CONTROL_MODE.id, null, 0, 1),
         Range(CONTROL_FRAME.id, null, 0, 1),
         Range(CONTROL_RIDER_REQUIRED.id, null, 0, 1),
+        Range(CONTROL_LEADER.id, null, 0, 1),
         Range(MOTOR_METHOD.id, null, 0, 2),
         Range(BOARD_BATTERY_FLOOR.id, null, 0, 6000),
         Range(CONTROL_GAIN_MAX.id, null, 0, Short.MAX_VALUE.toLong()),

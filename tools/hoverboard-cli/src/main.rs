@@ -80,6 +80,7 @@ use net::pdu::NO_ADDRESS;
 use net::walk::{Controller, CLASS_BRIDGE};
 
 use hoverboard_cli::bundle::{self, Bundle, FileKind, ImageKind, TreeEntry};
+use hoverboard_cli::checks;
 use hoverboard_cli::cli::{self, Command, Link, Mode, Noun, Swd};
 use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::config::{self, Board};
@@ -835,6 +836,10 @@ fn files_command(
     let none = BTreeMap::new();
     if noun == Noun::Board && !matches!(mode, Mode::Diff { .. }) {
         check_board(&mut *b.wire, f.addr, &files, &reads, &plan)?;
+        if plan_changes_leader(&plan) {
+            let w = walk(&mut *b.wire)?;
+            check_leader_on(&mut *b.wire, &w, &[(f.addr, &plan)])?;
+        }
     }
     if let Mode::Diff { .. } = mode {
         for l in config::report(&b.name, &plan, &reads, &none) {
@@ -1278,6 +1283,59 @@ fn check_board(
     config::check_plan(chip, files, reads, plan)
 }
 
+/// The leader check across the machine (`specs/rigid-leader.md` section 6.1): every motor
+/// controller the walk `w` found, its `machine.mode`, `machine.frame` and `control.leader` read as
+/// stored and, for a board `changed` names, with its plan's writes of those keys applied. A board
+/// whose three keys cannot be read refuses the write; `--force` overrides nothing here.
+fn check_leader_on(
+    wire: &mut impl Wire,
+    w: &Walked,
+    changed: &[(u8, &config::Plan)],
+) -> Result<(), String> {
+    let mut states = Vec::new();
+    for f in motors(&w.found) {
+        let unread = || {
+            format!(
+                "{}: {:#04x} did not answer; the leader check needs every board",
+                names::path_of(store::CONTROL_LEADER.key()),
+                f.addr
+            )
+        };
+        let mut b = Board {
+            wire: &mut *wire,
+            src: w.src,
+            dst: f.addr,
+            name: node_name(f),
+            class: CLASS_MOTOR,
+        };
+        let (reads, unknown) =
+            config::read_board(&mut b, &checks::LEADER_KEYS).map_err(|_| unread())?;
+        if !unknown.is_empty() {
+            return Err(unread());
+        }
+        let mut plan = config::Plan::default();
+        if let Some((_, p)) = changed.iter().find(|(a, _)| *a == f.addr) {
+            plan.steps = p
+                .steps
+                .iter()
+                .filter(|s| checks::changes_leader(s.key))
+                .cloned()
+                .collect();
+        }
+        states.push((f.addr, config::state_after(&reads, &plan)));
+    }
+    let boards: Vec<(u8, &checks::State)> = states.iter().map(|(a, s)| (*a, s)).collect();
+    match checks::check_leader(&boards) {
+        Some(r) => Err(r.msg),
+        None => Ok(()),
+    }
+}
+
+/// Whether `plan` writes a key the leader check reads.
+fn plan_changes_leader(plan: &config::Plan) -> bool {
+    plan.steps.iter().any(|s| checks::changes_leader(s.key))
+}
+
 /// Whether a node's chip routes by the AFIO remap (the GD32F10x), from its `IDENTITY` family: its
 /// pins carry no `af` in a file (`specs/config-read-once.md` section 3).
 fn remaps(f: &Found) -> bool {
@@ -1703,6 +1761,13 @@ fn machine_set(link: &Link, path: &str, value: &str, force: bool) -> Result<(), 
     check_problems(&checks, force)?;
     let mut wire = wire_on(link)?;
     let w = walk(&mut wire)?;
+    // The machine as the whole command leaves it, judged before the first board is written.
+    if checks::changes_leader(key) {
+        let plan = config::set_plan(key, value)?;
+        let each: Vec<(u8, &config::Plan)> =
+            motors(&w.found).iter().map(|f| (f.addr, &plan)).collect();
+        check_leader_on(&mut wire, &w, &each)?;
+    }
     let mut changed = Vec::new();
     for f in motors(&w.found) {
         let mut b = Board {
@@ -1862,6 +1927,10 @@ fn machine_files(
             plan.kept.retain(|(k, _)| is_machine(*k));
         }
         plans.push((f.clone(), reads, plan, entry.is_some()));
+    }
+    if !diff && plans.iter().any(|p| plan_changes_leader(&p.2)) {
+        let each: Vec<(u8, &config::Plan)> = plans.iter().map(|p| (p.0.addr, &p.2)).collect();
+        check_leader_on(&mut wire, &w, &each)?;
     }
     let none = BTreeMap::new();
     let mut changes = false;
@@ -2040,6 +2109,11 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             check_problems(&names::write_checks(key), force)?;
             let mut wire = wire_on(link)?;
             let (src, f) = reach(&mut wire, &target, noun)?;
+            if noun == Noun::Board && checks::changes_leader(key) {
+                let plan = config::set_plan(key, &value)?;
+                let w = walk(&mut wire)?;
+                check_leader_on(&mut wire, &w, &[(f.addr, &plan)])?;
+            }
             let mut b = Board {
                 wire: &mut wire,
                 src,

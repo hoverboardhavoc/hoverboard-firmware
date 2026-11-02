@@ -68,8 +68,10 @@ enum class DriveMode {
  *   control arms. Never a bridge. Empty for a drive the app refuses ([DriveInForce.refusal]),
  *   which still names its mode so the screen draws that mode's pad.
  * @param right the board that is the right wheel, for [DriveMode.DIFFERENTIAL] only.
+ * @param leader the board stored as the rigid frame's leader, for [DriveMode.RIGID] only
+ *   (`specs/rigid-leader.md` section 7).
  */
-data class DriveTargets(val mode: DriveMode, val boards: List<Int>, val right: Int? = null) {
+data class DriveTargets(val mode: DriveMode, val boards: List<Int>, val right: Int? = null, val leader: Int? = null) {
     init {
         require(mode.drivesBoth || boards.size <= 1) { "SINGLE addresses one board" }
         require(
@@ -77,6 +79,9 @@ data class DriveTargets(val mode: DriveMode, val boards: List<Int>, val right: I
                 (right != null && right in boards && boards.size == 2),
         ) {
             "DIFFERENTIAL needs its right wheel among its two boards"
+        }
+        require(mode != DriveMode.RIGID || boards.isEmpty() || (leader != null && leader in boards)) {
+            "RIGID needs its leader among its boards"
         }
     }
 
@@ -120,14 +125,10 @@ data class DriveFrame(val commands: Map<Int, RiderCommand>, val driven: Set<Int>
          * [steer] is the joystick's turn axis. SINGLE and BOUND send one value to their boards, so
          * a turn has nowhere to go in them and is dropped here rather than left to a caller to
          * remember to zero. DIFFERENTIAL spends it on the difference between two per-wheel demands.
-         * RIGID puts it on the wire, on the leader's command alone.
-         *
-         * [leader] is which board reports itself the rigid frame's leader, and only RIGID reads it.
-         * Null means the app cannot currently see one, and a rigid frame then drives NOBODY: both
-         * boards still get their arm level, so a disarm always lands, and neither gets a demand the
-         * app cannot say is for the right wheel.
+         * RIGID puts it on the wire, on the leader's command alone: [DriveTargets.leader], the board
+         * stored as the rigid frame's leader.
          */
-        fun of(targets: DriveTargets, command: RiderCommand, steer: Int = 0, leader: Int? = null): DriveFrame =
+        fun of(targets: DriveTargets, command: RiderCommand, steer: Int = 0): DriveFrame =
             when (targets.mode) {
                 DriveMode.SINGLE, DriveMode.BOUND -> DriveFrame(targets.boards.associateWith { command })
                 DriveMode.DIFFERENTIAL -> {
@@ -141,7 +142,7 @@ data class DriveFrame(val commands: Map<Int, RiderCommand>, val driven: Set<Int>
                     )
                 }
                 DriveMode.RIGID -> {
-                    val lead = leader?.takeIf { it in targets.boards }
+                    val lead = targets.leader?.takeIf { it in targets.boards }
                     DriveFrame(
                         commands = targets.boards.associateWith { board ->
                             if (board == lead) command.withTurn(steer) else command.withDemand(0)

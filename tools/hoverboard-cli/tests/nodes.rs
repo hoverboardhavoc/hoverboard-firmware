@@ -477,14 +477,20 @@ fn a_boards_store_as_a_file_through_the_binary() {
     assert_eq!(out.trim(), "rover-left: 0 changed, 0 pinned, 3 unchanged");
 
     // A stray key: kept by a merge, un-stored by a replace.
-    let (code, _, err) = run(&["board", "set", "rover-left", "machine.frame", "rigid"]);
+    let (code, _, err) = run(&[
+        "board",
+        "set",
+        "rover-left",
+        "machine.rider_required",
+        "false",
+    ]);
     assert_eq!(code, Some(0), "{err}");
     let (code, out, err) = run(&["board", "diff", "--replace", "rover-left", &file]);
     assert_eq!(code, Some(1), "{err}");
     assert_eq!(
         out,
         "rover-left: 0 changed, 0 pinned, 3 unchanged, 1 un-stored\n\
-         rover-left: machine.frame: rigid -> pivoting (default)\n\
+         rover-left: machine.rider_required: false -> true (default)\n\
          1 takes effect at the next arm\n"
     );
     // Without a terminal, replace refuses rather than asking; with --yes it un-stores.
@@ -499,7 +505,7 @@ fn a_boards_store_as_a_file_through_the_binary() {
     assert_eq!(
         out,
         "rover-left: 0 changed, 0 pinned, 3 unchanged, 1 un-stored\n\
-         rover-left: machine.frame: rigid -> pivoting (default)\n\
+         rover-left: machine.rider_required: false -> true (default)\n\
          1 takes effect at the next arm\n\
          machine fields changed on rover-left only: the boards now differ (\"machine diff\")\n"
     );
@@ -509,9 +515,12 @@ fn a_boards_store_as_a_file_through_the_binary() {
     let (code, out, err) = run(&["board", "diff", "--replace", "rover-left", &file]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "rover-left: 0 changed, 0 pinned, 3 unchanged");
-    let (code, out, err) = run(&["board", "get", "rover-left", "machine.frame"]);
+    let (code, out, err) = run(&["board", "get", "rover-left", "machine.rider_required"]);
     assert_eq!(code, Some(0), "{err}");
-    assert_eq!(out.trim(), "rover-left: machine.frame = pivoting (default)");
+    assert_eq!(
+        out.trim(),
+        "rover-left: machine.rider_required = true (default)"
+    );
 
     // apply merges: a file naming one changed key writes it and keeps the rest.
     let machine = scratch("machine.json");
@@ -1248,7 +1257,7 @@ fn the_machine_commands_through_the_binary() {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || serve(listener, 15));
+    let server = std::thread::spawn(move || serve(listener, 16));
     let run = |args: &[&str]| {
         let mut a = vec![tcp.as_str()];
         a.extend_from_slice(args);
@@ -1273,6 +1282,10 @@ fn the_machine_commands_through_the_binary() {
     assert_eq!(out, "machine.mode = balance\n");
 
     // One board's copy changed through `board`: the boards differ, and `machine diff` says how.
+    // A balance board in the rigid frame needs a leader (`specs/rigid-leader.md` section 6.1), so
+    // rover-left is flagged first.
+    let (code, _, err) = run(&["board", "set", "rover-left", "control.leader", "true"]);
+    assert_eq!(code, Some(0), "{err}");
     let (code, out, err) = run(&["board", "set", "rover-left", "machine.frame", "rigid"]);
     assert_eq!(code, Some(0), "{err}");
     assert!(
@@ -1312,7 +1325,7 @@ fn the_machine_commands_through_the_binary() {
         serde_json::json!({
             "machine": { "mode": "balance", "frame": "rigid" },
             "boards": {
-                left: { "device": { "name": "rover-left" } },
+                left: { "device": { "name": "rover-left" }, "control": { "leader": true } },
                 right: { "device": { "name": "rover-right" } },
             },
         })
@@ -1324,7 +1337,7 @@ fn the_machine_commands_through_the_binary() {
     assert_eq!(code, Some(0), "{err}");
     let lines: Vec<&str> = out.lines().collect();
     assert!(
-        lines.contains(&"rover-left: 0 changed, 0 pinned, 3 unchanged"),
+        lines.contains(&"rover-left: 0 changed, 0 pinned, 4 unchanged"),
         "{out}"
     );
     assert!(
@@ -1415,5 +1428,62 @@ fn the_machine_commands_through_the_binary() {
         "{out}"
     );
     assert!(!out.contains("rover-new: 0 changed"), "{out}");
+    server.join().unwrap();
+}
+
+/// The leader check through the binary (`specs/rigid-leader.md` sections 6.1 and 9): a write that
+/// would leave a balance machine in the rigid frame with no board flagged, or two, is refused and
+/// writes nothing, on `machine set` and on `board set`; a write of an unrelated key does not run it
+/// (no walk for an address target).
+#[test]
+fn the_leader_check_through_the_binary() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 9));
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+    let none = "control.leader: a balance machine in the rigid frame needs exactly one board set \
+                as leader; none is set";
+    // A rigid throttle pair needs no leader.
+    let (code, _, err) = run(&["machine", "set", "machine.frame", "rigid"]);
+    assert_eq!(code, Some(0), "{err}");
+    // Balance on it with no board flagged: refused, nothing written.
+    let (code, out, err) = run(&["machine", "set", "machine.mode", "balance"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains(none), "{err}");
+    assert!(out.is_empty(), "nothing written: {out}");
+    let (code, out, err) = run(&["machine", "get", "machine.mode"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "machine.mode = throttle (default)\n");
+    // One board flagged: balance goes in.
+    let (code, _, err) = run(&["board", "set", "0x01", "control.leader", "true"]);
+    assert_eq!(code, Some(0), "{err}");
+    let (code, _, err) = run(&["machine", "set", "machine.mode", "balance"]);
+    assert_eq!(code, Some(0), "{err}");
+    // The other board flagged too: refused, naming both, and nothing written.
+    let (code, out, err) = run(&["board", "set", "0x02", "control.leader", "true"]);
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains(
+            "control.leader: a balance machine in the rigid frame needs exactly one board set as \
+             leader; 0x01 and 0x02 are both set"
+        ),
+        "{err}"
+    );
+    assert!(out.is_empty(), "{out}");
+    let (code, out, err) = run(&["board", "get", "0x02", "control.leader"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "Hoverboard: control.leader = false (default)\n");
+    // Clearing the only flag is refused too.
+    let (code, _, err) = run(&["board", "set", "0x01", "control.leader", "false"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains(none), "{err}");
+    // An unrelated key to an address: no walk, so no leader check.
+    let (code, _, err) = run(&["board", "set", "0x02", "device.name", "right"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(!err.contains("walked"), "{err}");
     server.join().unwrap();
 }

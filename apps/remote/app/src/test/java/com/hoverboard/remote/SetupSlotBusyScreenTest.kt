@@ -46,6 +46,7 @@ class SetupSlotBusyScreenTest {
         override fun retry(key: Key) { last = "retry:$key" }
         override fun chooseFrame(value: Int) { last = "chooseFrame:$value" }
         override fun chooseRightWheel(address: Int) { last = "chooseRightWheel:$address" }
+        override fun chooseLeader(address: Int) { last = "chooseLeader:$address" }
         override fun editFrame(roles: List<Int>, signs: List<Int>) = Unit
         override fun setLevel() = Unit
         override fun checkLevel() = Unit

@@ -1,0 +1,50 @@
+[
+  {
+    "name": "the rover: master flagged",
+    "machine": { "mode": "balance", "frame": "rigid" },
+    "boards": [ { "control": { "leader": true } }, {} ],
+    "refused": null
+  },
+  {
+    "name": "a rigid balance pair with no board flagged",
+    "machine": { "mode": "balance", "frame": "rigid" },
+    "boards": [ {}, { "control": { "leader": false } } ],
+    "refused": "control.leader"
+  },
+  {
+    "name": "a rigid balance pair with both boards flagged",
+    "machine": { "mode": "balance", "frame": "rigid" },
+    "boards": [ { "control": { "leader": true } }, { "control": { "leader": true } } ],
+    "refused": "control.leader"
+  },
+  {
+    "name": "a rigid throttle pair with no board flagged",
+    "machine": { "mode": "throttle", "frame": "rigid" },
+    "boards": [ {}, {} ],
+    "refused": null
+  },
+  {
+    "name": "a rigid throttle pair with both boards flagged",
+    "machine": { "mode": "throttle", "frame": "rigid" },
+    "boards": [ { "control": { "leader": true } }, { "control": { "leader": true } } ],
+    "refused": null
+  },
+  {
+    "name": "a pivoting balance pair with both boards flagged",
+    "machine": { "mode": "balance", "frame": "pivoting" },
+    "boards": [ { "control": { "leader": true } }, { "control": { "leader": true } } ],
+    "refused": null
+  },
+  {
+    "name": "a one-board rigid balance machine, its board flagged",
+    "machine": { "mode": "balance", "frame": "rigid" },
+    "boards": [ { "control": { "leader": true } } ],
+    "refused": null
+  },
+  {
+    "name": "a one-board rigid balance machine, its board not flagged",
+    "machine": { "mode": "balance", "frame": "rigid" },
+    "boards": [ {} ],
+    "refused": "control.leader"
+  }
+]

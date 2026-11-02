@@ -666,6 +666,7 @@ class ControlScreenTest {
         val targets = when (mode) {
             DriveMode.SINGLE -> DriveTargets(DriveMode.SINGLE, listOf(0x01))
             DriveMode.DIFFERENTIAL -> DriveTargets(mode, listOf(0x01, 0x02), right = 0x01)
+            DriveMode.RIGID -> DriveTargets(mode, listOf(0x01, 0x02), leader = 0x01)
             else -> DriveTargets(mode, listOf(0x01, 0x02))
         }
         return UiState(
