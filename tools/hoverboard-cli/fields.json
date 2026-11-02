@@ -385,6 +385,25 @@
     "board_owned": false
   },
   {
+    "id": 30,
+    "path": "control.leader",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
+    "kind": "bool",
+    "ranges": [
+      {
+        "range": [
+          0,
+          1
+        ]
+      }
+    ],
+    "scope": "node",
+    "effect": "arm",
+    "board_owned": false
+  },
+  {
     "id": 32,
     "path": "machine.mode",
     "type": "u8",

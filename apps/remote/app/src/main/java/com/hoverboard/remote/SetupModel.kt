@@ -141,6 +141,13 @@ sealed interface SetupNotice {
      */
     data class BusUnread(val key: Key) : SetupNotice
 
+    /**
+     * A write that moves `machine.mode`, `machine.frame` or `control.leader` was not sent: the
+     * motor controller at [address] has not had those three read this session, so the leader check
+     * (`specs/rigid-leader.md` section 6.1) could not run.
+     */
+    data class LeaderUnread(val address: Int) : SetupNotice
+
     /** "Set level" could not compute a trim. */
     data class LevelUnavailable(val reason: Blocked) : SetupNotice
 
@@ -611,6 +618,13 @@ interface SetupActions {
      * leaves no board on the right rather than two.
      */
     fun chooseRightWheel(address: Int)
+
+    /**
+     * Make the board at [address] the rigid frame's leader and clear every other motor
+     * controller's flag (`specs/rigid-leader.md` section 7). The clears go FIRST, so a sequence that
+     * stops between them leaves no board flagged rather than two; the pair is checked as one write.
+     */
+    fun chooseLeader(address: Int)
 
     /**
      * Write one whole frame: the three [signs] and the two [roles] (`specs/imu.md`, a pose writes
@@ -1166,6 +1180,7 @@ class SetupModel(
     /** Queue [value] for [node]'s [key] and get the drain going, if there is anything to send. */
     private fun send(node: Int, key: Key, value: Value) {
         if (isArmed()) return
+        if (leaderRefused(mapOf(node to mapOf(key to value)))) return
         if (!enqueue(node, key, value)) return
         update(node) { it.copy(rotationCheck = checkAfterEdit(it, key)) }
         notice(null)
@@ -1374,6 +1389,7 @@ class SetupModel(
      */
     private fun writeToMachine(key: Key, value: Value) {
         if (isArmed()) return
+        if (leaderRefused(_state.value.motorControllers.associateWith { mapOf(key to value) })) return
         var due = false
         for (node in _state.value.motorControllers) due = enqueue(node, key, value) || due
         if (!due) return
@@ -1388,6 +1404,45 @@ class SetupModel(
      * than leaving the machine with two right wheels. With no other board in reach there is no order
      * to keep and the chosen board is written on its own.
      */
+    override fun chooseLeader(address: Int) {
+        if (isArmed()) return
+        val mcs = _state.value.motorControllers
+        if (address !in mcs) return
+        val key = SetupFields.CONTROL_LEADER.key
+        val flag = { a: Int -> Value.U8(if (a == address) 1 else 0) }
+        if (leaderRefused(mcs.associateWith { mapOf(key to flag(it)) })) return
+        val clears = mcs.filter { it != address }.filter { enqueue(it, key, flag(it)) }
+        val setDue = enqueue(address, key, flag(address))
+        if (clears.isNotEmpty() && setDue) waitsFor[Target(address, key)] = clears.map { Target(it, key) }
+        if (clears.isEmpty() && !setDue) return
+        notice(null)
+        startDraining()
+    }
+
+    /**
+     * The leader check (`specs/rigid-leader.md` section 6.1) on a write that moves `machine.mode`,
+     * `machine.frame` or `control.leader`: every motor controller's three values as [writes] (each
+     * board's writes by address) would leave them. True, with the notice set, when the write is
+     * refused, or when a board's three have not been read ([SetupNotice.LeaderUnread]). A write of
+     * no other key passes untouched.
+     */
+    private fun leaderRefused(writes: Map<Int, Map<Key, Value>>): Boolean {
+        if (writes.values.none { w -> w.keys.any { Checks.changesLeader(it) } }) return false
+        val s = _state.value
+        val boards = s.motorControllers.map { a ->
+            val stored = Checks.LEADER_KEYS.associateWith { s.setupOf(a).values[it] }
+            val missing = stored.filterValues { it == null }.keys - writes[a].orEmpty().keys
+            if (missing.isNotEmpty()) {
+                notice(SetupNotice.LeaderUnread(a))
+                return true
+            }
+            a to stored.mapNotNull { (k, v) -> v?.let { k to it } }.toMap() + writes[a].orEmpty()
+        }
+        val refusal = Checks.checkLeader(boards) ?: return false
+        notice(SetupNotice.CheckRefused(refusal))
+        return true
+    }
+
     override fun chooseRightWheel(address: Int) {
         if (isArmed()) return
         val mcs = _state.value.motorControllers

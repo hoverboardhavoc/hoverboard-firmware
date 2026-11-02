@@ -33,13 +33,15 @@ class DriveModeTest : RiderVmTest() {
      * Make the pair derive [mode]: RIGID is balance on a rigid frame; DIFFERENTIAL and BOUND are a
      * pivoting pair with the turn axis on or off. 0x01 is the right wheel.
      */
-    private fun derive(mode: DriveMode, vararg boards: Int = intArrayOf(0x01, 0x02)) {
+    /** The boards store [mode]'s mode and frame; RIGID's [leader] stores `control.leader` set. */
+    private fun derive(mode: DriveMode, vararg boards: Int = intArrayOf(0x01, 0x02), leader: Int? = 0x01) {
         val rigid = mode == DriveMode.RIGID
         for (b in boards) {
             val control = if (rigid) Fields.ControlMode.BALANCE else Fields.ControlMode.THROTTLE
             val frame = if (rigid) Fields.ControlFrame.RIGID else Fields.ControlFrame.PIVOTING
             transport.store[b to Fields.CONTROL_MODE.key()] = Value.U8(control)
             transport.store[b to Fields.CONTROL_FRAME.key()] = Value.U8(frame)
+            if (rigid) transport.store[b to Fields.CONTROL_LEADER.key()] = Value.U8(if (b == leader) 1 else 0)
         }
         settings.setTurnAxis(mode == DriveMode.DIFFERENTIAL)
         transport.store[0x01 to Fields.CONTROL_SIDE.key()] = Value.U8(Fields.ControlSide.RIGHT)
@@ -252,8 +254,9 @@ class DriveModeTest : RiderVmTest() {
     @Test
     fun `no frame both mixes a pair and states a turn`() = runTest(dispatcher) {
         derive(DriveMode.BOUND)
+        // The rigid frame's leader, so the Setup model's leader check lets RIGID in.
+        transport.store[0x01 to Fields.CONTROL_LEADER.key()] = Value.U8(1)
         connectPair()
-        leaderIs(0x01)
         for (mode in listOf(DriveMode.BOUND, DriveMode.DIFFERENTIAL, DriveMode.RIGID)) {
             val rigid = mode == DriveMode.RIGID
             viewModel.setup.edit(
@@ -305,9 +308,10 @@ class DriveModeTest : RiderVmTest() {
      */
     @Test
     fun `rigid drives the leader alone and puts both axes on the wire`() = runTest(dispatcher) {
-        derive(DriveMode.RIGID)
+        // The 2026-11-02 case (`specs/rigid-leader.md` section 7): no board's telemetry says it
+        // leads (both ran throttle since their last arm), and the stored flag names the leader.
+        derive(DriveMode.RIGID, leader = 0x01)
         connectPair()
-        leaderIs(0x01)
         viewModel.onArmToggle()
         viewModel.onJoystickMove(x = 0.75f * w, y = 0.25f * h, width = w, height = h)
 
@@ -325,12 +329,15 @@ class DriveModeTest : RiderVmTest() {
         assertEquals(0, follower.steer)
     }
 
-    /** The leader is read off the wire, not assumed: the board that leads is the board driven. */
+    /**
+     * The leader is read off the store, not the wire (`specs/rigid-leader.md` section 7): the board
+     * stored as leader is the board driven, whatever the telemetry flags say.
+     */
     @Test
-    fun `rigid drives whichever board is leading`() = runTest(dispatcher) {
-        derive(DriveMode.RIGID)
+    fun `rigid drives whichever board is stored as leader`() = runTest(dispatcher) {
+        derive(DriveMode.RIGID, leader = 0x02)
         connectPair()
-        leaderIs(0x02)
+        leaderIs(0x01)
         viewModel.onArmToggle()
         viewModel.onJoystickMove(x = 0.75f * w, y = 0.25f * h, width = w, height = h)
 
@@ -342,29 +349,23 @@ class DriveModeTest : RiderVmTest() {
     }
 
     /**
-     * A role the app cannot see is a board it cannot address, so the app refuses the arm and says
-     * why (`specs/remote-ui.md` 3.1c): with no leader reported, and with BOTH boards claiming the
-     * lead. The pad is RIGID's, the mode the machine stores, and nothing is armed.
+     * A machine stored with no leader is refused and says why (`specs/remote-ui.md` 3.1c,
+     * `specs/rigid-leader.md` section 7), whatever the telemetry says. The pad is RIGID's, the mode
+     * the machine stores, and nothing is armed.
      */
     @Test
-    fun `rigid is refused until exactly one board reports leading`() = runTest(dispatcher) {
-        derive(DriveMode.RIGID)
+    fun `rigid is refused while no board is stored as leader`() = runTest(dispatcher) {
+        derive(DriveMode.RIGID, leader = null)
         connectPair()
-        var state = currentState()
+        val state = currentState()
         assertEquals(DriveMode.RIGID, state.driveMode, "the derived mode's pad")
         assertEquals(DriveRefusal.NO_LEADER, state.drive.refusal)
         assertEquals(DriveMode.RIGID, state.drive.derived)
-        assertTrue(state.drive.targets.boards.isEmpty(), "no board reports leading")
+        assertTrue(state.drive.targets.boards.isEmpty(), "no board stored as leader")
         assertFalse(state.canArm)
 
-        for (b in listOf(0x01, 0x02)) transport.emitCyclicState(rigid(CyclicState.FLAG_LEADER), from = b)
-        runCurrent()
-        assertEquals(DriveRefusal.NO_LEADER, currentState().drive.refusal, "two leaders name no leader")
-
         leaderIs(0x01)
-        state = currentState()
-        assertEquals(DriveMode.RIGID, state.driveMode)
-        assertNull(state.drive.refusal)
+        assertEquals(DriveRefusal.NO_LEADER, currentState().drive.refusal, "a telemetry flag names no leader")
     }
 
     // --- the mode in force (`specs/remote-ui.md` 3.2) ------------------------------------------
@@ -486,7 +487,6 @@ class DriveModeTest : RiderVmTest() {
     fun `the drive mode comes back with the boards after a reconnect`() = runTest(dispatcher) {
         derive(DriveMode.RIGID)
         connectPair()
-        leaderIs(0x01)
         assertEquals(DriveMode.RIGID, currentState().driveMode)
 
         transport.setConnectionState(ConnectionState.SCANNING)

@@ -116,14 +116,15 @@ class FakeHoverboardTransport(
      * registered field's default.
      *
      * Every node starts out answering what every board running this firmware answers unwritten:
-     * its default `device.name`, `machine.mode` throttle, `machine.frame` pivoting and
-     * `machine.battery.chemistry` li_ion. A test about a stored mode says so in [store].
+     * its default `device.name`, `machine.mode` throttle, `machine.frame` pivoting, `control.leader`
+     * clear and `machine.battery.chemistry` li_ion. A test about a stored mode says so in [store].
      */
     val store: MutableMap<Pair<Int, Key>, Value> = mutableMapOf()
     val defaults: MutableMap<Key, Value> = mutableMapOf(
         Fields.DEVICE_NAME.key() to Fields.DEVICE_NAME.default,
         Fields.CONTROL_MODE.key() to Fields.CONTROL_MODE.default,
         Fields.CONTROL_FRAME.key() to Fields.CONTROL_FRAME.default,
+        Fields.CONTROL_LEADER.key() to Fields.CONTROL_LEADER.default,
         Fields.BOARD_BATTERY_CHEMISTRY.key() to Fields.BOARD_BATTERY_CHEMISTRY.default,
     )
 

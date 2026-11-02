@@ -86,6 +86,7 @@ object Names {
         single(Fields.IMU_REMAP, "imu.remap"),
         link(Fields.LINK_USART.id, "usart", Kind.INT),
         link(Fields.LINK_REMAP.id, "remap", Kind.INT),
+        single(Fields.CONTROL_LEADER, "control.leader", Kind.BOOL),
         // Machine.
         single(Fields.CONTROL_MODE, "machine.mode", Kind.ENUM, MODE),
         single(Fields.CONTROL_FRAME, "machine.frame", Kind.ENUM, FRAME),

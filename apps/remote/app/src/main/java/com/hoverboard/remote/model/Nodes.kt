@@ -27,7 +27,10 @@ data class NodeInfo(val address: Int, val nodeClass: Int?, val name: String?) {
  * does not derive to, so none of these falls back to driving one board.
  */
 enum class DriveRefusal {
-    /** A node's identity, or a motor controller's `machine.mode` or `machine.frame`, has not been read this session. */
+    /**
+     * A node's identity, or a motor controller's `machine.mode` or `machine.frame` (or, for RIGID,
+     * its `control.leader`), has not been read this session.
+     */
     UNREAD,
 
     /** The motor controllers hold different `machine.mode` or `machine.frame` copies. */
@@ -36,7 +39,7 @@ enum class DriveRefusal {
     /** The mode drives two motor controllers and the walk found another number of them. */
     NOT_TWO,
 
-    /** RIGID, and not exactly one motor controller reports itself the rigid frame's leader. */
+    /** RIGID, and not exactly one motor controller stores `control.leader` set. */
     NO_LEADER,
 
     /** DIFFERENTIAL, and not exactly one motor controller is set as the right wheel. */
@@ -67,7 +70,8 @@ data class DriveInForce(val targets: DriveTargets, val derived: DriveMode?, val 
          * @param mode each motor controller's stored `machine.mode` byte, null while unread.
          * @param frame each motor controller's stored `machine.frame` byte, null while unread.
          * @param side each motor controller's motor 0 `side` byte, null while unread.
-         * @param leaders the addresses whose own telemetry claims the rigid frame's lead.
+         * @param leader each motor controller's stored `control.leader` byte, null while unread
+         *   (`specs/rigid-leader.md` section 7).
          * @param turnAxis whether a machine of two or more motor controllers that is not rigid uses
          *   the pad's turn axis: DIFFERENTIAL with it, BOUND without (the Ride screen's setting).
          */
@@ -76,18 +80,22 @@ data class DriveInForce(val targets: DriveTargets, val derived: DriveMode?, val 
             mode: (Int) -> Int?,
             frame: (Int) -> Int?,
             side: (Int) -> Int?,
-            leaders: Set<Int>,
+            leader: (Int) -> Int?,
             turnAxis: Boolean,
         ): DriveInForce {
             val mcs = nodes.filter { it.isMotorController }.map { it.address }
             val (derived, unread) = derive(nodes, mcs, mode, frame, turnAxis)
             if (unread != null) return refused(derived, unread)
             if (derived == null) return NONE
-            val why = precondition(derived, mcs, side, leaders)
+            val why = precondition(derived, mcs, side, leader)
             return when {
                 why != null -> refused(derived, why)
                 derived == DriveMode.SINGLE -> DriveInForce(DriveTargets(DriveMode.SINGLE, mcs), derived, null)
-                else -> DriveInForce(DriveTargets(derived, mcs, rightWheel(derived, mcs, side)), derived, null)
+                else -> DriveInForce(
+                    DriveTargets(derived, mcs, rightWheel(derived, mcs, side), rigidLeader(derived, mcs, leader)),
+                    derived,
+                    null,
+                )
             }
         }
 
@@ -132,15 +140,26 @@ data class DriveInForce(val targets: DriveTargets, val derived: DriveMode?, val 
             mode: DriveMode,
             mcs: List<Int>,
             side: (Int) -> Int?,
-            leaders: Set<Int>,
+            leader: (Int) -> Int?,
         ): DriveRefusal? =
             when {
                 !mode.drivesBoth -> null
                 mcs.size != 2 -> DriveRefusal.NOT_TWO
-                mode == DriveMode.RIGID && leaders.count { it in mcs } != 1 -> DriveRefusal.NO_LEADER
+                mode == DriveMode.RIGID && mcs.any { leader(it) == null } -> DriveRefusal.UNREAD
+                mode == DriveMode.RIGID && rigidLeader(mode, mcs, leader) == null -> DriveRefusal.NO_LEADER
                 mode == DriveMode.DIFFERENTIAL && rightWheel(mode, mcs, side) == null -> DriveRefusal.NO_RIGHT_WHEEL
                 else -> null
             }
+
+        /**
+         * The board that stores `control.leader` set, for RIGID: exactly one such board with every
+         * copy read, else null (`specs/rigid-leader.md` section 7). The stored flag is what each
+         * board installs at its next arm, so it names the leader whatever the boards ran since.
+         */
+        private fun rigidLeader(mode: DriveMode, mcs: List<Int>, leader: (Int) -> Int?): Int? {
+            if (mode != DriveMode.RIGID || mcs.any { leader(it) == null }) return null
+            return mcs.filter { leader(it) != 0 }.singleOrNull()
+        }
 
         /**
          * The board whose own motor's `side` says it is the right wheel, for DIFFERENTIAL: exactly

@@ -340,6 +340,22 @@ object SetupFields {
         ),
         note = R.string.setup_note_control_side, advanced = true,
     )
+
+    /**
+     * `control.leader`, whether this board leads a rigid balance machine (`specs/rigid-leader.md`
+     * section 7). The raw row, like [CONTROL_SIDE]: the Machine section's Leader picker is the
+     * control, and it writes the pair as one. A node field, read from each motor controller.
+     */
+    val CONTROL_LEADER = SetupField(
+        Fields.CONTROL_LEADER, 0, R.string.setup_field_control_leader, SetupGroup.DRIVE,
+        Editor.Chips(
+            listOf(
+                Choice(0, R.string.setup_choice_leader_no),
+                Choice(1, R.string.setup_choice_leader_yes),
+            ),
+        ),
+        note = R.string.setup_note_control_leader, advanced = true,
+    )
     val IMU_MODEL = SetupField(
         Fields.IMU_MODEL, 0, R.string.setup_field_imu_model, SetupGroup.IMU,
         Editor.Chips(
@@ -482,11 +498,11 @@ object SetupFields {
     val FRAME: List<SetupField> = AXIS_SIGN + AXIS_ROLE
 
     /**
-     * The rows the Machine section owns (`specs/remote-ui.md` 3.7a): the frame and the right wheel.
-     * Read with the ride facts ([MOTOR_FACTS]), because the arm control and the drive state what
-     * they come to; their raw rows above are the per-board escape hatch.
+     * The rows the Machine section owns (`specs/remote-ui.md` 3.7a): the frame, the right wheel and
+     * the rigid frame's leader. Read with the ride facts ([MOTOR_FACTS]), because the arm control
+     * and the drive state what they come to; their raw rows above are the per-board escape hatch.
      */
-    val MACHINE: List<SetupField> = listOf(CONTROL_FRAME, CONTROL_SIDE)
+    val MACHINE: List<SetupField> = listOf(CONTROL_FRAME, CONTROL_SIDE, CONTROL_LEADER)
 
     /**
      * The rows the attach-time ride-facts read takes from the motor controllers: [MACHINE]'s two,
@@ -524,7 +540,7 @@ object SetupFields {
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_ADDRESS,
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_CHEMISTRY, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
-        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
+        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE, CONTROL_LEADER,
         IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 

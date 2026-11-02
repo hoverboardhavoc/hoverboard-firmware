@@ -20,7 +20,8 @@ import org.junit.jupiter.api.assertThrows
  * [DriveInForce.of] alone: RIGID is `machine.mode` balance with `machine.frame` rigid; SINGLE is one
  * motor controller; with two and not rigid, BOUND without the turn axis and DIFFERENTIAL with it. A
  * precondition that fails, or a copy unread or in disagreement, is a refusal with the reason and no
- * boards, keeping the derived mode where one is known. A bridge is never among the boards.
+ * boards, keeping the derived mode where one is known. A bridge is never among the boards. RIGID's
+ * leader is the board that STORES `control.leader` (`specs/rigid-leader.md` sections 7 and 9).
  */
 class DriveInForceTest {
 
@@ -36,9 +37,11 @@ class DriveInForceTest {
         modes: Map<Int, Int?> = mapOf(0x01 to throttle, 0x02 to throttle),
         frames: Map<Int, Int?> = mapOf(0x01 to pivoting, 0x02 to pivoting),
         sides: Map<Int, Int?> = mapOf(0x01 to Fields.ControlSide.RIGHT, 0x02 to Fields.ControlSide.LEFT),
-        leaders: Set<Int> = emptySet(),
+        leaders: Map<Int, Int?> = mapOf(0x01 to 0, 0x02 to 0),
         turnAxis: Boolean = false,
-    ) = DriveInForce.of(nodes, { modes[it] }, { frames[it] }, { sides[it] }, leaders, turnAxis)
+    ) = DriveInForce.of(nodes, { modes[it] }, { frames[it] }, { sides[it] }, { leaders[it] }, turnAxis)
+
+    private fun flagged(vararg boards: Int) = mapOf(0x01 to 0, 0x02 to 0) + boards.associateWith { 1 }
 
     private fun both(v: Int) = mapOf(0x01 to v, 0x02 to v)
 
@@ -50,8 +53,8 @@ class DriveInForceTest {
             of(turnAxis = true).targets,
             "two, pivoting, the turn axis used",
         )
-        val rigidBalance = of(modes = both(balance), frames = both(rigid), leaders = setOf(0x02))
-        assertEquals(DriveTargets(DriveMode.RIGID, listOf(0x01, 0x02)), rigidBalance.targets)
+        val rigidBalance = of(modes = both(balance), frames = both(rigid), leaders = flagged(0x02))
+        assertEquals(DriveTargets(DriveMode.RIGID, listOf(0x01, 0x02), leader = 0x02), rigidBalance.targets)
         assertEquals(DriveMode.RIGID, of(modes = both(balance), frames = both(rigid), turnAxis = true).derived)
         // A rigid frame in throttle mode is not one rigid machine: the firmware resolves the frame
         // only in balance, so the two wheels are driven as a pair.
@@ -104,8 +107,11 @@ class DriveInForceTest {
         assertEquals(DriveRefusal.NO_LEADER, noLeader.refusal)
         assertEquals(DriveMode.RIGID, noLeader.mode, "the rigid pad, and nothing armed")
         assertTrue(noLeader.targets.boards.isEmpty())
-        val twoLeaders = of(modes = both(balance), frames = both(rigid), leaders = setOf(0x01, 0x02))
+        val twoLeaders = of(modes = both(balance), frames = both(rigid), leaders = flagged(0x01, 0x02))
         assertEquals(DriveRefusal.NO_LEADER, twoLeaders.refusal)
+        val unreadFlag = of(modes = both(balance), frames = both(rigid), leaders = mapOf(0x01 to 1, 0x02 to null))
+        assertEquals(DriveRefusal.UNREAD, unreadFlag.refusal, "a flag unread")
+        assertEquals(DriveMode.RIGID, unreadFlag.derived)
         val noRight = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.LEFT)
         val twoRight = mapOf(0x01 to Fields.ControlSide.RIGHT, 0x02 to Fields.ControlSide.RIGHT)
         val unreadSide = mapOf(0x01 to Fields.ControlSide.RIGHT, 0x02 to null)
@@ -116,23 +122,47 @@ class DriveInForceTest {
         }
     }
 
+    /**
+     * The 2026-11-02 case (`specs/rigid-leader.md` section 7): the stored flag names the leader, so
+     * the RIGID frame drives the flagged board whatever the boards' telemetry flags say, and a rigid
+     * throttle machine evaluates no leader condition: BOUND or DIFFERENTIAL, both boards driven.
+     */
+    @Test
+    fun `rigid drives the stored leader and a rigid throttle machine needs none`() {
+        val rigidBalance = of(modes = both(balance), frames = both(rigid), leaders = flagged(0x01))
+        assertNull(rigidBalance.refusal)
+        val frame = DriveFrame.of(rigidBalance.targets, RiderCommand.armed(1_000), steer = 5)
+        assertEquals(setOf(0x01, 0x02), frame.commands.keys)
+        assertEquals(setOf(0x01), frame.driven, "the flagged board is the one driven")
+        for (leaders in listOf(flagged(), flagged(0x01, 0x02), mapOf<Int, Int?>(0x01 to null, 0x02 to null))) {
+            val bound = of(frames = both(rigid), leaders = leaders)
+            assertNull(bound.refusal, "$leaders")
+            assertEquals(DriveTargets(DriveMode.BOUND, listOf(0x01, 0x02)), bound.targets)
+            val diff = of(frames = both(rigid), leaders = leaders, turnAxis = true)
+            assertNull(diff.refusal, "$leaders")
+            assertEquals(DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02), right = 0x01), diff.targets)
+        }
+    }
+
     @Test
     fun `a frame addresses exactly the boards its targets name`() {
         val armed = RiderCommand.armed(1_000)
         val bound = DriveFrame.of(DriveTargets(DriveMode.BOUND, listOf(0x02, 0x03)), armed)
         assertEquals(setOf(0x02, 0x03), bound.commands.keys)
         assertTrue(DriveFrame.of(DriveTargets.NONE, armed).commands.isEmpty())
-        // A rigid frame with no leader among its boards drives nobody and still tells both.
-        val rigidTargets = DriveTargets(DriveMode.RIGID, listOf(0x02, 0x03))
-        val rigidFrame = DriveFrame.of(rigidTargets, armed, steer = 5, leader = 0x01)
+        // A rigid frame drives its leader alone and tells both.
+        val rigidTargets = DriveTargets(DriveMode.RIGID, listOf(0x02, 0x03), leader = 0x03)
+        val rigidFrame = DriveFrame.of(rigidTargets, armed, steer = 5)
         assertEquals(setOf(0x02, 0x03), rigidFrame.commands.keys)
-        assertTrue(rigidFrame.driven.isEmpty())
+        assertEquals(setOf(0x03), rigidFrame.driven)
     }
 
     @Test
     fun `targets that cannot be driven are not constructed`() {
         assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.SINGLE, listOf(0x01, 0x02)) }
         assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02)) }
+        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.RIGID, listOf(0x01, 0x02)) }
+        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.RIGID, listOf(0x01, 0x02), leader = 0x03) }
         // A refused DIFFERENTIAL names its mode and addresses nobody, so it needs no right wheel.
         assertTrue(DriveTargets(DriveMode.DIFFERENTIAL, emptyList()).boards.isEmpty())
     }

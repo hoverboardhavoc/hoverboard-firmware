@@ -3,6 +3,10 @@
 //! of cases: a `name`, the `chip` (a `hal::pincap::Chip` name), a `board` file fragment, and
 //! `refused`, the path of the key the first refusal names, or `null` for a board every check
 //! passes. A refused case is refused by its file's check alone.
+//!
+//! The leader check's cases (`leader.json`) are machine cases: a `machine` section and a list of
+//! `boards` (board file fragments, no chip), each board being the machine section plus its
+//! fragment, run through [`check_leader`] alone.
 
 use std::path::PathBuf;
 
@@ -39,6 +43,43 @@ fn refusals(chip: Chip, board: &Json) -> Vec<Refusal> {
     out
 }
 
+/// A board file fragment's stored values, as encoding it leaves them.
+fn state_of(board: &Json) -> State {
+    let files = read_files(&[("case".into(), board.to_string())]);
+    assert!(files.problems.is_empty(), "{:?}", files.problems);
+    let mut state = State::new();
+    for e in &files.entries {
+        let row = row_of(e.key).expect("a named key");
+        let (bytes, _) = encode(e.key, row.storage, &e.value)
+            .unwrap_or_else(|p| panic!("{}: {}", path_of(e.key), p.msg));
+        if let Some(b) = bytes {
+            state.insert(e.key, (row.storage, b));
+        }
+    }
+    state
+}
+
+/// A machine case's refusals: every board is the case's machine section plus its own fragment,
+/// addressed 0x01 onward.
+fn machine_refusals(case: &Json) -> Vec<Refusal> {
+    let states: Vec<State> = case["boards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            let mut board = b.clone();
+            board["machine"] = case["machine"].clone();
+            state_of(&board)
+        })
+        .collect();
+    let boards: Vec<(u8, &State)> = states
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i as u8 + 1, s))
+        .collect();
+    check_leader(&boards).into_iter().collect()
+}
+
 #[test]
 fn every_shared_case_gets_its_verdict() {
     for check in Check::ALL {
@@ -48,8 +89,12 @@ fn every_shared_case_gets_its_verdict() {
         let (mut passes, mut refuses) = (0, 0);
         for c in &cases {
             let name = c["name"].as_str().unwrap();
-            let chip = Chip::from_name(c["chip"].as_str().unwrap()).unwrap();
-            let got = refusals(chip, &c["board"]);
+            let got = if check == Check::Leader {
+                machine_refusals(c)
+            } else {
+                let chip = Chip::from_name(c["chip"].as_str().unwrap()).unwrap();
+                refusals(chip, &c["board"])
+            };
             match c["refused"].as_str() {
                 None => {
                     assert!(got.is_empty(), "{}: {name}: {got:?}", check.id());
@@ -103,6 +148,50 @@ fn chip_of_maps_target_id() {
     assert_eq!(chip_of(espsvc::FAMILY_F1X0, 32), None);
 }
 
+#[test]
+fn the_leader_refusal_names_the_boards() {
+    let rigid_balance = |leader: bool| {
+        let mut b = serde_json::json!({ "machine": { "mode": "balance", "frame": "rigid" } });
+        if leader {
+            b["control"] = serde_json::json!({ "leader": true });
+        }
+        state_of(&b)
+    };
+    let (set, clear) = (rigid_balance(true), rigid_balance(false));
+    let msg = |boards: &[(u8, &State)]| check_leader(boards).map(|r| r.msg);
+    assert_eq!(msg(&[(0x01, &set), (0x03, &clear)]), None);
+    assert_eq!(
+        msg(&[(0x01, &clear), (0x03, &clear)]).unwrap(),
+        "control.leader: a balance machine in the rigid frame needs exactly one board set as \
+         leader; none is set"
+    );
+    assert_eq!(
+        msg(&[(0x01, &set), (0x03, &set)]).unwrap(),
+        "control.leader: a balance machine in the rigid frame needs exactly one board set as \
+         leader; 0x01 and 0x03 are both set"
+    );
+    // One board left at rigid balance is enough to need a leader: a write that leaves the boards
+    // differing is judged by the board that would run it.
+    let throttle = state_of(&serde_json::json!({ "machine": { "frame": "rigid" } }));
+    assert!(check_leader(&[(0x01, &clear), (0x03, &throttle)]).is_some());
+    assert!(check_leader(&[(0x01, &throttle), (0x03, &throttle)]).is_none());
+}
+
+#[test]
+fn only_the_mode_the_frame_and_the_leader_run_the_leader_check() {
+    for key in LEADER_KEYS {
+        assert!(changes_leader(key), "{}", path_of(key));
+    }
+    for key in [
+        store::DEVICE_NAME.key(),
+        store::IMU_MODEL.key(),
+        store::CONTROL_SIDE.at(0).key(),
+        store::CONTROL_RIDER_REQUIRED.key(),
+    ] {
+        assert!(!changes_leader(key), "{}", path_of(key));
+    }
+}
+
 /// Every check on the board as `files` would leave a board that stores nothing else.
 fn file_refusals(chip: Chip, files: &crate::config::Files) -> Vec<Refusal> {
     let mut state = State::new();
@@ -152,5 +241,28 @@ fn the_fleets_machine_files_pass_on_their_chips_and_not_on_the_other() {
                 other.name()
             );
         }
+        // The machine as the file leaves it passes the leader check (the rover's master is
+        // flagged; the offroad pair is pivoting).
+        let states: Vec<State> = (0..file.entries.len())
+            .map(|i| file_state(&file.board_files(Some(i))))
+            .collect();
+        let boards: Vec<(u8, &State)> = states
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as u8 + 1, s))
+            .collect();
+        assert!(check_leader(&boards).is_none(), "{name}");
     }
+}
+
+/// The stored values `files` leave on a board that stores nothing else.
+fn file_state(files: &crate::config::Files) -> State {
+    let mut state = State::new();
+    for e in &files.entries {
+        let row = row_of(e.key).expect("a named key");
+        if let Ok((Some(b), _)) = encode(e.key, row.storage, &e.value) {
+            state.insert(e.key, (row.storage, b));
+        }
+    }
+    state
 }

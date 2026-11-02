@@ -37,7 +37,6 @@ import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.ui.screens.MachineStatusSection
 import com.hoverboard.remote.ui.screens.statusBoardTag
 import com.hoverboard.remote.ui.screens.statusEntryTag
-import com.hoverboard.remote.ui.screens.RIGID_NOT_LEADING_TAG
 import com.hoverboard.remote.ui.screens.SIM_RIDER_TAG
 import com.hoverboard.remote.ui.screens.MACHINE_DIFFER_TAG
 import com.hoverboard.remote.ui.screens.statusRearmTag
@@ -142,6 +141,9 @@ class MachineStatusTest {
 
         compose.onNodeWithText(context.getString(R.string.board_mode_demoted, BOARD)).assertIsDisplayed()
         compose.onNodeWithText(FAULT_WORD, substring = true).assertDoesNotExist()
+        // It names the flagged leader with no IMU among its causes (`specs/rigid-leader.md` section 7).
+        compose.onNodeWithText("set to lead the rigid frame and has no working IMU", substring = true)
+            .assertIsDisplayed()
     }
 
     /**
@@ -477,22 +479,19 @@ class MachineStatusTest {
     }
 
     /**
-     * The rigid sentence is said exactly once: when the machine is STORED as one rigid machine and
-     * no board is running as its leader. A pivoting machine is told nothing.
+     * A rigid throttle machine says nothing about a leader (`specs/rigid-leader.md` sections 7 and
+     * 9): it drives BOUND with no refusal.
      */
     @Test
-    fun aRigidPairThatIsNotLeadingIsToldWhy() {
-        val configured = pair(DriveInForce.NONE)
+    fun aRigidThrottlePairIsNotToldAboutTheRigidLead() {
+        val rigidThrottle = pair(DriveInForce(DriveTargets(DriveMode.BOUND, listOf(0x01, 0x02)), DriveMode.BOUND, null))
             .copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.OneRight(0x01)))
-        showState(configured)
-        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertIsDisplayed()
-    }
-
-    @Test
-    fun aPivotingPairIsNotToldAboutTheRigidLead() {
-        val pivoting = Machine(FramePair.Agree(rigid = false), SidePair.NoneRight)
-        showState(pair(DriveInForce.NONE).copy(machine = pivoting))
-        compose.onNodeWithTag(RIGID_NOT_LEADING_TAG).assertDoesNotExist()
+        showState(rigidThrottle)
+        val both = context.getString(R.string.status_and, BOARD, PEER)
+        compose.onNodeWithText(context.getString(R.string.status_drive, "BOUND", both)).assertIsDisplayed()
+        for (text in listOf(R.string.drive_refusal_no_leader, R.string.drive_refusal_no_leader_long)) {
+            compose.onNodeWithText(context.getString(text)).assertDoesNotExist()
+        }
     }
 
     // --- the boot status record: what each board's boot could not bring up ------------------------------

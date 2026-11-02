@@ -14,11 +14,14 @@ import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.FramePair
+import com.hoverboard.remote.LeaderPair
 import com.hoverboard.remote.R
 import com.hoverboard.remote.SetupActions
 import com.hoverboard.remote.SetupState
 import com.hoverboard.remote.SidePair
 import com.hoverboard.remote.machine
+import com.hoverboard.remote.leaderCheckFails
+import com.hoverboard.remote.leaderSending
 import com.hoverboard.remote.machineSending
 import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
@@ -32,12 +35,16 @@ const val MACHINE_SECTION_TAG = "setup_machine"
 /** Test tags on the two Machine rows. */
 const val MACHINE_FRAME_TAG = "setup_machine_frame"
 const val MACHINE_SIDE_TAG = "setup_machine_side"
+const val MACHINE_LEADER_TAG = "setup_machine_leader"
 
 /** Test tag on one board's line under a Machine row, reporting that board's own write. */
 fun machineWriteTag(key: Key, address: Int): String = "setup_machine_write_${key.fieldId}_${boardHex(address)}"
 
 /** Test tag on the chip of the Right wheel picker for the board at [address]. */
 fun machineSideTag(address: Int): String = "setup_machine_side_${boardHex(address)}"
+
+/** Test tag on the chip of the Leader picker for the board at [address]. */
+fun machineLeaderTag(address: Int): String = "setup_machine_leader_${boardHex(address)}"
 
 /**
  * The Machine section of Setup (`specs/remote-ui.md` 3.2, 3.7 and 3.7a): the settings that belong to
@@ -68,6 +75,38 @@ internal fun MachineSection(state: SetupState, editable: Boolean, actions: Setup
         }
         FrameRow(state, machine.frame, editable, actions)
         SideRow(state, machine.side, editable, actions)
+        if (state.motorControllers.size == 2) LeaderRow(state, machine.leader, editable, actions)
+    }
+}
+
+/**
+ * The Leader picker (`specs/rigid-leader.md` section 7): one chip per motor controller, built as
+ * [SideRow], shown for a machine of two motor controllers in any mode and frame, so the leader can
+ * be set before the frame or the mode that needs it. A stored machine that fails the leader check
+ * gets the badge.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LeaderRow(state: SetupState, pair: LeaderPair, editable: Boolean, actions: SetupActions) {
+    val chosen = state.leaderSending ?: (pair as? LeaderPair.One)?.leader
+    Panel(modifier = Modifier.testTag(MACHINE_LEADER_TAG)) {
+        PanelTitle(R.string.setup_machine_leader)
+        Caption(R.string.setup_machine_leader_body)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (node in state.nodes.filter { it.isMotorController }) {
+                FilterChip(
+                    selected = chosen == node.address,
+                    onClick = { actions.chooseLeader(node.address) },
+                    label = { Text(nodeLabel(node)) },
+                    enabled = editable,
+                    modifier = Modifier.testTag(machineLeaderTag(node.address)),
+                )
+            }
+        }
+        Text(leaderVerdict(state, pair), color = FgMuted)
+        if (state.leaderCheckFails) Badge()
+        PairWrite(state, SetupFields.CONTROL_LEADER)
+        TakeEffect(SetupFields.CONTROL_LEADER)
     }
 }
 

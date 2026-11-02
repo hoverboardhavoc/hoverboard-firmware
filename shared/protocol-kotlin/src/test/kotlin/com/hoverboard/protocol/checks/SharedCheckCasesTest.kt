@@ -22,6 +22,10 @@ import org.junit.jupiter.api.Test
  * `chip`, a `board` settings fragment, and `refused`, the path of the key the first refusal names,
  * or null for a board every check passes. A refused case is refused by its file's check alone.
  *
+ * The leader check's cases (`leader.json`) are machine cases: a `machine` section and a list of
+ * `boards` (settings fragments, no chip), each board the machine section plus its fragment,
+ * addressed 0x01 onward and run through [Checks.checkLeader] alone.
+ *
  * The case files and [Check] are compared as sets, so a check one implementation adds without a
  * case file, or a case file for a check this port lacks, fails here.
  */
@@ -124,6 +128,15 @@ class SharedCheckCasesTest {
 
     private fun refusals(chip: Chip, board: Board): List<Refusal> = Checks.run(chip, board.state, board.forms)
 
+    /** A machine case's refusals: each board is the machine section plus its own fragment. */
+    private fun machineRefusals(case: JsonObject): List<Refusal> {
+        val machine = JsonObject().apply { add("machine", case.get("machine")) }
+        val boards = case.getAsJsonArray("boards").mapIndexed { i, b ->
+            (i + 1) to read(b.asJsonObject, read(machine)).state.toMap()
+        }
+        return listOfNotNull(Checks.checkLeader(boards))
+    }
+
     @Test
     fun everySharedCaseGetsItsVerdict() {
         for (check in Check.entries) {
@@ -133,8 +146,12 @@ class SharedCheckCasesTest {
             var refuses = 0
             for (c in cases.map { it.asJsonObject }) {
                 val name = c.get("name").asString
-                val chip = checkNotNull(Chip.fromId(c.get("chip").asString)) { "${check.id}: $name names no chip" }
-                val got = refusals(chip, read(c.get("board").asJsonObject))
+                val got = if (check == Check.LEADER) {
+                    machineRefusals(c)
+                } else {
+                    val chip = checkNotNull(Chip.fromId(c.get("chip").asString)) { "${check.id}: $name names no chip" }
+                    refusals(chip, read(c.get("board").asJsonObject))
+                }
                 val refused = c.get("refused")
                 if (refused.isJsonNull) {
                     assertEquals(emptyList<Refusal>(), got, "${check.id}: $name")
@@ -179,6 +196,26 @@ class SharedCheckCasesTest {
                 val wrong = refusals(other, board())
                 assertTrue(wrong.any { it.check == Check.AF_FORM }, "$name $uid on the ${other.id}: $wrong")
             }
+            // The machine as the file leaves it passes the leader check.
+            val all = boards.mapIndexed { i, (_, entry) -> (i + 1) to read(entry.asJsonObject, read(machine)).state.toMap() }
+            assertEquals(null, Checks.checkLeader(all), name)
         }
+    }
+
+    @Test
+    fun theLeaderRefusalNamesTheBoards() {
+        fun board(leader: Boolean) = read(
+            JsonParser.parseString(
+                """{ "machine": { "mode": "balance", "frame": "rigid" }, "control": { "leader": $leader } }""",
+            ).asJsonObject,
+        ).state.toMap()
+        val (set, clear) = board(true) to board(false)
+        val prefix = "control.leader: a balance machine in the rigid frame needs exactly one board set as leader; "
+        assertEquals(null, Checks.checkLeader(listOf(1 to set, 3 to clear)))
+        assertEquals(prefix + "none is set", Checks.checkLeader(listOf(1 to clear, 3 to clear))?.msg)
+        assertEquals(prefix + "0x01 and 0x03 are both set", Checks.checkLeader(listOf(1 to set, 3 to set))?.msg)
+        for (key in Checks.LEADER_KEYS) assertTrue(Checks.changesLeader(key))
+        assertTrue(!Checks.changesLeader(Fields.DEVICE_NAME.key()))
+        assertTrue(!Checks.changesLeader(Fields.CONTROL_SIDE.key()))
     }
 }

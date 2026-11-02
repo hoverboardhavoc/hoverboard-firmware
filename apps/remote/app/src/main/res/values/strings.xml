@@ -43,7 +43,6 @@
     <!-- Drive mode (specs/machine-settings.md section 7): derived from the stored control mode and
          frame, the number of motor controllers and the Ride screen's turn-axis setting. Setup's
          machine status section shows the one in force. -->
-    <string name="drive_mode_rigid_not_leading">Both boards are set to one rigid machine, but neither is running as its leader yet. Set both to Balance under Drive on the Setup tab, and arm once so a new setting takes hold.</string>
 
     <!-- Per-board chips. %1$s is the board's label (its name and address), %2$s what that board
          says about itself. Never the word ARMED here: the arm control is the one armed statement on
@@ -315,6 +314,7 @@
     <string name="setup_field_imu_model">IMU model</string>
     <string name="setup_field_control_frame">Frame (both boards must match)</string>
     <string name="setup_field_control_side">Wheel side (this board)</string>
+    <string name="setup_field_control_leader">Rigid frame leader (this board)</string>
     <string name="setup_field_trim_pitch">Level trim, pitch (centidegrees)</string>
     <string name="setup_field_trim_roll">Level trim, roll (centidegrees)</string>
     <string name="setup_field_gyro_bias_x">Gyro bias X (counts)</string>
@@ -342,6 +342,8 @@
     <string name="setup_choice_frame_rigid">Rigid body</string>
     <string name="setup_choice_side_left">Left wheel</string>
     <string name="setup_choice_side_right">Right wheel</string>
+    <string name="setup_choice_leader_no">Not the leader</string>
+    <string name="setup_choice_leader_yes">Leader</string>
 
     <!-- The range a numeric row offers, which is the clamp the firmware applies as it reads the
          value: a word outside it is stored as written and narrowed on the way into the loop. -->
@@ -363,6 +365,7 @@
     <string name="setup_note_axis_role">1 = X, 2 = Y, 3 = Z, 0 = unset (the compiled role). Written only by the orientation pose picker above, together with the signs.</string>
     <string name="setup_note_control_frame">The raw byte behind the Frame control under Machine, for a bench with only one board powered. Set it the same on both boards.</string>
     <string name="setup_note_control_side">The raw byte behind the Right wheel control under Machine. Exactly one board of a pair is the right wheel.</string>
+    <string name="setup_note_control_leader">The raw byte behind the Leader control under Machine. A Balance machine in the rigid frame needs exactly one board set as leader.</string>
     <string name="setup_note_axis_sign">-1, +1, or 0 for unset (runs the firmware fallback for that axis). Written only by the orientation pose picker above, together with the axis roles, because one sign on its own cannot make a rotation.</string>
 
     <!-- The Machine section (specs/remote-ui.md 3.7 and 3.7a): settings that belong to the machine
@@ -401,9 +404,9 @@
     <string name="setup_machine_title">Machine</string>
     <string name="setup_machine_body">These settings describe the whole machine rather than one board, so picking one here writes it to every motor controller.</string>
     <string name="setup_machine_no_peer">Only one motor controller was found this session, so a write reaches only that board and the frame and the right wheel stay unknown.</string>
-    <string name="setup_machine_order">Set a new machine up in this order: the right wheel, then the frame, then the control mode under Drive below, then the lean and turn limits on the Tune screen. Each one does nothing until the next is set, and the machine neither leans nor steers while those two limits are 0.</string>
+    <string name="setup_machine_order">Set a new machine up in this order: the right wheel and the leader, then the frame, then the control mode under Drive below, then the lean and turn limits on the Tune screen. Each one does nothing until the next is set, and the machine neither leans nor steers while those two limits are 0.</string>
     <string name="setup_machine_frame">Frame</string>
-    <string name="setup_machine_frame_body">Pivoting platforms: each board balances the platform it sits under, using its own sensor. That is how a hoverboard works, and it is what a board does out of the box. Rigid body: the two wheels are bolted into one frame, the board that has the sensor balances the whole machine and tells the other wheel what to do.</string>
+    <string name="setup_machine_frame_body">Pivoting platforms: each board balances the platform it sits under, using its own sensor. That is how a hoverboard works, and it is what a board does out of the box. Rigid body: the two wheels are bolted into one frame, the board set as leader below balances the whole machine on its sensor and tells the other wheel what to do.</string>
     <string name="setup_machine_side">Right wheel</string>
     <string name="setup_machine_side_body">Which board drives the right-hand wheel, looking the way the machine drives forward. Picking one makes the other board the left wheel, and that board is written first, so if the second write fails neither board is left on the right. Nothing is picked for you: the answer is different from machine to machine.</string>
     <!-- %1$s is a frame name (setup_choice_frame_pivoting or _rigid). -->
@@ -416,6 +419,12 @@
     <string name="setup_machine_side_right">Right wheel: %1$s</string>
     <string name="setup_machine_side_none">Neither board is the right wheel. Both are set to the left, which is how a board leaves the factory.</string>
     <string name="setup_machine_side_both">Both boards are set to the right wheel.</string>
+    <string name="setup_machine_leader">Leader</string>
+    <string name="setup_machine_leader_body">Which board balances a rigid machine on its sensor and tells the other wheel what to do. It needs a working IMU; the other board follows whatever sensor it has. Picking one clears the other board\'s flag first. It matters only in Balance with the rigid frame, and takes effect at the next arm.</string>
+    <!-- %1$s is a board label: its name and address. -->
+    <string name="setup_machine_leader_one">Leader: %1$s</string>
+    <string name="setup_machine_leader_none">Neither board is set as leader.</string>
+    <string name="setup_machine_leader_both">Both boards are set as leader.</string>
     <string name="setup_machine_disagree">The two boards do not agree. Fix it here before riding.</string>
     <!-- One board's line under a Machine row: %1$s names the board, %2$s is what came of its write. -->
     <string name="setup_machine_board_line">%1$s: %2$s</string>
@@ -488,6 +497,8 @@
     <!-- %1$s is the refusal: the field\'s path and the reason. -->
     <string name="setup_notice_check_refused">Nothing was written. %1$s</string>
     <string name="setup_notice_bus_unread">The IMU\'s pins and I2C instance have not been read from this board, so the model was not written. Refresh and set it again.</string>
+    <!-- %1$s is the address of the motor controller whose leader flag has not been read. -->
+    <string name="setup_notice_leader_unread">Not written: the leader flag of %1$s has not been read, and the leader check needs every board.</string>
     <string name="setup_notice_no_telemetry">This board has not reported its attitude.</string>
     <string name="setup_notice_not_read">The stored values this needs have not been read.</string>
     <string name="setup_notice_awaiting_arm">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up at its next arm.</string>
@@ -701,12 +712,12 @@
     <string name="drive_refusal_unread">Reading the control mode and frame.</string>
     <string name="drive_refusal_disagree">Cannot arm: the boards store different control modes or frames.</string>
     <string name="drive_refusal_not_two">Cannot arm: %1$s needs two boards, %2$d found.</string>
-    <string name="drive_refusal_no_leader">Cannot arm: no single board leads the rigid frame.</string>
+    <string name="drive_refusal_no_leader">Cannot arm: no single board is set as the rigid frame\'s leader.</string>
     <string name="drive_refusal_no_right">Cannot arm: no single board is the right wheel.</string>
     <string name="drive_refusal_unread_long">Cannot arm yet: the control mode and frame the drive mode comes from have not been read.</string>
     <string name="drive_refusal_disagree_long">Cannot arm: the boards store different control modes or frames. Set the frame under Machine and the control mode under Drive, which writes every board.</string>
     <string name="drive_refusal_not_two_long">Cannot arm: %1$s needs two boards and %2$d were found.</string>
-    <string name="drive_refusal_no_leader_long">Cannot arm: RIGID needs exactly one board leading the rigid frame, and none is (or both are). A board takes a new frame or control mode when it arms or powers up, and arming is refused here, so power the boards off and on.</string>
+    <string name="drive_refusal_no_leader_long">Cannot arm: a Balance machine in the rigid frame needs exactly one board set as its leader. Pick it under Machine.</string>
     <string name="drive_refusal_no_right_long">Cannot arm: DIFFERENTIAL needs exactly one board set as the right wheel. Pick it under Machine.</string>
     <!-- A fault lamp's sheet (`specs/remote-ui.md` 3.1b). -->
     <string name="lamp_where">%1$s · %2$s</string>
@@ -728,7 +739,7 @@
     <string name="status_no_rider">No rider</string>
     <string name="status_lockdown">LOCKDOWN</string>
     <string name="status_not_turning">Not turning: the app has asked for drive for 1 s and the wheel reports no rotation.</string>
-    <string name="board_mode_demoted">MODE %1$s: the board is not running the control mode it stores (Balance with no working IMU runs Throttle), or both boards claim the rigid lead.</string>
+    <string name="board_mode_demoted">MODE %1$s: the board is not running the control mode it stores (Balance with no working IMU runs Throttle), it is set to lead the rigid frame and has no working IMU, or both boards claim the rigid lead.</string>
 
     <!-- One line per boot status record entry (specs/configured-links.md section 5), named the way hoverboard-cli board status names it. %1$s is the function, %2$s why it did not come up. -->
     <string name="status_config_line">%1$s: %2$s</string>

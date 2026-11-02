@@ -47,7 +47,6 @@ import com.hoverboard.remote.model.machineSpeed
 import com.hoverboard.remote.model.missingSettings
 import com.hoverboard.remote.model.odometerReading
 import com.hoverboard.remote.model.rideSlots
-import com.hoverboard.remote.model.rigidLeader
 import com.hoverboard.remote.model.ringReading
 import com.hoverboard.remote.model.shownLamps
 import kotlin.math.abs
@@ -217,10 +216,11 @@ data class UiState(
     fun telemetryOf(address: Int): TelemetryUi? = telemetryByBoard[address]
 
     /**
-     * Which motor controller is leading a rigid frame, read off what each says about itself
-     * ([rigidLeader]), or null while the app cannot name one. The one board a RIGID frame drives.
+     * The motor controller stored as the rigid frame's leader in the drive in force, or null while
+     * it is not RIGID or names none (`specs/rigid-leader.md` section 7). The one board a RIGID frame
+     * drives.
      */
-    val leader: Int? get() = rigidLeader(motorControllers.map { it.address }, telemetryByBoard)
+    val leader: Int? get() = driving.leader
 
     /**
      * What the board at [address]'s current display shows (`specs/remote-ui.md` 3.6): that board's
@@ -568,7 +568,7 @@ class MainViewModel(
                 nodes = st.nodes,
                 selected = st.selectedMotor,
                 machine = st.machine,
-                drive = st.driveInForce(byBoard, turn),
+                drive = st.driveInForce(turn),
                 turnAxis = turn,
                 setup = st,
                 telemetry = byBoard,
@@ -904,7 +904,7 @@ class MainViewModel(
         // see it (`specs/remote-ui.md` 3.7a). Refused here as well as on the control, so the gate is
         // not the rendering's. So is a drive that addresses no motor controller: nothing to arm.
         val st = setup.state.value
-        val targets = st.driveInForce(transport.telemetry.value, settings.turnAxis.value).targets
+        val targets = st.driveInForce(settings.turnAxis.value).targets
         val refused = local.value.engaged || disconnecting.value || st.machine.armStatement.refuses
         // A board the arm would arm reports a bit that refuses the arm: it would refuse the arm
         // itself (`specs/remote-ui.md` 3.1b). A lamp the app only holds lit refuses nothing.
@@ -1052,9 +1052,8 @@ class MainViewModel(
         // Taken from the models' own latest state rather than from [uiState], which is a
         // `WhileSubscribed` flow whose value is the initial one until something collects it.
         val telemetry = transport.telemetry.value
-        val targets = l.armedTargets ?: setup.state.value.driveInForce(telemetry, settings.turnAxis.value).targets
-        val leader = rigidLeader(targets.boards, telemetry)
-        val frame = DriveFrame.of(targets, command, steer = l.steer, leader = leader)
+        val targets = l.armedTargets ?: setup.state.value.driveInForce(settings.turnAxis.value).targets
+        val frame = DriveFrame.of(targets, command, steer = l.steer)
         transport.sendCommand(frame)
         watchTurning(frame, telemetry)
     }

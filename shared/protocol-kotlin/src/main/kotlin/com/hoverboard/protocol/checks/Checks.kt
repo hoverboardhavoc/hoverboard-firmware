@@ -26,6 +26,10 @@ import com.hoverboard.protocol.store.fleetPin
  * The two implementations are held together by the shared check cases (`shared/config-checks/`),
  * which both test suites run, and the tables they read ([com.hoverboard.protocol.pincap], the
  * range table [Fields.RANGES]) are mirrors pinned to the Rust.
+ *
+ * One check looks at the machine rather than at one board: [Checks.checkLeader], the rigid frame's
+ * leader (`specs/rigid-leader.md` section 6.1), run only by a write that changes `machine.mode`,
+ * `machine.frame` or `control.leader` ([Checks.changesLeader]).
  */
 
 /** One check of section 4, by the id the shared cases name it with (`checks::Check`). */
@@ -71,6 +75,9 @@ enum class Check(val id: String) {
 
     /** The IMU axis signs and roles form a proper rotation. */
     FRAME("frame"),
+
+    /** A balance machine in the rigid frame has exactly one board set as leader. */
+    LEADER("leader"),
 }
 
 /** A check that refused, the key it names, and why ([msg] starts with the key's path). */
@@ -431,6 +438,44 @@ object Checks {
             null -> Unit
         }
         return out
+    }
+
+    /**
+     * The keys whose write can change [checkLeader]'s verdict: `machine.mode`, `machine.frame` and
+     * `control.leader` (`checks::LEADER_KEYS`).
+     */
+    val LEADER_KEYS: List<Key> = listOf(Fields.CONTROL_MODE.key(), Fields.CONTROL_FRAME.key(), Fields.CONTROL_LEADER.key())
+
+    /** Whether writing [key] runs the leader check (`checks::changes_leader`). */
+    fun changesLeader(key: Key): Boolean = key in LEADER_KEYS
+
+    /**
+     * The leader check (`checks::check_leader`, `specs/rigid-leader.md` section 6.1) over every
+     * motor controller of the machine, each by its address and its stored values as the write would
+     * leave them: when any of them stores `machine.mode` balance and `machine.frame` rigid, exactly
+     * one stores `control.leader` set. Any other mode or frame passes, whatever the flags hold.
+     */
+    fun checkLeader(boards: List<Pair<Int, Map<Key, Value>>>): Refusal? {
+        fun Map<Key, Value>.byte(key: Key): Int = byteOf(this, key) ?: 0
+        val rigidBalance = boards.any { (_, s) ->
+            s.byte(Fields.CONTROL_MODE.key()) == 1 && s.byte(Fields.CONTROL_FRAME.key()) == 1
+        }
+        if (!rigidBalance) return null
+        val set = boards.filter { (_, s) -> s.byte(Fields.CONTROL_LEADER.key()) != 0 }.map { it.first }
+        val why = when (set.size) {
+            1 -> return null
+            0 -> "none is set"
+            else -> {
+                val names = set.map { "0x%02x".format(it) }
+                val verb = if (set.size == 2) "both" else "all"
+                "${names.dropLast(1).joinToString(", ")} and ${names.last()} are $verb set"
+            }
+        }
+        return refusal(
+            Check.LEADER,
+            Fields.CONTROL_LEADER.key(),
+            "a balance machine in the rigid frame needs exactly one board set as leader; $why",
+        )
     }
 
     /**

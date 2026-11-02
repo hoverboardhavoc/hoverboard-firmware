@@ -135,6 +135,9 @@
       "device": {
         "name": "Rover master"
       },
+      "control": {
+        "leader": true
+      },
       "battery_sense": {
         "pin": {
           "port": "A",

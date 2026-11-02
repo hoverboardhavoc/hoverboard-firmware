@@ -9,6 +9,10 @@
 //! chip. The value checks need no chip: the arm row and the calibration against the store's range
 //! table (`store::RANGES`), and the IMU frame against `imu::Config::frame_error`.
 //!
+//! One check looks at the machine rather than at one board: [`check_leader`], the rigid frame's
+//! leader (`specs/rigid-leader.md` section 6.1), on every motor controller as the write would leave
+//! it, run only by a write that changes `machine.mode`, `machine.frame` or `control.leader`.
+//!
 //! `protocol-kotlin` ports the same checks for the app. The two are held together by the shared
 //! check cases (`shared/config-checks/`), which this module's tests and the Kotlin tests both run:
 //! every [`Check`] has a passing and a refused case there.
@@ -53,11 +57,13 @@ pub enum Check {
     Range,
     /// The IMU axis signs and roles form a proper rotation.
     Frame,
+    /// A balance machine in the rigid frame has exactly one board set as leader.
+    Leader,
 }
 
 impl Check {
     /// Every check.
-    pub const ALL: [Check; 14] = [
+    pub const ALL: [Check; 15] = [
         Check::PinExists,
         Check::Swd,
         Check::PinTwice,
@@ -72,6 +78,7 @@ impl Check {
         Check::DeadTime,
         Check::Range,
         Check::Frame,
+        Check::Leader,
     ];
 
     /// The id the shared cases use.
@@ -91,6 +98,7 @@ impl Check {
             Check::DeadTime => "dead_time",
             Check::Range => "range",
             Check::Frame => "frame",
+            Check::Leader => "leader",
         }
     }
 }
@@ -556,6 +564,57 @@ pub fn check_values(state: &State) -> Vec<Refusal> {
         });
     }
     out
+}
+
+/// The keys whose write can change [`check_leader`]'s verdict: `machine.mode`, `machine.frame` and
+/// `control.leader`. No other write runs it, so a machine staged before the field existed does not
+/// block unrelated writes.
+pub const LEADER_KEYS: [Key; 3] = [
+    store::CONTROL_MODE.key(),
+    store::CONTROL_FRAME.key(),
+    store::CONTROL_LEADER.key(),
+];
+
+/// Whether writing `key` runs the leader check.
+pub fn changes_leader(key: Key) -> bool {
+    LEADER_KEYS.contains(&key)
+}
+
+/// The leader check (`specs/rigid-leader.md` section 6.1) over every motor controller of the
+/// machine, each by its address and its stored values as the write would leave it: when any of
+/// them stores `machine.mode` balance and `machine.frame` rigid, exactly one stores
+/// `control.leader` set. Any other mode or frame passes, whatever the flags hold.
+pub fn check_leader(boards: &[(u8, &State)]) -> Option<Refusal> {
+    let is = |s: &State, key: Key, v: u8| byte_of(s, key).unwrap_or(0) == v;
+    let rigid_balance = boards
+        .iter()
+        .any(|(_, s)| is(s, store::CONTROL_MODE.key(), 1) && is(s, store::CONTROL_FRAME.key(), 1));
+    if !rigid_balance {
+        return None;
+    }
+    let set: Vec<u8> = boards
+        .iter()
+        .filter(|(_, s)| !is(s, store::CONTROL_LEADER.key(), 0))
+        .map(|(a, _)| *a)
+        .collect();
+    let why = match set.as_slice() {
+        [_] => return None,
+        [] => "none is set".to_string(),
+        many => {
+            let names: Vec<String> = many.iter().map(|a| format!("{a:#04x}")).collect();
+            let (last, rest) = names.split_last().expect("two or more");
+            let verb = if many.len() == 2 { "both" } else { "all" };
+            format!("{} and {last} are {verb} set", rest.join(", "))
+        }
+    };
+    Some(Refusal {
+        check: Check::Leader,
+        key: store::CONTROL_LEADER.key(),
+        msg: format!(
+            "{}: a balance machine in the rigid frame needs exactly one board set as leader; {why}",
+            path_of(store::CONTROL_LEADER.key())
+        ),
+    })
 }
 
 /// The first pin `entries` carry: its `af` form is checked against the chip whether or not the

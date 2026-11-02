@@ -17,7 +17,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoverboard.protocol.linkctl.CyclicState
-import com.hoverboard.remote.FramePair
 import com.hoverboard.remote.MachineArm
 import com.hoverboard.remote.R
 import com.hoverboard.remote.RiderWaiver
@@ -42,9 +41,6 @@ const val MACHINE_STATUS_TAG = "machine_status"
 
 /** Test tag on the section's drive line. */
 const val STATUS_DRIVE_TAG = "status_drive"
-
-/** Test tag on the line that explains a rigid pair whose boards are not leading yet. */
-const val RIGID_NOT_LEADING_TAG = "rigid_not_leading"
 
 /** Test tag on the state line of the motor controller at [address]. */
 fun statusBoardTag(address: Int): String = "status_board_${boardHex(address)}"
@@ -75,12 +71,6 @@ fun MachineStatusSection(
         ) {
             DriveLine(state)
             MachineLines(state)
-            if (rigidIsConfiguredButNotRunning(state)) {
-                CautionText(
-                    stringResource(R.string.drive_mode_rigid_not_leading),
-                    modifier = Modifier.testTag(RIGID_NOT_LEADING_TAG),
-                )
-            }
             for (node in state.motorControllers) BoardRow(state, node.address, nodeLabel(node))
             CurrentSection(state.motorControllers.map { nodeLabel(it) to state.currentOf(it.address) })
             if (showSimulateRider) SimulateRiderRow(on = state.simulateRider, onChange = onSimulateRider)
@@ -149,18 +139,6 @@ private fun MachineLines(state: UiState) {
 
 private fun frameName(rigid: Boolean): Int =
     if (rigid) R.string.setup_choice_frame_rigid else R.string.setup_choice_frame_pivoting
-
-/**
- * Whether the machine is stored as one rigid machine and yet no board is leading one: the frame was
- * set under Machine, so the owner is expecting the mode, and the boards are still resolving to
- * something else, which on this firmware means the control mode is not balance or the frame has not
- * been armed in yet. An ordinary pivoting machine reaches none of this and is told nothing, which is
- * why the test is the stored frame rather than the absent leader.
- */
-private fun rigidIsConfiguredButNotRunning(state: UiState): Boolean {
-    val frame = state.machine.frame
-    return frame is FramePair.Agree && frame.rigid && state.leader == null
-}
 
 /**
  * One motor controller's row: its label and the state word its own frames give, then what its
