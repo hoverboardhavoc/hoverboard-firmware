@@ -1651,7 +1651,8 @@ mod firmware {
 
     /// Bring the IMU up on its stored bus (`specs/config-read-once.md` section 5): the I2C
     /// instance and the two pins with their alternate functions, as stored, and on the GD32F10x the
-    /// I2C's stored remap. The part is detected by its `WHO_AM_I` (`specs/decision-imu-detect.md`).
+    /// I2C's stored remap, when `imu.model` is non-zero (`layout::ImuBus`); the probe checks the
+    /// model's `WHO_AM_I`, and a model index the imu crate does not know is recorded `NotUp`.
     ///
     /// The frame installed here is the reference one with the stored gyro bias; the arm-row
     /// function installs the stored signs and roles right after, as it does at every arm.
@@ -1674,6 +1675,10 @@ mod firmware {
             return (None, None);
         };
         let scl_id = store::IMU_SCL_PIN.id();
+        let Some(model) = imu::model_from_index(b.model) else {
+            status.record(store::IMU_MODEL.id(), 0, Reason::NotUp, 0);
+            return (None, None);
+        };
         let instance = i2c_label(b.i2c);
         // The GD32F10x routes the I2C by its AFIO remap, the stored one.
         #[cfg(feature = "gd32f103c8")]
@@ -1700,7 +1705,7 @@ mod firmware {
                 return (None, None);
             }
         };
-        let mut dev = imu::Imu::new(cfg);
+        let mut dev = imu::Imu::new(model, cfg);
         // Probe and init at most twice, with a bus clear between (`specs/imu-probe-retry.md`): a
         // warm reset taken while the IMU drove SDA can fail the first probe and no later one.
         let attempts = imu_attempts::run(
@@ -2215,9 +2220,9 @@ mod firmware {
         //    (imu_configured in CTRL_OBS, read against imu_staged: the flags byte's b0 and b6, and
         //    the status record).
         let (imu_bus, imu_dev) = bring_up_imu(&chip, store, layout.imu, status);
-        // Whether the store asks for an IMU (`imu.i2c` and both pins stored): published as
+        // Whether the store asks for an IMU (`imu.model` non-zero, the switch): published as
         // `CTRL_OBS` b6 so a bench read tells "never asked" from "asked and nothing came up".
-        let imu_staged = layout.imu.is_some();
+        let imu_staged = layout.imu_model != 0;
 
         // The input pins (button + pads), each stored on its own, read together through one
         // branch-free InputGroup; an absent line samples as idle through the per-line mask.

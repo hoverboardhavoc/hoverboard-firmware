@@ -113,9 +113,16 @@ enum class Periph(val label: String) {
 
 /**
  * A function's keys: its pins with their roles, and for a peripheral group its instance key and
- * remap key. Complete when every pin and the instance are stored, absent when none is.
+ * remap key. Complete when every pin and the instance are stored, absent when none is. A group
+ * with a [switch] (the IMU's `imu.model`) is all or none with the switch: off (0 or not stored),
+ * its pins and instance may be stored or not.
  */
-class Group(val pins: List<Pair<PinSlot, Role>>, val instance: Pair<Key, Periph>? = null, val remap: Key? = null)
+class Group(
+    val pins: List<Pair<PinSlot, Role>>,
+    val instance: Pair<Key, Periph>? = null,
+    val remap: Key? = null,
+    val switch: Key? = null,
+)
 
 /** One pin field at one index: its key and its registered field. */
 data class PinSlot(val def: FieldDef, val index: Int) {
@@ -145,6 +152,7 @@ object Checks {
                 ),
                 Fields.IMU_I2C.key() to Periph.I2C,
                 Fields.IMU_REMAP.key(),
+                Fields.IMU_MODEL.key(),
             ),
         )
         for (i in 0 until Fields.LINKS) {
@@ -271,7 +279,11 @@ object Checks {
             val instance = g.instance?.let { (k, p) -> Triple(k, p, byteOf(state, k)) }
             val all = set.all { it } && (instance == null || instance.third != null)
             val none = set.none { it } && (instance == null || instance.third == null)
-            if (none) continue
+            // A switched group: on, it is all or none with its switch, so it needs every key; off,
+            // its keys may be stored or not, and a whole bus is still routed below.
+            val on = g.switch?.let { (byteOf(state, it) ?: 0) != 0 }
+            if (on == false && !all) continue
+            if (none && on != true) continue
             if (!all) {
                 val missing = g.pins.zip(set).firstOrNull { !it.second }?.first?.first?.key
                     ?: checkNotNull(instance).first
@@ -409,13 +421,15 @@ object Checks {
     }
 
     /**
-     * Whether writing [key] changes what the pin checks see: a pin, instance, remap or dead-time
-     * key (`checks::needs_chip`). Such a write is refused while the board's chip is not known.
+     * Whether writing [key] changes what the pin checks see: a pin, instance, remap, dead-time or
+     * `imu.model` key (`checks::needs_chip`). Such a write is refused while the board's chip is not
+     * known.
      */
     fun needsChip(key: Key): Boolean {
         val pin = Fields.typeOf(key.fieldId) in setOf(Type.Pin, Type.PinAf, Type.PinAdc)
         val extra = setOf(
             Fields.IMU_I2C.id,
+            Fields.IMU_MODEL.id,
             Fields.IMU_REMAP.id,
             Fields.LINK_USART.id,
             Fields.LINK_REMAP.id,

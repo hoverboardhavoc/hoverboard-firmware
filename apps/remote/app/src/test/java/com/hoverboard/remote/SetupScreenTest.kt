@@ -188,20 +188,20 @@ class SetupScreenTest {
     /**
      * 3.6a's second half, which was wrong at the bench on 2026-10-10: the commutation method is in
      * the arm-time value row, so its row says the next arm and never a restart, while a boot-read
-     * field (the dead time) says a restart, and its written mark is what reports that no restart has
+     * field (the IMU model) says a restart, and its written mark is what reports that no restart has
      * happened yet.
      */
     @Test
     fun aRowSaysWhenItsFieldTakesEffectAndTheMethodNeedsNoRestart() {
         val method = SetupFields.MOTOR_METHOD.key
-        val imu = SetupFields.MOTOR_DEAD_TIME.key
+        val imu = SetupFields.IMU_MODEL.key
         show(
             setupState(
                 board = 0x01,
                 values = stored + (method to Value.U8(2)),
                 writes = mapOf(
                     method to FieldWrite(Value.U8(2), WriteState.Written),
-                    imu to FieldWrite(Value.U8(28), WriteState.Written),
+                    imu to FieldWrite(Value.U8(1), WriteState.Written),
                 ),
             ),
         )

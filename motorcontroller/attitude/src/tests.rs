@@ -1226,7 +1226,7 @@ fn the_one_input_where_the_hoist_is_not_bit_exact() {
 fn settled_through_imu(cfg: imu::Config, up_chip_axis: usize) -> (f64, f64) {
     let mut buf = [0u8; imu::BURST_LEN];
     buf[2 * up_chip_axis..2 * up_chip_axis + 2].copy_from_slice(&8192i16.to_be_bytes());
-    let mut dev = imu::Imu::new(cfg);
+    let mut dev = imu::Imu::new(imu::MPU6050, cfg);
     let mut m = Mahony::new(Config::default());
     let mut out = Output::default();
     for _ in 0..3000 {

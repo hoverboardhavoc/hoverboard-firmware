@@ -9,9 +9,7 @@
 //! bias-corrected raw words the attitude filter (`motorcontroller/attitude`) consumes in the same tick.
 //!
 //! Every numeric constant is preserved exactly from the recovered stock behavioral contract (the
-//! spec's source 1). The part is detected, not configured (`specs/decision-imu-detect.md`): the
-//! probe accepts any `WHO_AM_I` on the list of parts that have run on the bench
-//! ([`KNOWN_WHO_AM_I`]).
+//! spec's source 1); which IMU model is fitted is a [`Model`] descriptor (the spec's model table).
 //!
 //! Transport: the driver is generic over the `embedded-hal` 1.0 `i2c::I2c` trait per call, so it
 //! works with either hal's hardware-I2C peripheral (the silicon-proven default path) or a
@@ -48,16 +46,39 @@ const REG_PWR_MGMT_1: u8 = 0x6B;
 /// First data register of the 14-byte sensor block, ACCEL_XOUT_H (spec section 6.1).
 const REG_ACCEL_XOUT_H: u8 = 0x3B;
 
-/// Device identity register (`specs/decision-imu-detect.md`): [`Imu::probe`] reads it and accepts
-/// any value in [`KNOWN_WHO_AM_I`].
+/// Device identity register (spec "Models"): [`Imu::probe`] reads it and compares against the
+/// model's expected value.
 const REG_WHO_AM_I: u8 = 0x75;
 
-/// The `WHO_AM_I` values of the MPU-6050-class parts that have run on the bench: `0x68`, a genuine
-/// MPU-6050 (its own bus address), and `0x2E`, the clone on the bench and rover boards. They differ
-/// in nothing else this crate uses; the configuration sequence, data layout and scales are the
-/// MPU-6050's. A part with another value may lay its registers out differently, so the probe
-/// refuses it. Adding a part is one entry here, after it has run on the bench.
-pub const KNOWN_WHO_AM_I: [u8; 2] = [0x68, 0x2E];
+/// One supported IMU model (`specs/imu.md`, "Models"). A descriptor carries only what differs
+/// between supported models; everything the entries share (address, config sequence, burst layout,
+/// scales) is the MPU-6050-class contract in this crate, and a field is added here only when a
+/// supported model actually differs in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Model {
+    /// Expected readback of the WHO_AM_I register (`0x75`).
+    pub who_am_i: u8,
+}
+
+/// A genuine MPU-6050 (WHO_AM_I reads its own bus address, `0x68`).
+pub const MPU6050: Model = Model { who_am_i: 0x68 };
+
+/// The bench F130's MPU-6050 clone: standard register map and address, but WHO_AM_I reads `0x2E`
+/// (silicon-observed 2026-06-18, hardware I2C0 PB6/PB7). Config sequence and burst layout are
+/// assumed MPU-6050-standard until the bench confirms (`specs/silicon-queue.md`).
+pub const CLONE_2E: Model = Model { who_am_i: 0x2E };
+
+/// The registered `imu.model` index lookup (`specs/imu.md`, the field table: the numbering is
+/// owned by this crate so the registry field stays a plain scalar): `0` = no IMU fitted,
+/// `1` = [`MPU6050`], `2` = [`CLONE_2E`]; anything else is unknown (`None`, the caller's
+/// fail-soft). First consumer: the firmware's plan-gated IMU bring-up (`specs/integration.md`).
+pub fn model_from_index(index: u8) -> Option<Model> {
+    match index {
+        1 => Some(MPU6050),
+        2 => Some(CLONE_2E),
+        _ => None,
+    }
+}
 
 /// Length of the cyclic burst read (spec section 6.1).
 pub const BURST_LEN: usize = 14;
@@ -398,9 +419,9 @@ impl Sample {
 pub enum Error<E> {
     /// A transaction failed on the bus. Wraps the underlying `embedded-hal` I2C error.
     Bus(E),
-    /// [`Imu::probe`]: the WHO_AM_I readback is not in [`KNOWN_WHO_AM_I`] (a part this crate does
-    /// not know must fail loud, never be read with the MPU-6050 layout).
-    Identity { got: u8 },
+    /// [`Imu::probe`]: the WHO_AM_I readback does not match the configured [`Model`] (a mis-set
+    /// model must fail loud, never silently mis-scale).
+    Identity { expected: u8, got: u8 },
 }
 
 /// Reassemble a big-endian signed 16-bit word from two bytes (spec section 6.1).
@@ -417,9 +438,10 @@ fn sign_clamp(sign: i32, raw: i16) -> i16 {
 }
 
 /// MPU-6050-class IMU front-end. Generic over the `embedded-hal` 1.0 I2C bus per call; holds the
-/// per-board calibration config, the still-detection state, and the
+/// configured [`Model`], the per-board calibration config, the still-detection state, and the
 /// one-tick corrected-sample history.
 pub struct Imu {
+    model: Model,
     cfg: Config,
     /// The body-order permutation `cfg.roles` selects (`order[i]` = the chip axis that becomes body
     /// axis `i`), resolved once when the config is installed rather than per sample.
@@ -438,10 +460,11 @@ pub struct Imu {
 }
 
 impl Imu {
-    /// Build the front-end with a per-board calibration config (sign map + gyro bias). The part is
-    /// the probe's to detect ([`KNOWN_WHO_AM_I`]).
-    pub fn new(cfg: Config) -> Self {
+    /// Build the front-end for a [`Model`] with a per-board calibration config (sign map + gyro
+    /// bias). Which model a board carries is board configuration, never runtime-guessed.
+    pub fn new(model: Model, cfg: Config) -> Self {
         Imu {
+            model,
             order: order_of(&cfg),
             cfg,
             gyro_scale: Fix::from_num(GYRO_SCALE),
@@ -450,20 +473,23 @@ impl Imu {
         }
     }
 
-    /// Identity check (`specs/decision-imu-detect.md`): read WHO_AM_I (`0x75`) and accept any
-    /// value in [`KNOWN_WHO_AM_I`], returning the one read. Separate from [`Imu::init`]; bring-up
-    /// order (probe-then-init vs init-blind) is the caller's policy.
-    pub fn probe<I, E>(&mut self, i2c: &mut I) -> Result<u8, Error<E>>
+    /// Identity check (spec "Models"): read WHO_AM_I (`0x75`) and compare against the model's
+    /// expected value. Separate from [`Imu::init`]; bring-up order (probe-then-init vs init-blind)
+    /// is the caller's policy.
+    pub fn probe<I, E>(&mut self, i2c: &mut I) -> Result<(), Error<E>>
     where
         I: I2c<Error = E>,
     {
         let mut got = [0u8; 1];
         i2c.write_read(ADDR, &[REG_WHO_AM_I], &mut got)
             .map_err(Error::Bus)?;
-        if !KNOWN_WHO_AM_I.contains(&got[0]) {
-            return Err(Error::Identity { got: got[0] });
+        if got[0] != self.model.who_am_i {
+            return Err(Error::Identity {
+                expected: self.model.who_am_i,
+                got: got[0],
+            });
         }
-        Ok(got[0])
+        Ok(())
     }
 
     /// Replace the calibration config (e.g. after loading the cal page at boot).

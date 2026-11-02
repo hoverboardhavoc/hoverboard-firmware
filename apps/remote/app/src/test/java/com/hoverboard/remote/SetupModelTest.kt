@@ -80,7 +80,7 @@ class SetupModelTest {
         rig.model.onShown()
         runCurrent()
         assertEquals(rideFacts + SetupFields.ALL.map { board to it.key }, rig.transport.reads)
-        assertEquals((SetupFields.ALL + SetupFields.IMU_SCL).associate { it.key to it.def.default }, rig.state.values)
+        assertEquals(SetupFields.ALL.associate { it.key to it.def.default }, rig.state.values)
 
         rig.model.onHidden()
         rig.model.onShown()

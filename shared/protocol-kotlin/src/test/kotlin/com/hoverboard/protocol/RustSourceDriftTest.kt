@@ -1690,7 +1690,7 @@ class RustSourceDriftTest {
     /**
      * The byte vocabularies the Setup screen offers as choices, against the enums and lookup that
      * decode them on the board, and the clamp the firmware applies to the current limit. Exact sets:
-     * a new method or mode in the firmware fails here until the screen can offer it, and a
+     * a new method, mode or IMU model in the firmware fails here until the screen can offer it, and a
      * renumbered one fails before the screen writes the wrong byte.
      */
     @Test
@@ -1709,6 +1709,24 @@ class RustSourceDriftTest {
             discriminants(rust("motorcontroller/commutation/src/lib.rs"), "CommutationMethod"),
             "MOTOR_METHOD vocabulary drifted",
         )
+
+        // `pub fn model_from_index(index: u8) -> Option<Model> { match index { 1 => Some(MPU6050), ... } }`
+        val imu = rust("motorcontroller/imu/src/lib.rs")
+        val start = imu.indexOf("pub fn model_from_index(")
+        check(start >= 0) { "No `pub fn model_from_index(` found" }
+        val body = imu.substring(start, imu.indexOf("\n}", start))
+        val models = findAllClaiming(
+            body,
+            """^\s*([^=\s]+)\s*=>\s*Some\(\s*(\w+)\s*\)""",
+            ARM_LINE,
+            "model_from_index arms",
+        ).associate { it.groupValues[2] to literal(it.groupValues[2], it.groupValues[1], "IMU model index") }
+        assertEquals(
+            mapOf("MPU6050" to Fields.ImuModel.MPU6050, "CLONE_2E" to Fields.ImuModel.CLONE_2E),
+            models,
+            "IMU_MODEL vocabulary drifted",
+        )
+        assertTrue(Fields.ImuModel.NONE !in models.values, "index 0 must stay 'no IMU fitted'")
 
         // The staged limit's clamp is NOT mirrored, and this is where that is recorded. The
         // firmware bounds the limit in COUNTS at both ends, because the counts-per-amp scale is

@@ -1095,7 +1095,7 @@ mod dynamic {
         let mut buf = [0u8; imu::BURST_LEN];
         buf[0..2].copy_from_slice(&8192i16.to_be_bytes()); // +1 g on chip X
         buf[8..10].copy_from_slice(&105i16.to_be_bytes()); // a rate on chip X
-        let sample = imu::Imu::new(cfg).decode(&buf);
+        let sample = imu::Imu::new(imu::MPU6050, cfg).decode(&buf);
         assert_eq!(sample.accel_raw, [0, 0, 8192], "gravity on body Z");
         assert_eq!(
             sample.gyro_raw,

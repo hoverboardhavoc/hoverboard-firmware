@@ -312,6 +312,7 @@
     <string name="setup_field_align_offset">Align offset</string>
     <string name="setup_field_dead_time">Dead time (raw DTG)</string>
     <string name="setup_field_current_limit">Current limit (mA)</string>
+    <string name="setup_field_imu_model">IMU model</string>
     <string name="setup_field_control_frame">Frame (both boards must match)</string>
     <string name="setup_field_control_side">Wheel side (this board)</string>
     <string name="setup_field_trim_pitch">Level trim, pitch (centidegrees)</string>
@@ -334,6 +335,9 @@
     <string name="setup_choice_foc">FOC</string>
     <string name="setup_choice_forward">Forward</string>
     <string name="setup_choice_reverse">Reverse</string>
+    <string name="setup_choice_imu_none">None fitted</string>
+    <string name="setup_choice_imu_mpu6050">MPU-6050</string>
+    <string name="setup_choice_imu_clone">MPU-6050 clone</string>
     <string name="setup_choice_frame_pivoting">Pivoting platforms</string>
     <string name="setup_choice_frame_rigid">Rigid body</string>
     <string name="setup_choice_side_left">Left wheel</string>
@@ -543,6 +547,7 @@
     <string name="layout_field_button">Power button</string>
     <string name="layout_field_imu_scl">IMU SCL</string>
     <string name="layout_field_imu_sda">IMU SDA</string>
+    <string name="layout_field_imu_model">IMU model</string>
     <string name="layout_field_imu_i2c">IMU I2C instance</string>
     <string name="layout_field_hall_a">Hall A</string>
     <string name="layout_field_hall_b">Hall B</string>
@@ -559,7 +564,7 @@
     <string name="layout_field_phase_b">Phase B sense</string>
 
     <string name="layout_note_self_hold">Set from hoverboard-cli when the board is onboarded, not in this app. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
-    <string name="layout_note_imu">Both pins and the I2C instance, or none, and the two pins that instance\'s clock and data. Apply refuses anything else and names the field.</string>
+    <string name="layout_note_imu">With a model set: both pins and the I2C instance, and the two pins that instance\'s clock and data. With None fitted the IMU stays off and the pins may stay stored. Apply refuses anything else and names the field.</string>
     <string name="layout_note_gates">All six gates, the gate timer and a dead time at or above the floor, or none, and the six have to be that timer\'s complementary set. Apply refuses anything else and names the field.</string>
     <string name="layout_note_halls">All three halls, or none.</string>
     <string name="layout_note_phase">Phase-current sense is fitted exactly when both pins are set, each with its pin\'s ADC channel.</string>
@@ -572,6 +577,9 @@
     <string name="layout_set">Set</string>
     <string name="layout_row_part_unknown">No pin can be picked: the board\'s part is not known.</string>
     <string name="layout_no_candidates">No pin on this part is free.</string>
+    <string name="layout_choice_imu_none">None fitted</string>
+    <string name="layout_choice_imu_mpu6050">MPU-6050</string>
+    <string name="layout_choice_imu_clone">MPU-6050 clone</string>
 
     <string name="layout_notice_armed">The board is armed. A layout is written to flash, which it refuses while armed.</string>
     <string name="layout_notice_not_attached">No board is attached, so nothing was sent.</string>
@@ -751,6 +759,7 @@
     <!-- %1$d is the HAL's error code. -->
     <string name="status_reason_not_up">did not come up (HAL error %1$d)</string>
     <string name="status_reason_no_answer">did not answer its probe</string>
+    <string name="status_reason_unknown_model">imu.model names no model the firmware knows</string>
     <!-- %1$d is the reason byte, %2$d the detail byte. -->
     <string name="status_reason_unknown">reason %1$d, detail %2$d</string>
 </resources>

@@ -106,7 +106,7 @@ val FieldDef.fleetPin: Pair<Int, Int>?
 /**
  * The registered store fields (`shared/store/src/field.rs`, `REGISTRY`), plus the value vocabularies the
  * firmware gives the byte-valued ones. The ids sit in the blocks of `specs/machine-settings.md`
- * section 3: node `0x01..=0x1C`, machine `0x20..=0x2B`, wheel `0x40..=0x56`.
+ * section 3: node `0x01..=0x1D`, machine `0x20..=0x2B`, wheel `0x40..=0x56`.
  *
  * Every registered field is here but the store-test fields. The live tune lane's keys, ranges and
  * ramp are in [Gains].
@@ -246,13 +246,14 @@ object Fields {
 
     /**
      * The IMU bus pins; no safe fleet default exists, so both are absent until stored. The IMU is
-     * fitted when both pins and [IMU_I2C] are stored (`shared/store/src/field.rs, IMU_I2C`).
+     * brought up when [IMU_MODEL] is non-zero and both pins and [IMU_I2C] are stored
+     * (`shared/store/src/field.rs, IMU_MODEL`).
      */
     val IMU_SCL_PIN = pin(0x11, Type.PinAf)
     val IMU_SDA_PIN = pin(0x12, Type.PinAf)
 
     /** The IMU bus's I2C instance, the HAL's label number (`specs/config-read-once.md` section 3). */
-    val IMU_I2C = FieldDef(0x13, Type.U8, Value.U8(0), Effect.BOOT)
+    val IMU_I2C = FieldDef(0x1D, Type.U8, Value.U8(0), Effect.BOOT)
 
     /** The IMU bus's AFIO remap on the GD32F10x, `0` = the I2C's default pins. */
     val IMU_REMAP = FieldDef(0x1A, Type.U8, Value.U8(0), Effect.BOOT)
@@ -318,6 +319,9 @@ object Fields {
      * foot on. No fleet board is known to differ, so a board with no record behaves as before.
      */
     val BOARD_INPUT_POLARITY = FieldDef(0x19, Type.U8, Value.U8(0b110), Effect.BOOT)
+
+    /** The IMU model index ([ImuModel]), the switch that brings an IMU up. */
+    val IMU_MODEL = FieldDef(0x13, Type.U8, Value.U8(0), Effect.BOOT)
 
     /** Per-axis zero-rate gyro bias, raw counts, indices 0/1/2 = x/y/z. */
     val IMU_GYRO_BIAS = IndexedFieldDef(0x14, Type.I32, List(3) { Value.I32(0) }, Effect.BOOT)
@@ -526,6 +530,7 @@ object Fields {
         "MOTOR_PHASE_A" to MOTOR_PHASE_A,
         "MOTOR_PHASE_B" to MOTOR_PHASE_B,
         "IMU_I2C" to IMU_I2C,
+        "IMU_MODEL" to IMU_MODEL,
         "IMU_REMAP" to IMU_REMAP,
         "MOTOR_GATE_TIMER" to MOTOR_GATE_TIMER,
         "MOTOR_GATE_REMAP" to MOTOR_GATE_REMAP,
@@ -744,5 +749,12 @@ object Fields {
         const val SIX_STEP = 0
         const val SINE = 1
         const val FOC = 2
+    }
+
+    /** [IMU_MODEL]'s vocabulary (`imu::model_from_index`): 0 = no IMU fitted. */
+    object ImuModel {
+        const val NONE = 0
+        const val MPU6050 = 1
+        const val CLONE_2E = 2
     }
 }

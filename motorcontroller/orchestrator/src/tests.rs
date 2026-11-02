@@ -3675,7 +3675,7 @@ fn sample_with_gy_counts(gy: i16) -> imu::Sample {
         gyro_bias: [0; 3],
         roles: imu::DEFAULT_ROLES,
     };
-    imu::Imu::new(cfg).decode(&buf)
+    imu::Imu::new(imu::MPU6050, cfg).decode(&buf)
 }
 
 #[test]

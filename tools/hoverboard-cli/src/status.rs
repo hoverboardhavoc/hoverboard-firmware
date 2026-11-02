@@ -16,7 +16,7 @@ fn function(e: &Entry) -> String {
     match id {
         _ if id == store::LINK_TX.id() => format!("links[{m}]"),
         _ if id == store::MOTOR_GATE_HI_A.id() => format!("motors[{m}] gate"),
-        _ if id == store::IMU_SCL_PIN.id() => "imu".into(),
+        _ if id == store::IMU_SCL_PIN.id() || id == store::IMU_MODEL.id() => "imu".into(),
         _ => path_of(Key {
             field_id: id,
             index: m,
@@ -30,6 +30,9 @@ fn reason(e: &Entry) -> String {
     match Reason::from_u8(e.reason) {
         Some(Reason::NotUp) if e.detail == 0 && e.field == store::IMU_SCL_PIN.id() => {
             "the IMU did not answer its probe".into()
+        }
+        Some(Reason::NotUp) if e.field == store::IMU_MODEL.id() => {
+            "imu.model names no model the firmware knows".into()
         }
         Some(Reason::NotUp) if e.detail == 0 => "did not come up".into(),
         Some(Reason::NotUp) => format!("did not come up (HAL error {})", e.detail),
@@ -96,6 +99,10 @@ mod tests {
         assert_eq!(
             line(store::IMU_SCL_PIN.id(), 0, 0),
             "rover-left: imu: the IMU did not answer its probe"
+        );
+        assert_eq!(
+            line(store::IMU_MODEL.id(), 0, 0),
+            "rover-left: imu: imu.model names no model the firmware knows"
         );
         assert_eq!(
             line(store::MOTOR_GATE_HI_A.id(), 0, 0),

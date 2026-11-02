@@ -46,15 +46,6 @@
           13,
           -88
         ],
-        "axis_sign": [
-          -1,
-          -1,
-          1
-        ],
-        "axis_role": [
-          "x",
-          "z"
-        ],
         "i2c": 0
       },
       "links": [
@@ -175,7 +166,8 @@
           "x",
           "z"
         ],
-        "i2c": 0
+        "i2c": 0,
+        "model": 2
       },
       "attitude": {
         "level_trim": [

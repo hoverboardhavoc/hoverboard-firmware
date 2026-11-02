@@ -53,9 +53,12 @@ pub struct Link {
     pub remap: u8,
 }
 
-/// The IMU bus, present when its two pins and its I2C instance are stored.
+/// The IMU, present when `imu.model` is non-zero and the bus's two pins and its I2C instance are
+/// stored: `imu.model` is the switch, so a board can keep its IMU pins with the IMU off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImuBus {
+    /// The stored `imu.model`, non-zero.
+    pub model: u8,
     /// The clock, with its alternate function.
     pub scl: Pin3,
     /// The data, with its alternate function.
@@ -79,8 +82,10 @@ pub struct Layout {
     pub motor: Option<Motor>,
     /// The two links.
     pub links: [Option<Link>; store::LINKS as usize],
-    /// The IMU bus.
+    /// The IMU.
     pub imu: Option<ImuBus>,
+    /// The stored `imu.model` (0 when not stored): whether the store asks for an IMU at all.
+    pub imu_model: u8,
 }
 
 /// The slots of the pass: one per key it reads, in [`KEYS`] order.
@@ -101,7 +106,9 @@ const I2C: usize = 21;
 const IMU_REMAP: usize = 22;
 /// Link `i`'s TX, RX, USART and remap are at `LINK + 4 * i`.
 const LINK: usize = 23;
-const N: usize = LINK + 4 * store::LINKS as usize;
+/// `imu.model`, after the links.
+const IMU_MODEL: usize = LINK + 4 * store::LINKS as usize;
+const N: usize = IMU_MODEL + 1;
 
 /// The keys of the pass, slot by slot, and the type each must be stored as.
 const KEYS: [(Key, Type); N] = [
@@ -136,6 +143,7 @@ const KEYS: [(Key, Type); N] = [
     pin(store::LINK_RX.at(1)),
     (store::LINK_USART.at(1).key(), Type::U8),
     (store::LINK_REMAP.at(1).key(), Type::U8),
+    (store::IMU_MODEL.key(), Type::U8),
 ];
 
 /// [`KEYS`]' keys alone, the filter the pass takes.
@@ -214,8 +222,10 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
             remap: byte(at + 3).unwrap_or(0),
         })
     };
+    let imu_model = byte(IMU_MODEL).unwrap_or(0);
     let imu = (|| {
         Some(ImuBus {
+            model: Some(imu_model).filter(|m| *m != 0)?,
             scl: p3(SCL)?,
             sda: p3(SDA)?,
             i2c: byte(I2C)?,
@@ -231,6 +241,7 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
         motor,
         links: [link(0), link(1)],
         imu,
+        imu_model,
     }
 }
 
@@ -278,8 +289,8 @@ mod tests {
         let l = with(|_| {});
         assert_eq!(l.self_hold, Some([1, 12]));
         assert_eq!(
-            (l.battery, l.inputs, l.motor, l.links, l.imu),
-            (None, [None; 3], None, [None; 2], None)
+            (l.battery, l.inputs, l.motor, l.links, l.imu, l.imu_model),
+            (None, [None; 3], None, [None; 2], None, 0)
         );
     }
 
@@ -299,6 +310,7 @@ mod tests {
             set(s, store::IMU_SCL_PIN.key(), Value::PinAf([1, 10, 1]));
             set(s, store::IMU_SDA_PIN.key(), Value::PinAf([1, 11, 1]));
             s.set(store::IMU_I2C, 1).unwrap();
+            s.set(store::IMU_MODEL, 2).unwrap();
             set(s, store::BOARD_SELF_HOLD.key(), Value::Pin([2, 13]));
             set(s, store::BOARD_BATTERY_PIN.key(), Value::PinAdc([0, 4, 4]));
             set(s, store::PAD_B.key(), Value::Pin([2, 15]));
@@ -316,6 +328,7 @@ mod tests {
         assert_eq!(
             l.imu,
             Some(ImuBus {
+                model: 2,
                 scl: [1, 10, 1],
                 sda: [1, 11, 1],
                 i2c: 1,
@@ -345,6 +358,30 @@ mod tests {
             s.erase_value(store::MOTOR_PHASE_B.key()).unwrap();
         });
         assert_eq!(l.motor.unwrap().phase, None);
+    }
+
+    /// `imu.model` is the switch: the bus stored whole with no model is no IMU (the rover slave),
+    /// and a model with the bus incomplete is none either.
+    #[test]
+    fn the_imu_needs_its_model_and_its_whole_bus() {
+        let bus = |s: &mut Store<TestFlash>| {
+            set(s, store::IMU_SCL_PIN.key(), Value::PinAf([1, 6, 1]));
+            set(s, store::IMU_SDA_PIN.key(), Value::PinAf([1, 7, 1]));
+            s.set(store::IMU_I2C, 0).unwrap();
+        };
+        let l = with(bus);
+        assert_eq!((l.imu, l.imu_model), (None, 0));
+        let l = with(|s| {
+            bus(s);
+            s.set(store::IMU_MODEL, 2).unwrap();
+        });
+        assert_eq!(l.imu.map(|b| (b.model, b.i2c)), Some((2, 0)));
+        let l = with(|s| {
+            bus(s);
+            s.set(store::IMU_MODEL, 2).unwrap();
+            s.erase_value(store::IMU_I2C.key()).unwrap();
+        });
+        assert_eq!((l.imu, l.imu_model), (None, 2));
     }
 
     #[test]

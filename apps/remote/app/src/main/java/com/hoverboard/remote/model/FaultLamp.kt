@@ -141,11 +141,11 @@ enum class FaultLamp(
 
 /**
  * What the app knows about one motor controller that decides which lamps apply on it: its
- * address and whether it has an IMU fitted (its `imu.scl` stored), null while unread.
+ * address and its stored `imu.model`, null while unread.
  */
-data class LampFacts(val address: Int, val imu: Boolean?) {
+data class LampFacts(val address: Int, val imuModel: Int?) {
     /** Whether the board has an IMU fitted. Unread counts as fitted, so an unread fact never hides a lamp. */
-    val imuFitted: Boolean get() = imu != false
+    val imuFitted: Boolean get() = imuModel != 0
 }
 
 /**

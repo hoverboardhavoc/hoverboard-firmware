@@ -522,12 +522,16 @@ pub const LED_RED: PinField = PinField::new(0x0B, Type::Pin).or(1, 4);
 pub const PAD_A: PinField = PinField::new(0x0C, Type::Pin);
 pub const PAD_B: PinField = PinField::new(0x0D, Type::Pin);
 /// IMU bus pins (VARIANT function: no safe fleet default; absent until configured). The IMU is
-/// fitted when both pins and [`IMU_I2C`] are stored (`specs/decision-imu-detect.md`); the part is
-/// detected by its `WHO_AM_I`.
+/// brought up when [`IMU_MODEL`] is non-zero and both pins and [`IMU_I2C`] are stored.
 pub const IMU_SCL_PIN: PinField = PinField::new(0x11, Type::PinAf);
 pub const IMU_SDA_PIN: PinField = PinField::new(0x12, Type::PinAf);
+/// The IMU model index (`specs/imu.md`: 0 = no IMU, else the imu crate's model index). The switch
+/// that brings an IMU up: the boot brings the bus up only when this is non-zero and [`IMU_I2C`] and
+/// both pins are stored, so a board can keep its IMU pins with the IMU off (the rover slave, which
+/// must not lead, `specs/rover-one-imu.md`).
+pub const IMU_MODEL: Field<u8> = Field::new(0x13, 0);
 /// The IMU bus's I2C instance (`specs/config-read-once.md` section 3), the HAL's label number.
-pub const IMU_I2C: Field<u8> = Field::new(0x13, 0);
+pub const IMU_I2C: Field<u8> = Field::new(0x1D, 0);
 /// The IMU bus's AFIO remap on the GD32F10x, `0` = the I2C's default pins; not part of the group.
 pub const IMU_REMAP: Field<u8> = Field::new(0x1A, 0);
 /// Hall inputs, per-motor via `Key.index` (motor groups are CONFIGURED, never defaulted).
@@ -728,7 +732,7 @@ pub const MOTOR_ODOMETER: Field<u32> = Field::new(0x54, 0);
 /// reader cannot sanity-check from the result: a 20-pole-pair hub reads 25 percent long and still
 /// looks plausible. A wrong distance stated confidently is worse than no distance. 0 is not a
 /// motor, so it is an unambiguous sentinel, and it is the convention the field set already uses for
-/// a fact with no safe fleet value ([`IMU_AXIS_ROLE`]).
+/// a fact with no safe fleet value ([`IMU_MODEL`], [`IMU_AXIS_ROLE`]).
 ///
 /// **The value is a measurement.** Turn the wheel one full revolution, read the delta on this
 /// motor's [`MOTOR_ODOMETER`], and divide by six.
@@ -1043,7 +1047,7 @@ field_ids! {
     0x10, // LINK_RX
     0x11, // IMU_SCL_PIN
     0x12, // IMU_SDA_PIN
-    0x13, // IMU_I2C
+    0x13, // IMU_MODEL
     0x14, // IMU_GYRO_BIAS
     0x15, // IMU_AXIS_SIGN
     0x16, // IMU_AXIS_ROLE
@@ -1053,6 +1057,7 @@ field_ids! {
     0x1A, // IMU_REMAP
     0x1B, // LINK_USART
     0x1C, // LINK_REMAP
+    0x1D, // IMU_I2C
     0x20, // CONTROL_MODE
     0x21, // CONTROL_FRAME
     0x22, // CONTROL_RIDER_REQUIRED
@@ -1110,7 +1115,7 @@ field_ids! {
     0x10, // LINK_RX
     0x11, // IMU_SCL_PIN
     0x12, // IMU_SDA_PIN
-    0x13, // IMU_I2C
+    0x13, // IMU_MODEL
     0x14, // IMU_GYRO_BIAS
     0x15, // IMU_AXIS_SIGN
     0x16, // IMU_AXIS_ROLE
@@ -1120,6 +1125,7 @@ field_ids! {
     0x1A, // IMU_REMAP
     0x1B, // LINK_USART
     0x1C, // LINK_REMAP
+    0x1D, // IMU_I2C
     0x20, // CONTROL_MODE
     0x21, // CONTROL_FRAME
     0x22, // CONTROL_RIDER_REQUIRED
@@ -1241,10 +1247,10 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 63 + 19;
+pub const REGISTRY_LEN: usize = 64 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 65 + 19;
+pub const REGISTRY_LEN: usize = 66 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1410,7 +1416,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     LINK_RX.at(1).entry(Boot),
     IMU_SCL_PIN.entry(Boot),
     IMU_SDA_PIN.entry(Boot),
-    IMU_I2C.entry(Boot),
+    IMU_MODEL.entry(Boot),
     IMU_GYRO_BIAS.at(0).entry(Boot),
     IMU_GYRO_BIAS.at(1).entry(Boot),
     IMU_GYRO_BIAS.at(2).entry(Boot),
@@ -1429,6 +1435,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     LINK_USART.at(1).entry(Boot),
     LINK_REMAP.at(0).entry(Boot),
     LINK_REMAP.at(1).entry(Boot),
+    IMU_I2C.entry(Boot),
     // Machine (`0x20..=0x3F`).
     CONTROL_MODE.entry(Arm),
     CONTROL_FRAME.entry(Arm),
@@ -1718,6 +1725,7 @@ pub mod names {
         FieldName::pin(IMU_SCL_PIN, "imu.scl", Index::Single),
         FieldName::pin(IMU_SDA_PIN, "imu.sda", Index::Single),
         FieldName::single(IMU_I2C, "imu.i2c", Kind::Int),
+        FieldName::single(IMU_MODEL, "imu.model", Kind::Int),
         FieldName::array(IMU_GYRO_BIAS, "imu.gyro_bias", Kind::Int),
         FieldName::array(IMU_AXIS_SIGN, "imu.axis_sign", Kind::Int),
         FieldName::array(IMU_AXIS_ROLE, "imu.axis_role", AXIS),
@@ -2154,7 +2162,7 @@ mod registry_tests {
             (0x10, LINK_RX.id()),
             (0x11, IMU_SCL_PIN.id()),
             (0x12, IMU_SDA_PIN.id()),
-            (0x13, IMU_I2C.id()),
+            (0x13, IMU_MODEL.id()),
             (0x14, IMU_GYRO_BIAS.id()),
             (0x15, IMU_AXIS_SIGN.id()),
             (0x16, IMU_AXIS_ROLE.id()),
@@ -2164,6 +2172,7 @@ mod registry_tests {
             (0x1A, IMU_REMAP.id()),
             (0x1B, LINK_USART.id()),
             (0x1C, LINK_REMAP.id()),
+            (0x1D, IMU_I2C.id()),
             (0x20, CONTROL_MODE.id()),
             (0x21, CONTROL_FRAME.id()),
             (0x22, CONTROL_RIDER_REQUIRED.id()),

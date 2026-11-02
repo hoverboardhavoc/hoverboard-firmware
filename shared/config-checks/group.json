@@ -67,10 +67,11 @@
     "refused": "links[0].tx"
   },
   {
-    "name": "an IMU bus without its second pin",
+    "name": "an IMU switched on without its second pin",
     "chip": "gd32f130c8",
     "board": {
       "imu": {
+        "model": 2,
         "i2c": 1,
         "scl": {
           "port": "B",
@@ -124,5 +125,71 @@
       ]
     },
     "refused": "motors[0].gate.hi_a"
+  },
+  {
+    "name": "the rover slave: the bus stored, imu.model not, the IMU off",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "i2c": 0,
+        "scl": {
+          "port": "B",
+          "pin": 6,
+          "af": 1
+        },
+        "sda": {
+          "port": "B",
+          "pin": 7,
+          "af": 1
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "imu.model 0 with one pin",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "model": 0,
+        "scl": {
+          "port": "B",
+          "pin": 6,
+          "af": 1
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "imu.model alone",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "model": 2
+      }
+    },
+    "refused": "imu.scl"
+  },
+  {
+    "name": "the IMU on, whole",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "model": 2,
+        "i2c": 1,
+        "scl": {
+          "port": "B",
+          "pin": 10,
+          "af": 1
+        },
+        "sda": {
+          "port": "B",
+          "pin": 11,
+          "af": 1
+        }
+      }
+    },
+    "refused": null
   }
 ]

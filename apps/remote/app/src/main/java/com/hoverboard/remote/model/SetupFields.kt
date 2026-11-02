@@ -10,7 +10,6 @@ import com.hoverboard.protocol.store.FieldDef
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
-import com.hoverboard.protocol.store.NO_PORT
 import com.hoverboard.protocol.store.Scope
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
@@ -341,13 +340,16 @@ object SetupFields {
         ),
         note = R.string.setup_note_control_side, advanced = true,
     )
-    /**
-     * `imu.scl`, read with the ride facts for one fact: whether the board has an IMU fitted. The IMU
-     * is fitted when its two pins and its I2C instance are stored (`shared/store/src/field.rs, IMU_I2C`),
-     * and the checks refuse a half-stored group, so a stored SCL pin is a fitted IMU; an unstored one
-     * reads back as the absent bytes ([imuFitted]). The layout editor edits it; Setup lists no row.
-     */
-    val IMU_SCL = SetupField(Fields.IMU_SCL_PIN, 0, R.string.layout_field_imu_scl, null, Editor.ReadOnly)
+    val IMU_MODEL = SetupField(
+        Fields.IMU_MODEL, 0, R.string.setup_field_imu_model, SetupGroup.IMU,
+        Editor.Chips(
+            listOf(
+                Choice(Fields.ImuModel.NONE, R.string.setup_choice_imu_none),
+                Choice(Fields.ImuModel.MPU6050, R.string.setup_choice_imu_mpu6050),
+                Choice(Fields.ImuModel.CLONE_2E, R.string.setup_choice_imu_clone),
+            ),
+        ),
+    )
 
     /** `ATTITUDE_LEVEL_TRIM` index 0 (pitch) and 1 (roll); the "set level" flow writes both. */
     val LEVEL_TRIM: List<SetupField> = listOf(
@@ -491,15 +493,14 @@ object SetupFields {
      * the control mode the drive mode is derived from (`specs/machine-settings.md` section 7), the
      * pack's cell count and chemistry, the rider requirement, and what the Ride screen's
      * instruments read beside the telemetry (`specs/remote-ui.md` 3.1): the low-battery floor the
-     * ring turns caution at, the IMU pin that says whether an IMU is fitted, which decides the
-     * attitude corner and the TILT and IMU lamps, and the current limit a phase bar is full at.
-     * Each is a fact a screen states before Setup has ever been opened. A machine field among them
-     * is read once and stands for every motor controller ([SetupField.machine]); the rest are read
-     * from each.
+     * ring turns caution at, the IMU model that decides the attitude corner and the TILT and IMU
+     * lamps, and the current limit a phase bar is full at. Each is a fact a screen states before
+     * Setup has ever been opened. A machine field among them is read once and stands for every
+     * motor controller ([SetupField.machine]); the rest are read from each.
      */
     val MOTOR_FACTS: List<SetupField> =
-        MACHINE + CONTROL_MODE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED + BATTERY_FLOOR +
-            IMU_SCL + MOTOR_CURRENT_LIMIT
+        MACHINE + CONTROL_MODE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED + BATTERY_FLOOR + IMU_MODEL +
+            MOTOR_CURRENT_LIMIT
 
 
     /**
@@ -524,9 +525,10 @@ object SetupFields {
         DEVICE_NAME, NODE_ADDRESS,
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_CHEMISTRY, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
         MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
+        IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
-    private val byKey: Map<Key, SetupField> = (ALL + DRIVE_BOUNDS + IMU_SCL).associateBy { it.key }
+    private val byKey: Map<Key, SetupField> = (ALL + DRIVE_BOUNDS).associateBy { it.key }
 
     /**
      * The row editing [key], or null when no screen has one. The Tune screen's [DRIVE_BOUNDS] are
@@ -551,8 +553,5 @@ object SetupFields {
 
     /** The largest axis role, chip Z (`1 = X`, `2 = Y`, `3 = Z`). */
     const val ROLE_MAX = 3L
-
-    /** Whether [scl], an `imu.scl` read, is a stored pin: an IMU is fitted ([IMU_SCL]). */
-    fun imuFitted(scl: Value): Boolean = (scl as? Value.PinAf)?.port?.let { it != NO_PORT } == true
 
 }

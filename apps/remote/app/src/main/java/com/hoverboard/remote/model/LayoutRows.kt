@@ -32,6 +32,9 @@ sealed interface LayoutEditor {
         fun accepts(v: Long): Boolean = v in range || v == unset
     }
 
+    /** One of a fixed set of byte values. */
+    data class Choices(val choices: List<Choice>) : LayoutEditor
+
     /** Shown, never edited here. */
     data object ReadOnly : LayoutEditor
 }
@@ -66,6 +69,12 @@ data class LayoutRow(
  * an operator can SEE what the board latches through, and it is not offered in the picker.
  */
 object LayoutRows {
+
+    private val imuModels = listOf(
+        Choice(Fields.ImuModel.NONE, R.string.layout_choice_imu_none),
+        Choice(Fields.ImuModel.MPU6050, R.string.layout_choice_imu_mpu6050),
+        Choice(Fields.ImuModel.CLONE_2E, R.string.layout_choice_imu_clone),
+    )
 
     /** Every row, in screen order. */
     val ALL: List<LayoutRow> = buildList {
@@ -109,6 +118,10 @@ object LayoutRows {
 
         row(Fields.IMU_SCL_PIN, null, R.string.layout_field_imu_scl, LayoutGroup.IMU, note = R.string.layout_note_imu)
         row(Fields.IMU_SDA_PIN, null, R.string.layout_field_imu_sda, LayoutGroup.IMU)
+        row(
+            Fields.IMU_MODEL, null, R.string.layout_field_imu_model, LayoutGroup.IMU,
+            editor = LayoutEditor.Choices(imuModels),
+        )
         row(
             Fields.IMU_I2C, null, R.string.layout_field_imu_i2c, LayoutGroup.IMU,
             editor = LayoutEditor.Number(0L..U8_MAX),

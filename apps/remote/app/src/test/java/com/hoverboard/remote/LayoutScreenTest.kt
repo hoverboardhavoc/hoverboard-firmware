@@ -263,6 +263,20 @@ class LayoutScreenTest {
     }
 
     @Test
+    fun aChoiceIsStagedFromItsOwnDialog() {
+        val actions = Recorder()
+        show(state(), actions = actions)
+        val key = slot(Fields.IMU_MODEL).key
+
+        compose.onNodeWithTag(layoutTabTag(LayoutGroup.IMU)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutOptionTag(key, Fields.ImuModel.CLONE_2E.toString())).performClick()
+
+        assertEquals(listOf(key to Value.U8(Fields.ImuModel.CLONE_2E)), actions.staged)
+        compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
+    }
+
+    @Test
     fun anInstanceIsTypedIntoAnEditDialog() {
         val actions = Recorder()
         show(state(), actions = actions)

@@ -99,6 +99,7 @@ class SetupFieldsTest {
         val restartNamed = listOf(
             SetupFields.DEVICE_NAME,
             SetupFields.MOTOR_DEAD_TIME,
+            SetupFields.IMU_MODEL,
         ).map { it.key } + (SetupFields.LEVEL_TRIM + SetupFields.GYRO_BIAS + SetupFields.VBATT_CAL).map { it.key }
         assertEquals(restartNamed.toSet(), boot)
 

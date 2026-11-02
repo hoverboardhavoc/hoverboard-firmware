@@ -351,7 +351,7 @@ class ControlScreenTest {
             sided(armed = true).copy(packCells = mapOf(0x01 to 10, 0x02 to 10)).reporting(0x01, board(battery = 3_050)),
             sided(armed = false).copy(
                 telemetryByBoard = mapOf(0x02 to board()),
-                imuFitted = mapOf(0x01 to false, 0x02 to false),
+                imuModel = mapOf(0x01 to 0, 0x02 to 0),
             ),
             sided(armed = false).copy(selfDisarmed = true, riderWaiver = RiderWaiver.WAIVED),
             sided(armed = false).copy(

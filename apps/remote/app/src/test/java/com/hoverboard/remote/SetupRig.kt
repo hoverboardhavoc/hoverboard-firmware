@@ -22,8 +22,6 @@ internal class SetupRig(scope: TestScope) {
         // they say nothing, which is not the same as a board that refuses the key.
         defaults[Fields.MOTOR_POLE_PAIRS.key()] = Fields.MOTOR_POLE_PAIRS.default
         defaults[Fields.WHEEL_DIAMETER_MM.key()] = Fields.WHEEL_DIAMETER_MM.default
-        // The ride fact that says whether an IMU is fitted: absent, as on a board that stores none.
-        defaults[SetupFields.IMU_SCL.key] = SetupFields.IMU_SCL.def.default
     }
     val model = SetupModel(transport, scope.backgroundScope) { armed }
     val state: SetupState get() = model.state.value

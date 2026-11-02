@@ -55,7 +55,7 @@ object Layout {
         for (def in listOf(
             Fields.BOARD_SELF_HOLD, Fields.BOARD_BATTERY_PIN, Fields.BOARD_BUZZER, Fields.LED_GREEN,
             Fields.LED_ORANGE, Fields.LED_RED, Fields.PAD_A, Fields.PAD_B, Fields.BOARD_BUTTON,
-            Fields.IMU_SCL_PIN, Fields.IMU_SDA_PIN, Fields.IMU_I2C, Fields.IMU_REMAP,
+            Fields.IMU_SCL_PIN, Fields.IMU_SDA_PIN, Fields.IMU_MODEL, Fields.IMU_I2C, Fields.IMU_REMAP,
         )) {
             single(def)
         }

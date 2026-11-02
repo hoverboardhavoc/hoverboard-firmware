@@ -207,7 +207,7 @@
   },
   {
     "id": 19,
-    "path": "imu.i2c",
+    "path": "imu.model",
     "type": "u8",
     "index": "single",
     "count": 1,
@@ -368,6 +368,17 @@
     "type": "u8",
     "index": "link",
     "count": 2,
+    "kind": "int",
+    "scope": "node",
+    "effect": "boot",
+    "board_owned": false
+  },
+  {
+    "id": 29,
+    "path": "imu.i2c",
+    "type": "u8",
+    "index": "single",
+    "count": 1,
     "kind": "int",
     "scope": "node",
     "effect": "boot",

@@ -811,7 +811,7 @@ impl OrchestratorState {
     /// stored values through [`dispatch::re_apply_control_values`] before the first tick and again
     /// at every arm (`specs/config-read-once.md` section 5), so the boot reads none of them here.
     /// `imu_configured` comes from the boot path (stored AND probe-ok); `imu_staged` is whether
-    /// the IMU group is stored (`imu.i2c` and both pins), published only, so the observation block
+    /// `imu.model` is non-zero (the switch that asks for an IMU), published only, so the observation block
     /// can tell an unstaged board from a failed bring-up; `attitude_cfg` is the per-board attitude
     /// calibration (the reference defaults on an uncalibrated board). `vbatt_cal` is the
     /// battery-sense calibration where the board stores `battery_sense.pin` (`None` = the board does

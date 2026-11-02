@@ -152,6 +152,10 @@ private fun Editor(
             Change(row, editable) { open = true }
             if (open) PinDialog(row, state, { open = false }, actions)
         }
+        is LayoutEditor.Choices -> {
+            Change(row, editable) { open = true }
+            if (open) ChoiceDialog(row, editor, { open = false }, actions)
+        }
         is LayoutEditor.Number -> {
             Change(row, editable) { open = true }
             if (open) NumberDialog(row, editor, (staged as? Value.U8)?.v, { open = false }, actions)

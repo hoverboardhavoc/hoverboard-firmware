@@ -76,6 +76,24 @@ internal fun PinDialog(row: LayoutRow, state: LayoutState, onClose: () -> Unit, 
     }
 }
 
+/** One of a fixed set of byte values: the IMU model. */
+@Composable
+internal fun ChoiceDialog(
+    row: LayoutRow,
+    editor: LayoutEditor.Choices,
+    onClose: () -> Unit,
+    actions: LayoutActions,
+) {
+    OptionDialog(row, onClose) {
+        for (choice in editor.choices) {
+            Option(layoutOptionTag(row.slot.key, choice.value.toString()), stringResource(choice.label)) {
+                actions.stage(row.slot, Value.U8(choice.value))
+                onClose()
+            }
+        }
+    }
+}
+
 /** The edit dialog: a `u8` such as the dead time or an instance, a number rather than a choice. */
 @Composable
 internal fun NumberDialog(

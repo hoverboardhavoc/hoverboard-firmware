@@ -380,6 +380,7 @@ class LayoutModelTest {
         rig.stage(Fields.IMU_SCL_PIN, af("PB6"))
         rig.stage(Fields.IMU_SDA_PIN, af("PB7"))
         rig.stage(Fields.IMU_I2C, Value.U8(0))
+        rig.stage(Fields.IMU_MODEL, Value.U8(Fields.ImuModel.CLONE_2E))
         for ((field, name) in listOf(
             Fields.MOTOR_HALL_A to "PC13", Fields.MOTOR_HALL_B to "PA1", Fields.MOTOR_HALL_C to "PC14",
         )) {

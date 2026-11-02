@@ -261,7 +261,7 @@ class BatteryCalibration(unittest.TestCase):
 class ImuBus(unittest.TestCase):
     def test_the_imu_fields_are_never_asserted(self):
         imu = [f for f in rp.FIELDS if f["key"].startswith("imu.")]
-        self.assertEqual({f["key"] for f in imu}, {"imu.scl", "imu.sda", "imu.i2c"})
+        self.assertEqual({f["key"] for f in imu}, {"imu.scl", "imu.sda", "imu.model"})
         for f in imu:
             self.assertEqual(f["kind"], "decision3", f["key"])
             self.assertNotIn("frm", f)
@@ -272,7 +272,7 @@ class ImuBus(unittest.TestCase):
         doc = json.load(open(PRESETS))
         for p in doc["presets"]:
             absent = {a["key"]: a["reason"] for a in p["absent"]}
-            for key in ("imu.scl", "imu.sda", "imu.i2c"):
+            for key in ("imu.scl", "imu.sda", "imu.model"):
                 self.assertIn(key, absent, p["id"])
                 self.assertIn("solderable", absent[key])
             self.assertFalse([f for f in p["fields"] if f["key"].startswith("imu.")], p["id"])

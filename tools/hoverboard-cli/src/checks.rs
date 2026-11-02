@@ -172,11 +172,14 @@ impl Periph {
 }
 
 /// A function's keys: its pins with their roles, and for a peripheral group its instance key and
-/// its remap key. Complete when every pin and the instance are stored, absent when none is.
+/// its remap key. Complete when every pin and the instance are stored, absent when none is. A group
+/// with a `switch` (the IMU's `imu.model`) is all or none with the switch: off (0 or not stored),
+/// its pins and instance may be stored or not.
 struct Group {
     pins: Vec<(PinField, Role)>,
     instance: Option<(Key, Periph)>,
     remap: Option<Key>,
+    switch: Option<Key>,
 }
 
 impl Group {
@@ -185,6 +188,7 @@ impl Group {
             pins: vec![(f, role)],
             instance: None,
             remap: None,
+            switch: None,
         }
     }
 }
@@ -208,6 +212,7 @@ fn groups() -> Vec<Group> {
             ],
             instance: Some((store::IMU_I2C.key(), Periph::I2c)),
             remap: Some(store::IMU_REMAP.key()),
+            switch: Some(store::IMU_MODEL.key()),
         },
     ];
     for i in 0..store::LINKS {
@@ -218,6 +223,7 @@ fn groups() -> Vec<Group> {
             ],
             instance: Some((store::LINK_USART.at(i).key(), Periph::Usart)),
             remap: Some(store::LINK_REMAP.at(i).key()),
+            switch: None,
         });
     }
     for m in 0..store::MOTORS {
@@ -229,6 +235,7 @@ fn groups() -> Vec<Group> {
             ],
             instance: None,
             remap: None,
+            switch: None,
         });
         g.push(Group {
             pins: vec![
@@ -241,6 +248,7 @@ fn groups() -> Vec<Group> {
             ],
             instance: Some((store::MOTOR_GATE_TIMER.at(m).key(), Periph::Timer)),
             remap: Some(store::MOTOR_GATE_REMAP.at(m).key()),
+            switch: None,
         });
         g.push(Group {
             pins: vec![
@@ -249,6 +257,7 @@ fn groups() -> Vec<Group> {
             ],
             instance: None,
             remap: None,
+            switch: None,
         });
     }
     g
@@ -344,7 +353,13 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
         let instance = g.instance.map(|(k, p)| (k, p, byte_of(state, k)));
         let all = set.iter().all(|s| *s) && instance.is_none_or(|(_, _, n)| n.is_some());
         let none = !set.iter().any(|s| *s) && instance.is_none_or(|(_, _, n)| n.is_none());
-        if none {
+        // A switched group: on, it is all or none with its switch, so it needs every key; off, its
+        // keys may be stored or not, and a whole bus is still routed below.
+        let on = g.switch.map(|k| byte_of(state, k).unwrap_or(0) != 0);
+        if on == Some(false) && !all {
+            continue;
+        }
+        if none && on != Some(true) {
             continue;
         }
         if !all {
@@ -543,12 +558,14 @@ pub fn check_values(state: &State) -> Vec<Refusal> {
     out
 }
 
-/// Whether writing `key` changes what the pin checks see: a pin, instance, remap or dead-time key.
+/// Whether writing `key` changes what the pin checks see: a pin, instance, remap, dead-time or
+/// `imu.model` key.
 pub fn needs_chip(key: Key) -> bool {
     let pin = crate::names::row_of(key)
         .is_some_and(|r| matches!(r.storage, Type::Pin | Type::PinAf | Type::PinAdc));
     let extra = [
         store::IMU_I2C.id(),
+        store::IMU_MODEL.id(),
         store::IMU_REMAP.id(),
         store::LINK_USART.id(),
         store::LINK_REMAP.id(),

@@ -76,6 +76,7 @@ object Names {
         pin(Fields.IMU_SCL_PIN, "imu.scl"),
         pin(Fields.IMU_SDA_PIN, "imu.sda"),
         single(Fields.IMU_I2C, "imu.i2c"),
+        single(Fields.IMU_MODEL, "imu.model"),
         array(Fields.IMU_GYRO_BIAS, "imu.gyro_bias"),
         array(Fields.IMU_AXIS_SIGN, "imu.axis_sign"),
         array(Fields.IMU_AXIS_ROLE, "imu.axis_role", Kind.ENUM, AXIS),

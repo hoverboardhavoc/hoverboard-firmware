@@ -58,7 +58,7 @@ private fun statusFunction(entry: BoardStatus.Entry): String = when (entry.field
     Fields.MOTOR_PHASE_A.id -> stringResource(R.string.status_fn_current, entry.index)
     Fields.LINK_TX.id -> stringResource(R.string.status_fn_link, entry.index)
     Fields.BOARD_BATTERY_PIN.id -> stringResource(R.string.status_fn_battery)
-    Fields.IMU_SCL_PIN.id -> stringResource(R.string.status_fn_imu)
+    Fields.IMU_SCL_PIN.id, Fields.IMU_MODEL.id -> stringResource(R.string.status_fn_imu)
     else -> Names.byId(entry.field)?.let { Names.pathOf(Key(entry.field, entry.index)) }
         ?: stringResource(R.string.status_fn_unknown, hex(entry.field), entry.index)
 }
@@ -66,7 +66,9 @@ private fun statusFunction(entry: BoardStatus.Entry): String = when (entry.field
 @Composable
 private fun statusReason(entry: BoardStatus.Entry): String = when (entry.reason) {
     BoardStatus.Reason.NOT_UP ->
-        if (entry.detail == 0) {
+        if (entry.field == Fields.IMU_MODEL.id) {
+            stringResource(R.string.status_reason_unknown_model)
+        } else if (entry.detail == 0) {
             stringResource(R.string.status_reason_no_answer)
         } else {
             stringResource(R.string.status_reason_not_up, entry.detail)
