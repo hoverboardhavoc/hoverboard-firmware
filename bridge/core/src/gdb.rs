@@ -5,7 +5,7 @@
 //! | GDB request | Here |
 //! | --- | --- |
 //! | target XML | [`TARGET_XML`]: the Cortex-M profile registers |
-//! | memory map | [`memory_map`]: flash in 1 KB blocks up to the store, RAM at `0x2000_0000` |
+//! | memory map | [`memory_map`]: flash in 1 KB blocks up to the part's store, RAM at `0x2000_0000` |
 //! | `g`, `G`, `p`, `P` | `DCRSR` / `DCRDR` with `S_REGRDY` polling ([`target::read_core_reg`]) |
 //! | `m`, `M`, `X` | memory access, which works while the core runs |
 //! | `c`, `s`, `vCont` | [`target::resume`], [`target::step`] |
@@ -66,7 +66,7 @@ use gdbstub::target::ext::monitor_cmd::{ConsoleOutput, MonitorCmd, MonitorCmdOps
 use gdbstub::target::{Target, TargetError as GdbError, TargetResult};
 use heapless::Deque;
 
-use crate::flash::{FLASH_BASE, PAGE, STORE_START};
+use crate::flash::{FLASH_BASE, PAGE};
 use crate::mailbox::MailboxPort;
 use crate::svc::{Platform, Service};
 use crate::swd::{Swd, SwdPins};
@@ -199,12 +199,12 @@ impl Arch for CortexM {
 }
 
 /// The memory map GDB's `load` works from (`specs/hoverboard-bridge.md`, "Debugging"): flash at
-/// [`FLASH_BASE`] in [`PAGE`] blocks, ending at the store's first page ([`STORE_START`]), so `load`
-/// arrives as flash erase and write requests and cannot address the store; RAM at `0x2000_0000`.
-/// With a map, GDB refuses any address outside it, so the RAM region runs to the end of the
-/// address space and the other gaps are RAM too (as OpenOCD's map does): the peripherals, the
-/// system block and the option bytes stay readable.
-pub fn memory_map(out: &mut heapless::String<512>) {
+/// [`FLASH_BASE`] in [`PAGE`] blocks, ending at the store's first page (`store_start`, the
+/// part's), so `load` arrives as flash erase and write requests and cannot address the store; RAM
+/// at `0x2000_0000`. With a map, GDB refuses any address outside it, so the RAM region runs to the
+/// end of the address space and the other gaps are RAM too (as OpenOCD's map does): the
+/// peripherals, the system block and the option bytes stay readable.
+pub fn memory_map(out: &mut heapless::String<512>, store_start: u32) {
     use core::fmt::Write;
     const RAM: u32 = 0x2000_0000;
     let _ = write!(
@@ -213,11 +213,11 @@ pub fn memory_map(out: &mut heapless::String<512>) {
          <memory type=\"ram\" start=\"0x0\" length=\"{FLASH_BASE:#x}\"/>\n\
          <memory type=\"flash\" start=\"{FLASH_BASE:#x}\" length=\"{:#x}\">\
          <property name=\"blocksize\">{PAGE:#x}</property></memory>\n\
-         <memory type=\"ram\" start=\"{STORE_START:#x}\" length=\"{:#x}\"/>\n\
+         <memory type=\"ram\" start=\"{store_start:#x}\" length=\"{:#x}\"/>\n\
          <memory type=\"ram\" start=\"{RAM:#x}\" length=\"{:#x}\"/>\n\
          </memory-map>",
-        STORE_START - FLASH_BASE,
-        RAM - STORE_START,
+        store_start - FLASH_BASE,
+        RAM - store_start,
         0u32.wrapping_sub(RAM),
     );
 }
@@ -278,6 +278,19 @@ pub struct Board<'b, 's, P: SwdPins, Pl: Platform> {
     masked: bool,
     /// A halt was seen that the session has not reported yet.
     stopped: bool,
+    /// The store's first byte on the part identified at the attach ([`session_store_start`]):
+    /// where the memory map's flash ends and the flash requests stop.
+    store_start: u32,
+}
+
+/// Where a session's flash ends (`specs/bridge-chip-support.md`, section 7): the store of the part
+/// identified at the attach, or, when the identify fails or the part is in no row, the lowest
+/// store of any row. The flash job checks the image against the part again when it starts.
+fn session_store_start<P: SwdPins>(swd: &mut Swd<P>) -> u32 {
+    target::identify(swd)
+        .ok()
+        .and_then(|id| crate::flash::row(&id).ok())
+        .map_or(crate::part::MIN_STORE_START, |p| p.store_start())
 }
 
 type Sm<'b, 's, P, Pl> = GdbStubStateMachine<'static, Board<'b, 's, P, Pl>, Conn>;
@@ -334,6 +347,7 @@ impl<'b, 's, P: SwdPins, Pl: Platform> Board<'b, 's, P, Pl> {
     /// Open a session: halt, count the comparators, clear them, enable the flash patch unit.
     fn attach(&mut self) {
         self.svc.gdb_status().connected = true;
+        self.store_start = session_store_start(self.port.swd());
         let halted = self.halt();
         if self.swd().is_ok() {
             let swd = self.port.swd();
@@ -485,8 +499,8 @@ impl<'b, 's, P: SwdPins, Pl: Platform> Board<'b, 's, P, Pl> {
 
     /// A flash request's range, as an offset into the image buffer; refused when it reaches the
     /// store's pages or lies outside flash.
-    fn image_range(addr: u32, len: u32) -> TargetResult<u32, Self> {
-        if addr < FLASH_BASE || addr.saturating_add(len) > STORE_START {
+    fn image_range(&self, addr: u32, len: u32) -> TargetResult<u32, Self> {
+        if addr < FLASH_BASE || addr.saturating_add(len) > self.store_start {
             return Err(GdbError::Errno(EIO));
         }
         Ok(addr - FLASH_BASE)
@@ -697,7 +711,7 @@ impl<P: SwdPins, Pl: Platform> MemoryMap for Board<'_, '_, P, Pl> {
         buf: &mut [u8],
     ) -> TargetResult<usize, Self> {
         let mut xml = heapless::String::new();
-        memory_map(&mut xml);
+        memory_map(&mut xml, self.store_start);
         let xml = xml.as_bytes();
         let start = (offset as usize).min(xml.len());
         let n = length.min(xml.len() - start).min(buf.len());
@@ -710,13 +724,13 @@ impl<P: SwdPins, Pl: Platform> MemoryMap for Board<'_, '_, P, Pl> {
 /// `vFlashDone` ([`Gdb`] starts the flash job when that packet arrives; the packet takes its result).
 impl<P: SwdPins, Pl: Platform> Flash for Board<'_, '_, P, Pl> {
     fn flash_erase(&mut self, addr: u32, len: u32) -> TargetResult<(), Self> {
-        let off = Self::image_range(addr, len)?;
+        let off = self.image_range(addr, len)?;
         let image = self.svc.gdb_image().map_err(|_| GdbError::Errno(EBUSY))?;
         image.erase(off, len).map_err(|_| GdbError::Errno(EIO))
     }
 
     fn flash_write(&mut self, addr: u32, data: &[u8]) -> TargetResult<(), Self> {
-        let off = Self::image_range(addr, data.len() as u32)?;
+        let off = self.image_range(addr, data.len() as u32)?;
         let image = self.svc.gdb_image().map_err(|_| GdbError::Errno(EBUSY))?;
         image.place(off, data).map_err(|_| GdbError::Errno(EIO))
     }
@@ -785,7 +799,8 @@ impl<P: SwdPins, Pl: Platform> MonitorCmd for Board<'_, '_, P, Pl> {
                     let family = match id.family {
                         espsvc::FAMILY_F10X => "GD32F10x",
                         espsvc::FAMILY_F1X0 => "GD32F1x0",
-                        _ => "unknown",
+                        espsvc::FAMILY_MM32SPIN05 => "MM32SPIN05",
+                        _ => "unsupported",
                     };
                     outputln!(out, "dpidr   {:#010x}", id.dpidr);
                     outputln!(out, "mcu id  {:#010x}", id.mcu_id);
@@ -891,6 +906,7 @@ impl<'b, 's, P: SwdPins, Pl: Platform> Gdb<'b, 's, P, Pl> {
                 stepping: false,
                 masked: false,
                 stopped: false,
+                store_start: crate::part::MIN_STORE_START,
             },
             sm: None,
             rx: Deque::new(),

@@ -5,7 +5,9 @@
 //! This module owns the layout (the job, the simulated board and the tests read it here; the loader
 //! source `loader/f1x.S` carries the two addresses it needs as literals, which a test checks) and
 //! the bridge's side of the protocol, over a [`MemPort`] so the emulator tests drive the real
-//! loader bytes with this same code.
+//! loader bytes with this same code. The ring's length and the stack top are the part's
+//! ([`Layout::of`], `specs/bridge-chip-support.md` section 5); the loader is ARMv6-M code, so the
+//! one binary runs on the Cortex-M0 and the Cortex-M3 rows.
 //!
 //! The protocol: the bridge writes image words into the ring and advances `wp` once per
 //! [`CHUNK`]; the loader programs halfwords from `rp`, publishes `rp` after each, and spins while
@@ -14,10 +16,11 @@
 //! halt; the loader leaves `FMC_STAT` in `r0` and the next flash address in `r2`. An error stops
 //! the loader at the failing halfword (`r2`) and sets `rp` to 0.
 
+use crate::part::{self, Part};
 use crate::swd::MemPort;
 use crate::target::{self, reg, PortError};
 
-/// The loader's Thumb code, assembled from `loader/f1x.S` (the command is at its top).
+/// The loader's ARMv6-M Thumb code, assembled from `loader/f1x.S` (the command is at its top).
 pub const CODE: &[u8] = include_bytes!("../../loader/f1x.bin");
 /// Where the code runs: the mailbox region, free while the board is halted for a flash.
 pub const BASE: u32 = 0x2000_0000;
@@ -27,20 +30,48 @@ pub const CODE_MAX: u32 = 128;
 pub const WP: u32 = BASE + CODE_MAX;
 /// The loader's read pointer into the ring; 0 after an error.
 pub const RP: u32 = WP + 4;
-/// The ring's first byte.
+/// The ring's first byte, on every row.
 pub const RING_START: u32 = 0x2000_0400;
-/// The ring's size.
-pub const RING_LEN: u32 = 4096;
-/// One past the ring's last byte.
-pub const RING_END: u32 = RING_START + RING_LEN;
 /// What the bridge writes between two advances of `wp`.
 pub const CHUNK: u32 = 1024;
-/// The loader's stack top: the top of the 8 KiB the smallest part has, so one loader runs on
-/// every part.
-pub const STACK_TOP: u32 = 0x2000_2000;
 
-const _: () = assert!(CODE.len() < CODE_MAX as usize);
-const _: () = assert!(RING_LEN.is_multiple_of(CHUNK) && RING_END <= STACK_TOP);
+/// A part's ring and stack (`specs/bridge-chip-support.md`, section 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layout {
+    /// The ring's length: 4 KiB on the 64 KiB rows, 2 KiB on the 4 KiB-SRAM rows.
+    pub ring_len: u32,
+    /// The loader's stack top: the end of the row's SRAM, capped at `0x2000_2000`.
+    pub stack_top: u32,
+}
+
+impl Layout {
+    /// `part`'s layout.
+    pub const fn of(part: &Part) -> Layout {
+        Layout {
+            ring_len: part.ring,
+            stack_top: part.stack_top(),
+        }
+    }
+
+    /// One past the ring's last byte.
+    pub const fn ring_end(self) -> u32 {
+        RING_START + self.ring_len
+    }
+}
+
+const _: () = assert!(CODE.len() <= CODE_MAX as usize);
+// Every row's ring holds whole chunks and ends below its stack, with the control block and the
+// code below the ring.
+const _: () = {
+    assert!(RP + 4 <= RING_START);
+    let mut i = 0;
+    while i < part::PARTS.len() {
+        let l = Layout::of(part::PARTS[i]);
+        assert!(l.ring_len.is_multiple_of(CHUNK) && l.ring_len >= 2 * CHUNK);
+        assert!(l.ring_end() <= l.stack_top);
+        i += 1;
+    }
+};
 
 /// Write the loader's code into SRAM. The core must be halted.
 pub fn load<M: MemPort>(m: &mut M) -> Result<(), M::Error> {
@@ -89,6 +120,7 @@ enum Phase {
 /// One loader run: `len` bytes programmed from flash address `addr`, ascending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Run {
+    layout: Layout,
     addr: u32,
     len: u32,
     sent: u32,
@@ -102,19 +134,25 @@ pub struct Run {
 impl Run {
     /// Start a run on a halted core with the loader's code in place: the control words, the
     /// register arguments (`r0` ring start, `r1` ring end, `r2` flash address, `r3` halfword
-    /// count), the stack, the entry point, then resume.
-    pub fn start<M: MemPort>(m: &mut M, addr: u32, len: u32) -> Result<Run, PortError<M::Error>> {
+    /// count), the stack, the entry point, then resume. The ring and stack are `layout`'s.
+    pub fn start<M: MemPort>(
+        m: &mut M,
+        layout: Layout,
+        addr: u32,
+        len: u32,
+    ) -> Result<Run, PortError<M::Error>> {
         m.write_word(WP, RING_START)?;
         m.write_word(RP, RING_START)?;
         target::write_core_reg(m, reg::R0, RING_START)?;
-        target::write_core_reg(m, reg::R1, RING_END)?;
+        target::write_core_reg(m, reg::R1, layout.ring_end())?;
         target::write_core_reg(m, reg::R2, addr)?;
         target::write_core_reg(m, reg::R3, len.div_ceil(2))?;
-        target::write_core_reg(m, reg::SP, STACK_TOP)?;
+        target::write_core_reg(m, reg::SP, layout.stack_top)?;
         target::write_core_reg(m, reg::PC, BASE | 1)?;
         target::write_core_reg(m, reg::XPSR, reg::XPSR_T)?;
         target::resume(m)?;
         Ok(Run {
+            layout,
             addr,
             len,
             sent: 0,
@@ -136,7 +174,8 @@ impl Run {
 
     /// Bytes in the ring the loader has not consumed, by the last `rp` read.
     fn used(&self) -> u32 {
-        (self.wp + RING_LEN - self.rp) % RING_LEN
+        let n = self.layout.ring_len;
+        (self.wp + n - self.rp) % n
     }
 
     /// Read `rp`. Returns whether it moved; an `rp` of 0 is the loader's error exit.
@@ -163,9 +202,10 @@ impl Run {
             Phase::Feed => {
                 let n = CHUNK.min(self.len - self.sent);
                 let adv = n.next_multiple_of(2);
-                if self.used() + adv >= RING_LEN {
+                let ring = self.layout.ring_len;
+                if self.used() + adv >= ring {
                     let moved = self.read_rp(m)?;
-                    if self.phase != Phase::Feed || self.used() + adv >= RING_LEN {
+                    if self.phase != Phase::Feed || self.used() + adv >= ring {
                         return Ok(if moved { Poll::Moved } else { Poll::Waiting });
                     }
                 }
@@ -184,7 +224,11 @@ impl Run {
                 }
                 m.write_words(self.wp, &words[..nw])?;
                 let wp = self.wp + adv;
-                self.wp = if wp == RING_END { RING_START } else { wp };
+                self.wp = if wp == self.layout.ring_end() {
+                    RING_START
+                } else {
+                    wp
+                };
                 m.write_word(WP, self.wp)?;
                 self.sent += n;
                 if self.sent == self.len {

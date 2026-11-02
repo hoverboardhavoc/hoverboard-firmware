@@ -12,10 +12,11 @@ use link::StreamFramer;
 use net::pdu::{Opcode, Pdu, NO_ADDRESS};
 use sha2::{Digest, Sha256};
 
-use crate::flash::{self, Finish, FlashError, FlashJob, FLASH_BASE, PAGE, STORE_START};
+use crate::flash::{self, Finish, FlashError, FlashJob, FLASH_BASE, PAGE};
 use crate::loader::{self, Poll};
 use crate::mailbox::MailboxPort;
 use crate::node::Node;
+use crate::part;
 use crate::router::{Port, Router, NOTIFY_MAX};
 use crate::sim::{
     board, Family, Firmware, Gd32, Inject, Machine, RamFlash, SimPins, SimPlatform, SIM_MAC,
@@ -27,6 +28,11 @@ use crate::target::{self, TargetError};
 use crate::update::Update;
 
 type SimSwd = Swd<SimPins<Gd32>>;
+
+/// The store's first byte on the 64 KiB rows, the parts most tests run on.
+const STORE_START: u32 = part::GD32F130C8.store_start();
+/// The GD32 debug hold's register bits.
+const GD_HOLD: u32 = part::Debug::Gd32.hold().bits;
 
 fn model(s: &mut SimSwd) -> &mut Gd32 {
     &mut s.pins().bus
@@ -243,7 +249,7 @@ fn a_halt_disarms_first_and_sets_the_debug_hold() {
     let g = model(&mut s);
     assert!(g.halted);
     assert_eq!(g.cchp, 0x1C, "MOE cleared, the dead time left alone");
-    assert_eq!(g.dbg_ctl0 & target::DEBUG_HOLD, target::DEBUG_HOLD);
+    assert_eq!(g.dbg_ctl0 & GD_HOLD, GD_HOLD);
     target::resume(&mut s).unwrap();
     assert!(!model(&mut s).halted);
 }
@@ -353,7 +359,8 @@ fn flashing_through_a_noisy_line_still_verifies() {
 
 /// One loader run of `data` at `addr`, driven to its halt (the loader's code already in SRAM).
 fn loader_run(s: &mut SimSwd, addr: u32, data: &[u8]) -> Result<(), FlashError> {
-    let mut run = flash::start_run(s, addr, data.len() as u32)?;
+    let part = s.pins().bus.part;
+    let mut run = flash::start_run(s, part, addr, data.len() as u32)?;
     for _ in 0..100_000 {
         if let Poll::Done(o) = run.poll(s, data)? {
             return flash::run_result(&run, o);
@@ -364,12 +371,17 @@ fn loader_run(s: &mut SimSwd, addr: u32, data: &[u8]) -> Result<(), FlashError> 
 
 /// A halted, unlocked board with `pages` pages from page 1 erased and the loader in SRAM.
 fn loader_board(fam: Family, pages: u32) -> SimSwd {
-    let mut s = board(fam, Inject::default(), 1);
+    loader_board_of(fam.part(), pages)
+}
+
+/// [`loader_board`] on `part`'s row.
+fn loader_board_of(part: &'static part::Part, pages: u32) -> SimSwd {
+    let mut s = crate::sim::board_of(part, Inject::default(), 1);
     s.connect().unwrap();
     target::halt(&mut s).unwrap();
     flash::unlock(&mut s).unwrap();
     for p in 1..=pages {
-        flash::erase_page(&mut s, FLASH_BASE + p * PAGE).unwrap();
+        flash::erase_page(&mut s, part, FLASH_BASE + p * PAGE).unwrap();
     }
     loader::load(&mut s).unwrap();
     s
@@ -474,12 +486,13 @@ fn a_write_that_reaches_the_store_is_refused_before_the_board_is_touched() {
     ));
     let mut s = board(Family::F1x0, Inject::default(), 1);
     s.connect().unwrap();
+    let p = &part::GD32F130C8;
     assert_eq!(
-        flash::erase_page(&mut s, STORE_START),
+        flash::erase_page(&mut s, p, STORE_START),
         Err(FlashError::StoreRange)
     );
     assert!(matches!(
-        flash::start_run(&mut s, STORE_START - 2, 4),
+        flash::start_run(&mut s, p, STORE_START - 2, 4),
         Err(FlashError::StoreRange)
     ));
     assert_eq!(model(&mut s).store_writes, 0);
@@ -519,9 +532,13 @@ fn a_protected_or_oversized_part_is_refused() {
     model(&mut s).flash_kib = 256;
     assert_eq!(
         run_job(&mut s, &image(2048)),
-        Err(FlashError::UnsupportedPart(256))
+        Err(FlashError::UnsupportedPart)
     );
-    assert_eq!(FlashError::UnsupportedPart(256).status(), Status::TooLarge);
+    assert_eq!(
+        FlashError::UnsupportedPart.status(),
+        Status::UnsupportedPart
+    );
+    assert!(!model(&mut s).halted);
 }
 
 #[test]
@@ -608,7 +625,7 @@ fn the_store_erase_erases_and_verifies_both_pages_then_boots_and_the_mailbox_reo
     assert_eq!(g.flash[store_half() - 1], 0x1234, "the image is untouched");
     assert_eq!(g.loader_runs, 0);
     assert_eq!(g.cchp & 1 << 15, 0, "disarmed before the halt");
-    assert_eq!(g.dbg_ctl0 & target::DEBUG_HOLD, target::DEBUG_HOLD);
+    assert_eq!(g.dbg_ctl0 & GD_HOLD, GD_HOLD);
     assert_eq!(
         g.resets,
         resets + 2,
@@ -626,7 +643,7 @@ fn the_store_erase_erases_and_verifies_both_pages_then_boots_and_the_mailbox_reo
 }
 
 #[test]
-fn the_store_erase_is_refused_while_the_disarm_does_not_take_and_on_any_part_but_64_kib() {
+fn the_store_erase_is_refused_while_the_disarm_does_not_take_and_on_a_part_in_no_row() {
     let (mut port, _fw, mut svc) = stored_board();
     let g = &mut port.swd().pins().bus;
     g.cchp = 1 << 15;
@@ -637,10 +654,14 @@ fn the_store_erase_is_refused_while_the_disarm_does_not_take_and_on_any_part_but
     assert!(!g.halted);
     assert_eq!(g.flash[store_half()], 0x5A5A, "the store is untouched");
 
-    for kib in [32, 128, 256] {
+    for kib in [16, 128, 256] {
         let (mut port, _fw, mut svc) = stored_board();
         port.swd().pins().bus.flash_kib = kib;
-        assert_eq!(store_erase(&mut port, &mut svc), Status::TooLarge, "{kib}");
+        assert_eq!(
+            store_erase(&mut port, &mut svc),
+            Status::UnsupportedPart,
+            "{kib}"
+        );
         let g = &mut port.swd().pins().bus;
         assert_eq!(g.store_writes, 0, "{kib}");
         assert!(!g.halted, "{kib}");
@@ -677,20 +698,21 @@ fn the_flash_guard_and_the_store_erase_use_the_store_crates_one_region() {
         store::geometry::store_base(64 * 1024, 1024),
         "the placement rule's address for the 64 KiB part"
     );
-    assert_eq!(flash::STORE_LEN as usize, store::geometry::region_len(1024));
-    assert_eq!(flash::MAX_IMAGE + flash::STORE_LEN as usize, 64 * 1024);
+    let p = &part::GD32F130C8;
+    assert_eq!(p.store_len() as usize, store::geometry::region_len(1024));
+    assert_eq!(flash::MAX_IMAGE + p.store_len() as usize, 64 * 1024);
     let mut s = board(Family::F1x0, Inject::default(), 1);
     s.connect().unwrap();
     target::halt(&mut s).unwrap();
     flash::unlock(&mut s).unwrap();
-    flash::erase_page(&mut s, STORE_START - PAGE).unwrap();
+    flash::erase_page(&mut s, p, STORE_START - PAGE).unwrap();
     assert_eq!(
         model(&mut s).store_writes,
         0,
         "the last image page is not the store's"
     );
     assert_eq!(
-        flash::erase_page(&mut s, STORE_START),
+        flash::erase_page(&mut s, p, STORE_START),
         Err(FlashError::StoreRange)
     );
     // The erase reaches exactly the pages the guard refuses: the model counts every bus erase of
@@ -744,7 +766,7 @@ fn the_checked_in_loader_bytes_are_what_the_source_assembles_to() {
     let obj = std::format!("{dir}/f1x.o");
     let bin = std::format!("{dir}/f1x.bin");
     let ok = Command::new("arm-none-eabi-as")
-        .args(["-mcpu=cortex-m3", "-mthumb", "-o", &obj])
+        .args(["-mcpu=cortex-m0", "-mthumb", "-o", &obj])
         .arg(std::format!("{app}/loader/f1x.S"))
         .status()
         .unwrap()
@@ -757,6 +779,347 @@ fn the_checked_in_loader_bytes_are_what_the_source_assembles_to() {
         .success();
     assert!(ok, "objcopy");
     assert_eq!(std::fs::read(&bin).unwrap(), loader::CODE);
+}
+
+// ---- the part table (specs/bridge-chip-support.md) ----
+
+/// A board of `row`, connected.
+fn row_board(row: &'static part::Part) -> SimSwd {
+    let mut s = crate::sim::board_of(row, Inject::default(), 1);
+    s.connect().unwrap();
+    s
+}
+
+#[test]
+fn every_row_identifies_with_its_family_flash_size_core_and_id_register() {
+    use crate::sim::{CPUID_M0, CPUID_M3, DPIDR_M0, MM32_ID};
+    for (row, mcu_id, cpuid, dpidr) in [
+        (&part::GD32F103_64, 0x1303_0410, CPUID_M3, 0x1BA0_1477),
+        (&part::GD32F130C8, 0x1303_0410, CPUID_M3, 0x1BA0_1477),
+        (&part::GD32F130C6, 0x1303_0410, CPUID_M3, 0x1BA0_1477),
+        (&part::MM32SPIN05, MM32_ID, CPUID_M0, DPIDR_M0),
+    ] {
+        let mut s = row_board(row);
+        let id = target::identify(&mut s).unwrap();
+        assert_eq!(
+            (id.dpidr, id.mcu_id, id.cpuid, id.family, id.flash_kib),
+            (dpidr, mcu_id, cpuid, row.family, row.flash_kib),
+            "{}",
+            row.name
+        );
+        assert_eq!(
+            (id.rdp, id.user, id.uid[0]),
+            (0xA5, 0xFF, 0x8A),
+            "{}",
+            row.name
+        );
+        assert_eq!(flash::row(&id), Ok(row), "{}", row.name);
+    }
+}
+
+#[test]
+fn the_mm32_branch_reads_none_of_the_gd32_addresses_and_a_protected_mm32_reports_rdprt() {
+    let mut s = row_board(&part::MM32SPIN05);
+    model(&mut s).protect();
+    model(&mut s).reads = Some(Vec::new());
+    let id = target::identify(&mut s).unwrap();
+    assert_eq!(id.family, espsvc::FAMILY_MM32SPIN05);
+    assert_eq!(
+        id.flash_kib, 32,
+        "from the row: the MM32 has no flash size register"
+    );
+    assert_eq!((id.rdp, id.user), (0x00, 0xFF), "RDPRT set");
+    assert_eq!(id.uid, [0; 12], "the UID reads 0 while protected");
+    let reads = model(&mut s).reads.take().unwrap();
+    for a in [0xE004_2000, 0x1FFF_F7E0, 0x1FFF_F800] {
+        assert!(!reads.contains(&a), "{a:#x} read: {reads:x?}");
+    }
+    assert!(reads.contains(&target::MM32_FLASH_OBR) && reads.contains(&target::CCHP));
+    assert_eq!(
+        flash::check_part(&mut s).map(|_| ()),
+        Err(FlashError::Protected)
+    );
+}
+
+#[test]
+fn an_unknown_m0_and_an_unknown_core_answer_target_id_and_everything_else_is_refused() {
+    for (row, cpuid, m0_id) in [
+        (&part::MM32SPIN05, crate::sim::CPUID_M0, 0x1234_5678),
+        (&part::GD32F130C8, 0x410F_C241, 0), // a Cortex-M4
+    ] {
+        let mut port = MailboxPort::new(crate::sim::board_of(row, Inject::default(), 1));
+        let g = &mut port.swd().pins().bus;
+        g.load(&image(2048));
+        g.cpuid = cpuid;
+        g.m0_id = m0_id;
+        g.reads = Some(Vec::new());
+        let id = target::identify(port.swd()).unwrap();
+        assert_eq!(id.family, espsvc::FAMILY_UNSUPPORTED);
+        assert_eq!((id.cpuid, id.mcu_id), (cpuid, m0_id));
+        assert_eq!((id.flash_kib, id.rdp, id.user, id.uid), (0, 0, 0, [0; 12]));
+        let reads = port.swd().pins().bus.reads.take().unwrap();
+        assert!(
+            reads
+                .iter()
+                .all(|&a| a == target::CPUID || a == part::M0_ID),
+            "only CPUID and the M0 ID register: {reads:x?}"
+        );
+        assert_eq!(flash::row(&id), Err(FlashError::UnsupportedPart));
+
+        let mut svc = service();
+        let me = Identity {
+            addr: 0,
+            store_mounted: true,
+        };
+        let mut ask = |port: &mut MailboxPort<SimPins<Gd32>>, m: Msg| {
+            let mut got = None;
+            svc.handle(
+                &Pdu::decode(&encode(&m, 0x80)).unwrap(),
+                me,
+                port,
+                &mut |_, m| {
+                    got = Some(match m {
+                        Msg::Result { status, .. } => Err(*status),
+                        Msg::TargetId(id) => Ok(id.family),
+                        _ => return,
+                    });
+                },
+            );
+            got.expect("a reply")
+        };
+        assert_eq!(
+            ask(&mut port, Msg::TargetIdReq),
+            Ok(espsvc::FAMILY_UNSUPPORTED)
+        );
+        let begin = Msg::FlashBegin {
+            len: 2048,
+            sha256: [0; 32],
+        };
+        for m in [begin, Msg::StoreErase, Msg::ClearProtection] {
+            assert_eq!(ask(&mut port, m), Err(Status::UnsupportedPart), "{m:?}");
+        }
+        let g = &mut port.swd().pins().bus;
+        assert!(!g.halted, "nothing halted the part");
+        assert_eq!(g.store_writes, 0);
+        assert_eq!(&g.flash_bytes()[..2048], &image(2048)[..], "nothing erased");
+    }
+}
+
+#[test]
+fn the_store_image_limit_ring_and_stack_follow_the_row() {
+    for (row, store, max, ring, stack) in [
+        (&part::GD32F103_64, 0x0800_F800, 63_488, 4096, 0x2000_2000),
+        (&part::GD32F130C8, 0x0800_F800, 63_488, 4096, 0x2000_2000),
+        (&part::GD32F130C6, 0x0800_7800, 30_720, 2048, 0x2000_1000),
+        (&part::MM32SPIN05, 0x0800_7800, 30_720, 2048, 0x2000_1000),
+    ] {
+        assert_eq!(row.store_start(), store, "{}", row.name);
+        assert_eq!(
+            row.store_start(),
+            store::geometry::store_base(row.flash_kib as u32 * 1024, row.page),
+            "the store crate's placement rule"
+        );
+        assert_eq!(row.max_image(), max, "{}", row.name);
+        assert_eq!(
+            loader::Layout::of(row),
+            loader::Layout {
+                ring_len: ring,
+                stack_top: stack
+            },
+            "{}",
+            row.name
+        );
+        assert_eq!(part::lookup(row.family, row.flash_kib), Some(row));
+    }
+    assert_eq!(
+        flash::MAX_IMAGE,
+        63_488,
+        "the image buffer holds the largest row's"
+    );
+    assert_eq!(
+        part::lookup(FAMILY_F10X, 256),
+        None,
+        "the 12-FET is refused"
+    );
+    assert_eq!(part::lookup(FAMILY_F1X0, 16), None);
+    assert_eq!(part::lookup(FAMILY_F10X, 32), None);
+}
+
+#[test]
+fn an_image_flashes_verifies_and_boots_on_each_32_kib_row_through_its_2_kib_ring() {
+    for row in [&part::GD32F130C6, &part::MM32SPIN05] {
+        for pace in [u32::MAX, 2] {
+            let mut s = row_board(row);
+            let g = model(&mut s);
+            g.loader_pace = pace;
+            let at = row.max_image() / 2;
+            for (i, h) in g.flash[at..].iter_mut().enumerate() {
+                *h = (i as u16) ^ 0x5A5A;
+            }
+            let store: Vec<u16> = g.flash[at..].to_vec();
+            let img = image(row.max_image());
+            run_job(&mut s, &img).unwrap();
+            let g = model(&mut s);
+            assert_eq!(&g.flash_bytes()[..img.len()], &img[..], "{}", row.name);
+            assert_eq!(
+                &g.flash[at..],
+                &store[..],
+                "{}: the store is untouched",
+                row.name
+            );
+            assert_eq!(g.store_writes, 0);
+            assert_eq!(g.loader_runs, 2);
+            assert!(!g.halted, "booted");
+        }
+        // One byte more reaches the store and is refused before the board is touched.
+        let mut s = row_board(row);
+        let resets = model(&mut s).resets;
+        assert_eq!(
+            run_job(&mut s, &image(row.max_image() + 1)),
+            Err(FlashError::StoreRange)
+        );
+        let g = model(&mut s);
+        assert_eq!((g.resets, g.halted, g.store_writes), (resets, false, 0));
+    }
+}
+
+#[test]
+fn the_store_erase_on_a_32_kib_row_erases_its_two_pages_and_leaves_the_image() {
+    for row in [&part::GD32F130C6, &part::MM32SPIN05] {
+        let mut s = row_board(row);
+        let img = image(row.max_image());
+        let g = model(&mut s);
+        g.load(&img);
+        let at = row.max_image() / 2;
+        g.flash[at..].fill(0x1234);
+        flash::erase_store(&mut s).unwrap();
+        let g = model(&mut s);
+        assert!(g.flash[at..].iter().all(|&h| h == 0xFFFF), "{}", row.name);
+        assert_eq!(g.store_writes, 2, "{}", row.name);
+        assert_eq!(&g.flash_bytes()[..img.len()], &img[..], "{}", row.name);
+    }
+}
+
+#[test]
+fn the_debug_hold_is_the_cores_and_picked_per_call() {
+    let mm32_hold = part::Debug::Mm32.hold();
+    assert_eq!(
+        (mm32_hold.addr, mm32_hold.bits),
+        (0x4001_3404, 1 << 8 | 1 << 10)
+    );
+    // A Cortex-M3: DBG_CTL0.
+    let mut s = row_board(&part::GD32F130C6);
+    target::debug_hold(&mut s).unwrap();
+    assert_eq!(model(&mut s).dbg_ctl0 & GD_HOLD, GD_HOLD);
+    // The MM32: DBGMCU_CR, and nothing at 0xE004_2004.
+    let mut s = row_board(&part::MM32SPIN05);
+    model(&mut s).reads = Some(Vec::new());
+    target::halt(&mut s).unwrap();
+    let g = model(&mut s);
+    assert_eq!(g.dbgmcu_cr & mm32_hold.bits, mm32_hold.bits);
+    assert!(!g.reads.take().unwrap().contains(&0xE004_2004));
+    // A board swap behind the same engine: the next hold is the new board's.
+    let mut s = row_board(&part::GD32F130C8);
+    target::debug_hold(&mut s).unwrap();
+    s.pins().bus = Gd32::new(Family::Mm32Spin05);
+    target::debug_hold(&mut s).unwrap();
+    assert_eq!(model(&mut s).dbgmcu_cr & mm32_hold.bits, mm32_hold.bits);
+    // An unsupported part: nothing written.
+    for (row, cpuid, m0_id) in [
+        (&part::MM32SPIN05, crate::sim::CPUID_M0, 0xDEAD_BEEF),
+        (&part::GD32F130C8, 0x410F_C241, 0),
+    ] {
+        let mut s = row_board(row);
+        let g = model(&mut s);
+        g.cpuid = cpuid;
+        g.m0_id = m0_id;
+        target::debug_hold(&mut s).unwrap();
+        let g = model(&mut s);
+        assert_eq!((g.dbg_ctl0, g.dbgmcu_cr), (0, 0), "{cpuid:#x}");
+    }
+}
+
+#[test]
+fn the_mm32_clear_takes_with_a_reset_and_then_an_image_flashes() {
+    let mut s = row_board(&part::MM32SPIN05);
+    let g = model(&mut s);
+    g.load(&image(4096));
+    g.protect();
+    let resets = g.resets;
+    assert_eq!(target::identify(&mut s).unwrap().rdp, 0x00);
+    let user = flash::clear_protection(&mut s).unwrap();
+    assert_eq!(user, 0xFF);
+    // No power cycle: the system reset at the end of the clear reloaded the option bytes.
+    let after = target::identify(&mut s).unwrap();
+    assert!(flash::clear_took(&after, user), "{after:?}");
+    assert_eq!(after.uid[0], 0x8A, "the UID reads again");
+    let g = model(&mut s);
+    assert_eq!(g.resets, resets + 2, "reset and halt, then the final reset");
+    assert_eq!(g.option[0], 0x5AA5, "0xFFA5 stored with its complement");
+    assert_eq!(g.secure, [0xFFFF; 2], "the secure block erased");
+    assert!(g.flash.iter().all(|&h| h == 0xFFFF), "mass-erased");
+    assert_eq!(
+        g.dbgmcu_cr & part::Debug::Mm32.hold().bits,
+        part::Debug::Mm32.hold().bits
+    );
+    run_job(&mut s, &image(1500)).unwrap();
+}
+
+/// The MM32 clear's steps by hand, with `OPTWRE` kept in every `CR` write or not and `FLASH_AR`
+/// set before each erase or not; then the system reset. Whether `RDPRT` cleared.
+fn mm32_clear_by_hand(optwre: bool, ar: bool) -> bool {
+    let mut s = row_board(&part::MM32SPIN05);
+    model(&mut s).protect();
+    target::reset_halt(&mut s).unwrap();
+    flash::unlock(&mut s).unwrap();
+    let w = |s: &mut SimSwd, a: u32, v: u32| s.write_word(a, v).unwrap();
+    w(&mut s, 0x4002_2008, 0x4567_0123);
+    w(&mut s, 0x4002_2008, 0xCDEF_89AB);
+    let keep = if optwre { 0x200 } else { 0 };
+    let erase = |s: &mut SimSwd, at: u32, op: u32| {
+        if ar {
+            w(s, 0x4002_2014, at);
+        }
+        w(s, 0x4002_2010, keep | op);
+        w(s, 0x4002_2010, keep | op | 0x40);
+        w(s, 0x4002_200C, 0x34);
+        w(s, 0x4002_2010, keep);
+    };
+    erase(&mut s, FLASH_BASE, 0x04);
+    erase(&mut s, 0x1FFF_F800, 0x20);
+    w(&mut s, 0x4002_2010, keep | 0x10);
+    s.write_halfwords(0x1FFF_F800, &[0xFFA5]).unwrap();
+    w(&mut s, 0x4002_2010, keep);
+    erase(&mut s, flash::MM32_SECURE_BLOCK, 0x20);
+    w(&mut s, 0x4002_2010, 0x80);
+    target::reset(&mut s).unwrap();
+    target::identify(&mut s).unwrap().rdp == 0xA5
+}
+
+#[test]
+fn on_the_mm32_dropping_optwre_or_flash_ar_leaves_the_part_protected() {
+    assert!(
+        mm32_clear_by_hand(true, true),
+        "the sequence with both rules"
+    );
+    assert!(!mm32_clear_by_hand(false, true), "without OPTWRE");
+    assert!(!mm32_clear_by_hand(true, false), "without FLASH_AR");
+}
+
+#[test]
+fn the_mm32s_debugger_halfword_at_2_mod_4_stores_0_and_the_loader_path_does_not_use_it() {
+    let mut s = row_board(&part::MM32SPIN05);
+    target::halt(&mut s).unwrap();
+    flash::unlock(&mut s).unwrap();
+    flash::erase_page(&mut s, &part::MM32SPIN05, FLASH_BASE + PAGE).unwrap();
+    s.write_word(0x4002_2010, 1).unwrap(); // PG
+    s.write_halfwords(FLASH_BASE + PAGE + 2, &[0x1234]).unwrap();
+    assert_eq!(model(&mut s).flash[(PAGE / 2 + 1) as usize], 0x0000);
+    // The flash job programs through the loader, so every halfword lands.
+    let mut s = row_board(&part::MM32SPIN05);
+    let img = image(3 * 1024 + 6);
+    run_job(&mut s, &img).unwrap();
+    assert_eq!(&model(&mut s).flash_bytes()[..img.len()], &img[..]);
 }
 
 // ---- the mailbox session ----
@@ -2690,6 +3053,22 @@ fn xfer(g: &mut SimGdb<'_>, object: &str, annex: &str) -> String {
 
 #[test]
 fn the_memory_map_and_the_target_description_parse_with_the_right_ranges_and_registers() {
+    // On a 32 KiB part the map's flash ends at that part's store.
+    for row in [&part::GD32F130C6, &part::MM32SPIN05] {
+        let mut port = MailboxPort::new(crate::sim::board_of(row, Inject::default(), 1));
+        let mut svc = service();
+        let mut g = Gdb::new(&mut port, &mut svc);
+        open(&mut g);
+        let map = xfer(&mut g, "memory-map", "");
+        let flash = std::format!(
+            "<memory type=\"flash\" start=\"0x8000000\" length=\"{:#x}\">",
+            0x7800
+        );
+        assert!(map.contains(&flash), "{}: {map}", row.name);
+        // GDB's `load` past the part's store is refused at the write.
+        let w = ask(&mut g, "vFlashErase:08007800,400");
+        assert!(w.starts_with('E'), "{}: {w}", row.name);
+    }
     let (mut port, _fw, mut svc) = gdb_board();
     let mut g = Gdb::new(&mut port, &mut svc);
     open(&mut g);

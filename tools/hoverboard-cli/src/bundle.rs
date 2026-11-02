@@ -9,7 +9,8 @@
 //!   anything parses it.
 //! - [`Bundle::select`] picks the board image whose target equals the family and flash size
 //!   `TARGET_ID` reports, takes `--image` among several, and refuses a match the bridge would
-//!   refuse (`SUPPORTED_KIB`, section 3.4). [`Bundle::select_bridge`] picks a bridge image of a
+//!   refuse (a part in no row of the bridge's part table, `hoverboard_bridge_core::part`,
+//!   section 3.4). [`Bundle::select_bridge`] picks a bridge image of a
 //!   kind by the chip `ESP_INFO` reports (section 4.2).
 //! - [`Bundle::prepare`] runs a board image's guards from the manifest and converts it to the
 //!   binary; [`Bundle::bridge_file`] runs a bridge image's install check (section 3.3).
@@ -23,8 +24,10 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use espsvc::{TargetId, CHIP_ESP32C3, FAMILY_F10X, FAMILY_F1X0};
-use hoverboard_bridge_core::flash::SUPPORTED_KIB;
+use espsvc::{
+    TargetId, CHIP_ESP32C3, FAMILY_F10X, FAMILY_F1X0, FAMILY_MM32SPIN05, FAMILY_UNSUPPORTED,
+};
+use hoverboard_bridge_core::part;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -43,6 +46,9 @@ pub enum Family {
     /// [`FAMILY_F1X0`].
     #[serde(rename = "gd32f1x0")]
     Gd32f1x0,
+    /// [`FAMILY_MM32SPIN05`].
+    #[serde(rename = "mm32spin05")]
+    Mm32spin05,
 }
 
 impl Family {
@@ -51,6 +57,7 @@ impl Family {
         match code {
             FAMILY_F10X => Some(Family::Gd32f10x),
             FAMILY_F1X0 => Some(Family::Gd32f1x0),
+            FAMILY_MM32SPIN05 => Some(Family::Mm32spin05),
             _ => None,
         }
     }
@@ -60,6 +67,7 @@ impl Family {
         match self {
             Family::Gd32f10x => "gd32f10x",
             Family::Gd32f1x0 => "gd32f1x0",
+            Family::Mm32spin05 => "mm32spin05",
         }
     }
 }
@@ -425,6 +433,9 @@ impl std::fmt::Display for BundleError {
 pub enum SelectError {
     /// `TARGET_ID` reports a family code the CLI has no name for.
     UnknownFamily(u8),
+    /// `TARGET_ID` reports a part the bridge does not support ([`FAMILY_UNSUPPORTED`]), with what
+    /// it read.
+    UnsupportedPart { cpuid: u32, mcu_id: u32 },
     /// No board image has a target equal to the chip; every board image, with its targets.
     NoMatch {
         chip: BoardTarget,
@@ -470,6 +481,11 @@ impl std::fmt::Display for SelectError {
             Ok(())
         };
         match self {
+            SelectError::UnsupportedPart { cpuid, mcu_id } => write!(
+                f,
+                "REFUSED: a part the bridge does not support (cpuid {cpuid:#010x}, mcu id \
+                 {mcu_id:#010x})"
+            ),
             SelectError::UnknownFamily(c) => {
                 write!(
                     f,
@@ -509,8 +525,8 @@ impl std::fmt::Display for SelectError {
             ),
             SelectError::BridgeRefuses { name, chip } => write!(
                 f,
-                "REFUSED: image {name} matches the chip ({chip}), but the bridge flashes only \
-                 {SUPPORTED_KIB} KiB parts and would refuse a {chip} part"
+                "REFUSED: image {name} matches the chip ({chip}), but the bridge's part table \
+                 has no row for it and the bridge would refuse a {chip} part"
             ),
             SelectError::UnknownChip(c) => {
                 write!(
@@ -601,6 +617,12 @@ impl Bundle {
         id: &TargetId,
         want: Option<&str>,
     ) -> Result<(&Image, BoardTarget), SelectError> {
+        if id.family == FAMILY_UNSUPPORTED {
+            return Err(SelectError::UnsupportedPart {
+                cpuid: id.cpuid,
+                mcu_id: id.mcu_id,
+            });
+        }
         let family = Family::of(id.family).ok_or(SelectError::UnknownFamily(id.family))?;
         let chip = BoardTarget {
             family,
@@ -646,7 +668,7 @@ impl Bundle {
                 }
             }
         };
-        if chip.flash_kib != SUPPORTED_KIB {
+        if part::lookup(id.family, id.flash_kib).is_none() {
             return Err(SelectError::BridgeRefuses {
                 name: chosen.name.clone(),
                 chip,

@@ -75,7 +75,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use espsvc::{Ctrl, FAMILY_F1X0};
+use espsvc::{Ctrl, Status};
 use net::pdu::NO_ADDRESS;
 use net::walk::{Controller, CLASS_BRIDGE};
 
@@ -137,12 +137,35 @@ fn hexdump(addr: u32, data: &[u8]) {
     }
 }
 
+/// The family `TARGET_ID` reports, for a terminal.
+fn family_name(family: u8) -> &'static str {
+    match family {
+        espsvc::FAMILY_F10X => "GD32F10x",
+        espsvc::FAMILY_F1X0 => "GD32F1x0",
+        espsvc::FAMILY_MM32SPIN05 => "MM32SPIN05",
+        espsvc::FAMILY_UNSUPPORTED => "unsupported",
+        _ => "unknown",
+    }
+}
+
+/// A bridge refusal as text; an unsupported part's carries the `cpuid` and `mcu_id` it reports
+/// (`specs/bridge-chip-support.md`, section 3).
+fn refusal(c: &mut EspClient, e: ClientError) -> String {
+    let unsupported = matches!(
+        e,
+        ClientError::Status(Status::UnsupportedPart)
+            | ClientError::Flash(_, Status::UnsupportedPart)
+    );
+    match c.target_id() {
+        Ok(id) if unsupported => {
+            format!("{e} (cpuid {:#010x}, mcu id {:#010x})", id.cpuid, id.mcu_id)
+        }
+        _ => e.to_string(),
+    }
+}
+
 fn print_id(id: &espsvc::TargetId) {
-    let family = if id.family == FAMILY_F1X0 {
-        "GD32F1x0"
-    } else {
-        "GD32F10x"
-    };
+    let family = family_name(id.family);
     let uid: Vec<String> = id.uid.iter().map(|b| format!("{b:02x}")).collect();
     println!("dpidr       {:#010x}", id.dpidr);
     println!("mcu id      {:#010x}", id.mcu_id);
@@ -1245,7 +1268,7 @@ fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
         }
     }
     let e = |e: ClientError| e.to_string();
-    c.store_erase().map_err(e)?;
+    c.store_erase().map_err(|x| refusal(&mut c, x))?;
     let state = c.wait_mailbox(erase::MAILBOX_WAIT).map_err(e)?;
     if state != espsvc::MailboxState::Up as u8 {
         let state = espsvc::MailboxState::from_u8(state)
@@ -1281,13 +1304,32 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
         Swd::ClearProtection => {
             let id = c.target_id().map_err(e)?;
             print_id(&id);
+            if id.family == espsvc::FAMILY_UNSUPPORTED {
+                return Err(format!(
+                    "REFUSED: {} (cpuid {:#010x}, mcu id {:#010x})",
+                    Status::UnsupportedPart.describe(),
+                    id.cpuid,
+                    id.mcu_id
+                ));
+            }
             if !confirm(
                 "Clearing protection MASS-ERASES the chip: the stock firmware is lost unless it \
                  was backed up with gdf130backup. Continue?",
             ) {
                 return Err("not cleared".into());
             }
-            c.clear_protection().map_err(e)?;
+            c.clear_protection().map_err(|x| refusal(&mut c, x))?;
+            if id.family == espsvc::FAMILY_MM32SPIN05 {
+                // The bridge's clear ends in a system reset, which reloads the MM32's option
+                // bytes; it has no USER byte to compare.
+                let after = c.target_id().map_err(e)?;
+                print_id(&after);
+                if after.rdp != 0xA5 {
+                    return Err("the clear did not take: RDPRT is still set".into());
+                }
+                println!("protection off");
+                return Ok(());
+            }
             println!("cleared; USER byte recorded as {:#04x}", id.user);
             print!("Power-cycle the board by hand, then press Enter. ");
             let _ = std::io::stdout().flush();
@@ -1377,7 +1419,7 @@ fn flash_board(c: &mut EspClient, image: &[u8]) -> Result<(), String> {
             t0.elapsed().as_secs_f32()
         );
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|x| refusal(c, x))?;
     eprintln!();
     println!(
         "booted ({} B in {:.1} s)",

@@ -395,19 +395,60 @@ fn image_cannot_override_the_match() {
 
 #[test]
 fn a_match_the_bridge_would_refuse_is_refused_naming_the_part() {
+    // --image resolves the several matches, and the 32 KiB F130 is in the bridge's part table.
     let b = fleet();
-    // --image resolves the several matches; the 32 KiB part is still one the bridge refuses.
-    let e = b
+    let (img, _) = b
         .select(&chip(FAMILY_F1X0, 32), Some("mainboard-gd32f130c6"))
-        .unwrap_err();
+        .unwrap();
+    assert_eq!(img.name, "mainboard-gd32f130c6");
+    // The 256 KiB F103 is in no row: an image for it matches, and is refused.
+    let (g103, elf103) = f103();
+    let rc = t(Family::Gd32f10x, 256);
+    let b = Bundle::open(&bundle_of(vec![(
+        image("mainboard-gd32f103rc", &[rc], &g103, &elf103),
+        elf103.clone(),
+    )]))
+    .unwrap();
+    let e = b.select(&chip(FAMILY_F10X, 256), None).unwrap_err();
     assert_eq!(
         e,
         SelectError::BridgeRefuses {
-            name: "mainboard-gd32f130c6".into(),
-            chip: t(Family::Gd32f1x0, 32),
+            name: "mainboard-gd32f103rc".into(),
+            chip: rc,
         }
     );
-    assert!(e.to_string().contains("gd32f1x0 32 KiB part"), "{e}");
+    assert!(e.to_string().contains("gd32f10x 256 KiB part"), "{e}");
+}
+
+#[test]
+fn the_mm32_is_named_mm32spin05_and_an_unsupported_part_is_refused_with_its_ids() {
+    let (sg, selfm) = small();
+    let mm32 = t(Family::Mm32spin05, 32);
+    let b = Bundle::open(&bundle_of(vec![(
+        image("mainboard-mm32spin05", &[mm32], &sg, &selfm),
+        selfm.clone(),
+    )]))
+    .unwrap();
+    let (img, matched) = b
+        .select(&chip(espsvc::FAMILY_MM32SPIN05, 32), None)
+        .unwrap();
+    assert_eq!((img.name.as_str(), matched), ("mainboard-mm32spin05", mm32));
+    assert_eq!(matched.to_string(), "mm32spin05 32 KiB");
+    let id = TargetId {
+        family: espsvc::FAMILY_UNSUPPORTED,
+        cpuid: 0x410F_C241,
+        mcu_id: 0,
+        ..TargetId::default()
+    };
+    let e = b.select(&id, None).unwrap_err();
+    assert_eq!(
+        e,
+        SelectError::UnsupportedPart {
+            cpuid: 0x410F_C241,
+            mcu_id: 0
+        }
+    );
+    assert!(e.to_string().contains("cpuid 0x410fc241"), "{e}");
 }
 
 #[test]

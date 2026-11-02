@@ -52,8 +52,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
-# The flash sizes the bridge flashes (`SUPPORTED_KIB`), so a bundle match the bridge would refuse
-# is refused before anything is streamed (specs/firmware-bundle.md section 3.3).
+# The parts the bridge flashes (its part table, `part`), so a bundle match the bridge would refuse
+# is refused before anything is streamed (specs/firmware-bundle.md section 3.4).
 hoverboard-bridge-core = { path = "../../bridge/core" }
 
 [dev-dependencies]

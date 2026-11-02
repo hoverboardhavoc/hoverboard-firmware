@@ -1,7 +1,14 @@
 //! A simulated target for the host tests (`specs/hoverboard-bridge.md`, "Verification"): a bit-level SWD
 //! debug port and memory access port that injects `WAIT`, `FAULT`, missing ACKs and read-parity
-//! errors at set rates, in front of a GD32 model with a flash controller that has write-once
-//! halfwords, erase to `0xFFFF`, `PGERR` on a re-program and the F1x0 closed-halfword rule.
+//! errors at set rates, in front of a model of one part-table row ([`crate::part`]): its flash,
+//! SRAM and core, with a flash controller that has write-once halfwords, erase to `0xFFFF`,
+//! `PGERR` on a re-program and the F1x0 closed-halfword rule. The MM32SPIN05 row adds its own
+//! identification registers, its debug block, `FLASH_OBR` and `FLASH_AR`, and its option-erase rules
+//! (`specs/bench-work/mm32/README.md`): a mass or option erase without `FLASH_AR` on its block does
+//! nothing and leaves `STRT` set, a `CR` write without `OPTWRE` clears it, a second "secure" option
+//! block at `0x1FFE_0000` keeps the part protected until it is erased, flash, option bytes and UID
+//! read 0 while protected, and the debugger's halfword writes to flash at an address 2 mod 4 store
+//! 0.
 //!
 //! The core does not execute code, with one exception: resumed at the RAM loader's entry with its
 //! code in SRAM, it runs the loader's protocol ([`crate::loader`]) against the same flash
@@ -23,6 +30,10 @@ use crate::swd::{Counters, SwdPins};
 
 /// A memory bus behind the access port. `size` is 2 or 4; a halfword travels in the low 16 bits.
 pub trait Bus {
+    /// What the debug port's `DPIDR` reads.
+    fn dpidr(&self) -> u32 {
+        DPIDR
+    }
     /// Read; `None` is a bus error.
     fn read(&mut self, addr: u32, size: u32) -> Option<u32>;
     /// Write; `false` is a bus error.
@@ -244,7 +255,7 @@ impl<B: Bus> SimPins<B> {
             return match a {
                 0 => {
                     self.needs_idcode = false;
-                    DPIDR
+                    self.bus.dpidr()
                 }
                 1 => {
                     let acks = (self.ctrl & (1 << 28)) << 1 | (self.ctrl & (1 << 30)) << 1;
@@ -482,20 +493,52 @@ impl<B: Bus> SwdPins for SimPins<B> {
     }
 }
 
-/// Which GD32 the model is.
+/// Which family the model is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
     /// GD32F10x: UID at `0x1FFF_F7E8`; programming order free.
     F10x,
     /// GD32F1x0: UID at `0x1FFF_F7AC`; the closed-halfword rule.
     F1x0,
+    /// MM32SPIN05: a Cortex-M0, UID at `0x1FFF_F7E8`, the rules in the module's header.
+    Mm32Spin05,
+}
+
+impl Family {
+    /// The family's part-table row for [`Gd32::new`]: the 64 KiB GD32 rows and the MM32.
+    pub fn part(self) -> &'static crate::part::Part {
+        match self {
+            Family::F10x => &crate::part::GD32F103_64,
+            Family::F1x0 => &crate::part::GD32F130C8,
+            Family::Mm32Spin05 => &crate::part::MM32SPIN05,
+        }
+    }
+
+    fn of(family: u8) -> Family {
+        match family {
+            espsvc::FAMILY_F10X => Family::F10x,
+            espsvc::FAMILY_F1X0 => Family::F1x0,
+            espsvc::FAMILY_MM32SPIN05 => Family::Mm32Spin05,
+            f => panic!("no model for family {f:#x}"),
+        }
+    }
 }
 
 const FLASH_BASE: u32 = 0x0800_0000;
-const FLASH_LEN: u32 = 64 * 1024;
 const RAM_BASE: u32 = 0x2000_0000;
-const RAM_LEN: u32 = 8 * 1024;
 const OB_BASE: u32 = 0x1FFF_F800;
+/// The MM32's secure option block.
+const SECURE_BASE: u32 = 0x1FFE_0000;
+/// The MM32 secure block as shipped (`80 7F 00 FF`: on).
+pub const SECURE_ON: [u16; 2] = [0x7F80, 0xFF00];
+/// `CPUID` of the Cortex-M3 the GD32s have.
+pub const CPUID_M3: u32 = 0x412F_C231;
+/// `CPUID` of the MM32's Cortex-M0 (r0p0).
+pub const CPUID_M0: u32 = 0x410C_C200;
+/// The MM32SPIN05's ID register value.
+pub const MM32_ID: u32 = 0xCC44_60B1;
+/// The MM32's debug port ID.
+pub const DPIDR_M0: u32 = 0x0BB1_1477;
 const FMC: u32 = 0x4002_2000;
 const CCHP: u32 = 0x4001_2C44;
 const MOE: u32 = 1 << 15;
@@ -525,10 +568,25 @@ const CTL_START: u32 = 1 << 6;
 const CTL_LK: u32 = 1 << 7;
 const CTL_OBWEN: u32 = 1 << 9;
 
-/// A GD32 mainboard MCU as seen over the memory access port.
+/// A mainboard MCU (a part-table row) as seen over the memory access port.
 pub struct Gd32 {
     /// The family.
     pub family: Family,
+    /// The row the model's flash, SRAM and core come from.
+    pub part: &'static crate::part::Part,
+    flash_len: u32,
+    ram_len: u32,
+    /// `CPUID`; a test sets another core's to model an unsupported part.
+    pub cpuid: u32,
+    /// The Cortex-M0 ID register at `0x4001_3400` (the MM32's), when the model has one.
+    pub m0_id: u32,
+    /// The MM32's `DBGMCU_CR` at `0x4001_3404`.
+    pub dbgmcu_cr: u32,
+    /// The MM32's secure option block, two halfwords; erased is off.
+    pub secure: [u16; 2],
+    /// Every bus read's address, while `Some` (a test that checks which addresses a sequence
+    /// reads sets it).
+    pub reads: Option<Vec<u32>>,
     /// Main flash, as halfwords.
     pub flash: Vec<u16>,
     /// Halfwords the F1x0 rule has closed until the next erase: programming the low halfword of a
@@ -605,13 +663,33 @@ struct SimLoader {
 }
 
 impl Gd32 {
-    /// An unprotected part with erased flash, powered on.
+    /// An unprotected part of `family`'s row ([`Family::part`]) with erased flash, powered on.
     pub fn new(family: Family) -> Self {
+        Self::of(family.part())
+    }
+
+    /// An unprotected part of `part`'s row with erased flash, powered on.
+    pub fn of(part: &'static crate::part::Part) -> Self {
+        let family = Family::of(part.family);
+        let flash_len = part.flash_kib as u32 * 1024;
+        let ram_len = part.sram_kib as u32 * 1024;
+        let m0 = match part.core {
+            crate::part::Core::M0 { id } => Some(id),
+            crate::part::Core::M3 => None,
+        };
         let mut g = Gd32 {
             family,
-            flash: vec![0xFFFF; (FLASH_LEN / 2) as usize],
-            closed: vec![false; (FLASH_LEN / 2) as usize],
-            ram: vec![0; (RAM_LEN / 4) as usize],
+            part,
+            flash_len,
+            ram_len,
+            cpuid: if m0.is_some() { CPUID_M0 } else { CPUID_M3 },
+            m0_id: m0.unwrap_or(0),
+            dbgmcu_cr: 0,
+            secure: [0xFFFF; 2],
+            reads: None,
+            flash: vec![0xFFFF; (flash_len / 2) as usize],
+            closed: vec![false; (flash_len / 2) as usize],
+            ram: vec![0; (ram_len / 4) as usize],
             option: [
                 0x5AA5, 0x00FF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
             ],
@@ -631,7 +709,7 @@ impl Gd32 {
             cchp: 0,
             moe_stuck: false,
             resets: 0,
-            flash_kib: 64,
+            flash_kib: part.flash_kib,
             store_writes: 0,
             regs: [0; 21],
             dcrdr: 0,
@@ -662,10 +740,23 @@ impl Gd32 {
         self.flash.iter().flat_map(|h| h.to_le_bytes()).collect()
     }
 
-    /// Set the protection byte as a stock board ships it (read protection on, level 1).
+    /// Set the protection byte as a stock board ships it (read protection on, level 1), and on
+    /// the MM32 the secure block too.
     pub fn protect(&mut self) {
         self.option[0] = 0xFF00;
+        if self.family == Family::Mm32Spin05 {
+            self.secure = SECURE_ON;
+        }
         self.power_cycle();
+    }
+
+    fn mm32(&self) -> bool {
+        self.family == Family::Mm32Spin05
+    }
+
+    /// The store's first halfword, from the row.
+    fn store_half(&self) -> usize {
+        ((self.part.store_start() - FLASH_BASE) / 2) as usize
     }
 
     /// The protection byte as the option block holds it.
@@ -688,6 +779,7 @@ impl Gd32 {
     /// Power off and on: the option bytes load, the debug registers clear, the core boots.
     pub fn power_cycle(&mut self) {
         self.dbg_ctl0 = 0;
+        self.dbgmcu_cr = 0;
         self.debugen = false;
         self.demcr = 0;
         self.reset();
@@ -706,6 +798,10 @@ impl Gd32 {
         } else {
             0xFF
         };
+        if self.mm32() && self.secure != [0xFFFF; 2] {
+            // The secure block keeps the part protected whatever the protection byte says.
+            self.loaded_spc = 0xFF;
+        }
         self.locked = true;
         self.ctl = CTL_LK;
         self.stat = 0;
@@ -749,10 +845,14 @@ impl Gd32 {
         }
         self.ctl = v | if obwen { CTL_OBWEN } else { 0 };
         if v & CTL_START != 0 {
+            if self.mm32() && v & (CTL_MER | CTL_OBER) != 0 {
+                self.mm32_erase(v);
+                return;
+            }
             if v & CTL_PER != 0 {
                 let page = (self.addr.wrapping_sub(FLASH_BASE) / 1024) as usize;
-                if page < (FLASH_LEN / 1024) as usize {
-                    if page >= 62 {
+                if page < (self.flash_len / 1024) as usize {
+                    if page * 512 >= self.store_half() {
                         self.store_writes += 1;
                     }
                     let r = page * 512..page * 512 + 512;
@@ -774,6 +874,25 @@ impl Gd32 {
         }
     }
 
+    /// An MM32 mass or option erase: it takes only with `FLASH_AR` on its block (flash for `MER`,
+    /// the main or the secure option block for `OPTER`); otherwise `STRT` stays set and nothing
+    /// happens, with no `EOP`.
+    fn mm32_erase(&mut self, v: u32) {
+        let a = self.addr;
+        if v & CTL_MER != 0 && (FLASH_BASE..FLASH_BASE + self.flash_len).contains(&a) {
+            self.flash.fill(0xFFFF);
+            self.closed.fill(false);
+        } else if v & CTL_OBER != 0 && a == OB_BASE {
+            self.option = [0xFFFF; 8];
+        } else if v & CTL_OBER != 0 && a == SECURE_BASE {
+            self.secure = [0xFFFF; 2];
+        } else {
+            return;
+        }
+        self.ctl &= !CTL_START;
+        self.flash_op_done();
+    }
+
     fn program(&mut self, addr: u32, val: u16) -> bool {
         if self.locked || self.ctl & CTL_PG == 0 {
             self.stat |= STAT_PGERR;
@@ -784,7 +903,7 @@ impl Gd32 {
             return true;
         }
         let i = ((addr - FLASH_BASE) / 2) as usize;
-        if i >= 31 * 1024 {
+        if i >= self.store_half() {
             self.store_writes += 1;
         }
         if (self.flash[i] != 0xFFFF || self.closed[i]) && val != 0 {
@@ -822,6 +941,13 @@ impl Gd32 {
         if self.regs[15] & !1 != BASE || self.regs[16] & 1 << 24 == 0 || !code_ok {
             return;
         }
+        let ram_end = RAM_BASE + self.ram_len;
+        assert!(
+            self.regs[1] <= self.regs[13] && self.regs[13] <= ram_end,
+            "the loader's ring end {:#x} and stack {:#x} must lie in the part's SRAM (to {ram_end:#x})",
+            self.regs[1],
+            self.regs[13]
+        );
         self.loader_runs += 1;
         self.ctl_write(CTL_PG);
         self.loader = Some(SimLoader {
@@ -936,15 +1062,31 @@ impl Gd32 {
 
     fn uid_base(&self) -> u32 {
         match self.family {
-            Family::F10x => 0x1FFF_F7E8,
+            Family::F10x | Family::Mm32Spin05 => 0x1FFF_F7E8,
             Family::F1x0 => 0x1FFF_F7AC,
         }
     }
 }
 
 impl Bus for Gd32 {
+    fn dpidr(&self) -> u32 {
+        if self.mm32() {
+            DPIDR_M0
+        } else {
+            DPIDR
+        }
+    }
+
     fn read(&mut self, addr: u32, size: u32) -> Option<u32> {
-        let v = self.bus_read(addr, size);
+        if let Some(log) = self.reads.as_mut() {
+            log.push(addr);
+        }
+        let v = if self.mm32() {
+            self.mm32_read(addr)
+        } else {
+            None
+        };
+        let v = v.or_else(|| self.bus_read(addr, size));
         self.run_loader();
         v
     }
@@ -957,11 +1099,32 @@ impl Bus for Gd32 {
 }
 
 impl Gd32 {
+    /// The MM32's own reads, before the shared ones: what reads 0 while protected, its ID and debug
+    /// registers, `FLASH_OBR`, the secure block, and what it lacks.
+    fn mm32_read(&mut self, addr: u32) -> Option<u32> {
+        let protected = self.protected();
+        let uid = self.uid_base();
+        Some(match addr {
+            a if (FLASH_BASE..FLASH_BASE + self.flash_len).contains(&a) && protected => 0,
+            a if (OB_BASE..OB_BASE + 16).contains(&a) && protected => 0,
+            a if (uid..uid + 12).contains(&a) && protected => 0,
+            a if (SECURE_BASE..SECURE_BASE + 4).contains(&a) => {
+                self.secure[0] as u32 | (self.secure[1] as u32) << 16
+            }
+            0x4001_3400 => self.m0_id,
+            0x4001_3404 => self.dbgmcu_cr,
+            0x4002_201C => 0x03FF_FC1C | (protected as u32) << 1,
+            0xE004_2000 | 0xE004_2004 => 0,
+            0x1FFF_F7E0 => 0xFFFF_05A3,
+            _ => return None,
+        })
+    }
+
     fn bus_read(&mut self, addr: u32, size: u32) -> Option<u32> {
         assert_eq!(size, 4, "the engine reads words");
         let uid = self.uid_base();
         Some(match addr {
-            a if (FLASH_BASE..FLASH_BASE + FLASH_LEN).contains(&a) => {
+            a if (FLASH_BASE..FLASH_BASE + self.flash_len).contains(&a) => {
                 if self.protected() {
                     return None;
                 }
@@ -972,7 +1135,7 @@ impl Gd32 {
                     _ => w,
                 }
             }
-            a if (RAM_BASE..RAM_BASE + RAM_LEN).contains(&a) => {
+            a if (RAM_BASE..RAM_BASE + self.ram_len).contains(&a) => {
                 let i = ((a - RAM_BASE) / 4) as usize;
                 // SAFETY: `i` is in bounds; volatile and through the buffer pointer (no slice
                 // reference) because the firmware's `Mailbox` writes the same words through a
@@ -1008,7 +1171,7 @@ impl Gd32 {
             CCHP => self.cchp,
             0xE004_2000 => 0x1303_0410,
             0xE004_2004 => self.dbg_ctl0,
-            0xE000_ED00 => 0x412F_C231,
+            0xE000_ED00 => self.cpuid,
             0xE000_EDF0 => {
                 (self.halted as u32) << 17
                     | 1 << 16
@@ -1037,8 +1200,10 @@ impl Gd32 {
 
     fn bus_write(&mut self, addr: u32, size: u32, val: u32) -> bool {
         match (addr, size) {
-            (a, 2) if (FLASH_BASE..FLASH_BASE + FLASH_LEN).contains(&a) => {
-                self.program(a, val as u16)
+            (a, 2) if (FLASH_BASE..FLASH_BASE + self.flash_len).contains(&a) => {
+                // The MM32 stores 0 for the debugger's halfword at 2 mod 4.
+                let v = if self.mm32() && a & 2 != 0 { 0 } else { val };
+                self.program(a, v as u16)
             }
             (a, 2) if (OB_BASE..OB_BASE + 16).contains(&a) => {
                 if self.locked || self.ctl & CTL_OBPG == 0 || self.ctl & CTL_OBWEN == 0 {
@@ -1048,13 +1213,22 @@ impl Gd32 {
                 let i = ((a - OB_BASE) / 2) as usize;
                 if self.option[i] != 0xFFFF {
                     self.stat |= STAT_PGERR;
+                } else if self.mm32() {
+                    // The MM32 generates the complement: 0xFFA5 is stored as 0x5AA5.
+                    let b = val as u8;
+                    self.option[i] = b as u16 | (!b as u16) << 8;
                 } else {
                     self.option[i] = val as u16;
                 }
                 self.flash_op_done();
                 true
             }
-            (a, 4) if (RAM_BASE..RAM_BASE + RAM_LEN).contains(&a) => {
+            (0x4001_3404, 4) if self.mm32() => {
+                self.dbgmcu_cr = val;
+                true
+            }
+            (0xE004_2004, 4) if self.mm32() => true,
+            (a, 4) if (RAM_BASE..RAM_BASE + self.ram_len).contains(&a) => {
                 let i = ((a - RAM_BASE) / 4) as usize;
                 // SAFETY: as in `read`.
                 unsafe { self.ram.as_mut_ptr().add(i).write_volatile(val) };
@@ -1193,8 +1367,17 @@ impl Gd32 {
 
 /// A connected engine on a fresh model, for tests.
 pub fn board(family: Family, inject: Inject, seed: u64) -> crate::swd::Swd<SimPins<Gd32>> {
+    board_of(family.part(), inject, seed)
+}
+
+/// A connected engine on a fresh model of `part`'s row, for tests.
+pub fn board_of(
+    part: &'static crate::part::Part,
+    inject: Inject,
+    seed: u64,
+) -> crate::swd::Swd<SimPins<Gd32>> {
     crate::swd::Swd::new(
-        SimPins::new(Gd32::new(family), inject, seed),
+        SimPins::new(Gd32::of(part), inject, seed),
         crate::swd::SwdConfig::default(),
     )
 }
