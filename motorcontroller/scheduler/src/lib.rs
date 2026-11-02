@@ -387,7 +387,17 @@ impl Scheduler {
                 slot.counter.store(counter - 1, Ordering::Relaxed);
             } else {
                 // Step 3: expired -> mark due (atomic accrual, wrapping as the original).
+                #[cfg(target_has_atomic = "32")]
                 slot.runcount.fetch_add(1, Ordering::Relaxed);
+                // The Cortex-M0 has no read-modify-write atomics (specs/hal.md section 6). The
+                // tick runs in the SysTick handler, which the thread-side dispatch cannot
+                // preempt, and dispatch masks interrupts around its own update, so a load and a
+                // store are the whole increment there.
+                #[cfg(not(target_has_atomic = "32"))]
+                slot.runcount.store(
+                    slot.runcount.load(Ordering::Relaxed).wrapping_add(1),
+                    Ordering::Relaxed,
+                );
                 let reload = slot.reload.load(Ordering::Relaxed);
                 if reload != 0 {
                     // Step 3b: reschedule for the next period.
@@ -434,7 +444,15 @@ impl Scheduler {
                 }
                 // Step 1b: consume exactly one pending due event (atomic; concurrent accruals
                 // survive).
+                #[cfg(target_has_atomic = "32")]
                 slot.runcount.fetch_sub(1, Ordering::Relaxed);
+                // The Cortex-M0's decrement: a load and a store with interrupts masked, so a
+                // tick cannot land between them and lose its accrual.
+                #[cfg(not(target_has_atomic = "32"))]
+                cortex_m::interrupt::free(|_| {
+                    let n = slot.runcount.load(Ordering::Relaxed);
+                    slot.runcount.store(n.wrapping_sub(1), Ordering::Relaxed);
+                });
                 // Step 1c: one-shot -> remove after running.
                 if slot.reload.load(Ordering::Relaxed) == 0 {
                     self.clear_slot(index);

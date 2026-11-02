@@ -217,6 +217,19 @@ fn an_elf_given_directly_gets_the_wfi_scan_alone() {
 }
 
 #[test]
+fn a_size_measurement_image_is_never_turned_into_a_flash_binary() {
+    // Every guard passes, so only the marker refuses it: on the path `board flash` takes (the wfi
+    // scan, then the binary) and on the bundle's (the guards, then the binary).
+    let g = release_guards();
+    let (mut text, bss) = common::names_of(&g);
+    text.push(elf::NOT_FLASHABLE.to_string());
+    let elf = Fixture::new(&[], g.code_floor, (text, bss)).build();
+    elf::check_wfi(&elf).unwrap();
+    elf::check(&elf, &g).unwrap();
+    assert_eq!(elf::to_bin(&elf), Err(ElfError::NotFlashable));
+}
+
+#[test]
 fn the_strip_removes_the_debug_sections_and_keeps_the_symbols_and_the_flashed_bytes() {
     use object::{Object, ObjectSection, ObjectSymbol};
     let g = release_guards();

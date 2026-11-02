@@ -12,7 +12,8 @@
 //!   - the required symbols, matched against `nm`-style lines as `grep -E` matches them there;
 //!   - the hot-window symbols: the first `nm` line (in `nm`'s name order) each matches must sit
 //!     below [`HOT_LIMIT`].
-//! - **The layout check** ([`to_bin`]): loadable bytes, all inside flash.
+//! - **The layout check** ([`to_bin`]): loadable bytes, all inside flash, and not a size-measurement
+//!   image ([`NOT_FLASHABLE`]).
 //!
 //! An ELF given directly gets the `wfi` scan and the layout check only ([`check_wfi`], [`to_bin`]):
 //! it does not say which image it is, so there are no guards to apply.
@@ -26,6 +27,11 @@ use serde::{Deserialize, Serialize};
 pub const LINK_BASE: u64 = 0x0800_0000;
 /// The F1x0 zero-wait flash boundary the hot-window symbols must sit below.
 pub const HOT_LIMIT: u64 = 0x0800_8000;
+/// The symbol a size-measurement image carries (`motorcontroller/firmware/build.rs`, the
+/// `oversize-link` feature): linked into a flash region larger than its chip's, so its size can be
+/// measured, and never flashed. [`to_bin`], which every install path and the packer go through,
+/// refuses an ELF that defines it.
+pub const NOT_FLASHABLE: &str = "__image_not_flashable";
 
 /// An image's release guards (`tools/image-guard-syms.sh`, and a bundle manifest's
 /// `images[].guards`).
@@ -115,6 +121,8 @@ pub enum ElfError {
     HotCold(Vec<(String, u64)>),
     /// No loadable bytes, or bytes outside flash.
     Layout(String),
+    /// A size-measurement image ([`NOT_FLASHABLE`]).
+    NotFlashable,
 }
 
 impl std::fmt::Display for ElfError {
@@ -150,6 +158,11 @@ impl std::fmt::Display for ElfError {
                 )
             }
             ElfError::Layout(e) => write!(f, "REFUSED: {e}"),
+            ElfError::NotFlashable => write!(
+                f,
+                "REFUSED: the image defines {NOT_FLASHABLE}: it is a size-measurement build, \
+                 linked past its chip's flash, and is never flashed"
+            ),
         }
     }
 }
@@ -328,7 +341,11 @@ fn find_wfi(obj: &object::File) -> Option<u64> {
 
 /// The flash image: every loadable segment's file bytes at its load (physical) address, from
 /// [`LINK_BASE`], gaps filled with `0xFF` (what `objcopy -O binary` produces for these images).
+/// A size-measurement image ([`NOT_FLASHABLE`]) is refused.
 pub fn to_bin(elf: &[u8]) -> Result<Vec<u8>, ElfError> {
+    if parse(elf)?.symbols().any(|s| s.name() == Ok(NOT_FLASHABLE)) {
+        return Err(ElfError::NotFlashable);
+    }
     use object::elf::{FileHeader32, PT_LOAD};
     use object::read::elf::{FileHeader, ProgramHeader};
     use object::LittleEndian;

@@ -640,7 +640,15 @@ pub mod hw {
     /// than an unchanged word its freshness guard would keep ageing.
     fn zero_demand() {
         motor::DEMAND.store(0, Ordering::Relaxed);
+        // One context writes the sequence (the main thread, with the control task's publish), so
+        // a load and a store are the whole update on the Cortex-M0, which has no fetch_add.
+        #[cfg(target_has_atomic = "32")]
         motor::DEMAND_SEQ.fetch_add(1, Ordering::Relaxed);
+        #[cfg(not(target_has_atomic = "32"))]
+        motor::DEMAND_SEQ.store(
+            motor::DEMAND_SEQ.load(Ordering::Relaxed).wrapping_add(1),
+            Ordering::Relaxed,
+        );
     }
 
     /// Watch [`motor::PERIODS`] advance, bounded by [`ARM_CONFIRM_SPINS`].

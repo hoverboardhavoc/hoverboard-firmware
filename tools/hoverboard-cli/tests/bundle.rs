@@ -605,6 +605,12 @@ fn the_packer_refuses_an_elf_that_fails_its_guards() {
     let (_, small_elf) = small();
     let e = pack(&[entry(small_elf.leak())], "c", "b").unwrap_err();
     assert!(e.contains("floor"), "{e}");
+    // A size-measurement image (the MM32 CI build) with every guard symbol.
+    let (mut text, bss) = names_of(&g);
+    text.push(elf::NOT_FLASHABLE.to_string());
+    let measured: &'static [u8] = Fixture::new(&[], g.code_floor, (text, bss)).build().leak();
+    let e = pack(&[entry(measured)], "c", "b").unwrap_err();
+    assert!(e.contains("size-measurement"), "{e}");
     // One name twice.
     let ok: &'static [u8] = release_elf().leak();
     let e = pack(&[entry(ok), entry(ok)], "c", "b").unwrap_err();
