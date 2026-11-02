@@ -101,6 +101,8 @@ base = 0x4002_2000
 size = 0x400
 registers = { "0x00" = "ACR", "0x04" = "KEYR", "0x08" = "OPTKEYR", "0x0C" = "SR", "0x10" = "CR", "0x14" = "AR", "0x1C" = "OBR", "0x20" = "WRPR" }
 reset = { "0x10" = 0x0000_0080 }
+# CR.STRT (bit 6): set by software to start an erase, cleared by the controller when it finishes.
+self_clearing = { "0x10" = 0x0000_0040 }
 
 # The system control block's CPUID: the silicon reading on the bench board (0x410CC200, a
 # Cortex-M0 r0p0). The vendor's 72 MHz HSI sequence reads it with DBGMCU IDCODE.

@@ -238,7 +238,7 @@ pub fn enable_spi(
     enable(rcu_base, bit, spi)
 }
 
-/// Enable an ADC's clock and set the ADC clock divider and source.
+/// Enable an ADC's clock and, on the GD32 models, set the ADC clock divider and source.
 pub fn enable_adc(
     rcu_base: u32,
     _path: ClockPath,
@@ -260,6 +260,8 @@ pub fn enable_adc(
         _ => None,
     };
     enable(rcu_base, bit, adc)?;
+    // The MM32 divides the ADC clock in the ADC itself (`ADCFG.PRE`), which its bring-ups program.
+    #[cfg(not(hal_clock = "mm32"))]
     model::adc_clock(rcu_base);
     Ok(())
 }

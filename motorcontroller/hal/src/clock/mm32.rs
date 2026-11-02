@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The MM32SPIN05 RCC model (MindMotion's `reg_rcc.h` and `system_mm32spin0x_q.c`, LibSamples
-//! V1.13): the enable-bit map, the flash wait states, the ADC clock, and the tree.
+//! V1.13): the enable-bit map, the flash wait states and the tree. The ADC clock divider is the
+//! ADC's own (`ADCFG.PRE`, `adc/mm32.rs`).
 //!
 //! The part has no PLL. Its system clock is the HSI's 72 MHz output (`CR.HSI_72M`, bit 20) switched
 //! in by `CFGR.SW = 0b10`, and the vendor trims the HSI from a factory word at `0x1FFF_F7FA` on the
@@ -67,24 +68,6 @@ pub(crate) const fn timer_enable(timer: PeriphLabel) -> Option<EnableBit> {
         }),
         _ => None,
     }
-}
-
-/// ADC1's base.
-const ADC_BASE: u32 = match DESCRIPTOR.addrs.get(PeriphLabel::Adc0) {
-    Some(b) => b,
-    None => panic!("the descriptor carries no ADC"),
-};
-/// `ADCFG`, where the MM32 keeps its ADC clock divider.
-const ADCFG: u32 = 0x04;
-/// `ADCFG.PRE` (bits 6:4) with its extension `PREL` (bit 14).
-const ADCFG_PRE: u32 = (0b111 << 4) | (1 << 14);
-/// `ADC_PCLK2_PRESCARE_6`: PCLK2 / 6, 12 MHz at 72 MHz (the part's ADC clock limit is 15 MHz).
-const ADCFG_PRE_DIV6: u32 = 0b010 << 4;
-
-/// The ADC clock: the MM32 divides PCLK2 in the ADC's own `ADCFG.PRE`, not in the RCC, so the clock
-/// enable programs it there (PCLK2 / 6, the divider the GD32 parts run their ADC at).
-pub(crate) fn adc_clock(_rcu_base: u32) {
-    Reg32::new(ADC_BASE, ADCFG).modify(ADCFG_PRE, ADCFG_PRE_DIV6);
 }
 
 /// A clock tree: the HSI's 72 MHz and the bus prescalers.

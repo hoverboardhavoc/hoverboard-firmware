@@ -5,6 +5,14 @@
 #
 # SR (0x0C) reads 0x00000020 (EOP, BSY clear) on every read. The store page is seeded erased
 # (0xFFFF at the target and its successor) so the HAL's erased-and-not-closed check passes.
+#
+# Compared as final_state, not register_writes. The two sides make the same accesses but for the
+# CR writes' style: LibSamples sets and clears PER/PG and STRT with read-modify-writes and clears
+# PER/PG before it sets LOCK; the HAL's controller code (shared with the GD32 parts, whose silicon
+# runs it) writes CR whole and locks with one write. The emulator does not model the key sequence
+# clearing LOCK, so the vendor's read-modify-writes carry LOCK in every CR value. The final values
+# (KEYR the second key, AR the address, SR the flag clear, CR = LOCK) are compared; the order the
+# MM32 needs (AR before STRT) is in both traces and is what the fmc validator exercises on silicon.
 description = """
 One half-word programmed on the MM32SPIN05, 0xA55A at the store's first page 0x0800_7800: unlock,
 PG, the store, wait not busy, clear PG and the flags, lock. On silicon the store must come from the
@@ -15,7 +23,7 @@ Vendor: FLASH_Unlock(); FLASH_ProgramHalfWord(0x08007800, 0xA55A); FLASH_Lock().
 HAL: Fmc::new(&chip).program(0x0800_7800, &[0x5A, 0xA5]).
 """
 family = "mm32spin05"
-mode = "register_writes"
+mode = "final_state"
 assert_only = ["<FLASH_BASE>"]
 
 [read_responses]

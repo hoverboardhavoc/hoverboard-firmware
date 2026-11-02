@@ -1,18 +1,23 @@
-# Mode: with_polling, narrowed with assert_only to TAR, DR, RAWISR, ENR and SR: the address, the data
-# commands, the end-of-transfer handshake and the polls. The bring-up's register values are compared
-# by bringup_i2c1_400k_mm32.
+# Mode: with_polling, narrowed with assert_only to TAR, DR and ENR: the target address, the data and
+# read commands, the received byte, and the enable and abort handshake, in order. The bring-up's
+# register values are compared by bringup_i2c1_400k_mm32.
 #
 # SR (0x70) reads 0x0000000E on every read (TFNF | TFE | RFNE): the transmit FIFO drained and a
-# received byte waiting, so each of the vendor's polls is satisfied on its first read. RAWISR
-# (0x34) reads 0x00000200 (STOP_DET). DR (0x10) reads 0x002E, the WHO_AM_I the bench IMU answers
+# received byte waiting, so each poll is satisfied on its first read. RAWISR (0x34) reads
+# 0x00000200 (STOP_DET). DR (0x10) reads 0x002E, the WHO_AM_I the bench IMU answers
 # (specs/bench-work/mm32/README.md). The flags are the ones the vendor body polls, not a silicon
 # capture.
 #
-# LibSamples' sequence, which the HAL's must match or the difference must be argued here: the target
-# address is written with I2C1 disabled (I2C_Cmd(DISABLE), TAR, I2C_Cmd(ENABLE)); the register
-# pointer is a DR write and a TFE poll; the read is DR = CMD (a read command), an RFNE poll and a DR
-# read; and LibSamples' "STOP" (I2C_GenerateSTOP) is a transfer ABORT: ENR |= ABORT, a poll until it
-# clears, then a read of the TX_ABRT clear register; then a STOP_DET poll on RAWISR.
+# LibSamples' sequence: the target address written with I2C1 disabled (I2C_Cmd(DISABLE), TAR,
+# I2C_Cmd(ENABLE)); the register pointer a DR write and a TFE poll; the read DR = CMD (a read
+# command), an RFNE poll and a DR read; LibSamples' "STOP" (I2C_GenerateSTOP) a transfer ABORT:
+# ENR |= ABORT, a poll until it clears, a read of the TX_ABRT clear register; then a STOP_DET poll.
+#
+# Outside the assertion, and why: the HAL waits for the master to be idle (SR.MST_ACTIV) before it
+# sets TAR, and clears a stale abort (a read of TX_ABRT, 0x54) after it, both at the start of an
+# acquisition, where the sample assumes an idle block; it does not wait for STOP_DET after the
+# abort (the flag is sticky and the sample never clears it, so after the first transfer that wait
+# passes at once). The SR polls of the write and the read are the vendor's.
 description = """
 The IMU's WHO_AM_I read on the MM32SPIN05: write the register pointer 0x75 to address 0x69 (the
 master board's MPU-6050 clone), read one byte, end the transfer.
@@ -28,8 +33,7 @@ mode = "with_polling"
 assert_only = [
     "<I2C1_BASE>+0x04",
     "<I2C1_BASE>+0x10",
-    "<I2C1_BASE>+0x34",
-    "<I2C1_BASE>+0x6C..0x70",
+    "<I2C1_BASE>+0x6C",
 ]
 
 # The running 72 MHz tree, not reset: I2C_Init derives its SCL counts from RCC_GetPCLK1Freq, which
@@ -70,7 +74,6 @@ body = '''
 
 [hal]
 body = '''
-    use embedded_hal::i2c::I2c as _;
     use hal::{Chip, ClockConfig, I2c, I2cMode, PeriphLabel};
 
     pub fn body() {
@@ -85,8 +88,9 @@ body = '''
             I2cMode::fast(400_000, hal::i2c::FastDuty::Two),
         )
         .unwrap();
-        let mut i2c = i2c;
         let mut who = [0u8; 1];
-        i2c.write_read(0x69, &[0x75], &mut who).unwrap();
+        // write_read's sequence: a fresh write with no STOP, then a read behind the repeated START.
+        i2c.write_bytes(0x69, &[0x75], true, false).unwrap();
+        i2c.read_bytes(0x69, &mut who, false).unwrap();
     }
 '''

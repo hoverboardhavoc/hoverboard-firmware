@@ -11,7 +11,7 @@
 //! | `SSHR`/`SSLR` | `0x14`/`0x18` | 16 | the standard-mode SCL high and low counts |
 //! | `FSHR`/`FSLR` | `0x1C`/`0x20` | 16 | the fast-mode SCL high and low counts |
 //! | `IMR` | `0x30` | 16 | the interrupt mask, cleared to `INTR_MASK` (0xC000) |
-//! | `RAWISR` | `0x34` | 16 | `TX_ABRT` 6 |
+//! | `RAWISR` | `0x34` | 16 | `TX_ABRT` 6, `MST_ON_HOLD` 13 |
 //! | `RXTLR`/`TXTLR` | `0x38`/`0x3C` | 16 | the FIFO thresholds, 0 |
 //! | `TX_ABRT` | `0x54` | 16 | read to clear the abort |
 //! | `ENR` | `0x6C` | 16 | `ENABLE` 0, `ABORT` 1 |
@@ -87,6 +87,9 @@ const DR_CMD_READ: u16 = 1 << 8;
 /// `INTR_MASK` (`hal_i2c.h`), what `I2C_Init` masks `IMR` with: every interrupt off.
 const IMR_KEEP: u16 = 0xC000;
 const RAWISR_TX_ABRT: u16 = 1 << 6;
+/// `RAWISR.MST_ON_HOLD`: the master holds the bus because its FIFO ran empty, after the last
+/// byte's acknowledge bit.
+const RAWISR_HOLD: u16 = 1 << 13;
 const ENR_ENABLE: u16 = 1 << 0;
 const ENR_ABORT: u16 = 1 << 1;
 const SR_TFNF: u32 = 1 << 1;
@@ -349,13 +352,28 @@ impl I2c {
         r
     }
 
+    /// Each byte into `DR`, then a wait for the FIFO to empty (`SR.TFE`), MindMotion's
+    /// `EEPROM_WriteByte`: one byte in the FIFO at a time. Before a STOP, a wait for the master to
+    /// hold the bus (`RAWISR.MST_ON_HOLD`, after the last byte's acknowledge) or abort, so a NACK of
+    /// the last byte is seen before the STOP's own abort clears the flag.
     fn write_inner(&self, bytes: &[u8], stop: bool) -> Result<(), I2cError> {
         for &b in bytes {
-            self.wait_sr(SR_TFNF)?;
             self.reg(DR).write(u16::from(b));
+            self.wait_sr(SR_TFE)?;
         }
         if stop {
-            self.wait_sr(SR_TFE)?;
+            loop {
+                let raw = self.reg(RAWISR).read();
+                if raw & RAWISR_TX_ABRT != 0 {
+                    return Err(I2cError::NoAcknowledgeAddress);
+                }
+                if raw & RAWISR_HOLD != 0 {
+                    break;
+                }
+                if !self.spend() {
+                    return Err(I2cError::Timeout);
+                }
+            }
             self.stop();
         }
         Ok(())
@@ -383,12 +401,13 @@ impl I2c {
         let mut issued = 0usize;
         for (taken, slot) in buf.iter_mut().enumerate() {
             loop {
-                let sr = self.sr();
-                if issued < len && issued < taken + RX_IN_FLIGHT && sr & SR_TFNF != 0 {
+                // Room for a command, then a byte to take: two `SR` reads, as MindMotion's
+                // `EEPROM_ReadBuff` polls them.
+                if issued < len && issued < taken + RX_IN_FLIGHT && self.sr() & SR_TFNF != 0 {
                     self.reg(DR).write(DR_CMD_READ);
                     issued += 1;
                 }
-                if sr & SR_RFNE != 0 {
+                if self.sr() & SR_RFNE != 0 {
                     *slot = (self.reg(DR).read() & 0xFF) as u8;
                     break;
                 }

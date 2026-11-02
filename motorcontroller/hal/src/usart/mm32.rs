@@ -5,7 +5,7 @@
 //! |-------|--------|----------------------------------------------------------------------|
 //! | `TDR` | `0x00` | the byte to send                                                     |
 //! | `RDR` | `0x04` | the byte received                                                    |
-//! | `CSR` | `0x08` | TXC(0) transmit complete, TXFULL(2) the transmit buffer full          |
+//! | `CSR` | `0x08` | TXC(0) transmit complete                                              |
 //! | `ISR` | `0x0C` | RXOERR(3), RXPERR(4), RXFERR(5), RXBRK(6), the line-error flags      |
 //! | `IER` | `0x10` | the same bits, their interrupt enables                               |
 //! | `ICR` | `0x14` | the same bits, a written 1 clears the flag                           |
@@ -41,7 +41,6 @@ const BRR: u32 = 0x20;
 const FRA: u32 = 0x24;
 
 const CSR_TXC: u32 = 1 << 0;
-const CSR_TXFULL: u32 = 1 << 2;
 
 /// The line errors: receive overrun, parity, framing and break (`ISR`/`IER`/`ICR` bits 3-6).
 const LINE_ERRORS: u32 = 0b1111 << 3;
@@ -135,13 +134,13 @@ pub(super) fn program(base: u32, div: u32, frame: UsartFrame) {
 }
 
 impl Usart {
-    /// Write one byte and wait until it has left the shift register: wait for room in the transmit
-    /// buffer (`CSR.TXFULL` clear), write `TDR`, wait for `CSR.TXC`. Both waits are unbounded (a
-    /// bring-up primitive; the link's write path is [`crate::serial::SplitSerial`]).
+    /// Write one byte and wait until it has left the shift register: write `TDR`, wait for
+    /// `CSR.TXC`, MindMotion's polled send (the wait leaves the buffer empty for the next call).
+    /// The wait is unbounded (a bring-up primitive; the link's write path is
+    /// [`crate::serial::SplitSerial`]).
     pub fn write_byte(&self, byte: u8) {
-        let csr = Reg32::new(self.base, CSR);
-        while csr.read() & CSR_TXFULL != 0 {}
         Reg32::new(self.base, TDR).write(u32::from(byte));
+        let csr = Reg32::new(self.base, CSR);
         while csr.read() & CSR_TXC == 0 {}
     }
 }

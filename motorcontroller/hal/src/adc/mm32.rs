@@ -20,13 +20,17 @@
 //! | `ADSTA`  | `0x14` | ADIF(0)                                                         |
 //! | `ADDRn`  | `0x18` | channel `n`'s data, `+4` per channel (`0x48`, channel 12's, is reserved) |
 //!
-//! The clock divider (`ADCFG.PRE`) is [`crate::clock::enable_adc`]'s. The part has no calibration
+//! The clock divider is the block's own `ADCFG.PRE` (PCLK2 / 6 for the single conversion, the
+//! configuration's [`AdcClockDiv`] for the group), set by the bring-ups as MindMotion's `ADC_Init`
+//! sets it; [`crate::clock::enable_adc`] only gates the clock. The part has no calibration
 //! sequence in MindMotion's library, so [`Adc`] has no `calibrate` and the group's bring-up runs
 //! none (specs/hal.md section 4.1: a capability the chip lacks is absent from its build).
 
 use crate::addr::PeriphLabel;
 use crate::chip::Chip;
-use crate::config::{InjectedAdcConfig, InjectedChannel, TimerTriggerLink, MAX_INJECTED_CHANNELS};
+use crate::config::{
+    AdcClockDiv, InjectedAdcConfig, InjectedChannel, TimerTriggerLink, MAX_INJECTED_CHANNELS,
+};
 use crate::descriptor::DESCRIPTOR;
 use crate::error::{AdcError, BringUpError, DescriptorError};
 use crate::reg::{Field, Reg32};
@@ -42,6 +46,9 @@ const ADDR0: u32 = 0x18;
 const ADCFG_ADEN: u32 = 1 << 0;
 const ADCFG_TEN: u32 = 1 << 2;
 const ADCFG_VEN: u32 = 1 << 3;
+/// `PRE` (6:4) with its extension `PREL` (14): the ADC clock divider from PCLK2. Codes 0 to 3 are
+/// /2, /4, /6 and /8, the codes of [`AdcClockDiv`].
+const ADCFG_PRE: u32 = (0b111 << 4) | (1 << 14);
 const ADCFG_SAMCTL: u32 = 0b1111 << 10;
 
 const ADCR_ADIE: u32 = 1 << 0;
@@ -85,13 +92,18 @@ const fn readable(channel: u8) -> bool {
     channel <= 11 || channel == CH_TEMPERATURE || channel == CH_VREFINT
 }
 
-/// The `ADCFG` sensor enables an internal channel needs.
+/// The `ADCFG` sensor enables an internal channel needs: both, as MindMotion's one call
+/// (`ADC_TempSensorVrefintCmd`) sets them, for either internal channel.
 const fn sensor_bits(channel: u8) -> u32 {
     match channel {
-        CH_TEMPERATURE => ADCFG_TEN,
-        CH_VREFINT => ADCFG_VEN,
+        CH_TEMPERATURE | CH_VREFINT => ADCFG_TEN | ADCFG_VEN,
         _ => 0,
     }
+}
+
+/// `ADCFG.PRE` for a divider.
+const fn pre_bits(div: AdcClockDiv) -> u32 {
+    (div.psc_code() << 4) & ADCFG_PRE
 }
 
 /// Channel `channel`'s data register offset.
@@ -99,11 +111,16 @@ const fn data_offset(channel: u8) -> u32 {
     ADDR0 + 4 * channel as u32
 }
 
-/// The single software-started conversion's fields: immediate mode, right alignment, no trigger
-/// (`ADC_Init` with `ADC_CR_IMM`), the sample time and the sensor enable (`ADC_RegularChannelConfig`
-/// and `ADC_TempSensorVrefintCmd`), then `ADEN` (`ADC_Cmd`).
-const fn single_fields(channel: u8, code: u8) -> [Field; 3] {
+/// The single software-started conversion's fields: the clock divider (PCLK2 / 6), immediate
+/// mode, right alignment, no trigger (`ADC_Init` with `ADC_CR_IMM`), the sample time and the sensor
+/// enables (`ADC_RegularChannelConfig` and `ADC_TempSensorVrefintCmd`), then `ADEN` (`ADC_Cmd`).
+const fn single_fields(channel: u8, code: u8) -> [Field; 4] {
     [
+        Field {
+            offset: ADCFG,
+            mask: ADCFG_PRE,
+            value: pre_bits(AdcClockDiv::Div6),
+        },
         Field {
             offset: ADCR,
             mask: ADCR_ALIGN | ADCR_MODE | ADCR_TRGSEL | ADCR_TRGEN | ADCR_ADIE,
@@ -171,16 +188,21 @@ impl Adc {
 
     /// Configure one software-started conversion of `channel` at sample-time code `sample_time`
     /// (`SAMCTL`, 0..=12) and switch the ADC on: immediate mode, right alignment, no trigger, the
-    /// sensor enable for the temperature sensor (14) or VREFINT (15). No poll. A code past 12 is
-    /// masked to the field.
+    /// sensor enables for the temperature sensor (14) or VREFINT (15), and `channel` alone selected
+    /// in `ADCHS` (none for a channel with no data register). No poll. A code past 12 is masked to
+    /// the field.
     pub fn configure_single(&self, channel: u8, sample_time: u8) {
         for f in single_fields(channel, sample_time) {
             f.apply(self.base);
         }
+        if readable(channel) {
+            self.reg(ADCHS).write(1 << channel);
+        }
     }
 
     /// One conversion of `channel`: clear `ADIF`, enable that channel alone, start (`ADST`), wait
-    /// for `ADIF`, read the channel's data register. `AdcError::Other` for a channel with no data
+    /// for `ADIF`, read the channel's data register, clear `ADIF` (MindMotion's polled samples clear
+    /// it after the read; the clear before covers a flag left by anything else). `AdcError::Other` for a channel with no data
     /// register (12, 13, past 15), before any register access.
     pub fn read_channel(&self, channel: u8) -> Result<u16, AdcError> {
         if !readable(channel) {
@@ -190,7 +212,9 @@ impl Adc {
         self.reg(ADCHS).write(1 << channel);
         self.reg(ADCR).set_bits(ADCR_ADST);
         self.wait_eoic()?;
-        Ok(self.reg(data_offset(channel)).read() as u16)
+        let value = self.reg(data_offset(channel)).read() as u16;
+        self.reg(ADSTA).write(ADSTA_ADIF);
+        Ok(value)
     }
 
     /// Wait for the end of a conversion or scan (`ADSTA.ADIF`).
@@ -242,7 +266,7 @@ impl TriggeredAdc for InjectedAdcController {
     type Handle = InjectedHandle;
 
     /// Configure `cfg.adc` as the timer-triggered scan of `cfg.channels` and switch it on: the
-    /// sample time and the sensor enables in `ADCFG`, the channel bitmap in `ADCHS`, then `ADCR`
+    /// clock divider (`cfg.clock_div`), the sample time and the sensor enables in `ADCFG`, the channel bitmap in `ADCHS`, then `ADCR`
     /// (scan mode, the alignment, the trigger select from [`etsic_for_link`] and its enable, the
     /// end-of-scan interrupt), then `ADEN`.
     ///
@@ -277,8 +301,8 @@ impl TriggeredAdc for InjectedAdcController {
 
         Field {
             offset: ADCFG,
-            mask: ADCFG_SAMCTL | ADCFG_TEN | ADCFG_VEN,
-            value: (u32::from(code) << 10) | sensors,
+            mask: ADCFG_PRE | ADCFG_SAMCTL | ADCFG_TEN | ADCFG_VEN,
+            value: pre_bits(cfg.clock_div) | (u32::from(code) << 10) | sensors,
         }
         .apply(base);
         Reg32::new(base, ADCHS).write(bitmap);
@@ -348,7 +372,6 @@ impl InjectedHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AdcClockDiv;
     use crate::reg::fold;
 
     fn group(list: &[(u8, u8)], link: TimerTriggerLink) -> InjectedAdcConfig {
@@ -418,8 +441,12 @@ mod tests {
     fn a_single_conversion_is_immediate_mode_with_the_sensor_it_needs() {
         let regs = fold(&single_fields(CH_VREFINT, 7));
         assert_eq!(regs[&ADCR], 0);
-        assert_eq!(regs[&ADCFG], ADCFG_ADEN | ADCFG_VEN | (7 << 10));
+        let pre6 = 2 << 4;
+        assert_eq!(
+            regs[&ADCFG],
+            ADCFG_ADEN | ADCFG_TEN | ADCFG_VEN | (7 << 10) | pre6
+        );
         let regs = fold(&single_fields(3, 2));
-        assert_eq!(regs[&ADCFG], ADCFG_ADEN | (2 << 10));
+        assert_eq!(regs[&ADCFG], ADCFG_ADEN | (2 << 10) | pre6);
     }
 }
