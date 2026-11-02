@@ -8,7 +8,7 @@
 //! number per pin. Its alternate-function pins take the role's mux number as well as the nibble;
 //! an AF input keeps the floating-input nibble, as MindMotion's own UART samples configure RX.
 
-use super::{InputPull, PinRole};
+use super::{AfMode, InputPull};
 use crate::reg::Reg32;
 
 const CTL0: u32 = 0x00;
@@ -51,18 +51,17 @@ fn set_af(port_base: u32, pin: u8, af: u32) {
     Reg32::new(port_base, offset).modify(0xF << shift, af << shift);
 }
 
-/// An alternate-function pin. The F10x has no per-pin mux: the role picks the nibble, and the
-/// AFIO remap (if any) is the caller's. The MM32 sets the role's mux number first, then the nibble.
-pub(crate) fn configure_af(port_base: u32, pin: u8, role: PinRole) {
-    let cfg = role.config();
+/// An alternate-function pin. The F10x has no per-pin mux: `af` is not read, the mode picks the
+/// nibble, and the AFIO remap is the caller's. The MM32 writes `af` into its mux first, then the
+/// nibble.
+#[cfg_attr(hal_gpio = "crl", allow(unused_variables))]
+pub(crate) fn configure_af(port_base: u32, pin: u8, mode: AfMode, af: u8) {
     #[cfg(hal_gpio = "mm32")]
-    set_af(port_base, pin, cfg.af);
-    let nibble = if !cfg.output {
-        INPUT_FLOATING
-    } else if cfg.open_drain {
-        AF_OD_50MHZ
-    } else {
-        AF_PP_50MHZ
+    set_af(port_base, pin, u32::from(af & 0x0F));
+    let nibble = match mode {
+        AfMode::Input => INPUT_FLOATING,
+        AfMode::OpenDrainPullUp => AF_OD_50MHZ,
+        AfMode::PushPull => AF_PP_50MHZ,
     };
     set_nibble(port_base, pin, nibble);
 }

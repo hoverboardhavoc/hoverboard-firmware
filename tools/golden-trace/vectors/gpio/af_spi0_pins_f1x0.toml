@@ -17,7 +17,7 @@ GD32F1x0 GPIO model: AF mode, AF0 in the per-pin mux, no pull, and for SCK and M
 
 Vendor: gpio_mode_set(AF, PUPD_NONE) and gpio_af_set(AF_0) for the three pins;
         gpio_output_options_set(OTYPE_PP, 50MHZ) for PA5 | PA7.
-HAL: chip.route_spi_pin(PA5 / PA7, SpiAfPushPull); chip.route_spi_pin(PA6, SpiInput).
+HAL: chip.route_spi_pin(PA5 / PA7, output); chip.route_spi_pin(PA6, input).
 """
 family = "gd32f1x0"
 mode = "final_state"
@@ -35,14 +35,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::gpio::PinRole;
-    use hal::Chip;
+    use hal::{Chip, PinAf};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
-        chip.route_spi_pin(0x05, PinRole::SpiAfPushPull).unwrap(); // SCK
-        chip.route_spi_pin(0x06, PinRole::SpiInput).unwrap(); // MISO
-        chip.route_spi_pin(0x07, PinRole::SpiAfPushPull).unwrap(); // MOSI
+        chip.route_spi_pin(PinAf { port: 0, pin: 5, af: 0 }, false); // SCK
+        chip.route_spi_pin(PinAf { port: 0, pin: 6, af: 0 }, true); // MISO
+        chip.route_spi_pin(PinAf { port: 0, pin: 7, af: 0 }, false); // MOSI
     }
 '''

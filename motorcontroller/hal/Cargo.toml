@@ -23,10 +23,15 @@ heapless = "0.8"
 [target.'cfg(target_arch = "arm")'.dependencies]
 cortex-m-rt = { version = "0.7", features = ["device"] }
 
-# One feature per chip; exactly one must be enabled (src/lib.rs refuses none or two). build.rs maps
+# One feature per chip; exactly one must be enabled (src/lib.rs refuses none or two) unless the
+# build is the host's `pincap` tables alone. build.rs maps
 # the chip to its register model per peripheral and to its vendor vector list.
 [features]
 gd32f103c8 = []
 gd32f130c8 = []
 gd32f103rc = []
 mm32spin05 = []
+# The pin capability tables of every chip (`src/pincap.rs`), for the host tools that check a board's
+# stored configuration (`specs/config-read-once.md` section 4). No image enables it; on its own,
+# with no chip feature, the crate is those tables and nothing else.
+pincap = []

@@ -6,7 +6,7 @@ The clock enables for UART2 on PA2/PA3 on the MM32SPIN05: GPIOA on AHBENR bit 17
 bit 17. The port first, then the UART.
 
 Vendor: RCC_AHBPeriphClockCmd(RCC_AHBENR_GPIOA, ENABLE); RCC_APB1PeriphClockCmd(RCC_APB1ENR_UART2, ENABLE).
-HAL: clock::enable_gpio_port(Gpioa); clock::enable_usart(Usart1) (the HAL's label for UART2, at
+HAL: chip.pin(port A) (the port clock alone); clock::enable_usart(Usart1) (the HAL's label for UART2, at
 0x4000_4400, the GD32 USART1's address).
 """
 family = "mm32spin05"
@@ -20,13 +20,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::{clock, Chip, PeriphLabel};
+    use hal::{clock, Chip, PeriphLabel, PinId};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
         let rcu = chip.rcu_base().unwrap();
-        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpioa).unwrap();
+        let _ = chip.pin(PinId { port: 0, pin: 0 });
         clock::enable_usart(rcu, chip.clock(), PeriphLabel::Usart1).unwrap();
     }
 '''

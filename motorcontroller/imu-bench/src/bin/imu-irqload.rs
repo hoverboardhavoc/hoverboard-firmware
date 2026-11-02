@@ -48,7 +48,7 @@ mod firmware {
     use embedded_hal::i2c::I2c as _;
     use hal::clock::{self, ClockConfig};
     use hal::descriptor::DESCRIPTOR;
-    use hal::{Chip, I2c, I2cMode, PeriphLabel};
+    use hal::{Chip, I2c, I2cMode, PeriphLabel, PinAf};
     use imu::{Config, Imu, CLONE_2E};
     use test_shared::obs_store;
 
@@ -66,9 +66,18 @@ mod firmware {
     /// confirmed a sub-byte-time preemption is harmless (66k bursts, 0 errors, pre-fix driver).
     const IRQ_BURN_CYCLES: u32 = 72 * 120;
 
-    /// The IMU bus pins, packed `port << 4 | pin` (`Chip::pin`): PB6 = SCL, PB7 = SDA.
-    const PB6: u8 = 0x16;
-    const PB7: u8 = 0x17;
+    /// The IMU bus pins: SCL PB6 and SDA PB7, AF1 on the F1x0 mux (the F10x reaches them at the
+    /// I2C0 default remap and reads no AF).
+    const SCL: PinAf = PinAf {
+        port: 1,
+        pin: 6,
+        af: 1,
+    };
+    const SDA: PinAf = PinAf {
+        port: 1,
+        pin: 7,
+        af: 1,
+    };
 
     /// The I2C0 base for the first-error register snapshot, from the chip descriptor (reading the
     /// registers raw here keeps the snapshot independent of the driver under test).
@@ -138,14 +147,12 @@ mod firmware {
         if clock::configure_tree(&chip, &CLOCK).is_err() {
             fail(2);
         }
-        let (Ok(scl), Ok(sda)) = (chip.pin(PB6), chip.pin(PB7)) else {
-            fail(3)
-        };
         let mut i2c = match I2c::new(
             &chip,
             &CLOCK,
             PeriphLabel::I2c0,
-            (scl, sda),
+            SCL,
+            SDA,
             I2cMode::standard(I2C_HZ),
         ) {
             Ok(b) => b,

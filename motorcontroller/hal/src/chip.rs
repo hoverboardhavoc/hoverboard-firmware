@@ -6,8 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::addr::PeriphLabel;
 use crate::descriptor::{McuDescriptor, PageSize, DESCRIPTOR};
 use crate::error::DescriptorError;
-use crate::gpio::{self, Floating, Input, InputGroup, Pin, PinRole, INPUT_GROUP_LINES};
-use crate::pincap::{self, PinClaim};
+use crate::gpio::{self, AfMode, Floating, Input, InputGroup, Pin, PinAf, PinId, INPUT_GROUP_LINES};
 use crate::reg::Reg32;
 
 /// The clock tree of the compiled chip.
@@ -140,55 +139,38 @@ impl Chip {
         label.is_i2c() && DESCRIPTOR.addrs.get(label).is_some()
     }
 
-    /// `packed` as a floating input with its port clock on, or refused: an SWD pin, a pin the
-    /// package does not bond out, or a port the chip does not carry.
-    pub fn pin(&self, packed: u8) -> Result<Pin<Input<Floating>>, DescriptorError> {
-        let base = self.clocked_port_base(packed)?;
-        Ok(Pin::new(base, packed))
+    /// Pin `p` with its port clock on, as a floating input type (its mode registers are left as
+    /// they are).
+    pub fn pin(&self, p: PinId) -> Pin<Input<Floating>> {
+        Pin::new(self.clocked_port_base(p.port), p.pin)
     }
 
-    /// The port base of `packed` with its clock on, after the SWD and bonding checks.
+    /// The register base of GPIO port `port` (`0` = A to `5` = F) with its clock on: the port A
+    /// base plus `port` x `0x400`, and the port A enable bit plus `port`, on every chip this HAL
+    /// drives. The one place a port number becomes a register block; every pin write goes through
+    /// it, and nothing here checks the port.
     #[inline(never)]
-    pub(crate) fn clocked_port_base(&self, packed: u8) -> Result<u32, DescriptorError> {
-        pincap::check_not_swd(packed)?;
-        let port = port_label(packed)?;
-        if !DESCRIPTOR.bonded(packed) {
-            return Err(DescriptorError::MissingBase(port));
-        }
-        let base = self.base(port)?;
-        crate::clock::enable_gpio_port(self.rcu_base()?, ClockPath, port)?;
-        Ok(base)
+    pub(crate) fn clocked_port_base(&self, port: u8) -> u32 {
+        crate::clock::model::gpio_enable(port).apply(RCU_BASE);
+        GPIOA_BASE + u32::from(port) * GPIO_STRIDE
     }
 
-    /// Put pin `pin` of `port` in analog mode (an ADC input), with its port clock on.
-    pub fn analog_pin(&self, port: PeriphLabel, pin: u8) -> Result<(), DescriptorError> {
-        let packed = packed_pin(port, pin)?;
-        pincap::check_pin_ownership(self, packed, PinClaim::NonGate)?;
-        let base = self.clocked_port_base(packed)?;
-        gpio::configure_analog(base, packed);
-        Ok(())
+    /// Put pin `p` in analog mode (an ADC input), with its port clock on.
+    pub fn analog_pin(&self, p: PinId) {
+        gpio::configure_analog(self.clocked_port_base(p.port), p.pin);
     }
 
     /// A group of up to three input lines read together as one code (line `i` is bit `i`): the hall
     /// sensors, or the button and foot pads. Each line's port clock is enabled; the pin modes are
     /// left as configured.
-    pub fn input_group(
-        &self,
-        pins: [u8; INPUT_GROUP_LINES],
-    ) -> Result<InputGroup, DescriptorError> {
-        let mut lines = [(0u32, 0u8); INPUT_GROUP_LINES];
-        for (slot, &pin) in lines.iter_mut().zip(pins.iter()) {
-            *slot = (self.clocked_port_base(pin)?, pin & 0x0F);
-        }
-        Ok(InputGroup::resolve(lines))
+    pub fn input_group(&self, pins: [PinId; INPUT_GROUP_LINES]) -> InputGroup {
+        InputGroup::resolve(pins.map(|p| (self.clocked_port_base(p.port), p.pin)))
     }
 
-    /// Route a gate pin (an advanced-timer channel or complementary output) to its timer.
-    pub fn route_advanced_pwm_pin(&self, pin: u8) -> Result<(), DescriptorError> {
-        pincap::check_pin_ownership(self, pin, PinClaim::Gate)?;
-        let base = self.clocked_port_base(pin)?;
-        gpio::configure_af(base, pin, PinRole::TimerAfPushPull);
-        Ok(())
+    /// Route a gate pin (an advanced-timer channel or complementary output) to its timer: AF
+    /// push-pull at 50 MHz on alternate function `p.af`.
+    pub fn gate_pin(&self, p: PinAf) {
+        gpio::configure_af(self.clocked_port_base(p.port), p.pin, AfMode::PushPull, p.af);
     }
 
     /// Route a general-timer PWM pin (TIMER1). On the F10x the TIMER1 outputs reach PB3 through the
@@ -197,56 +179,42 @@ impl Chip {
     /// Not on the Cortex-M0 build: there TIMER1 (the MM32's 32-bit TIM2) is the HAL's own cycle
     /// counter (`irq::cycle_count`), which the M0 has no DWT for.
     #[cfg(hal_core = "m3")]
-    pub fn route_general_pwm_pin(&self, pin: u8) -> Result<(), DescriptorError> {
-        pincap::check_pin_ownership(self, pin, PinClaim::NonGate)?;
-        let base = self.clocked_port_base(pin)?;
+    pub fn route_general_pwm_pin(&self, p: PinAf) {
+        let base = self.clocked_port_base(p.port);
         #[cfg(hal_gpio = "crl")]
         {
-            let rcu = self.rcu_base()?;
-            crate::afio::set_swj_sw_only(rcu);
-            crate::afio::remap_timer1_partial0(rcu);
+            crate::afio::set_swj_sw_only(RCU_BASE);
+            crate::afio::remap_timer1_partial0(RCU_BASE);
         }
-        gpio::configure_af(base, pin, PinRole::GenTimerAfPushPull);
-        Ok(())
+        gpio::configure_af(base, p.pin, AfMode::PushPull, p.af);
     }
 
-    /// Route an SPI pin: `SpiAfPushPull` for SCK, MOSI and a hardware NSS, `SpiInput` for MISO.
+    /// Route an SPI pin: AF push-pull for SCK, MOSI and a hardware NSS, an input for MISO.
     #[cfg(hal_spi = "gd")]
-    pub fn route_spi_pin(&self, pin: u8, role: PinRole) -> Result<(), DescriptorError> {
-        if !matches!(role, PinRole::SpiAfPushPull | PinRole::SpiInput) {
-            return Err(DescriptorError::UnsupportedRole);
-        }
-        pincap::check_pin_ownership(self, pin, PinClaim::NonGate)?;
-        let base = self.clocked_port_base(pin)?;
-        gpio::configure_af(base, pin, role);
-        Ok(())
+    pub fn route_spi_pin(&self, p: PinAf, input: bool) {
+        let mode = if input {
+            AfMode::Input
+        } else {
+            AfMode::PushPull
+        };
+        gpio::configure_af(self.clocked_port_base(p.port), p.pin, mode, p.af);
     }
 }
 
-/// The GPIO port of a packed pin byte.
-pub(crate) const fn port_label(pin: u8) -> Result<PeriphLabel, DescriptorError> {
-    match pin >> 4 {
-        0 => Ok(PeriphLabel::Gpioa),
-        1 => Ok(PeriphLabel::Gpiob),
-        2 => Ok(PeriphLabel::Gpioc),
-        3 => Ok(PeriphLabel::Gpiod),
-        5 => Ok(PeriphLabel::Gpiof),
-        _ => Err(DescriptorError::MissingBase(PeriphLabel::Gpioa)),
-    }
-}
+/// The RCU base, from the descriptor.
+const RCU_BASE: u32 = match DESCRIPTOR.addrs.get(PeriphLabel::Rcu) {
+    Some(b) => b,
+    None => panic!("every descriptor carries the RCU base"),
+};
 
-/// The packed byte of pin `pin` on `port`.
-const fn packed_pin(port: PeriphLabel, pin: u8) -> Result<u8, DescriptorError> {
-    let index = match port {
-        PeriphLabel::Gpioa => 0,
-        PeriphLabel::Gpiob => 1,
-        PeriphLabel::Gpioc => 2,
-        PeriphLabel::Gpiod => 3,
-        PeriphLabel::Gpiof => 5,
-        other => return Err(DescriptorError::MissingBase(other)),
-    };
-    Ok((index << 4) | (pin & 0x0F))
-}
+/// GPIO port A's base, from the descriptor.
+const GPIOA_BASE: u32 = match DESCRIPTOR.addrs.get(PeriphLabel::Gpioa) {
+    Some(b) => b,
+    None => panic!("every descriptor carries GPIO port A"),
+};
+
+/// The distance between two GPIO ports' register blocks.
+const GPIO_STRIDE: u32 = 0x400;
 
 #[cfg(test)]
 mod tests {

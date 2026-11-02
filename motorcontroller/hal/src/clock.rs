@@ -12,13 +12,13 @@
 
 #[cfg(hal_clock = "f10x")]
 #[path = "clock/f10x.rs"]
-mod model;
+pub(crate) mod model;
 #[cfg(hal_clock = "f1x0")]
 #[path = "clock/f1x0.rs"]
-mod model;
+pub(crate) mod model;
 #[cfg(hal_clock = "mm32")]
 #[path = "clock/mm32.rs"]
-mod model;
+pub(crate) mod model;
 
 #[cfg(hal_clock = "mm32")]
 pub use model::{configure_tree, ClockConfig};
@@ -164,7 +164,7 @@ pub(crate) struct EnableBit {
 
 impl EnableBit {
     #[inline]
-    fn apply(self, rcu_base: u32) {
+    pub(crate) fn apply(self, rcu_base: u32) {
         Reg32::new(rcu_base, self.reg).set_bits(1 << self.bit);
     }
 }
@@ -181,15 +181,6 @@ fn enable(
     bit.ok_or(DescriptorError::MissingBase(label))?
         .apply(rcu_base);
     Ok(())
-}
-
-/// Enable a GPIO port's clock.
-pub fn enable_gpio_port(
-    rcu_base: u32,
-    _path: ClockPath,
-    port: PeriphLabel,
-) -> Result<(), DescriptorError> {
-    enable(rcu_base, model::gpio_enable(port), port)
 }
 
 /// Enable a USART's clock.
@@ -474,24 +465,6 @@ mod tests {
             1
         };
         assert_eq!(model::wait_states(72_000_000), want);
-    }
-
-    #[test]
-    fn every_bonded_port_has_a_clock_enable() {
-        use crate::descriptor::DESCRIPTOR;
-        let ports = [
-            PeriphLabel::Gpioa,
-            PeriphLabel::Gpiob,
-            PeriphLabel::Gpioc,
-            PeriphLabel::Gpiod,
-            PeriphLabel::Gpioc,
-            PeriphLabel::Gpiof,
-        ];
-        for (i, port) in ports.into_iter().enumerate() {
-            if i != 4 && DESCRIPTOR.bonding[i] != 0 {
-                assert!(model::gpio_enable(port).is_some(), "{port:?}");
-            }
-        }
     }
 
     #[test]

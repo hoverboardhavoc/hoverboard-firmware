@@ -3,14 +3,14 @@
 #   GPIOA CTL1 = 0x44444BBB (PA8, PA9, PA10 AF push-pull 50 MHz)
 #   GPIOB CTL1 = 0xBBB44444 (PB13, PB14, PB15)
 #
-# ignore RCU: Chip::route_advanced_pwm_pin enables each port clock; the vendor body does not.
+# ignore RCU: Chip::gate_pin enables each port clock; the vendor body does not.
 description = """
 The alternate-function configuration of the TIMER0 complementary gate pins on the GD32F10x GPIO
 model: high side CH0/CH1/CH2 on PA8/PA9/PA10, low side CH0N/CH1N/CH2N on PB13/PB14/PB15, all AF
 push-pull at 50 MHz (nibble 0xB; the F10x has no AF number).
 
 Vendor: gpio_init(GPIO_MODE_AF_PP, 50MHZ) on each port's three pins.
-HAL: chip.route_advanced_pwm_pin(pin) for each of the six.
+HAL: chip.gate_pin(PinAf) for each of the six.
 """
 family = "gd32f10x"
 mode = "final_state"
@@ -24,13 +24,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::Chip;
+    use hal::{Chip, PinAf};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
-        for pin in [0x08, 0x09, 0x0A, 0x1D, 0x1E, 0x1F] {
-            chip.route_advanced_pwm_pin(pin).unwrap();
+        for (port, pin) in [(0, 8), (0, 9), (0, 10), (1, 13), (1, 14), (1, 15)] {
+            chip.gate_pin(PinAf { port, pin, af: 0 });
         }
     }
 '''

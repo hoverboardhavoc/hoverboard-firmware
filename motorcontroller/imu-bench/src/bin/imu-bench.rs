@@ -45,7 +45,7 @@ mod firmware {
     use embedded_hal::i2c::I2c as _;
     use hal::clock::{self, ClockConfig};
     use hal::i2c::FastDuty;
-    use hal::{Chip, I2c, I2cMode, PeriphLabel};
+    use hal::{Chip, I2c, I2cMode, PeriphLabel, PinAf};
     use imu::{Config, Error, Fix, Imu, CLONE_2E, CONFIG_WRITES};
     use test_shared::obs_store;
 
@@ -57,9 +57,18 @@ mod firmware {
     /// I2C bus rate: 400 kHz fast mode (`specs/imu.md`, "Hardware I2C first": the production
     /// rate; clone-validated here 2026-07-18, sustained 251/s bursts with zero errors).
     const I2C_HZ: u32 = 400_000;
-    /// The IMU bus pins, packed `port << 4 | pin` (`Chip::pin`): PB6 = SCL, PB7 = SDA.
-    const PB6: u8 = 0x16;
-    const PB7: u8 = 0x17;
+    /// The IMU bus pins: SCL PB6 and SDA PB7, AF1 on the F1x0 mux (the F10x reaches them at the
+    /// I2C0 default remap and reads no AF).
+    const SCL: PinAf = PinAf {
+        port: 1,
+        pin: 6,
+        af: 1,
+    };
+    const SDA: PinAf = PinAf {
+        port: 1,
+        pin: 7,
+        af: 1,
+    };
     /// The sample/tick rate: the spec'd 250 Hz control tick.
     const TICK_HZ: u32 = 250;
     /// Post-`init` settling pause before the first burst read (the caller-owned pause the spec
@@ -106,7 +115,7 @@ mod firmware {
         /// `0x494D_5542` ("IMUB").
         magic: u32,
         /// Fatal bring-up error, busy-spinning: 0 ok, 1 `Chip::take` failed, 2 clock tree failed,
-        /// 3 PB6/PB7 pin bring-up failed, 4 I2C bring-up failed, 5 probe bus error, 6 probe identity
+        /// 3 unused (was the PB6/PB7 pin bring-up), 4 I2C bring-up failed, 5 probe bus error, 6 probe identity
         /// mismatch (`who_am_i` holds the returned value), 7 init write failed, 8 config readback
         /// bus error.
         err: u8,
@@ -216,11 +225,6 @@ mod firmware {
             fail(2);
         }
 
-        // The IMU bus pins PB6 (SCL) / PB7 (SDA), as floating inputs with the port clock on.
-        let (Ok(scl), Ok(sda)) = (chip.pin(PB6), chip.pin(PB7)) else {
-            fail(3)
-        };
-
         // Hardware I2C0 on PB6/PB7 (AF1 on the F1x0, the silicon-proven mux), 400 kHz fast
         // mode. `I2c::new` consumes the pins, enables the peripheral clock, clears the bus,
         // configures the pins AF open-drain, and programs the SPL-faithful timing from
@@ -229,7 +233,8 @@ mod firmware {
             &chip,
             &CLOCK,
             PeriphLabel::I2c0,
-            (scl, sda),
+            SCL,
+            SDA,
             I2cMode::fast(I2C_HZ, FastDuty::Two),
         ) {
             Ok(b) => b,

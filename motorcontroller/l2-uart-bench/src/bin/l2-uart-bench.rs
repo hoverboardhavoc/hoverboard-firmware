@@ -44,7 +44,7 @@ mod firmware {
     use embedded_io::{Read, Write};
     use hal::clock::{self, ClockConfig};
     use hal::descriptor::DESCRIPTOR;
-    use hal::{Chip, DmaTx, PeriphLabel, RingBufferedRx, SplitSerial, Usart};
+    use hal::{Chip, DmaTx, PeriphLabel, PinAf, RingBufferedRx, SplitSerial, Usart};
     use link::{encode_stream_frame, fragment, Reassembler, StreamFramer};
     use test_shared::obs_store;
 
@@ -73,9 +73,18 @@ mod firmware {
     /// DMA ring capacity. >= the max wire frame with comfortable margin for back-to-back fragments
     /// ("a buffer sized to the max L2 frame", with headroom so a 2-fragment burst never laps).
     const DMA_CAP: usize = 256;
-    /// The inter-board USART1 pins, packed `port << 4 | pin` (`Chip::pin`): PA2 = TX, PA3 = RX.
-    const PA2: u8 = 0x02;
-    const PA3: u8 = 0x03;
+    /// The inter-board USART1 pins: TX PA2 and RX PA3, AF1 on the F1x0 mux (the F10x reaches them
+    /// at the USART1 default remap and reads no AF).
+    const TX: PinAf = PinAf {
+        port: 0,
+        pin: 2,
+        af: 1,
+    };
+    const RX: PinAf = PinAf {
+        port: 0,
+        pin: 3,
+        af: 1,
+    };
 
     // --- test packets (master) ------------------------------------------------------------------
 
@@ -195,14 +204,9 @@ mod firmware {
             halt();
         }
 
-        // The inter-board USART1 pins PA2 (TX) / PA3 (RX), as floating inputs with the port clock on.
-        let (Ok(pa2), Ok(pa3)) = (chip.pin(PA2), chip.pin(PA3)) else {
-            halt()
-        };
-
         // USART1 on PA2/PA3, link::INTER_BOARD_BAUD 8N1: configures the GPIO AF + base, RX/TX
         // enabled. The BRR is computed from the 72 MHz tree's APB1 = 36 MHz input clock.
-        let usart = match Usart::new(&chip, &CLOCK, PeriphLabel::Usart1, (pa2, pa3), BAUD) {
+        let usart = match Usart::new(&chip, &CLOCK, PeriphLabel::Usart1, TX, RX, BAUD) {
             Ok(u) => u,
             Err(_) => halt(),
         };

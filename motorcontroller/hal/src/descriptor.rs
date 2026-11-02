@@ -2,7 +2,7 @@
 //! The chip descriptor: the facts of one exact part, as a `const`.
 //!
 //! A descriptor holds only chip facts (specs/hal.md, section 3.1): the base-address table, the flash
-//! and page size, the RAM size, the advanced-timer and ADC instance counts, the pin bonding, the
+//! and page size, the RAM size, the advanced-timer and ADC instance counts, the
 //! interrupt numbers the HAL's drivers use, and the two identity bytes the firmware reports. Each
 //! value is per exact part and is to be confirmed on silicon by the probe validator (section 8.4).
 //!
@@ -75,9 +75,6 @@ pub struct McuDescriptor {
     pub adv_timers: u8,
     /// ADC instances carried.
     pub adc_count: u8,
-    /// Bonded GPIO pins per port, as a bit mask per port index (A = 0, B = 1, C = 2, D = 3,
-    /// E = 4, F = 5): bit `n` set means pin `n` is bonded out in this part's package.
-    pub bonding: [u16; 6],
     /// The interrupt numbers the drivers use.
     pub irqs: IrqMap,
     /// The `NODE_HELLO` mcu byte for this part (`net::walk::MCU_F10X` = 1 for the GD32F10x,
@@ -95,13 +92,6 @@ impl McuDescriptor {
     #[inline]
     pub const fn flash_size_bytes(&self) -> u32 {
         self.flash_kib as u32 * 1024
-    }
-
-    /// Whether packed pin `pin` (`(port << 4) | n`) is bonded out on this part.
-    #[inline]
-    pub const fn bonded(&self, pin: u8) -> bool {
-        let port = (pin >> 4) as usize;
-        port < self.bonding.len() && self.bonding[port] & (1 << (pin & 0x0F)) != 0
     }
 }
 
@@ -138,8 +128,7 @@ const F10X: AddrTable = COMMON
     .with(PeriphLabel::UniqueId, 0x1FFF_F7E8);
 
 /// GD32F103C8: medium density, 64 KiB flash, 20 KiB SRAM, LQFP48. One advanced timer (TIMER0) and
-/// two ADCs, as `runtime-hal` measured on the bench F103 (its README); PA, PB, PC13-15 and PD0-1
-/// bonded (GD32F103xx datasheet, LQFP48 pinout).
+/// two ADCs, as `runtime-hal` measured on the bench F103 (its README).
 #[cfg(feature = "gd32f103c8")]
 pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     name: "GD32F103C8",
@@ -149,7 +138,6 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     ram_kib: RAM_KIB,
     adv_timers: 1,
     adc_count: 2,
-    bonding: [0xFFFF, 0xFFFF, 0xE000, 0x0003, 0, 0],
     irqs: F10X_IRQS,
     node_mcu: 1,
     chip_tag: 1,
@@ -157,7 +145,7 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
 
 /// GD32F103RC: high density, 256 KiB flash in 2 KiB pages, 48 KiB SRAM, LQFP64 (the 12-FET
 /// mainboard). Two advanced timers (TIMER0, TIMER7) and three ADCs, as `runtime-hal`'s probe
-/// measured on the 12-FET; PA, PB, PC and PD0-2 bonded.
+/// measured on the 12-FET.
 #[cfg(feature = "gd32f103rc")]
 pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     name: "GD32F103RC",
@@ -171,7 +159,6 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     ram_kib: RAM_KIB,
     adv_timers: 2,
     adc_count: 3,
-    bonding: [0xFFFF, 0xFFFF, 0xFFFF, 0x0007, 0, 0],
     irqs: F10X_IRQS,
     node_mcu: 1,
     chip_tag: 3,
@@ -180,7 +167,7 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
 /// GD32F130C8: 64 KiB flash, 8 KiB SRAM, LQFP48. GPIO on AHB (0x400 stride, no port E), one
 /// advanced timer and one ADC, the second I2C (the x8 parts carry
 /// it, GD32F130xx datasheet table 2-10 note 3), and the factory unique ID at `0x1FFF_F7AC`
-/// (GD32F1x0 User Manual 1.6.2). PA, PB, PC13-15, PF0-1 and PF6-7 bonded.
+/// (GD32F1x0 User Manual 1.6.2).
 #[cfg(feature = "gd32f130c8")]
 pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     name: "GD32F130C8",
@@ -197,7 +184,6 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     ram_kib: RAM_KIB,
     adv_timers: 1,
     adc_count: 1,
-    bonding: [0xFFFF, 0xFFFF, 0xE000, 0, 0, 0x00C3],
     irqs: IrqMap {
         period: Interrupt::ADC_CMP,
         usart: [
@@ -237,8 +223,7 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
 /// | `Dma0`   | DMA1       | `0x4002_0000` |
 ///
 /// GPIO A-D on AHB at `0x4800_0000` (0x400 stride, no port F), and the factory unique ID at
-/// `0x1FFF_F7E8`. One advanced timer and one ADC. Bonded in LQFP48 (DS_MM32SPIN05 table 5): PA0-15,
-/// PB0-15, PC13-15 and PD0-3. SPI1 and SPI2 exist on the part and are not in the table: their
+/// `0x1FFF_F7E8`. One advanced timer and one ADC. SPI1 and SPI2 exist on the part and are not in the table: their
 /// register model is not this HAL's (`hal_spi`), so no bring-up may name them.
 #[cfg(feature = "mm32spin05")]
 pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
@@ -263,7 +248,6 @@ pub const DESCRIPTOR: McuDescriptor = McuDescriptor {
     ram_kib: RAM_KIB,
     adv_timers: 1,
     adc_count: 1,
-    bonding: [0xFFFF, 0xFFFF, 0xE000, 0x000F, 0, 0],
     irqs: IrqMap {
         period: Interrupt::ADC1_COMP,
         usart: [
@@ -344,27 +328,20 @@ mod tests {
     }
 
     #[test]
-    fn swd_pins_and_the_motor_pins_are_bonded() {
-        // PA13/PA14 (SWD) and the TIMER0 gate set PA8-10 / PB13-15 exist on every part.
-        for pin in [0x0D, 0x0E, 0x08, 0x09, 0x0A, 0x1D, 0x1E, 0x1F] {
-            assert!(DESCRIPTOR.bonded(pin), "{pin:#04x}");
+    fn every_gpio_port_is_port_a_plus_its_number_times_0x400() {
+        // `Chip::clocked_port_base` computes a port's block from port A's; every port the
+        // descriptor carries must sit where that puts it.
+        let a = DESCRIPTOR.addrs.get(PeriphLabel::Gpioa).expect("port A");
+        for (n, port) in [
+            (1, PeriphLabel::Gpiob),
+            (2, PeriphLabel::Gpioc),
+            (3, PeriphLabel::Gpiod),
+            (5, PeriphLabel::Gpiof),
+        ] {
+            if let Some(base) = DESCRIPTOR.addrs.get(port) {
+                assert_eq!(base, a + n * 0x400, "{port:?}");
+            }
         }
-        // Port E is never bonded, nor an out-of-range port byte.
-        assert!(!DESCRIPTOR.bonded(0x40));
-        assert!(!DESCRIPTOR.bonded(0x60));
-    }
-
-    #[test]
-    fn bonded_gpio_counts_match_the_datasheets() {
-        let n: u32 = DESCRIPTOR.bonding.iter().map(|m| m.count_ones()).sum();
-        let want = match DESCRIPTOR.name {
-            "GD32F103C8" => 37,
-            "GD32F130C8" => 39,
-            "GD32F103RC" => 51,
-            "MM32SPIN05" => 39,
-            other => panic!("no datasheet count for {other}"),
-        };
-        assert_eq!(n, want);
     }
 
     #[test]

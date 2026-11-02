@@ -72,16 +72,14 @@ body = '''
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
         // Low side inverted (the vendor's OCN polarity low), both outputs idling high.
-        let pair = |high, low| PwmChannelConfig {
-            high,
-            low,
+        let pair = || PwmChannelConfig {
             polarity: true,
             idle_high: true,
             idle_high_n: true,
         };
         let cfg = PwmConfig {
             timer: PeriphLabel::Timer0,
-            channels: [pair(0x08, 0x1D), pair(0x09, 0x1E), pair(0x0A, 0x1F)],
+            channels: [pair(), pair(), pair()],
             period: 2250,
             prescaler: 0,
             dead_time: 0x1C,

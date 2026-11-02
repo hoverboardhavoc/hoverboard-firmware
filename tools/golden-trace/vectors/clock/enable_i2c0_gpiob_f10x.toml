@@ -6,7 +6,7 @@ The clock enables for the IMU's I2C link (I2C0 on PB6/PB7) on the GD32F10x: the 
 port enables on APB2EN (GPIOB = bit 3) and I2C0 on APB1EN (bit 21). The port first, then the bus.
 
 Vendor: rcu_periph_clock_enable(RCU_GPIOB); rcu_periph_clock_enable(RCU_I2C0).
-HAL: clock::enable_gpio_port(Gpiob); clock::enable_i2c(I2c0).
+HAL: chip.pin(port B) (the port clock alone); clock::enable_i2c(I2c0).
 """
 family = "gd32f10x"
 mode = "register_writes"
@@ -19,13 +19,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::{clock, Chip, PeriphLabel};
+    use hal::{clock, Chip, PeriphLabel, PinId};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
         let rcu = chip.rcu_base().unwrap();
-        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpiob).unwrap();
+        let _ = chip.pin(PinId { port: 1, pin: 0 });
         clock::enable_i2c(rcu, chip.clock(), PeriphLabel::I2c0).unwrap();
     }
 '''

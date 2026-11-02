@@ -27,86 +27,53 @@ pub(crate) use model::{
 
 use crate::reg::Reg32;
 
-/// The alternate-function number a USART pin takes on the F1x0 or MM32 mux (`AFSEL`/`AFR`
-/// nibble). The F10x has no per-pin mux and ignores it.
+/// A pin as the store and the settings file name it (`specs/config-read-once.md` section 3): its
+/// port, `0` = A to `5` = F, and its number within the port, `0..=15`. The HAL writes these into
+/// the registers and checks neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsartAf {
-    /// AF0 (USART0 on PB6/PB7).
-    Af0,
-    /// AF1 (USART1 on PA2/PA3).
-    Af1,
-    /// AF3 (the MM32's UART1 on PB3/PB4, UART2 RX on PA6).
-    #[cfg(hal_gpio = "mm32")]
-    Af3,
-    /// AF4 (the MM32's UART2 on PB7/PB8).
-    #[cfg(hal_gpio = "mm32")]
-    Af4,
+pub struct PinId {
+    /// The port, `0` = A to `5` = F.
+    pub port: u8,
+    /// The pin number within the port.
+    pub pin: u8,
 }
 
-impl UsartAf {
-    /// The `AFSEL` nibble.
+/// A pin and the alternate function it is routed to: the per-pin mux number the GD32F1x0
+/// (`AFSEL`) and the MM32 (`AFR`) write. The GD32F10x has no per-pin mux and never reads `af`; its
+/// routing is the AFIO remap ([`crate::afio`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinAf {
+    /// The port, `0` = A to `5` = F.
+    pub port: u8,
+    /// The pin number within the port.
+    pub pin: u8,
+    /// The alternate-function number.
+    pub af: u8,
+}
+
+impl PinAf {
+    /// The pin without its alternate function.
     #[inline]
-    pub(crate) const fn nibble(self) -> u32 {
-        match self {
-            UsartAf::Af0 => 0,
-            UsartAf::Af1 => 1,
-            #[cfg(hal_gpio = "mm32")]
-            UsartAf::Af3 => 3,
-            #[cfg(hal_gpio = "mm32")]
-            UsartAf::Af4 => 4,
+    pub const fn id(self) -> PinId {
+        PinId {
+            port: self.port,
+            pin: self.pin,
         }
     }
 }
 
-/// The role an alternate-function pin is configured for.
+/// What an alternate-function pin's mode registers are set to; the AF number is the pin's own
+/// ([`PinAf::af`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PinRole {
-    /// A USART transmit pin: AF push-pull.
-    Tx(UsartAf),
-    /// A USART receive pin: an input (F10x floating input; F1x0 AF mode, no pull).
-    Rx(UsartAf),
-    /// An I2C pin: AF open-drain with the pull-up (F1x0 AF1).
-    I2cAfOpenDrain,
-    /// SPI SCK, MOSI or a hardware NSS: AF push-pull (F1x0 AF0).
-    SpiAfPushPull,
-    /// SPI MISO: an input (F1x0 AF0).
-    SpiInput,
-    /// An advanced-timer gate pin: AF push-pull (F1x0 AF2).
-    TimerAfPushPull,
-    /// A general-timer PWM pin: AF push-pull (F1x0 AF2).
-    GenTimerAfPushPull,
-}
-
-/// What a [`PinRole`] asks of the pin's mode registers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PinConfig {
-    /// Driven by the peripheral (else an input).
-    pub output: bool,
-    /// Open-drain (else push-pull), for an output.
-    pub open_drain: bool,
-    /// The pull-up on (the F1x0 `PUD`; the F10x AF modes have no pull).
-    pub pull_up: bool,
-    /// The F1x0 `AFSEL` or MM32 `AFR` nibble.
-    pub af: u32,
-}
-
-impl PinRole {
-    pub(crate) const fn config(self) -> PinConfig {
-        let (output, open_drain, pull_up, af) = match self {
-            PinRole::Tx(af) => (true, false, false, af.nibble()),
-            PinRole::Rx(af) => (false, false, false, af.nibble()),
-            PinRole::I2cAfOpenDrain => (true, true, true, 1),
-            PinRole::SpiAfPushPull => (true, false, false, 0),
-            PinRole::SpiInput => (false, false, false, 0),
-            PinRole::TimerAfPushPull | PinRole::GenTimerAfPushPull => (true, false, false, 2),
-        };
-        PinConfig {
-            output,
-            open_drain,
-            pull_up,
-            af,
-        }
-    }
+pub(crate) enum AfMode {
+    /// Driven by the peripheral, push-pull at 50 MHz: a USART TX, a timer output, SPI SCK/MOSI.
+    PushPull,
+    /// Driven by the peripheral, open-drain at 50 MHz with the pull-up (the F1x0 `PUD`; the F10x
+    /// AF modes have no pull): an I2C line.
+    OpenDrainPullUp,
+    /// An input the peripheral reads (F10x and MM32 floating input; F1x0 AF mode, no pull): a
+    /// USART RX, SPI MISO.
+    Input,
 }
 
 /// The pull an input takes.
@@ -140,7 +107,8 @@ pub struct Output<OTYPE> {
     _otype: PhantomData<OTYPE>,
 }
 
-/// A GPIO pin in mode `MODE`, its port clock already enabled ([`crate::Chip::pin`]).
+/// A GPIO pin in mode `MODE`, its port clock already enabled ([`crate::Chip::pin`]). `pin` is the
+/// number within the port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pin<MODE> {
     port_base: u32,
@@ -158,17 +126,6 @@ impl<MODE> Pin<MODE> {
         }
     }
 
-    /// The packed pin byte.
-    #[inline]
-    pub const fn pin(&self) -> u8 {
-        self.pin
-    }
-
-    /// The port's register base.
-    #[inline]
-    pub(crate) const fn port_base(&self) -> u32 {
-        self.port_base
-    }
 
     /// As a push-pull output.
     #[inline]
@@ -261,43 +218,5 @@ impl InputGroup {
             code |= (((istat.read() >> u32::from(*pin)) & 1) as u8) << i;
         }
         code
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roles_ask_for_the_af_numbers_of_the_f1x0_mux() {
-        assert_eq!(PinRole::Tx(UsartAf::Af1).config().af, 1);
-        assert_eq!(PinRole::Rx(UsartAf::Af0).config().af, 0);
-        assert_eq!(PinRole::I2cAfOpenDrain.config().af, 1);
-        assert_eq!(PinRole::SpiAfPushPull.config().af, 0);
-        assert_eq!(PinRole::TimerAfPushPull.config().af, 2);
-        assert_eq!(PinRole::GenTimerAfPushPull.config().af, 2);
-    }
-
-    #[test]
-    fn only_i2c_is_open_drain_and_pulled_up() {
-        for role in [
-            PinRole::Tx(UsartAf::Af1),
-            PinRole::Rx(UsartAf::Af1),
-            PinRole::SpiAfPushPull,
-            PinRole::SpiInput,
-            PinRole::TimerAfPushPull,
-            PinRole::GenTimerAfPushPull,
-        ] {
-            let c = role.config();
-            assert!(!c.open_drain && !c.pull_up, "{role:?}");
-        }
-        let i2c = PinRole::I2cAfOpenDrain.config();
-        assert!(i2c.output && i2c.open_drain && i2c.pull_up);
-    }
-
-    #[test]
-    fn inputs_are_not_driven() {
-        assert!(!PinRole::Rx(UsartAf::Af1).config().output);
-        assert!(!PinRole::SpiInput.config().output);
     }
 }

@@ -6,7 +6,7 @@ The clock enables for USART1 and its port (TX/RX on PA2/PA3) on the GD32F1x0: GP
 and USART1 APB1EN bit 17.
 
 Vendor: rcu_periph_clock_enable(RCU_GPIOA); rcu_periph_clock_enable(RCU_USART1).
-HAL: clock::enable_gpio_port(Gpioa); clock::enable_usart(Usart1).
+HAL: chip.pin(port A) (the port clock alone); clock::enable_usart(Usart1).
 """
 family = "gd32f1x0"
 mode = "register_writes"
@@ -19,13 +19,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::{clock, Chip, PeriphLabel};
+    use hal::{clock, Chip, PeriphLabel, PinId};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
         let rcu = chip.rcu_base().unwrap();
-        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpioa).unwrap();
+        let _ = chip.pin(PinId { port: 0, pin: 0 });
         clock::enable_usart(rcu, chip.clock(), PeriphLabel::Usart1).unwrap();
     }
 '''

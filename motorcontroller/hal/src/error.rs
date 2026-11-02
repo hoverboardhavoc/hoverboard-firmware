@@ -3,31 +3,25 @@
 
 use crate::addr::PeriphLabel;
 
-/// A bring-up refused for its wiring: the request names something the chip does not carry, a pin
-/// another function owns, or a role the pin cannot take.
+/// A bring-up refused: the request names something the chip does not carry, or a configuration
+/// the HAL cannot express. The stored pin values are not checked here
+/// (`specs/config-read-once.md` section 5); the CLI checks them before they are written.
 ///
 /// The firmware records these in its boot report through [`DescriptorError::code`]. The codes are
 /// the numbering `runtime-hal` used for the variants that remain, so a boot report reads the same
 /// across the move; the two that described a mismatched runtime selector (codes 1 and 2) went with
-/// the selectors (specs/hal.md, section 4).
+/// the selectors (specs/hal.md, section 4), and the four pin and claim refusals (codes 5, 6, 9 and
+/// 10) with the checks (`specs/config-read-once.md` section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorError {
     /// The chip has no base address for this peripheral.
     MissingBase(PeriphLabel),
     /// The serial configuration cannot be expressed (a baud the divider cannot reach).
     UsartConfig,
-    /// The pin cannot take the requested role.
-    UnsupportedRole,
-    /// The pin belongs to another function (a gate pin for anything but a gate, or the reverse).
-    PinOwnership,
     /// The capability exists in the request but not in the HAL.
     Unsupported,
     /// A bring-up's read-back did not confirm its configuration.
     SelfCheckFailed,
-    /// The pin is PA13 or PA14, the SWD pins, which nothing may claim.
-    SwdPin,
-    /// The instance is already in use by another bring-up.
-    InUse,
 }
 
 impl DescriptorError {
@@ -36,12 +30,8 @@ impl DescriptorError {
         match self {
             DescriptorError::MissingBase(_) => 3,
             DescriptorError::UsartConfig => 4,
-            DescriptorError::UnsupportedRole => 5,
-            DescriptorError::PinOwnership => 6,
             DescriptorError::Unsupported => 7,
             DescriptorError::SelfCheckFailed => 8,
-            DescriptorError::SwdPin => 9,
-            DescriptorError::InUse => 10,
         }
     }
 }
@@ -264,12 +254,8 @@ mod tests {
         let all = [
             (DescriptorError::MissingBase(PeriphLabel::Usart0), 3),
             (DescriptorError::UsartConfig, 4),
-            (DescriptorError::UnsupportedRole, 5),
-            (DescriptorError::PinOwnership, 6),
             (DescriptorError::Unsupported, 7),
             (DescriptorError::SelfCheckFailed, 8),
-            (DescriptorError::SwdPin, 9),
-            (DescriptorError::InUse, 10),
         ];
         for (i, (e, want)) in all.iter().enumerate() {
             assert_eq!(e.code(), *want, "{e:?}");

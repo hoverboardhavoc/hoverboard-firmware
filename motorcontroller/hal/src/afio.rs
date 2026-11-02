@@ -12,6 +12,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use crate::addr::PeriphLabel;
 use crate::reg::Reg32;
 
 const AFIO_BASE: u32 = 0x4001_0000;
@@ -19,7 +20,6 @@ const PCF0: u32 = 0x04;
 const RCU_APB2EN: u32 = 0x18;
 const APB2EN_AFEN: u32 = 1 << 0;
 
-const PCF0_USART0_REMAP: u32 = 1 << 2;
 const PCF0_TIMER1_REMAP: u32 = 0b11 << 8;
 const PCF0_TIMER1_PARTIAL0: u32 = 0b01 << 8;
 const PCF0_SWJ_CFG: u32 = 0b111 << 24;
@@ -56,8 +56,28 @@ pub(crate) fn remap_timer1_partial0(rcu_base: u32) {
     write_pcf0(PCF0_TIMER1_REMAP, PCF0_TIMER1_PARTIAL0);
 }
 
-/// USART0 on PB6/PB7 instead of PA9/PA10.
-pub(crate) fn set_usart0_remap(rcu_base: u32) {
-    enable_clock(rcu_base);
-    write_pcf0(PCF0_USART0_REMAP, PCF0_USART0_REMAP);
+/// Write a peripheral's remap field in `PCF0` (`specs/config-read-once.md` section 3): the stored
+/// `remap` key of the group that uses it, `0` = the peripheral's default pins. The fields (GD32F10x
+/// User Manual 7.5.9): I2C0 bit 1, USART0 bit 2, USART1 bit 3, USART2 bits 5:4, TIMER0 bits 7:6.
+/// A peripheral with no remap field is left alone. The value is written as stored, masked to its
+/// field; `SWJ_CFG` keeps what this HAL configured ([`write_pcf0`]), so no remap can re-enable the
+/// JTAG-DP.
+pub fn remap(label: PeriphLabel, value: u8) {
+    let (shift, width) = match label {
+        PeriphLabel::I2c0 => (1, 1),
+        PeriphLabel::Usart0 => (2, 1),
+        PeriphLabel::Usart1 => (3, 1),
+        PeriphLabel::Usart2 => (4, 2),
+        PeriphLabel::Timer0 => (6, 2),
+        _ => return,
+    };
+    let mask = ((1u32 << width) - 1) << shift;
+    enable_clock(RCU_BASE);
+    write_pcf0(mask, u32::from(value) << shift);
 }
+
+/// The RCU base, from the descriptor.
+const RCU_BASE: u32 = match crate::descriptor::DESCRIPTOR.addrs.get(PeriphLabel::Rcu) {
+    Some(b) => b,
+    None => panic!("every descriptor carries the RCU base"),
+};

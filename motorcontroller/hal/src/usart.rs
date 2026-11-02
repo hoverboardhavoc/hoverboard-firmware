@@ -15,7 +15,7 @@
 //! - `mm32` (MM32SPIN05, MindMotion's `reg_uart.h`): another register set altogether (`TDR`, `RDR`,
 //!   `CSR`, `ISR`, `IER`, `ICR`, `GCR`, `CCR`, `BRR`, `FRA`), one DMA enable for both directions and
 //!   no idle-line detection. `usart/mm32.rs` carries the divisor, the programming, the flags and the
-//!   halves' register operations; the claim, the pin routing and the handles here are shared.
+//!   halves' register operations; the pin routing and the handles here are shared.
 
 #[cfg(hal_usart = "f10x")]
 #[path = "usart/f10x.rs"]
@@ -32,7 +32,6 @@ pub(crate) use model::service_rx_flags;
 #[cfg(hal_usart = "mm32")]
 use model::{divisor_for, program};
 
-use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::addr::PeriphLabel;
 use crate::chip::{Chip, ClockPath};
@@ -41,8 +40,7 @@ use crate::config::{Oversampling, UsartConfig, UsartFrame};
 #[cfg(not(hal_usart = "mm32"))]
 use crate::config::{Parity, WordLen};
 use crate::error::DescriptorError;
-use crate::gpio::{configure_af, Pin, PinRole};
-use crate::pincap::{self, PinClaim, UsartRemap};
+use crate::gpio::{configure_af, AfMode, PinAf};
 #[cfg(not(hal_usart = "mm32"))]
 use crate::reg::Reg32;
 
@@ -93,34 +91,6 @@ pub(crate) const USARTS: [PeriphLabel; 3] = [
     PeriphLabel::Usart1,
     PeriphLabel::Usart2,
 ];
-
-// --- the bring-up claim ---------------------------------------------------------------------------
-
-/// One bit per USART instance brought up this boot, at the label's index. Set by
-/// [`Usart::new`] and [`Usart::bring_up`], never cleared: a USART is brought up once, and a second
-/// bring-up of the same instance (two links naming one USART) is refused with
-/// [`DescriptorError::InUse`] so the first keeps running.
-static BROUGHT_UP: AtomicU8 = AtomicU8::new(0);
-
-/// The claim mask with `label` added, or [`DescriptorError::InUse`] if it is already in `mask`.
-const fn with_claim(mask: u8, label: PeriphLabel) -> Result<u8, DescriptorError> {
-    let bit = 1u8 << label.index();
-    if mask & bit != 0 {
-        Err(DescriptorError::InUse)
-    } else {
-        Ok(mask | bit)
-    }
-}
-
-/// Claim `label` for a bring-up. Touches no register. A critical section makes the load and the
-/// store one update (the HAL uses no read-modify-write atomics, specs/hal.md section 6).
-fn claim(label: PeriphLabel) -> Result<(), DescriptorError> {
-    cortex_m::interrupt::free(|_| {
-        let mask = with_claim(BROUGHT_UP.load(Ordering::Relaxed), label)?;
-        BROUGHT_UP.store(mask, Ordering::Relaxed);
-        Ok(())
-    })
-}
 
 // --- the baud divisor -----------------------------------------------------------------------------
 
@@ -200,43 +170,26 @@ pub struct UsartRx {
 impl Usart {
     /// Bring up `instance` on its pins at `baud`, 8N1, oversampling by 16.
     ///
-    /// In order: the ownership check on both pins (neither may be a gate or an SWD pin); the pair
-    /// resolved through [`pincap::usart_pins`], which must name `instance`; the divisor; the claim
-    /// (a second bring-up of an instance is [`DescriptorError::InUse`]); the USART clock; the
-    /// F10x USART0 remap where the pair needs it; TX as AF push-pull and RX as an AF input; then
-    /// the registers as [`Usart::bring_up`] writes them. Every refusal comes before the first
-    /// register write, so a refused call leaves the instance unclaimed and untouched.
-    pub fn new<TX, RX>(
+    /// The values are the stored ones (`specs/config-read-once.md` section 5) and nothing here
+    /// checks them: the divisor (a baud the clock cannot reach is refused before any register is
+    /// written), the USART clock, TX as AF push-pull and RX as an AF input on their stored
+    /// alternate functions, then the registers as [`Usart::bring_up`] writes them. On the F10x the
+    /// routing is the AFIO remap the caller writes from the stored `remap` key ([`crate::afio`]).
+    pub fn new(
         chip: &Chip,
         clock: &ClockConfig,
         instance: PeriphLabel,
-        pins: (Pin<TX>, Pin<RX>),
+        tx: PinAf,
+        rx: PinAf,
         baud: u32,
     ) -> Result<Usart, DescriptorError> {
-        let (tx, rx) = pins;
-        pincap::check_pin_ownership(chip, tx.pin(), PinClaim::NonGate)?;
-        pincap::check_pin_ownership(chip, rx.pin(), PinClaim::NonGate)?;
-        let mapping =
-            pincap::usart_pins(chip, tx.pin(), rx.pin()).ok_or(DescriptorError::Unsupported)?;
-        if mapping.usart != instance {
-            return Err(DescriptorError::Unsupported);
-        }
         let base = chip.base(instance)?;
         let rcu = chip.rcu_base()?;
         let brr = divisor_for(clock, instance, baud, Oversampling::By16)?;
-        claim(instance)?;
 
         crate::clock::enable_usart(rcu, ClockPath, instance)?;
-        match mapping.remap {
-            UsartRemap::Default => {}
-            UsartRemap::Usart0 => {
-                // `usart_pins` answers this only on the F10x; the F1x0 routes through its mux.
-                #[cfg(hal_gpio = "crl")]
-                crate::afio::set_usart0_remap(rcu);
-            }
-        }
-        configure_af(tx.port_base(), tx.pin(), PinRole::Tx(mapping.tx_af));
-        configure_af(rx.port_base(), rx.pin(), PinRole::Rx(mapping.rx_af));
+        configure_af(chip.clocked_port_base(tx.port), tx.pin, AfMode::PushPull, tx.af);
+        configure_af(chip.clocked_port_base(rx.port), rx.pin, AfMode::Input, rx.af);
 
         program(base, brr, UsartFrame::EIGHT_N_ONE);
         Ok(Usart {
@@ -250,8 +203,7 @@ impl Usart {
     ///
     /// The writes: clear `UEN` (`usart_disable`), `BAUD` (`usart_baudrate_set`), the frame fields
     /// `WL`, `STB`, `PM`/`PCEN` (`usart_word_length_set`, `usart_stop_bit_set`,
-    /// `usart_parity_config`), `REN`/`TEN`, then `UEN` (`usart_enable`). The instance is claimed as
-    /// in [`Usart::new`].
+    /// `usart_parity_config`), `REN`/`TEN`, then `UEN` (`usart_enable`).
     pub fn bring_up(
         chip: &Chip,
         clock: &ClockConfig,
@@ -264,7 +216,6 @@ impl Usart {
         let brr = divisor_for(clock, cfg.usart, cfg.baud, cfg.oversampling)?;
         #[cfg(hal_usart = "mm32")]
         model::check_frame(&cfg.frame)?;
-        claim(cfg.usart)?;
         program(base, brr, cfg.frame);
         Ok(Usart {
             label: cfg.usart,
@@ -393,15 +344,13 @@ pub(crate) fn service_rx_flags(base: u32) -> bool {
     stat & STAT_ERRORS != 0
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(hal_usart = "mm32")))]
 mod tests {
     use super::*;
 
-    #[cfg(not(hal_usart = "mm32"))]
     const TREE: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
 
     #[test]
-    #[cfg(not(hal_usart = "mm32"))]
     fn usart1_at_115200_on_the_72_mhz_tree_is_0x139() {
         // The golden bring-up's headline value: APB1 = 36 MHz, (36e6 + 57600) / 115200 = 313.
         assert_eq!(
@@ -415,7 +364,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(hal_usart = "mm32"))]
     fn usart0_divides_the_apb2_clock() {
         // APB2 = 72 MHz: (72e6 + 57600) / 115200 = 625.
         assert_eq!(
@@ -425,7 +373,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(hal_usart = "mm32"))]
     fn the_divisor_rounds_to_nearest() {
         // 36e6 / 460800 = 78.125 -> 78; 36e6 / 9600 = 3750 exactly; 36e6 / 230400 = 156.25 -> 156.
         assert_eq!(baud_divisor(36_000_000, 460_800), Some(78));
@@ -437,7 +384,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(hal_usart = "mm32"))]
     fn unreachable_bauds_are_refused() {
         let refuse = |baud| divisor_for(&TREE, PeriphLabel::Usart1, baud, Oversampling::By16);
         assert_eq!(refuse(0), Err(DescriptorError::UsartConfig));
@@ -450,7 +396,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(hal_usart = "mm32"))]
     fn oversampling_by_8_and_non_usart_labels_are_refused() {
         assert_eq!(
             divisor_for(&TREE, PeriphLabel::Usart1, 115_200, Oversampling::By8),
@@ -463,20 +408,6 @@ mod tests {
     }
 
     #[test]
-    fn an_instance_is_claimed_once() {
-        let m = with_claim(0, PeriphLabel::Usart1).expect("first claim");
-        assert_eq!(m, 0b010);
-        assert_eq!(
-            with_claim(m, PeriphLabel::Usart1),
-            Err(DescriptorError::InUse)
-        );
-        let m = with_claim(m, PeriphLabel::Usart0).expect("another instance");
-        let m = with_claim(m, PeriphLabel::Usart2).expect("another instance");
-        assert_eq!(m, 0b111);
-    }
-
-    #[test]
-    #[cfg(not(hal_usart = "mm32"))]
     fn the_model_offsets_are_the_vendor_headers() {
         // gd32f10x_usart.h / gd32f1x0_usart.h.
         let (stat, tdata, rdata, baud, ctl0, ctl1, ctl2, uen) = (

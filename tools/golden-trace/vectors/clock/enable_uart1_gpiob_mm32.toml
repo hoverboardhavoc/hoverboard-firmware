@@ -6,7 +6,7 @@ The clock enables for UART1 on PB6 (TX) / PB4 (RX) on the MM32SPIN05 (trondin's 
 inter-board link): GPIOB on AHBENR bit 18, UART1 on APB2ENR bit 14. The port first, then the UART.
 
 Vendor: RCC_AHBPeriphClockCmd(RCC_AHBENR_GPIOB, ENABLE); RCC_APB2PeriphClockCmd(RCC_APB2ENR_UART1, ENABLE).
-HAL: clock::enable_gpio_port(Gpiob); clock::enable_usart(Usart0) (the HAL's label for UART1, at
+HAL: chip.pin(port B) (the port clock alone); clock::enable_usart(Usart0) (the HAL's label for UART1, at
 0x4001_3800, the GD32 USART0's address).
 """
 family = "mm32spin05"
@@ -20,13 +20,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::{clock, Chip, PeriphLabel};
+    use hal::{clock, Chip, PeriphLabel, PinId};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
         let rcu = chip.rcu_base().unwrap();
-        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpiob).unwrap();
+        let _ = chip.pin(PinId { port: 1, pin: 0 });
         clock::enable_usart(rcu, chip.clock(), PeriphLabel::Usart0).unwrap();
     }
 '''

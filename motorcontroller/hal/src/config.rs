@@ -279,10 +279,6 @@ pub struct BreakConfig {
 /// One complementary channel pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PwmChannelConfig {
-    /// The high-side pin (packed).
-    pub high: u8,
-    /// The low-side (complementary) pin (packed).
-    pub low: u8,
     /// Output polarity: `true` = active high.
     pub polarity: bool,
     /// The high-side idle level (`ISOx`).

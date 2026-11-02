@@ -6,7 +6,7 @@
 # AF2 is non-zero, so the comparison pins the mux number (TIMER0 is AF2 on port A and B,
 # gd32f1x0_gpio.c's AF table).
 #
-# ignore RCU: Chip::route_advanced_pwm_pin enables each port clock; the vendor body does not.
+# ignore RCU: Chip::gate_pin enables each port clock; the vendor body does not.
 # ignore AFSEL0 on both ports: gpio_af_set rewrites both AFSEL registers, the HAL only AFSEL1, which
 # holds pins 8 to 15; both leave AFSEL0 at its reset 0.
 description = """
@@ -16,7 +16,7 @@ model: PA8/PA9/PA10 (CH0/CH1/CH2) and PB13/PB14/PB15 (CH0N/CH1N/CH2N), AF mode, 
 
 Vendor: gpio_mode_set(AF, PUPD_NONE), gpio_af_set(AF_2), gpio_output_options_set(OTYPE_PP, 50MHZ)
         on each port's three pins.
-HAL: chip.route_advanced_pwm_pin(pin) for each of the six.
+HAL: chip.gate_pin(PinAf) for each of the six.
 """
 family = "gd32f1x0"
 mode = "final_state"
@@ -39,13 +39,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::Chip;
+    use hal::{Chip, PinAf};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
-        for pin in [0x08, 0x09, 0x0A, 0x1D, 0x1E, 0x1F] {
-            chip.route_advanced_pwm_pin(pin).unwrap();
+        for (port, pin) in [(0, 8), (0, 9), (0, 10), (1, 13), (1, 14), (1, 15)] {
+            chip.gate_pin(PinAf { port, pin, af: 2 });
         }
     }
 '''

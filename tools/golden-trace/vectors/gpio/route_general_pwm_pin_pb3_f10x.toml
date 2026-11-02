@@ -38,11 +38,11 @@ body = '''
 
 [hal]
 body = '''
-    use hal::Chip;
+    use hal::{Chip, PinAf};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
-        chip.route_general_pwm_pin(0x13).unwrap(); // PB3 = TIMER1_CH1
+        chip.route_general_pwm_pin(PinAf { port: 1, pin: 3, af: 0 }); // PB3 = TIMER1_CH1
     }
 '''

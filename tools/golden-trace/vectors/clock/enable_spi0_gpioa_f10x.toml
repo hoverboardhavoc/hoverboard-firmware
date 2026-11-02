@@ -7,7 +7,7 @@ The clock enables for SPI0 and its port (SCK/MISO/MOSI on PA5/PA6/PA7) on the GD
 APB2EN bit 2 and SPI0 APB2EN bit 12.
 
 Vendor: rcu_periph_clock_enable(RCU_GPIOA); rcu_periph_clock_enable(RCU_SPI0).
-HAL: clock::enable_gpio_port(Gpioa); clock::enable_spi(Spi0).
+HAL: chip.pin(port A) (the port clock alone); clock::enable_spi(Spi0).
 """
 family = "gd32f10x"
 mode = "register_writes"
@@ -20,13 +20,13 @@ body = '''
 
 [hal]
 body = '''
-    use hal::{clock, Chip, PeriphLabel};
+    use hal::{clock, Chip, PeriphLabel, PinId};
 
     pub fn body() {
         // SAFETY: the vector owns the whole chip.
         let chip = unsafe { Chip::steal() };
         let rcu = chip.rcu_base().unwrap();
-        clock::enable_gpio_port(rcu, chip.clock(), PeriphLabel::Gpioa).unwrap();
+        let _ = chip.pin(PinId { port: 0, pin: 0 });
         clock::enable_spi(rcu, chip.clock(), PeriphLabel::Spi0).unwrap();
     }
 '''
