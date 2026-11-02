@@ -218,6 +218,21 @@ pub fn parse_value_as(kind: Type, field_id: u8, raw: &str) -> Result<Value<'_>, 
         },
         Type::Str => Value::Str(raw.as_bytes()),
         Type::Blob => return Err(FieldArgError::UnsupportedType { field_id, kind }),
+        // A pin (`specs/config-read-once.md` section 3): its bytes, comma-separated: the port
+        // (0 = A), the pin, and the af or the adc channel (`0,8,2`).
+        Type::Pin | Type::PinAf | Type::PinAdc => {
+            let bytes = raw
+                .split(',')
+                .map(|b| parse_u64(b.trim()).ok().and_then(|v| u8::try_from(v).ok()))
+                .collect::<Option<Vec<u8>>>()
+                .filter(|b| Some(b.len()) == kind.fixed_len())
+                .ok_or_else(|| bad("expected the pin's bytes, port,pin[,af|adc]".into()))?;
+            match kind {
+                Type::Pin => Value::Pin([bytes[0], bytes[1]]),
+                Type::PinAf => Value::PinAf([bytes[0], bytes[1], bytes[2]]),
+                _ => Value::PinAdc([bytes[0], bytes[1], bytes[2]]),
+            }
+        }
     };
     Ok(value)
 }

@@ -6,7 +6,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::addr::PeriphLabel;
 use crate::descriptor::{McuDescriptor, PageSize, DESCRIPTOR};
 use crate::error::DescriptorError;
-use crate::gpio::{self, AfMode, Floating, Input, InputGroup, Pin, PinAf, PinId, INPUT_GROUP_LINES};
+use crate::gpio::{
+    self, AfMode, Floating, Input, InputGroup, Pin, PinAf, PinId, INPUT_GROUP_LINES,
+};
 use crate::reg::Reg32;
 
 /// The clock tree of the compiled chip.
@@ -170,7 +172,12 @@ impl Chip {
     /// Route a gate pin (an advanced-timer channel or complementary output) to its timer: AF
     /// push-pull at 50 MHz on alternate function `p.af`.
     pub fn gate_pin(&self, p: PinAf) {
-        gpio::configure_af(self.clocked_port_base(p.port), p.pin, AfMode::PushPull, p.af);
+        gpio::configure_af(
+            self.clocked_port_base(p.port),
+            p.pin,
+            AfMode::PushPull,
+            p.af,
+        );
     }
 
     /// Route a general-timer PWM pin (TIMER1). On the F10x the TIMER1 outputs reach PB3 through the

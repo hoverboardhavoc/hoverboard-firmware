@@ -32,7 +32,6 @@ pub(crate) use model::service_rx_flags;
 #[cfg(hal_usart = "mm32")]
 use model::{divisor_for, program};
 
-
 use crate::addr::PeriphLabel;
 use crate::chip::{Chip, ClockPath};
 use crate::clock::ClockConfig;
@@ -188,8 +187,18 @@ impl Usart {
         let brr = divisor_for(clock, instance, baud, Oversampling::By16)?;
 
         crate::clock::enable_usart(rcu, ClockPath, instance)?;
-        configure_af(chip.clocked_port_base(tx.port), tx.pin, AfMode::PushPull, tx.af);
-        configure_af(chip.clocked_port_base(rx.port), rx.pin, AfMode::Input, rx.af);
+        configure_af(
+            chip.clocked_port_base(tx.port),
+            tx.pin,
+            AfMode::PushPull,
+            tx.af,
+        );
+        configure_af(
+            chip.clocked_port_base(rx.port),
+            rx.pin,
+            AfMode::Input,
+            rx.af,
+        );
 
         program(base, brr, UsartFrame::EIGHT_N_ONE);
         Ok(Usart {

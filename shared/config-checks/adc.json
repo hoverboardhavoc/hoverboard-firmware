@@ -1,0 +1,76 @@
+[
+  {
+    "name": "PA4 is channel 4",
+    "chip": "gd32f130c8",
+    "board": {
+      "battery_sense": {
+        "pin": {
+          "port": "A",
+          "pin": 4,
+          "adc": 4
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "PA4 is not channel 5",
+    "chip": "gd32f130c8",
+    "board": {
+      "battery_sense": {
+        "pin": {
+          "port": "A",
+          "pin": 4,
+          "adc": 5
+        }
+      }
+    },
+    "refused": "battery_sense.pin"
+  },
+  {
+    "name": "PB2 is no ADC input",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "B",
+              "pin": 2,
+              "adc": 10
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.phase_b"
+  },
+  {
+    "name": "the phase pair on PA0/PB0",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "B",
+              "pin": 0,
+              "adc": 8
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  }
+]

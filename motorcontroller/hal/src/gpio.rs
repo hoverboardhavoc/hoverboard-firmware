@@ -126,7 +126,6 @@ impl<MODE> Pin<MODE> {
         }
     }
 
-
     /// As a push-pull output.
     #[inline]
     pub fn into_push_pull_output(self) -> Pin<Output<PushPull>> {

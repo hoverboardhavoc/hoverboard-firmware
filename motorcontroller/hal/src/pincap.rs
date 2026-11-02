@@ -432,7 +432,11 @@ mod tests {
         assert_eq!(f103.adc_channel(0, 4), Some(4));
         assert_eq!(f103.adc_channel(1, 0), Some(8));
         assert_eq!(f103.adc_channel(1, 2), None);
-        assert_eq!(f103.adc_channel(2, 0), None, "PC0 is not bonded on the LQFP48");
+        assert_eq!(
+            f103.adc_channel(2, 0),
+            None,
+            "PC0 is not bonded on the LQFP48"
+        );
         assert_eq!(Chip::Gd32f103rc.table().adc_channel(2, 0), Some(10));
         let mm32 = Chip::Mm32spin05.table();
         assert_eq!(mm32.adc_channel(1, 3), Some(10));

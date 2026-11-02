@@ -9,7 +9,9 @@
 //! bias-corrected raw words the attitude filter (`motorcontroller/attitude`) consumes in the same tick.
 //!
 //! Every numeric constant is preserved exactly from the recovered stock behavioral contract (the
-//! spec's source 1); which IMU model is fitted is a [`Model`] descriptor (the spec's model table).
+//! spec's source 1). The part is detected, not configured (`specs/decision-imu-detect.md`): the
+//! probe accepts any `WHO_AM_I` on the list of parts that have run on the bench
+//! ([`KNOWN_WHO_AM_I`]).
 //!
 //! Transport: the driver is generic over the `embedded-hal` 1.0 `i2c::I2c` trait per call, so it
 //! works with either hal's hardware-I2C peripheral (the silicon-proven default path) or a
@@ -46,39 +48,16 @@ const REG_PWR_MGMT_1: u8 = 0x6B;
 /// First data register of the 14-byte sensor block, ACCEL_XOUT_H (spec section 6.1).
 const REG_ACCEL_XOUT_H: u8 = 0x3B;
 
-/// Device identity register (spec "Models"): [`Imu::probe`] reads it and compares against the
-/// model's expected value.
+/// Device identity register (`specs/decision-imu-detect.md`): [`Imu::probe`] reads it and accepts
+/// any value in [`KNOWN_WHO_AM_I`].
 const REG_WHO_AM_I: u8 = 0x75;
 
-/// One supported IMU model (`specs/imu.md`, "Models"). A descriptor carries only what differs
-/// between supported models; everything the entries share (address, config sequence, burst layout,
-/// scales) is the MPU-6050-class contract in this crate, and a field is added here only when a
-/// supported model actually differs in it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Model {
-    /// Expected readback of the WHO_AM_I register (`0x75`).
-    pub who_am_i: u8,
-}
-
-/// A genuine MPU-6050 (WHO_AM_I reads its own bus address, `0x68`).
-pub const MPU6050: Model = Model { who_am_i: 0x68 };
-
-/// The bench F130's MPU-6050 clone: standard register map and address, but WHO_AM_I reads `0x2E`
-/// (silicon-observed 2026-06-18, hardware I2C0 PB6/PB7). Config sequence and burst layout are
-/// assumed MPU-6050-standard until the bench confirms (`specs/silicon-queue.md`).
-pub const CLONE_2E: Model = Model { who_am_i: 0x2E };
-
-/// The registered `imu.model` index lookup (`specs/imu.md`, the field table: the numbering is
-/// owned by this crate so the registry field stays a plain scalar): `0` = no IMU fitted,
-/// `1` = [`MPU6050`], `2` = [`CLONE_2E`]; anything else is unknown (`None`, the caller's
-/// fail-soft). First consumer: the firmware's plan-gated IMU bring-up (`specs/integration.md`).
-pub fn model_from_index(index: u8) -> Option<Model> {
-    match index {
-        1 => Some(MPU6050),
-        2 => Some(CLONE_2E),
-        _ => None,
-    }
-}
+/// The `WHO_AM_I` values of the MPU-6050-class parts that have run on the bench: `0x68`, a genuine
+/// MPU-6050 (its own bus address), and `0x2E`, the clone on the bench and rover boards. They differ
+/// in nothing else this crate uses; the configuration sequence, data layout and scales are the
+/// MPU-6050's. A part with another value may lay its registers out differently, so the probe
+/// refuses it. Adding a part is one entry here, after it has run on the bench.
+pub const KNOWN_WHO_AM_I: [u8; 2] = [0x68, 0x2E];
 
 /// Length of the cyclic burst read (spec section 6.1).
 pub const BURST_LEN: usize = 14;
@@ -189,7 +168,7 @@ pub struct Config {
 /// body order IS the chip order (the identity permutation). The fallback for an unset (`0`) role.
 pub const DEFAULT_ROLES: [u8; 2] = [3, 2];
 
-/// Why [`Config::staged`] refused a frame (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
+/// Why [`Config::frame_error`] refuses a frame (`specs/imu.md`, `IMU_AXIS_ROLE`, "Validation").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameError {
     /// A role is outside `1..=3`, or the two roles name the same chip axis.
@@ -216,7 +195,7 @@ impl Default for Config {
 
 impl Config {
     /// Build a config from per-board STAGED values (the store's `IMU_AXIS_SIGN`, `IMU_GYRO_BIAS`
-    /// and `IMU_AXIS_ROLE`), applying the unset rule, and REFUSE a frame that is not a rotation.
+    /// and `IMU_AXIS_ROLE`), applying the unset rule.
     ///
     /// `sign` is the three-axis triple `[x, y, z]`, applied to the accelerometer AND the gyro: on
     /// the MPU-6050 class both share one rotation (`specs/imu.md`, the reference map;
@@ -229,15 +208,10 @@ impl Config {
     /// sign, which is what lets one all-indices default express three different per-axis defaults.
     /// A staged role of 0 likewise falls back to that index of [`DEFAULT_ROLES`].
     ///
-    /// The rule lives here rather than in the firmware's bring-up because it is this type's own
-    /// contract: `sign` and `roles` are the config's fields, so what an absent value means for them
-    /// is the config's to say, and saying it here is what makes it host-testable.
-    ///
-    /// The resolved frame must pass [`Config::frame_is_rotation`], or this returns the
-    /// [`FrameError`] and the caller does not bring the IMU up: a wrong role is worse than a wrong
-    /// sign (the machine balances about the wrong axis and nothing in the loop can tell), so it is
-    /// a boot refusal, not only a host-test property.
-    pub fn staged(sign: [i32; 3], gyro_bias: [i32; 3], roles: [u8; 2]) -> Result<Self, FrameError> {
+    /// Nothing is refused here (`specs/config-read-once.md` section 5): the CLI and the app check
+    /// the frame with [`Config::frame_error`] before they write it, and a frame whose roles name no
+    /// permutation decodes in chip order ([`body_order`]).
+    pub fn staged(sign: [i32; 3], gyro_bias: [i32; 3], roles: [u8; 2]) -> Self {
         let mut cfg = Config {
             gyro_bias,
             ..Config::default()
@@ -253,13 +227,23 @@ impl Config {
                 *dst = *staged;
             }
         }
+        cfg
+    }
+
+    /// Why the staged frame `sign`, `roles` (the unset rule of [`Config::staged`] applied) is not
+    /// a proper rotation with distinct roles, or `None` when it is: the check the CLI and the app
+    /// make before writing a frame (`specs/config-read-once.md` section 4). A wrong role is worse
+    /// than a wrong sign: the machine balances about the wrong axis and nothing in the loop can
+    /// tell.
+    pub fn frame_error(sign: [i32; 3], roles: [u8; 2]) -> Option<FrameError> {
+        let cfg = Self::staged(sign, [0; 3], roles);
         let s = cfg.sign;
         if body_order(cfg.roles).is_none() {
-            Err(FrameError::Roles)
+            Some(FrameError::Roles)
         } else if !Self::frame_is_rotation(cfg.roles, [s[0], s[1], s[2]]) {
-            Err(FrameError::Accel)
+            Some(FrameError::Accel)
         } else {
-            Ok(cfg)
+            None
         }
     }
 
@@ -414,9 +398,9 @@ impl Sample {
 pub enum Error<E> {
     /// A transaction failed on the bus. Wraps the underlying `embedded-hal` I2C error.
     Bus(E),
-    /// [`Imu::probe`]: the WHO_AM_I readback does not match the configured [`Model`] (a mis-set
-    /// model must fail loud, never silently mis-scale).
-    Identity { expected: u8, got: u8 },
+    /// [`Imu::probe`]: the WHO_AM_I readback is not in [`KNOWN_WHO_AM_I`] (a part this crate does
+    /// not know must fail loud, never be read with the MPU-6050 layout).
+    Identity { got: u8 },
 }
 
 /// Reassemble a big-endian signed 16-bit word from two bytes (spec section 6.1).
@@ -433,10 +417,9 @@ fn sign_clamp(sign: i32, raw: i16) -> i16 {
 }
 
 /// MPU-6050-class IMU front-end. Generic over the `embedded-hal` 1.0 I2C bus per call; holds the
-/// configured [`Model`], the per-board calibration config, the still-detection state, and the
+/// per-board calibration config, the still-detection state, and the
 /// one-tick corrected-sample history.
 pub struct Imu {
-    model: Model,
     cfg: Config,
     /// The body-order permutation `cfg.roles` selects (`order[i]` = the chip axis that becomes body
     /// axis `i`), resolved once when the config is installed rather than per sample.
@@ -455,11 +438,10 @@ pub struct Imu {
 }
 
 impl Imu {
-    /// Build the front-end for a [`Model`] with a per-board calibration config (sign map + gyro
-    /// bias). Which model a board carries is board configuration, never runtime-guessed.
-    pub fn new(model: Model, cfg: Config) -> Self {
+    /// Build the front-end with a per-board calibration config (sign map + gyro bias). The part is
+    /// the probe's to detect ([`KNOWN_WHO_AM_I`]).
+    pub fn new(cfg: Config) -> Self {
         Imu {
-            model,
             order: order_of(&cfg),
             cfg,
             gyro_scale: Fix::from_num(GYRO_SCALE),
@@ -468,23 +450,20 @@ impl Imu {
         }
     }
 
-    /// Identity check (spec "Models"): read WHO_AM_I (`0x75`) and compare against the model's
-    /// expected value. Separate from [`Imu::init`]; bring-up order (probe-then-init vs init-blind)
-    /// is the caller's policy.
-    pub fn probe<I, E>(&mut self, i2c: &mut I) -> Result<(), Error<E>>
+    /// Identity check (`specs/decision-imu-detect.md`): read WHO_AM_I (`0x75`) and accept any
+    /// value in [`KNOWN_WHO_AM_I`], returning the one read. Separate from [`Imu::init`]; bring-up
+    /// order (probe-then-init vs init-blind) is the caller's policy.
+    pub fn probe<I, E>(&mut self, i2c: &mut I) -> Result<u8, Error<E>>
     where
         I: I2c<Error = E>,
     {
         let mut got = [0u8; 1];
         i2c.write_read(ADDR, &[REG_WHO_AM_I], &mut got)
             .map_err(Error::Bus)?;
-        if got[0] != self.model.who_am_i {
-            return Err(Error::Identity {
-                expected: self.model.who_am_i,
-                got: got[0],
-            });
+        if !KNOWN_WHO_AM_I.contains(&got[0]) {
+            return Err(Error::Identity { got: got[0] });
         }
-        Ok(())
+        Ok(got[0])
     }
 
     /// Replace the calibration config (e.g. after loading the cal page at boot).

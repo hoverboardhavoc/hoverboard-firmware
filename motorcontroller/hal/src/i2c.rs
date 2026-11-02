@@ -63,9 +63,9 @@ use crate::chip::Chip;
 use crate::clock::ClockConfig;
 #[cfg(hal_i2c = "gd")]
 use crate::error::{DescriptorError, I2cError};
-use crate::gpio::{self, AfMode};
 #[cfg(hal_i2c = "gd")]
 use crate::gpio::PinAf;
+use crate::gpio::{self, AfMode};
 #[cfg(hal_i2c = "gd")]
 use crate::reg::Reg32;
 
@@ -396,8 +396,18 @@ struct BusPins {
 impl BusPins {
     /// Both pins as AF open-drain with the pull-up: the block owns the bus from here.
     fn claim_af(&self) {
-        gpio::configure_af(self.scl_base, self.scl, AfMode::OpenDrainPullUp, self.scl_af);
-        gpio::configure_af(self.sda_base, self.sda, AfMode::OpenDrainPullUp, self.sda_af);
+        gpio::configure_af(
+            self.scl_base,
+            self.scl,
+            AfMode::OpenDrainPullUp,
+            self.scl_af,
+        );
+        gpio::configure_af(
+            self.sda_base,
+            self.sda,
+            AfMode::OpenDrainPullUp,
+            self.sda_af,
+        );
     }
 }
 

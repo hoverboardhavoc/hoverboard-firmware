@@ -1,0 +1,22 @@
+[
+  {
+    "name": "a remap on the F103",
+    "chip": "gd32f103c8",
+    "board": {
+      "imu": {
+        "remap": 0
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "a remap on the F130",
+    "chip": "gd32f130c8",
+    "board": {
+      "imu": {
+        "remap": 0
+      }
+    },
+    "refused": "imu.remap"
+  }
+]

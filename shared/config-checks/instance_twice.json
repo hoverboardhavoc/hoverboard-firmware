@@ -1,0 +1,72 @@
+[
+  {
+    "name": "two links on two UARTs",
+    "chip": "mm32spin05",
+    "board": {
+      "links": [
+        {
+          "usart": 1,
+          "tx": {
+            "port": "A",
+            "pin": 2,
+            "af": 1
+          },
+          "rx": {
+            "port": "A",
+            "pin": 3,
+            "af": 1
+          }
+        },
+        {
+          "usart": 0,
+          "tx": {
+            "port": "B",
+            "pin": 6,
+            "af": 0
+          },
+          "rx": {
+            "port": "B",
+            "pin": 7,
+            "af": 0
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "two links on one UART",
+    "chip": "mm32spin05",
+    "board": {
+      "links": [
+        {
+          "usart": 1,
+          "tx": {
+            "port": "A",
+            "pin": 2,
+            "af": 1
+          },
+          "rx": {
+            "port": "A",
+            "pin": 3,
+            "af": 1
+          }
+        },
+        {
+          "usart": 1,
+          "tx": {
+            "port": "B",
+            "pin": 7,
+            "af": 4
+          },
+          "rx": {
+            "port": "B",
+            "pin": 8,
+            "af": 4
+          }
+        }
+      ]
+    },
+    "refused": "links[1].usart"
+  }
+]

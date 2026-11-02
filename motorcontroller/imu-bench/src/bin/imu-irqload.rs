@@ -49,7 +49,7 @@ mod firmware {
     use hal::clock::{self, ClockConfig};
     use hal::descriptor::DESCRIPTOR;
     use hal::{Chip, I2c, I2cMode, PeriphLabel, PinAf};
-    use imu::{Config, Imu, CLONE_2E};
+    use imu::{Config, Imu};
     use test_shared::obs_store;
 
     /// The production 72 MHz tree (matching the integrated image's clock regime).
@@ -161,7 +161,7 @@ mod firmware {
 
         // Probe + init BEFORE the interrupt load starts (the integrated image's boot does the
         // same; the race under test is the cyclic burst, not the bring-up).
-        let mut sensor = Imu::new(CLONE_2E, Config::default());
+        let mut sensor = Imu::new(Config::default());
         if sensor.probe(&mut i2c).is_err() {
             fail(5);
         }

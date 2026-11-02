@@ -1,14 +1,14 @@
 //! IMU + attitude on-silicon validator (`specs/imu.md` "Silicon validation" +
 //! `specs/silicon-queue.md` section 2).
 //!
-//! Target: the bench F130 slave with the clone IMU (`imu::CLONE_2E`, WHO_AM_I `0x2E`) on hardware
+//! Target: the bench F130 slave with the clone IMU (WHO_AM_I `0x2E`, one of `imu::KNOWN_WHO_AM_I`) on hardware
 //! **I2C0 PB6/PB7** (AF1 on the F1x0; the silicon-proven mux). One image per chip on the `hal`
 //! crate (the `gd32f130c8` or `gd32f103c8` feature, with `hardware`). The image, in order:
 //!
 //! 1. `Chip::take`, bring up the production 72 MHz tree (`ClockConfig::REFERENCE_72M_IRC8M`).
 //! 2. Bring up I2C0 on PB6/PB7 at 400 kHz fast mode (the production rate, `specs/imu.md`; at
 //!    72 MHz APB1 = 36 MHz, so I2CCLK = 0x24 / RT = 0x0B / CKCFG = 0x801E per `timing_for`).
-//! 3. `Imu::probe` as `CLONE_2E` (records WHO_AM_I + probe verdict; an identity mismatch records
+//! 3. `Imu::probe` against the known parts (records WHO_AM_I + probe verdict; an identity mismatch records
 //!    the value the device actually returned).
 //! 4. `Imu::init` (the 5-write config sequence, issued back-to-back per the spec's timing delta),
 //!    then read the five config registers back and compare against `imu::CONFIG_WRITES` (the
@@ -46,7 +46,7 @@ mod firmware {
     use hal::clock::{self, ClockConfig};
     use hal::i2c::FastDuty;
     use hal::{Chip, I2c, I2cMode, PeriphLabel, PinAf};
-    use imu::{Config, Error, Fix, Imu, CLONE_2E, CONFIG_WRITES};
+    use imu::{Config, Error, Fix, Imu, CONFIG_WRITES};
     use test_shared::obs_store;
 
     // --- parameters -----------------------------------------------------------------------------
@@ -90,7 +90,7 @@ mod firmware {
     /// |---|---|---|
     /// | `0x00` | `magic` | `0x494D_5542` ("IMUB") once the block is live (set after bring-up, or together with a fatal `err`) |
     /// | `0x04` | `err` | 0 = ok; nonzero = fatal bring-up error, busy-spinning (codes on the field) |
-    /// | `0x05` | `probe_ok` | 1 = `Imu::probe` passed as `CLONE_2E` |
+    /// | `0x05` | `probe_ok` | 1 = `Imu::probe` passed (a known part) |
     /// | `0x06` | `who_am_i` | WHO_AM_I readback (expected `0x2E`; on an identity mismatch, the value the device returned) |
     /// | `0x07` | `readback_ok` | 1 = all five config registers read back the written values |
     /// | `0x08` | `readback[5]` | config-register readback bytes, in `CONFIG_WRITES` order (PWR_MGMT_1, SMPLRT_DIV, CONFIG, GYRO_CONFIG, ACCEL_CONFIG) |
@@ -119,7 +119,7 @@ mod firmware {
         /// mismatch (`who_am_i` holds the returned value), 7 init write failed, 8 config readback
         /// bus error.
         err: u8,
-        /// `Imu::probe` passed as `CLONE_2E`.
+        /// `Imu::probe` passed (a known part).
         probe_ok: u8,
         /// WHO_AM_I readback.
         who_am_i: u8,
@@ -241,18 +241,18 @@ mod firmware {
             Err(_) => fail(4),
         };
 
-        // The driver under test: the CLONE_2E model with the reference Config (stock sign map,
-        // zero gyro bias; the bias is captured below and fed back).
-        let mut sensor = Imu::new(CLONE_2E, Config::default());
+        // The driver under test with the reference Config (stock sign map, zero gyro bias; the bias
+        // is captured below and fed back).
+        let mut sensor = Imu::new(Config::default());
 
-        // Probe: WHO_AM_I identity check as CLONE_2E. Record the readback either way (on a
-        // mismatch the Identity error carries what the device returned).
+        // Probe: the WHO_AM_I identity check against the known parts. Record the readback either
+        // way (on a mismatch the Identity error carries what the device returned).
         match sensor.probe(&mut i2c) {
-            Ok(()) => {
-                obs_store!(IMU_BENCH_OBS, who_am_i, CLONE_2E.who_am_i);
+            Ok(who) => {
+                obs_store!(IMU_BENCH_OBS, who_am_i, who);
                 obs_store!(IMU_BENCH_OBS, probe_ok, 1);
             }
-            Err(Error::Identity { got, .. }) => {
+            Err(Error::Identity { got }) => {
                 obs_store!(IMU_BENCH_OBS, who_am_i, got);
                 fail(6);
             }

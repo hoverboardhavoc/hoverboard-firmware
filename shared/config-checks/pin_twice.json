@@ -1,0 +1,108 @@
+[
+  {
+    "name": "two pads on two pins",
+    "chip": "gd32f130c8",
+    "board": {
+      "pads": {
+        "a": {
+          "port": "A",
+          "pin": 11
+        },
+        "b": {
+          "port": "C",
+          "pin": 15
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "two pads on one pin",
+    "chip": "gd32f130c8",
+    "board": {
+      "pads": {
+        "a": {
+          "port": "A",
+          "pin": 11
+        },
+        "b": {
+          "port": "A",
+          "pin": 11
+        }
+      }
+    },
+    "refused": "pads.b"
+  },
+  {
+    "name": "the button on the latch's default pin",
+    "chip": "gd32f130c8",
+    "board": {
+      "power": {
+        "button": {
+          "port": "B",
+          "pin": 12
+        }
+      }
+    },
+    "refused": "power.button"
+  },
+  {
+    "name": "a hall on a gate pin",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 28,
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 2
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            }
+          },
+          "hall": {
+            "a": {
+              "port": "C",
+              "pin": 13
+            },
+            "b": {
+              "port": "A",
+              "pin": 1
+            },
+            "c": {
+              "port": "A",
+              "pin": 8
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].gate.hi_a"
+  }
+]

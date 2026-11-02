@@ -1,0 +1,137 @@
+[
+  {
+    "name": "28 ticks",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 28,
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 2
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "the floor itself",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 18,
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 2
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "10 ticks",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 10,
+            "hi_a": {
+              "port": "A",
+              "pin": 8,
+              "af": 2
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9,
+              "af": 2
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10,
+              "af": 2
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13,
+              "af": 2
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14,
+              "af": 2
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15,
+              "af": 2
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].gate.dead_time"
+  }
+]

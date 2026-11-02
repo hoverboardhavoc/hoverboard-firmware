@@ -25,6 +25,12 @@ linkctl = { path = "../../shared/linkctl" }
 # The boot status record's layout and reason codes, for `status` (`specs/configured-links.md`
 # section 5): `board.status` decodes with the firmware's own type.
 board = { path = "../../motorcontroller/board" }
+# Every chip's pin tables (`hal::pincap`, the `pincap` feature alone builds nothing else), which the
+# configuration checks test pin, instance and remap keys against (`specs/config-read-once.md`
+# section 4).
+hal = { path = "../../motorcontroller/hal", default-features = false, features = ["pincap"] }
+# The IMU frame rule (`imu::Config::frame_error`), the check before an axis frame is written.
+imu = { path = "../../motorcontroller/imu" }
 espsvc = { path = "../../shared/espsvc" }
 embedded-io = "0.6"
 # The BLE link and `scan` (the `ble` feature).

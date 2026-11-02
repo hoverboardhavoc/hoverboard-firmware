@@ -1,0 +1,82 @@
+[
+  {
+    "name": "an af on the F130",
+    "chip": "gd32f130c8",
+    "board": {
+      "links": [
+        {
+          "usart": 0,
+          "tx": {
+            "port": "B",
+            "pin": 6,
+            "af": 0
+          },
+          "rx": {
+            "port": "B",
+            "pin": 7,
+            "af": 0
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "no af on the F130",
+    "chip": "gd32f130c8",
+    "board": {
+      "links": [
+        {
+          "usart": 0,
+          "tx": {
+            "port": "B",
+            "pin": 6
+          },
+          "rx": {
+            "port": "B",
+            "pin": 7,
+            "af": 0
+          }
+        }
+      ]
+    },
+    "refused": "links[0].tx"
+  },
+  {
+    "name": "no af on the F103",
+    "chip": "gd32f103c8",
+    "board": {
+      "imu": {
+        "i2c": 0,
+        "scl": {
+          "port": "B",
+          "pin": 6
+        },
+        "sda": {
+          "port": "B",
+          "pin": 7
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "an af on the F103",
+    "chip": "gd32f103c8",
+    "board": {
+      "imu": {
+        "i2c": 0,
+        "scl": {
+          "port": "B",
+          "pin": 6
+        },
+        "sda": {
+          "port": "B",
+          "pin": 7,
+          "af": 1
+        }
+      }
+    },
+    "refused": "imu.sda"
+  }
+]

@@ -833,6 +833,9 @@ fn files_command(
     let replace = matches!(mode, Mode::Replace | Mode::Diff { replace: true });
     let plan = config::plan(&files, &reads, &unknown, replace).map_err(joined)?;
     let none = BTreeMap::new();
+    if noun == Noun::Board && !matches!(mode, Mode::Diff { .. }) {
+        check_board(&mut *b.wire, f.addr, &files, &reads, &plan)?;
+    }
     if let Mode::Diff { .. } = mode {
         for l in config::report(&b.name, &plan, &reads, &none) {
             println!("{l}");
@@ -1236,6 +1239,49 @@ fn swd_route(link: &Link, spec: &str, purpose: Purpose) -> Result<(EspClient, Ro
     Ok((Client::addressed(wire, r.src, r.dst), r))
 }
 
+/// The chip of the board at `addr`, as `TARGET_ID` through the bridge wired to it reports it, over
+/// the open `wire` (`specs/config-read-once.md` section 4: the pin checks are made against it).
+fn chip_on(wire: &mut impl Wire, addr: u8) -> Result<hal::pincap::Chip, String> {
+    let r = route::swd(wire, &format!("{addr:#04x}"), Purpose::Other)?;
+    let id = Client::addressed(&mut *wire, r.src, r.dst)
+        .target_id()
+        .map_err(|e| e.to_string())?;
+    hoverboard_cli::checks::chip_of(id.family, id.flash_kib).ok_or_else(|| {
+        format!(
+            "{addr:#04x}: TARGET_ID reports {} with {} KiB of flash, a part no image is built for",
+            family_name(id.family),
+            id.flash_kib
+        )
+    })
+}
+
+/// The board checks of a plan (`specs/config-read-once.md` section 4), with the chip read when the
+/// plan changes a key the pin checks read.
+fn check_board(
+    wire: &mut impl Wire,
+    addr: u8,
+    files: &config::Files,
+    reads: &config::Reads,
+    plan: &config::Plan,
+) -> Result<(), String> {
+    let chip = if plan
+        .steps
+        .iter()
+        .any(|s| hoverboard_cli::checks::needs_chip(s.key))
+    {
+        Some(chip_on(wire, addr)?)
+    } else {
+        None
+    };
+    config::check_plan(chip, files, reads, plan)
+}
+
+/// Whether a node's chip routes by the AFIO remap (the GD32F10x), from its `IDENTITY` family: its
+/// pins carry no `af` in a file (`specs/config-read-once.md` section 3).
+fn remaps(f: &Found) -> bool {
+    f.identity.is_some_and(|i| i.mcu == net::walk::MCU_F10X)
+}
+
 /// `board erase` (`specs/hoverboard-bridge.md`, "Erasing the store"): print what the erase loses
 /// that a dump leaves out, ask, send `STORE_ERASE` through the board's own bridge, wait for the
 /// board's mailbox, and give the board its old address back out the bridge's mailbox port.
@@ -1555,7 +1601,9 @@ fn board_status_cmd(link: &Link, targets: &[String]) -> Result<(), String> {
         let mut link_pins = |i: u8| {
             let mut pin = |k: store::Key| match nodes::read(&mut wire, src, f.addr, k).ok()?.value()
             {
-                Some(store::Value::U8(p)) => Some(p),
+                Some(store::Value::PinAf([port, pin, _])) if port != 0xFF => {
+                    Some(names::pin_text(port, pin))
+                }
                 _ => None,
             };
             Some((
@@ -1563,9 +1611,9 @@ fn board_status_cmd(link: &Link, targets: &[String]) -> Result<(), String> {
                 pin(store::LINK_RX.at(i).key())?,
             ))
         };
-        let pins: Vec<Option<(u8, u8)>> = (0..store::LINKS).map(&mut link_pins).collect();
+        let pins: Vec<Option<(String, String)>> = (0..store::LINKS).map(&mut link_pins).collect();
         for l in hoverboard_cli::status::lines(&name, &value, |i| {
-            pins.get(i as usize).copied().flatten()
+            pins.get(i as usize).cloned().flatten()
         }) {
             println!("{l}");
         }
@@ -1662,7 +1710,7 @@ fn machine_set(link: &Link, path: &str, value: &str, force: bool) -> Result<(), 
             name: node_name(f),
             class: CLASS_MOTOR,
         };
-        let written = config::config_write(&mut b, key, value, force)?;
+        let written = config::config_write(&mut b, key, value, force, None)?;
         for l in &written.warnings {
             eprintln!("{l}");
         }
@@ -1704,7 +1752,7 @@ fn machine_dump(link: &Link, out: &str, from: Option<&str>) -> Result<(), String
         for l in config::left_out(&node_name(f), reads) {
             eprintln!("{l}");
         }
-        boards.push((uid, reads.clone()));
+        boards.push((uid, reads.clone(), remaps(f)));
     }
     let copies: Vec<(String, config::Reads)> = each
         .iter()
@@ -1804,6 +1852,10 @@ fn machine_files(
         // names only the machine fields it keeps.
         let replace = replace_all && entry.is_some();
         let mut plan = config::plan(&files, &reads, &unknown, replace).map_err(joined)?;
+        if !diff {
+            check_board(&mut *b.wire, f.addr, &files, &reads, &plan)
+                .map_err(|e| format!("{}: {e}", node_name(f)))?;
+        }
         if entry.is_none() {
             plan.kept.retain(|(k, _)| is_machine(*k));
         }
@@ -1993,7 +2045,12 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
                 name: node_name(&f),
                 class: class_of(noun),
             };
-            let w = config::config_write(&mut b, key, &value, force)?;
+            let chip = if noun == Noun::Board && hoverboard_cli::checks::needs_chip(key) {
+                Some(chip_on(&mut *b.wire, f.addr)?)
+            } else {
+                None
+            };
+            let w = config::config_write(&mut b, key, &value, force, chip)?;
             for l in &w.warnings {
                 eprintln!("{l}");
             }
@@ -2029,7 +2086,7 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
                 .values()
                 .filter(|r| r.status == net::walk::CFG_OK)
                 .count();
-            let text = serde_json::to_string_pretty(&config::to_file(&reads))
+            let text = serde_json::to_string_pretty(&config::to_file(&reads, remaps(&f)))
                 .map_err(|e| e.to_string())?
                 + "\n";
             match out {

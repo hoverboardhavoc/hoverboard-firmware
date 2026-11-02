@@ -1,0 +1,41 @@
+[
+  {
+    "name": "PA12 is a pin like any other",
+    "chip": "gd32f130c8",
+    "board": {
+      "pads": {
+        "a": {
+          "port": "A",
+          "pin": 12
+        }
+      }
+    },
+    "refused": null
+  },
+  {
+    "name": "PA13 is SWDIO",
+    "chip": "gd32f130c8",
+    "board": {
+      "pads": {
+        "a": {
+          "port": "A",
+          "pin": 13
+        }
+      }
+    },
+    "refused": "pads.a"
+  },
+  {
+    "name": "PA14 is SWCLK",
+    "chip": "gd32f103c8",
+    "board": {
+      "power": {
+        "self_hold": {
+          "port": "A",
+          "pin": 14
+        }
+      }
+    },
+    "refused": "power.self_hold"
+  }
+]

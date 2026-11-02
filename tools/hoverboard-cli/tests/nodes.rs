@@ -441,11 +441,11 @@ fn a_boards_store_as_a_file_through_the_binary() {
          1 takes effect at the next arm\n\
          machine fields changed on rover-left only: the boards now differ (\"machine diff\")\n"
     );
-    let (code, out, err) = run(&["board", "set", "0x01", "0x40.1", "PB5"]);
+    let (code, out, err) = run(&["board", "set", "0x01", "0x0C", r#"{"port": "B", "pin": 5}"#]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
-        "rover-left: motors[1].hall.a: none (default) -> PB5\n1 takes effect at the next boot\n"
+        "rover-left: pads.a: none (default) -> PB5\n1 takes effect at the next boot\n"
     );
     let (code, _, err) = run(&["board", "set", "rover-lft", "machine.mode", "balance"]);
     assert_eq!(code, Some(1));
@@ -469,7 +469,7 @@ fn a_boards_store_as_a_file_through_the_binary() {
         serde_json::json!({
             "device": { "name": "rover-left" },
             "machine": { "mode": "balance" },
-            "motors": [{}, { "hall": { "a": "PB5" } }],
+            "pads": { "a": { "port": "B", "pin": 5 } },
         })
     );
     let (code, out, err) = run(&["board", "diff", "rover-left", &file]);
@@ -523,24 +523,25 @@ fn a_boards_store_as_a_file_through_the_binary() {
         "rover-left: 1 changed, 0 pinned, 0 unchanged, 2 kept\n\
          rover-left: machine.mode: balance -> throttle\n\
          rover-left: kept: device.name = \"rover-left\" (stored, not in the file)\n\
-         rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n\
+         rover-left: kept: pads.a = PB5 (stored, not in the file)\n\
          1 takes effect at the next arm\n\
          machine fields changed on rover-left only: the boards now differ (\"machine diff\")\n"
     );
     // A pin ends with where to see what the board made of it.
     let links = scratch("links.json");
-    std::fs::write(&links, r#"{ "links": [{ "tx": "PA2", "rx": "PA3" }] }"#).unwrap();
+    std::fs::write(&links, r#"{ "links": [{ "usart": 1, "tx": { "port": "A", "pin": 2, "af": 1 }, "rx": { "port": "A", "pin": 3, "af": 1 } }] }"#).unwrap();
     let (code, out, err) = run(&["board", "apply", "rover-left", &links]);
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(
         out,
-        "rover-left: 2 changed, 0 pinned, 0 unchanged, 3 kept\n\
-         rover-left: links[0].tx: none (default) -> PA2\n\
-         rover-left: links[0].rx: none (default) -> PA3\n\
+        "rover-left: 3 changed, 0 pinned, 0 unchanged, 3 kept\n\
+         rover-left: links[0].usart: 0 (default) -> 1\n\
+         rover-left: links[0].tx: none (default) -> PA2 af1\n\
+         rover-left: links[0].rx: none (default) -> PA3 af1\n\
          rover-left: kept: device.name = \"rover-left\" (stored, not in the file)\n\
+         rover-left: kept: pads.a = PB5 (stored, not in the file)\n\
          rover-left: kept: machine.mode = throttle (stored, not in the file)\n\
-         rover-left: kept: motors[1].hall.a = PB5 (stored, not in the file)\n\
-         2 take effect at the next boot\n\
+         3 take effect at the next boot\n\
          check the boot report with \"board status\" after the next boot\n"
     );
     server.join().unwrap();
@@ -772,35 +773,19 @@ fn over_a_boards_own_link_an_esp_command_finds_no_bridge() {
 fn status_reads_the_boot_report_from_each_motor_controller() {
     use board::status::Reason::*;
     const LINK: u8 = store::LINK_TX.id();
-    static ENTRIES: [u8; 28] = [
-        store::MOTOR_HALL_A.id(),
-        0,
-        NotAPin as u8,
-        0x47, // hall: a byte that is no pin
-        LINK,
-        0,
-        Incomplete as u8,
-        store::LINK_RX.id(), // link 0: rx unset
+    static ENTRIES: [u8; 12] = [
         LINK,
         1,
-        NotRouted as u8,
-        0x16, // link 1: no USART
-        store::LED_GREEN.id(),
-        0,
-        SwdPin as u8,
-        0x0D, // leds.green on SWDIO
+        NotUp as u8,
+        3, // link 1: a HAL refusal
         store::MOTOR_GATE_HI_A.id(),
         0,
-        DeadTime as u8,
-        10, // gate: dead time 10
+        NotUp as u8,
+        0, // gate: did not come up
         store::IMU_SCL_PIN.id(),
         0,
         NotUp as u8,
         0, // imu: no probe answer
-        store::IMU_AXIS_SIGN.id(),
-        0,
-        ImuFrame as u8,
-        0, // imu: the sign triple refused
     ];
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
@@ -816,13 +801,9 @@ fn status_reads_the_boot_report_from_each_motor_controller() {
     assert_eq!(
         lines,
         [
-            "Hoverboard: motors[0] hall: stored byte 0x47 is not a pin",
-            "Hoverboard: links[0]: incomplete, links[0].rx is not set",
-            "Hoverboard: links[1]: no USART routes this pair on this chip",
-            "Hoverboard: leds.green: PA13 is an SWD pin",
-            "Hoverboard: motors[0] gate: dead time 10 is below the floor of 18",
+            "Hoverboard: links[1]: did not come up (HAL error 3)",
+            "Hoverboard: motors[0] gate: did not come up",
             "Hoverboard: imu: the IMU did not answer its probe",
-            "Hoverboard: imu: imu.axis_sign is not a rotation",
             "Hoverboard: ok",
         ],
         "{out}"
@@ -837,7 +818,7 @@ fn status_reads_the_boot_report_from_each_motor_controller() {
     let rows: Vec<&str> = out.lines().collect();
     assert!(
         rows[1].starts_with("0x01")
-            && rows[1].ends_with("! silent, 7 status entries (\"board status\")"),
+            && rows[1].ends_with("! silent, 3 status entries (\"board status\")"),
         "{out}"
     );
     assert!(rows[2].ends_with("Hoverboard  ! silent"), "{out}");
@@ -1253,7 +1234,11 @@ fn the_machine_commands_through_the_binary() {
         "{err}"
     );
     let board_file = scratch("board-kind.json");
-    std::fs::write(&board_file, r#"{ "leds": { "green": "PB3" } }"#).unwrap();
+    std::fs::write(
+        &board_file,
+        r#"{ "leds": { "green": { "port": "B", "pin": 3 } } }"#,
+    )
+    .unwrap();
     let (code, _, err) = cli_code(&[idle, "machine", "apply", &board_file]);
     assert_eq!(code, Some(1));
     assert!(
