@@ -1502,9 +1502,11 @@ pub enum BringUpStep {
 }
 
 /// The trigger-to-`CEN` delay of TIMER7's event-mode start, in timer ticks (`specs/twelve-fet.md`
-/// section 5.1, step 2): measured on the bench (section 12.4 step 5, twenty halts reading both
-/// counters) and 0 until then.
-pub const SLAVE_START_TICKS: u16 = 0;
+/// section 5.1, step 2). MEASURED on the 12-FET (2026-11-02, section 12.4 step 5,
+/// `specs/bench-evidence/2026-11-02/twelve-fet/`): with the preset at `TRIGGER_COMPARE` alone,
+/// twenty halts under the debug hold read TIMER7's counter one tick behind TIMER0's every time,
+/// on the up count and the down count alike; one tick of preset puts them in step.
+pub const SLAVE_START_TICKS: u16 = 1;
 /// TIMER7's preset count: TIMER0's counter at its first trigger edge, plus the resynchronisation
 /// delay, so the two counters run in step with centres aligned.
 pub const SLAVE_START_COUNT: u16 = TRIGGER_COMPARE + SLAVE_START_TICKS;
