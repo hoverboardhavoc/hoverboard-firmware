@@ -16,7 +16,7 @@ is halted by a debugger, so a halt freezes the PWM and does not let the watchdog
 
 Vendor: RCC_APB2PeriphClockCmd(RCC_APB2ENR_DBGMCU, ENABLE) before each of
         DBGMCU_Configure(DBGMCU_CR_TIM1_STOP, ENABLE); DBGMCU_Configure(DBGMCU_CR_IWDG_STOP, ENABLE).
-HAL: debug_hold_timer0(); FreeWatchdog::freeze_on_debug_halt().
+HAL: debug_hold_timers(); FreeWatchdog::freeze_on_debug_halt().
 """
 family = "mm32spin05"
 mode = "register_writes"
@@ -34,7 +34,7 @@ body = '''
     use hal::FreeWatchdog;
 
     pub fn body() {
-        hal::debug_hold_timer0();
+        hal::debug_hold_timers();
         FreeWatchdog::freeze_on_debug_halt();
     }
 '''

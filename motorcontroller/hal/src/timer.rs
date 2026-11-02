@@ -8,8 +8,9 @@
 //!
 //! Three objects, split by what they may write:
 //!
-//! - [`PwmTimer`]: the bring-up ([`PwmTimer::configure`], [`PwmTimer::configure_trigger`]) and the
-//!   counter start. It writes `CCHP` once, with `POEN` clear, and never sets `POEN`.
+//! - [`PwmTimer`]: the bring-up ([`PwmTimer::configure`], [`PwmTimer::configure_trigger`],
+//!   [`PwmTimer::follow`]) and the counter start. It writes `CCHP` once, with `POEN` clear, and
+//!   never sets `POEN`.
 //! - [`PwmHandle`]: the period ISR's surface: the three duties (`CH0CV`..`CH2CV`), the trigger
 //!   compare (`CH3CV`) and the channel output enables in `CHCTL2`. It holds no `CCHP` accessor.
 //! - [`ArmGate`]: `CCHP.POEN` (the main output enable, MOE) and nothing else. It is the only object
@@ -19,16 +20,19 @@
 //! |----------|--------|---------------------------------------------------------------------|
 //! | `CTL0`   | `0x00` | CEN(0), DIR(4), CAM(6:5), ARSE(7), CKDIV(9:8)                       |
 //! | `CTL1`   | `0x04` | MMC(6:4), ISOx(8 + 2n), ISOxN(9 + 2n)                               |
+//! | `SMCFG`  | `0x08` | SMC(2:0), TRGS(6:4)                                                 |
 //! | `SWEVG`  | `0x14` | UPG(0)                                                              |
 //! | `CHCTL0` | `0x18` | CH0 (7:0), CH1 (15:8): MS(1:0), COMSEN(3), COMCTL(6:4)              |
 //! | `CHCTL1` | `0x1C` | CH2 (7:0), CH3 (15:8), as `CHCTL0`                                  |
 //! | `CHCTL2` | `0x20` | per channel at 4n: EN(0), P(1), NEN(2), NP(3)                       |
+//! | `CNT`    | `0x24` | the counter                                                         |
 //! | `PSC`    | `0x28` | prescaler                                                           |
 //! | `CAR`    | `0x2C` | auto-reload (the period)                                            |
 //! | `CREP`   | `0x30` | repetition counter                                                  |
 //! | `CHxCV`  | `0x34` | channel compare, `+4` per channel to `CH3CV` at `0x40`              |
 //! | `CCHP`   | `0x44` | DTCFG(7:0), PROT(9:8), IOS(10), ROS(11), BRKEN(12), BRKP(13), POEN(15) |
 
+use crate::addr::PeriphLabel;
 use crate::chip::Chip;
 use crate::config::{
     BreakConfig, OcMode, PwmChannelConfig, PwmConfig, TrgoSource, MAX_PWM_CHANNELS,
@@ -38,10 +42,12 @@ use crate::reg::{Field, Reg32};
 
 const CTL0: u32 = 0x00;
 const CTL1: u32 = 0x04;
+const SMCFG: u32 = 0x08;
 const SWEVG: u32 = 0x14;
 const CHCTL0: u32 = 0x18;
 const CHCTL1: u32 = 0x1C;
 const CHCTL2: u32 = 0x20;
+const CNT: u32 = 0x24;
 const PSC: u32 = 0x28;
 const CAR: u32 = 0x2C;
 const CREP: u32 = 0x30;
@@ -57,6 +63,13 @@ const CTL0_ARSE: u32 = 1 << 7;
 const CTL0_CKDIV: u32 = 0b11 << 8;
 
 const SWEVG_UPG: u32 = 1 << 0;
+
+/// `SMCFG.SMC`, the slave mode.
+const SMCFG_SMC: u32 = 0b111;
+/// `SMCFG.TRGS`, the trigger input.
+const SMCFG_TRGS: u32 = 0b111 << 4;
+/// `SMC = 6`, event mode (`TIMER_SLAVE_MODE_EVENT`): the trigger's rising edge sets `CEN`.
+const SMC_EVENT: u32 = 6;
 
 const CTL1_MMC: u32 = 0b111 << 4;
 /// `ISOx` within a channel's two-bit idle field at `8 + 2n`.
@@ -163,6 +176,30 @@ const fn trgo(src: TrgoSource) -> Field {
     }
 }
 
+/// The `TRGS` code by which advanced timer `slave` takes `master`'s TRGO as its trigger, or `None`
+/// where the trigger matrix offers no such input. The GD32F10x User Manual Rev2.6 chapter 15 table
+/// (page 268): TIMER7's `ITI0` is `TIMER0_TRGO`; TIMER0's four inputs are TIMER4, 1, 2 and 3, so
+/// TIMER0 cannot follow TIMER7. No other part this HAL drives carries a second advanced timer.
+const fn internal_trigger(slave: PeriphLabel, master: PeriphLabel) -> Option<u32> {
+    match (slave, master) {
+        // TIMER_SMCFG_TRGSEL_ITI0.
+        (PeriphLabel::Timer7, PeriphLabel::Timer0) => Some(0),
+        _ => None,
+    }
+}
+
+/// `SMCFG` for event mode on trigger input `trgs` (`timer_input_trigger_source_select` and
+/// `timer_slave_mode_select`): the counter starts on the trigger's first rising edge, and later
+/// edges do nothing while `CEN` is set (GD32F10x User Manual Rev2.6 section 15.1.4, master-slave
+/// management).
+const fn event_slave(trgs: u32) -> Field {
+    Field {
+        offset: SMCFG,
+        mask: SMCFG_SMC | SMCFG_TRGS,
+        value: ((trgs << 4) & SMCFG_TRGS) | SMC_EVENT,
+    }
+}
+
 /// `CH3EN`: the trigger channel's output enable. Its pin (PA11 on TIMER0) is never routed, so the
 /// enable drives nothing off-chip.
 const CH3_OUTPUT: Field = Field {
@@ -197,11 +234,12 @@ const fn output_enables(enabled: [bool; MAX_PWM_CHANNELS]) -> u32 {
 
 // --- the bring-up -------------------------------------------------------------------------------
 
-/// A configured advanced timer: its base and period. The bring-up leaves the counter stopped and
-/// the bridge disarmed; the per-period writes go through [`PwmTimer::handle`] and the output enable
-/// through [`PwmTimer::arm_gate`].
+/// A configured advanced timer: its label, base and period. The bring-up leaves the counter
+/// stopped and the bridge disarmed; the per-period writes go through [`PwmTimer::handle`] and the
+/// output enable through [`PwmTimer::arm_gate`].
 #[derive(Debug, Clone, Copy)]
 pub struct PwmTimer {
+    label: PeriphLabel,
     base: u32,
     period: u16,
 }
@@ -239,6 +277,7 @@ impl PwmTimer {
         reg(CCHP).write(cchp_word(cfg.dead_time, cfg.brk));
 
         Ok(PwmTimer {
+            label: cfg.timer,
             base,
             period: cfg.period,
         })
@@ -260,6 +299,30 @@ impl PwmTimer {
             CH3_OUTPUT.apply(self.base);
         }
         trgo(trgo_src).apply(self.base);
+    }
+
+    /// Make this timer `master`'s event-mode slave: preset the counter to `start_count`, then set
+    /// `SMCFG` to event mode on the trigger input that carries `master`'s TRGO. The counter then
+    /// starts on the first rising edge of `master`'s TRGO (`twelve-fet.md` section 5.1, steps 2 and
+    /// 4: TIMER7 following TIMER0).
+    ///
+    /// Both timers are configured first ([`PwmTimer::configure`]): its last time-base write is the
+    /// `UPG` update event that loads the repetition counter and, in the centre-aligned modes,
+    /// initialises the counter to 0 (GD32F10x User Manual Rev2.6 section 15.1.4, centre-aligned
+    /// counting), so the preset comes after it and nothing here issues `UPG`.
+    ///
+    /// Refused before any register access: a pair the trigger matrix does not offer (only TIMER7
+    /// following TIMER0, [`PwmError::NoInternalTrigger`]), and a `start_count` above the period
+    /// ([`PwmError::DutyOutOfRange`]).
+    pub fn follow(&self, master: &PwmTimer, start_count: u16) -> Result<(), PwmError> {
+        let trgs = internal_trigger(self.label, master.label).ok_or(PwmError::NoInternalTrigger)?;
+        if start_count > self.period {
+            return Err(PwmError::DutyOutOfRange);
+        }
+        // timer_counter_value_config, then the two SMCFG fields in one write.
+        Reg32::new(self.base, CNT).write(u32::from(start_count));
+        event_slave(trgs).apply(self.base);
+        Ok(())
     }
 
     /// The per-period handle for this timer.
@@ -383,7 +446,6 @@ impl ArmGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addr::PeriphLabel;
     use crate::config::{ClockDiv, PwmAlign};
     use crate::reg::fold;
 
@@ -593,6 +655,44 @@ mod tests {
             assert_eq!(h.set_duties(d), Err(PwmError::DutyOutOfRange));
         }
         assert_eq!(h.rearm_trigger(2251), Err(PwmError::DutyOutOfRange));
+    }
+
+    #[test]
+    fn the_event_slave_sets_event_mode_on_iti0() {
+        let trgs = internal_trigger(PeriphLabel::Timer7, PeriphLabel::Timer0).unwrap();
+        let f = event_slave(trgs);
+        assert_eq!((f.offset, f.mask, f.value), (SMCFG, 0x77, 0x06));
+    }
+
+    #[test]
+    fn only_timer7_follows_timer0() {
+        let labels = [PeriphLabel::Timer0, PeriphLabel::Timer7];
+        for slave in labels {
+            for master in labels {
+                let offered = slave == PeriphLabel::Timer7 && master == PeriphLabel::Timer0;
+                assert_eq!(
+                    internal_trigger(slave, master).is_some(),
+                    offered,
+                    "{slave:?} following {master:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn follow_refuses_before_any_register_access() {
+        // The refusals return before touching a register, so they run on the host against
+        // addresses nothing maps.
+        let timer = |label| PwmTimer {
+            label,
+            base: 0,
+            period: 2250,
+        };
+        let (t0, t7) = (timer(PeriphLabel::Timer0), timer(PeriphLabel::Timer7));
+        assert_eq!(t0.follow(&t7, 0), Err(PwmError::NoInternalTrigger));
+        assert_eq!(t0.follow(&t0, 0), Err(PwmError::NoInternalTrigger));
+        assert_eq!(t7.follow(&t7, 0), Err(PwmError::NoInternalTrigger));
+        assert_eq!(t7.follow(&t0, 2251), Err(PwmError::DutyOutOfRange));
     }
 
     #[test]

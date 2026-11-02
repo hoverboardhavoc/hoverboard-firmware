@@ -1,0 +1,30 @@
+# Mode: final_state. The vendor sets each hold with its own read-modify-write of DBG_CTL0; the HAL
+# sets both in one. End state:
+#   DBG_CTL0 = 0x00020400 (TIMER7_HOLD, bit 17 | TIMER0_HOLD, bit 10)
+# The free watchdog's hold (bit 8) is FreeWatchdog::freeze_on_debug_halt's, not this call's.
+description = """
+The debug holds of both advanced timers on the GD32F103RC: TIMER0's and TIMER7's counters stop
+while the core is halted by a debugger, so a halt freezes both bridges' PWM (DBG_CTL0, GD32F10x
+User Manual Rev2.6 section 10.4.2). The HAL sets TIMER7_HOLD because the chip's descriptor carries
+TIMER7.
+
+Vendor: dbg_periph_enable(DBG_TIMER0_HOLD); dbg_periph_enable(DBG_TIMER7_HOLD).
+HAL: debug_hold_timers().
+"""
+family = "gd32f10x"
+# The chip with TIMER7; hold_timer0_f10x is the C8's.
+chips = ["gd32f103rc"]
+mode = "final_state"
+
+[vendor]
+body = '''
+    dbg_periph_enable(DBG_TIMER0_HOLD);
+    dbg_periph_enable(DBG_TIMER7_HOLD);
+'''
+
+[hal]
+body = '''
+    pub fn body() {
+        hal::debug_hold_timers();
+    }
+'''

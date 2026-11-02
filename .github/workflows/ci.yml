@@ -568,6 +568,35 @@ jobs:
             arm-none-eabi-size "$elf"
           done
 
+      # The GD32F103RC validators the 12-FET's first session runs (specs/twelve-fet.md section 10
+      # step 3, section 3.3): probe, fmc and motor-verify, linked into the part's 256 KiB less the
+      # store's two pages and refused if one carries a wfi or wfe. The 12-FET has no NRST wired, so a
+      # validator that locked SWD re-attach could not be recovered there. Uploaded as an artifact for
+      # the bench to flash over OpenOCD.
+      - name: Build the GD32F103RC validators (probe, fmc, motor-verify)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: |
+          cargo build --release -p hal-bench --features gd32f103rc --target thumbv7m-none-eabi \
+            --target-dir target/hal-bench-gd32f103rc --bin probe --bin fmc --bin motor-verify
+          mkdir -p target/hal-bench-elfs
+          for v in probe fmc motor-verify; do
+            elf=target/hal-bench-gd32f103rc/thumbv7m-none-eabi/release/$v
+            test -f "$elf"
+            if arm-none-eabi-objdump -d "$elf" | grep -qwE 'wfi|wfe'; then
+              echo "$v carries a wfi or wfe" >&2
+              exit 1
+            fi
+            arm-none-eabi-size "$elf"
+            cp "$elf" "target/hal-bench-elfs/hal-bench-$v-gd32f103rc.elf"
+          done
+
+      - name: Upload the GD32F103RC validator ELFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: hal-bench-gd32f103rc
+          path: hoverboard-firmware/motorcontroller/target/hal-bench-elfs/
+          if-no-files-found: error
+
       # The per-chip size gate (specs/hal.md section 6): each image's flashed span against its
       # chip's flash less the store's two pages, and its static RAM (.data + .bss + .uninit) against
       # its SRAM less the SWD mailbox carve. Both budgets are the image's own linker regions, which

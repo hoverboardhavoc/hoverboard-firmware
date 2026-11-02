@@ -1,0 +1,74 @@
+# Mode: final_state over TIMER7's SMCFG and CNT. The HAL body configures both timers first, as the
+# firmware does (twelve-fet.md section 5.1 step 1, `PwmTimer::configure`, whose last time-base write
+# is the UPG that re-initialises a centre-aligned counter to 0), and those writes are
+# pwm_bringup_timer0_f10x's and pwm_bringup_timer7_f10x's, so the scope keeps the two registers
+# follow writes. The vendor's timer_input_trigger_source_select and timer_slave_mode_select each
+# clear then set their field, four writes; the HAL writes both fields in one read-modify-write after
+# the counter preset (final_state does not compare the order). End state:
+#   TIMER7 CNT   = 0x00000000 (the preset, start_count 0; the bench measures the real offset)
+#   TIMER7 SMCFG = 0x00000006 (SMC = 6, event mode | TRGS = 0, ITI0 = TIMER0_TRGO)
+description = """
+TIMER7 as TIMER0's event-mode slave on the GD32F103RC: the counter preset to 0, the trigger input
+ITI0 (TIMER0's TRGO, GD32F10x User Manual Rev2.6 chapter 15's internal-trigger table), and the slave
+mode event, so TIMER7's counter starts on TIMER0's first TRGO edge.
+
+Vendor: timer_counter_value_config(TIMER7, 0); timer_input_trigger_source_select(TIMER7,
+        TIMER_SMCFG_TRGSEL_ITI0); timer_slave_mode_select(TIMER7, TIMER_SLAVE_MODE_EVENT).
+HAL: PwmTimer::configure for Timer0 and Timer7 (the firmware's configuration: centre-aligned mode 1,
+     2250, PSC 0, CREP 1, dead time 32), then timer7.follow(&timer0, 0).
+"""
+family = "gd32f10x"
+# TIMER7 exists on the GD32F103RC alone.
+chips = ["gd32f103rc"]
+mode = "final_state"
+assert_only = ["<TIMER7_BASE>+0x08", "<TIMER7_BASE>+0x24"]
+
+[vendor]
+body = '''
+    timer_counter_value_config(TIMER7, 0U);
+    timer_input_trigger_source_select(TIMER7, TIMER_SMCFG_TRGSEL_ITI0);
+    timer_slave_mode_select(TIMER7, TIMER_SLAVE_MODE_EVENT);
+'''
+
+[hal]
+body = '''
+    use hal::config::{
+        BreakConfig, ClockDiv, OcMode, PwmAlign, PwmChannelConfig, PwmConfig, TrgoSource,
+    };
+    use hal::{Chip, PeriphLabel, PwmTimer};
+
+    fn config(timer: PeriphLabel) -> PwmConfig {
+        let pair = || PwmChannelConfig {
+            polarity: true,
+            idle_high: false,
+            idle_high_n: true,
+        };
+        PwmConfig {
+            timer,
+            channels: [pair(), pair(), pair()],
+            period: 2250,
+            prescaler: 0,
+            dead_time: 32,
+            brk: BreakConfig {
+                enabled: false,
+                level: false,
+            },
+            trigger_compare: 2200,
+            align: PwmAlign::Center1,
+            arse: false,
+            trigger_oc_mode: OcMode::Pwm1,
+            trigger_ch_enable: true,
+            crep: 1,
+            ckdiv: ClockDiv::Div2,
+            trgo_src: TrgoSource::Ch3Compare,
+        }
+    }
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let t0 = PwmTimer::configure(&chip, &config(PeriphLabel::Timer0)).unwrap();
+        let t7 = PwmTimer::configure(&chip, &config(PeriphLabel::Timer7)).unwrap();
+        t7.follow(&t0, 0).unwrap();
+    }
+'''

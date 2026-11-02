@@ -13,11 +13,16 @@
 //! debug access answering WAIT, instead of faulting (specs/agent-runs/hal-step2-report.md).
 //! Nothing here starts a counter, sets a channel or output enable, or touches MOE.
 //!
+//! The debug holds are set first (`hal::debug_hold_timers`: TIMER0's, and TIMER7's where the
+//! descriptor carries it) and `DBG_CTL0` read back, so a halt mid-run freezes the timers this run
+//! clocks.
+//!
 //! Result words: 2 = DBG_IDCODE, 3 = flash-size word, 4 = descriptor flash KiB, 5 = mismatches (a
-//! bit per carried candidate that refused the write-back, and bit 8 when the flash-size word's KiB
-//! differ from the descriptor's), 6..8 = uid words, then
-//! per candidate `i` (0..7) at 8 + 4i: [label, sticky | writeback << 2 | present << 3, scratch
-//! reset value, descriptor-carries].
+//! bit per carried candidate that refused the write-back, bit 8 when the flash-size word's KiB
+//! differ from the descriptor's, bit 9 when the timer holds did not read back), 6..8 = uid words,
+//! then per candidate `i` (0..7) at 8 + 4i: [label, sticky | writeback << 2 | present << 3, scratch
+//! reset value, descriptor-carries]; 40 = `DBG_CTL0` after the holds (want bit 10, and bit 17 on a
+//! chip with TIMER7), 41 = its value before.
 #![no_std]
 #![no_main]
 
@@ -32,6 +37,15 @@ mod image {
     const RCU: u32 = 0x4002_1000;
     const APB2EN: u32 = 0x18;
     const APB1EN: u32 = 0x1C;
+    /// `DBG_CTL0` (GD32F10x User Manual Rev2.6 section 10.4.2; the F1x0 has the same register).
+    const DBG_CTL0: u32 = 0xE004_2004;
+    /// The holds `hal::debug_hold_timers` sets: `TIMER0_HOLD` (bit 10), and `TIMER7_HOLD` (bit 17)
+    /// where the descriptor carries TIMER7.
+    const HOLDS: u32 = if DESCRIPTOR.adv_timers == 2 {
+        1 << 10 | 1 << 17
+    } else {
+        1 << 10
+    };
 
     /// One candidate: label, base, RCU enable register and bit, scratch register offset, the
     /// pattern written there, and its reset value.
@@ -114,6 +128,12 @@ mod image {
 
     #[entry]
     fn main() -> ! {
+        let dbg = Reg32::new(DBG_CTL0, 0);
+        put(41, dbg.read());
+        hal::debug_hold_timers();
+        let held = dbg.read();
+        put(40, held);
+
         put(2, Reg32::new(0xE004_2000, 0).read());
         put(3, Reg32::new(0x1FFF_F7E0, 0).read());
         put(4, u32::from(DESCRIPTOR.flash_kib));
@@ -160,6 +180,9 @@ mod image {
         if Reg32::new(0x1FFF_F7E0, 0).read() & 0xFFFF != u32::from(DESCRIPTOR.flash_kib) {
             mismatch |= 1 << 8;
         }
+        if held & HOLDS != HOLDS {
+            mismatch |= 1 << 9;
+        }
         put(5, mismatch);
         finish(1)
     }
@@ -173,7 +196,7 @@ mod image {
 /// window off), I2C1 `SAR` (16-bit, the block disabled), UART1 and UART2 `RXAR` (the receive
 /// address match), DMA1 channel 1 `CMAR`.
 ///
-/// Result words as the GD32 probe, and: 40 = `DBGMCU_CR` after `hal::debug_hold_timer0` and
+/// Result words as the GD32 probe, and: 40 = `DBGMCU_CR` after `hal::debug_hold_timers` and
 /// `FreeWatchdog::freeze_on_debug_halt` (want bits 8 and 10), 41 = its value before. Mismatch bits:
 /// a carried candidate that refused the write-back (bit `i`), the device ID not `0xCC44_60B1`
 /// (bit 8), the hold bits not read back (bit 9).
@@ -325,7 +348,7 @@ mod image {
 
         let cr = Reg32::new(DBGMCU, 0x04);
         put(41, cr.read());
-        hal::debug_hold_timer0();
+        hal::debug_hold_timers();
         FreeWatchdog::freeze_on_debug_halt();
         let held = cr.read();
         put(40, held);

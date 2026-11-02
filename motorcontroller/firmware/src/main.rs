@@ -1970,13 +1970,13 @@ mod firmware {
         // Before the motor bring-up starts the counter, and before anything could halt: the
         // register is power-reset-only, so a debugger setting it in-session is lost at the next
         // power cycle and the firmware must set it on every cold boot. One set-only RMW.
-        hal::debug_hold_timer0();
+        hal::debug_hold_timers();
 
         // Paint the free stack, SECOND: as early as anything can run while still leaving the FET
         // backstop above it, and before the first thing in this function with a frame worth
         // measuring (`Mailbox::from_raw`, `Chip::take`, `clock::configure_tree`).
         //
-        // WHERE IT CANNOT GO. Not before `debug_hold_timer0`, which is the halt backstop and stays
+        // WHERE IT CANNOT GO. Not before `debug_hold_timers`, which is the halt backstop and stays
         // unconditionally first. Not in `#[pre_init]`, which runs before cortex-m-rt has
         // initialized `.data`/`.bss`, so the paint would be measuring a stack that the `.bss` zero
         // loop then runs over from below. And the FLOOR is `_stack_end`, not `__ebss`: cortex-m-rt

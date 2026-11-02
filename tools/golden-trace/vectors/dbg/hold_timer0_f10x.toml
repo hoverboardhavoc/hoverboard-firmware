@@ -1,0 +1,27 @@
+# Mode: register_writes. One read-modify-write of DBG_CTL0 on each side:
+#   DBG_CTL0 = 0x00000400 (TIMER0_HOLD, bit 10)
+# Bit 17 (TIMER7_HOLD) stays clear: the C8's descriptor carries no TIMER7.
+description = """
+The advanced timer's debug hold on the GD32F103C8: TIMER0's counter stops while the core is halted
+by a debugger (DBG_CTL0, GD32F10x User Manual Rev2.6 section 10.4.2). hold_timer0_timer7_f10x is
+the GD32F103RC's.
+
+Vendor: dbg_periph_enable(DBG_TIMER0_HOLD).
+HAL: debug_hold_timers().
+"""
+family = "gd32f10x"
+# The chip without TIMER7.
+chips = ["gd32f103c8"]
+mode = "register_writes"
+
+[vendor]
+body = '''
+    dbg_periph_enable(DBG_TIMER0_HOLD);
+'''
+
+[hal]
+body = '''
+    pub fn body() {
+        hal::debug_hold_timers();
+    }
+'''

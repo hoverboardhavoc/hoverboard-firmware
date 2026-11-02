@@ -1,0 +1,28 @@
+# Mode: register_writes. One read-modify-write on each side: APB2EN bit 13.
+description = """
+The second advanced timer TIMER7's clock enable on the GD32F103RC: APB2EN bit 13
+(RCU_APB2EN_TIMER7EN, gd32f10x_rcu.h).
+
+Vendor: rcu_periph_clock_enable(RCU_TIMER7).
+HAL: clock::enable_timer(rcu, chip.clock(), Timer7).
+"""
+family = "gd32f10x"
+# TIMER7 exists on the GD32F103RC alone; the C8 build refuses it (MissingBase).
+chips = ["gd32f103rc"]
+mode = "register_writes"
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_TIMER7);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        clock::enable_timer(chip.rcu_base().unwrap(), chip.clock(), PeriphLabel::Timer7).unwrap();
+    }
+'''

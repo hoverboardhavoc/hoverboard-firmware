@@ -1,0 +1,29 @@
+# Mode: with_polling over every block: no access on either side. TIMER7 has no field in AFIO_PCF0
+# (GD32F10x User Manual 7.5.9) and its pins sit at their one route (CH0-2 PC6-8, CH0N-2N PA7, PB0,
+# PB1, GD32F103xx Datasheet Rev2.14 Table 2-7), so the 12-FET's motor 1 stores no gate.remap and a
+# remap call for it reads and writes nothing: not the AFIO clock, not PCF0.
+description = """
+afio::remap for TIMER7 on the GD32F103RC: a peripheral with no remap field is left alone, so the
+call makes no register access.
+
+Vendor: nothing (the SPL has no TIMER7 remap).
+HAL: afio::remap(Timer7, 0).
+"""
+family = "gd32f10x"
+# TIMER7 exists on the GD32F103RC alone.
+chips = ["gd32f103rc"]
+mode = "with_polling"
+
+[vendor]
+body = '''
+    /* TIMER7 has no AFIO_PCF0 remap field: nothing to write. */
+'''
+
+[hal]
+body = '''
+    use hal::PeriphLabel;
+
+    pub fn body() {
+        hal::afio::remap(PeriphLabel::Timer7, 0);
+    }
+'''

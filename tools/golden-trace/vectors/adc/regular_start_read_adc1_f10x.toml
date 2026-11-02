@@ -1,0 +1,50 @@
+# Mode: with_polling over ADC1. One 250 Hz pass of the 12-FET's battery read (twelve-fet.md section
+# 5.4): the previous conversion's result, then the next conversion's start, with no wait.
+#
+# STAT (0x00) reads 0x00000002 (EOC set: the conversion the last pass started has ended). RDATA
+# (0x4C) reads 0x0000_0800 (a placeholder, not a silicon capture).
+#
+# The start is read_channel's without the rank write and the wait (transfer_vrefint_f10x): EOC
+# cleared by a plain write of every STAT flag but EOC, and SWRCST cleared before
+# adc_software_trigger_enable sets it, so the trigger is an edge. The vendor body writes the two
+# with the SPL's register macros.
+description = """
+The battery's split regular conversion on ADC1: read RDATA because EOC is set, then clear EOC and
+start the next conversion on a fresh SWRCST edge, returning at once.
+
+Vendor: adc_flag_get(ADC_FLAG_EOC), then adc_regular_data_read; STAT = ~EOC; CTL1 &= ~SWRCST;
+        adc_software_trigger_enable(REGULAR).
+HAL: chip.adc_instance(Adc1), regular_result() (Some), then start_regular().
+"""
+family = "gd32f10x"
+mode = "with_polling"
+assert_only = ["<ADC1_BASE>"]
+
+[read_responses]
+"<ADC1_BASE>+0x00" = 0x0000_0002
+"<ADC1_BASE>+0x4C" = 0x0000_0800
+
+[vendor]
+body = '''
+    if(SET == adc_flag_get(ADC1, ADC_FLAG_EOC)){
+        (void)adc_regular_data_read(ADC1);
+    }
+    ADC_STAT(ADC1) = ~ADC_STAT_EOC;
+    ADC_CTL1(ADC1) &= ~ADC_CTL1_SWRCST;
+    adc_software_trigger_enable(ADC1, ADC_REGULAR_CHANNEL);
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc_instance(PeriphLabel::Adc1).unwrap();
+        if adc.regular_result() != Some(0x800) {
+            loop {}
+        }
+        adc.start_regular();
+    }
+'''

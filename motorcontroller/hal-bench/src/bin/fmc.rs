@@ -2,10 +2,17 @@
 //! `fmc`: `hal::fmc::Fmc` on silicon (specs/hal.md section 8.4).
 //!
 //! Scratch pages: the two pages below the store's two (on a 64 KiB part `0x0800_F000` and
-//! `0x0800_F400`, on the 32 KiB MM32SPIN05 `0x0800_7000` and `0x0800_7400`), above any validator image and outside the store, which the bridge's flash path
-//! also never reaches. Erases both, programs 32 bytes across their boundary, reads them back,
-//! re-programs a written half-word (must be refused), tries out-of-range and misaligned addresses
-//! (must be refused), and erases both again (must read back erased). Leaves both pages erased.
+//! `0x0800_F400`, on the 32 KiB MM32SPIN05 `0x0800_7000` and `0x0800_7400`), above any validator
+//! image and outside the store, which the bridge's flash path also never reaches. On the
+//! GD32F103RC they are the store's own two 2 KiB pages, `0x0803_F000` and `0x0803_F800`
+//! (`twelve-fet.md` section 10, step 3): the run erases and programs the range the firmware's store
+//! will use, on a board that holds no store yet, and leaves it erased (step 4 erases it again
+//! before the firmware is flashed).
+//!
+//! The debug holds are set first. Erases both, programs 32 bytes across their boundary, reads them
+//! back, re-programs a written half-word (must be refused), tries out-of-range and misaligned
+//! addresses (must be refused), and erases both again (must read back erased). Leaves both pages
+//! erased.
 //!
 //! Result words (error codes: 0 ok, 1 BadArg, 2 NotErased, 3 Closed, 4 WriteProtect,
 //! 5 ProgramError, 6 Timeout): 2 = scratch base, 3 = page size, 4 = erase codes (page0 | page1 <<
@@ -45,12 +52,20 @@ mod image {
             .all(|o| unsafe { core::ptr::read_volatile((base + o) as *const u32) } == u32::MAX)
     }
 
+    /// Pages from the end of flash to the first scratch page: the store's two and the two below
+    /// them, or on the GD32F103RC the store's two.
+    #[cfg(not(feature = "gd32f103rc"))]
+    const SCRATCH_FROM_END: u32 = 4;
+    #[cfg(feature = "gd32f103rc")]
+    const SCRATCH_FROM_END: u32 = 2;
+
     #[entry]
     fn main() -> ! {
+        hal::debug_hold_timers();
         let Some(chip) = Chip::take() else { finish(2) };
         let mut fmc = Fmc::new(&chip);
         let page = fmc.page_size();
-        let base = 0x0800_0000 + fmc.flash_size_bytes() - 4 * page;
+        let base = 0x0800_0000 + fmc.flash_size_bytes() - SCRATCH_FROM_END * page;
         put(2, base);
         put(3, page);
 
