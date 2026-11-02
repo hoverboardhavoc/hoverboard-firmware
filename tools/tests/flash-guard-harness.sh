@@ -7,11 +7,10 @@
 # zero-wait boundary) and drives the REAL flash.sh over it, asserting both the exit code AND that
 # nothing reached a probe.
 #
-# Nothing here can touch hardware: bench-lock.sh, ssh, scp, sudo, timeout and openocd are all stubbed
-# in a temp dir, the tools tree is COPIED there with the lock replaced, and every run is
-# FLASH_DRY_RUN=1. The stub logs are the evidence: an IMAGE-guard case that must refuse asserts zero
-# openocd invocations, and the pre-lock cases assert zero lock acquisitions, which is what makes "the
-# refusal fires before the bench lock is taken" a checked fact rather than a reading of the source.
+# Nothing here can touch hardware: ssh, scp, sudo, timeout and openocd are all stubbed in a temp dir,
+# the tools tree is COPIED there, and every run is FLASH_DRY_RUN=1. The stub logs are the evidence: an
+# IMAGE-guard case that must refuse asserts zero openocd invocations. A refusal from the up-front
+# toolchain check exits 2 and one from a guard exits 1, so the exit code says which of them fired.
 # The armed-bridge refusals near the end are the exception, and necessarily so: the SWD read that
 # triggers them IS an openocd invocation, so those assert one.
 #
@@ -134,17 +133,6 @@ I="$H/$CHIP0"
 
 # ---------------------------------------------------------------- stubs
 mkdir -p "$H/stub" "$H/log" "$H/tcl" "$H/minbin"
-# HARNESS_LOCK_RELEASE_FAIL fabricates a release that fails (a Pi that went away mid-run). The EXIT
-# handler must survive it: still remove the staged image, still report the run's own status.
-cat > "$H/stub/bench-lock.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'LOCK %s\n' "$*" >> "$HARNESS_LOG/lock.log"
-case "$1" in
-  acquire) echo "ACQUIRED: $2 (stub)";;
-  release) [ -n "${HARNESS_LOCK_RELEASE_FAIL:-}" ] && exit 1;;
-esac
-exit 0
-EOF
 # The Pi. HARNESS_REMOTE_PATH is what makes "the tools run THERE, not here" a checked fact rather
 # than a reading of the source: it is the PATH the remote command sees, independent of this host's.
 cat > "$H/stub/ssh" <<'EOF'
@@ -198,16 +186,16 @@ chmod +x "$H/stub"/*
 for u in bash sh perl sed grep awk head cat cp env tr hostname basename dirname printf mkdir rm wc; do
   p=$(command -v "$u" 2>/dev/null) && ln -sf "$p" "$H/minbin/$u"
 done
-# Shims that pass the pre-lock check ONCE and fail afterwards: the toolchain changing under the run,
-# which is the only way to reach the in-guard fail-closed branches now that the pre-lock check exists.
+# Shims that pass the up-front check ONCE and fail afterwards: the toolchain changing under the run,
+# which is the only way to reach the in-guard fail-closed branches now that the up-front check exists.
 #
 # What is counted is any invocation carrying the FLAG the guard uses ($cflag: `size -A`,
-# `objdump -d`), which is the pre-lock exercise's `-d` as well as the guard's own - two per run, not
+# `objdump -d`), which is the up-front exercise's `-d` as well as the guard's own - two per run, not
 # one. Counting the `-f` architecture probe too would spend this shim's single pass there: the run
-# would refuse pre-lock and these cases would stop testing the in-guard branch they exist for. Not
+# would refuse up-front and these cases would stop testing the in-guard branch they exist for. Not
 # silently, as it happens - dropping the filter turns five cases red, loudly - but they would be
 # testing a different thing than their names say. The claim each case makes is unchanged either way: the
-# tool works during the pre-lock exercise and is broken by the time the guard reads the image.
+# tool works during the up-front exercise and is broken by the time the guard reads the image.
 mkdir -p "$H/vanish"
 for t in size objdump; do
   case $t in size) cflag="-A" ;; objdump) cflag="-d" ;; esac
@@ -313,14 +301,13 @@ for t in size nm; do
   ln -sf "$ARM_BIN/arm-none-eabi-$t" "$H/armstub/arm-none-eabi-$t"
 done
 
-# The tools tree under test, with the bench lock replaced by the stub.
+# The tools tree under test.
 mkdir -p "$H/tools"
 cp "$FLASH"/*.sh "$H/tools/" 2>/dev/null
-cp "$H/stub/bench-lock.sh" "$H/tools/bench-lock.sh"
 chmod +x "$H/tools"/*.sh
 
 # THE STUB DIRECTORY COMES FIRST IN EVERY PATH, ahead of $ARM_BIN and ahead of the system
-# directories. It carries ssh, scp, sudo, timeout, openocd and bench-lock.sh, and the moment a
+# directories. It carries ssh, scp, sudo, timeout and openocd, and the moment a
 # system directory precedes it the run reaches the REAL ones: on a Linux runner the cross toolchain
 # installs into /usr/bin, so `$ARM_BIN` IS /usr/bin and `$ARM_BIN:$H/stub` put /usr/bin/ssh in front
 # of the stub. The harness then opened a real connection to the bench Pi and hung there until the
@@ -362,29 +349,27 @@ for pv in FULL_PATH APPLE_PATH NONE_PATH VANISH_PATH VANISH_SIZE_PATH VANISH_OD_
 done
 
 # ---------------------------------------------------------------- the case runner
-# case_is <label> <want-rc> <want-locks> <want-openocd> <path> <board> <img> [env=val...]
+# case_is <label> <want-rc> <want-openocd> <path> <board> <img> [env=val...]
 # Every runner names CHIP=$CHIP0, the chip the full case list's images are built for; a case's own
 # env=val arguments come after it and override it (`CHIP=` for none at all).
 case_is() {
-  local label="$1" wrc="$2" wlock="$3" wocd="$4" path="$5" board="$6" img="$7"; shift 7
+  local label="$1" wrc="$2" wocd="$3" path="$4" board="$5" img="$6"; shift 6
   rm -rf "$H/log"; mkdir -p "$H/log"
   local out rc
   out=$( export PATH="$path" HARNESS_LOG="$H/log"
-         env CHIP="$CHIP0" "$@" BOARD="$board" FLASH_DRY_RUN=1 BENCH_OWNER=harness \
+         env CHIP="$CHIP0" "$@" BOARD="$board" FLASH_DRY_RUN=1 \
              OFFROAD_OCD_BIN="$H/stub/openocd" OFFROAD_OCD_TCL="$H/tcl" \
              bash "$H/tools/flash.sh" "$img" 2>&1 )
   rc=$?
-  local lock ocd prog
-  lock=$(grep -c acquire "$H/log/lock.log" 2>/dev/null || echo 0)
+  local ocd prog
   ocd=$(grep -c . "$H/log/openocd.log" 2>/dev/null || echo 0)
   prog=$(grep -c . "$H/log/program.log" 2>/dev/null || echo 0)
   local why=""
   [ "$rc"   = "$wrc" ]   || why="$why rc=$rc(want $wrc)"
-  [ "$lock" = "$wlock" ] || why="$why locks=$lock(want $wlock)"
   [ "$ocd"  = "$wocd" ]  || why="$why openocd=$ocd(want $wocd)"
   [ "$prog" = 0 ]        || why="$why PROGRAMMED=$prog"
   if [ -z "$why" ]; then
-    printf 'PASS  %-56s rc=%s locks=%s ocd=%s\n' "$label" "$rc" "$lock" "$ocd"; PASS=$((PASS+1))
+    printf 'PASS  %-56s rc=%s ocd=%s\n' "$label" "$rc" "$ocd"; PASS=$((PASS+1))
   else
     printf 'FAIL  %-56s%s\n' "$label" "$why"; printf '%s\n' "$out" | sed 's/^/        | /'; FAIL=$((FAIL+1))
   fi
@@ -394,7 +379,7 @@ expect_out() {  # expect_out <label> <regex> <path> <board> <img> [env=val...]
   rm -rf "$H/log"; mkdir -p "$H/log"
   local out
   out=$( export PATH="$path" HARNESS_LOG="$H/log"
-         env CHIP="$CHIP0" "$@" BOARD="$board" FLASH_DRY_RUN=1 BENCH_OWNER=harness \
+         env CHIP="$CHIP0" "$@" BOARD="$board" FLASH_DRY_RUN=1 \
              OFFROAD_OCD_BIN="$H/stub/openocd" OFFROAD_OCD_TCL="$H/tcl" \
              bash "$H/tools/flash.sh" "$img" 2>&1 )
   if printf '%s' "$out" | grep -qE "$re"; then
@@ -411,7 +396,7 @@ pi_run() {  # pi_run <path> <img> [env=val...]
   local path="$1" img="$2"; shift 2
   rm -rf "$H/log"; mkdir -p "$H/log"
   OUT=$( export PATH="$path" HARNESS_LOG="$H/log"
-         env CHIP="$CHIP0" "$@" BOARD=master FLASH_DRY_RUN=1 BENCH_OWNER=harness \
+         env CHIP="$CHIP0" "$@" BOARD=master FLASH_DRY_RUN=1 \
              bash "$H/tools/flash.sh" "$img" 2>&1 )
   OUT_RC=$?
 }
@@ -420,31 +405,31 @@ pass() { printf 'PASS  %-56s %s\n' "$1" "${2-}"; PASS=$((PASS+1)); }
 fail() { printf 'FAIL  %-56s %s\n' "$1" "${2-}"; FAIL=$((FAIL+1)); }
 
 echo "== flash.sh image guards: adversarial input, local runner =="
-echo "-- with the cross toolchain present (locks=1: the guards run under the bench lock)"
-case_is "wfi image refused"                    1 1 0 "$FULL_PATH" offroad-master "$I/sleeper.elf"
+echo "-- with the cross toolchain present: the guards run"
+case_is "wfi image refused"                    1 0 "$FULL_PATH" offroad-master "$I/sleeper.elf"
 # The scan must key on the INSTRUCTION, not on the path. `objdump -d` opens with
 # `<image-path>:  file format elf32-littlearm`, so an image at a path containing the word used to be
 # refused with no wfi in it, and every case above was passing on its filename rather than on its
 # bytes. This image has the word in its path and nops in its text: it must flash.
-case_is "clean image at a wfi-named path flashes" 0 1 1 "$FULL_PATH" offroad-master "$I/wfi.elf"
-case_is "gutted image refused (below floor)"   1 1 0 "$FULL_PATH" offroad-master "$I/gutted.elf"
-case_is "missing required symbols refused"     1 1 0 "$FULL_PATH" offroad-master "$I/missing.elf"
-case_is "hot symbol above 0x08008000 refused"  1 1 0 "$FULL_PATH" offroad-master "$I/cold.elf"
-case_is "a renamed required symbol refused"    1 1 0 "$FULL_PATH" offroad-master "$I/renamed_req.elf"
-case_is "a renamed hot symbol refused"         1 1 0 "$FULL_PATH" offroad-master "$I/renamed_hot.elf"
+case_is "clean image at a wfi-named path flashes" 0 1 "$FULL_PATH" offroad-master "$I/wfi.elf"
+case_is "gutted image refused (below floor)"   1 0 "$FULL_PATH" offroad-master "$I/gutted.elf"
+case_is "missing required symbols refused"     1 0 "$FULL_PATH" offroad-master "$I/missing.elf"
+case_is "hot symbol above 0x08008000 refused"  1 0 "$FULL_PATH" offroad-master "$I/cold.elf"
+case_is "a renamed required symbol refused"    1 0 "$FULL_PATH" offroad-master "$I/renamed_req.elf"
+case_is "a renamed hot symbol refused"         1 0 "$FULL_PATH" offroad-master "$I/renamed_hot.elf"
 expect_out "and the refusal names the renamed required symbol" "required symbol.*3arm2hw4GATE" \
   "$FULL_PATH" offroad-master "$I/renamed_req.elf"
 expect_out "and the refusal names the renamed hot symbol" "hot-window symbol.*route_emits" \
   "$FULL_PATH" offroad-master "$I/renamed_hot.elf"
-case_is "healthy image passes to the read"     0 1 1 "$FULL_PATH" offroad-master "$I/good.elf"
+case_is "healthy image passes to the read"     0 1 "$FULL_PATH" offroad-master "$I/good.elf"
 
-echo "-- with the cross toolchain ABSENT: refuse, and BEFORE the lock (locks=0)"
+echo "-- with the cross toolchain ABSENT: refuse, and BEFORE the guards (rc=2)"
 for i in wfi gutted missing cold good; do
-  case_is "no cross toolchain: $i refused pre-lock" 2 0 0 "$APPLE_PATH" offroad-master "$I/$i.elf"
+  case_is "no cross toolchain: $i refused up front" 2 0 "$APPLE_PATH" offroad-master "$I/$i.elf"
 done
-case_is "no binutils at all: refused pre-lock"   2 0 0 "$NONE_PATH"  offroad-master "$I/good.elf"
-case_is "unreadable non-ELF refused pre-lock"    2 0 0 "$FULL_PATH"  offroad-master "$H/corrupt.elf"
-expect_out "the pre-lock refusal names the tool" "REFUSED - (no usable|'[^']*' cannot read)" \
+case_is "no binutils at all: refused up front"   2 0 "$NONE_PATH"  offroad-master "$I/good.elf"
+case_is "unreadable non-ELF refused up front"    2 0 "$FULL_PATH"  offroad-master "$H/corrupt.elf"
+expect_out "the up-front refusal names the tool" "REFUSED - (no usable|'[^']*' cannot read)" \
   "$APPLE_PATH" offroad-master "$I/good.elf"
 
 echo "-- a guard that cannot run must fail closed, not warn (toolchain changes under the run)"
@@ -453,25 +438,25 @@ rm -f "$H/vanish/.size.n" "$H/vanish/.objdump.n"
 # there, so this is the objdump branch failing closed, not the size branch. It was labelled "size
 # vanishes mid-run" while the comment 180 lines above already explained why that cannot be what it
 # tests. The genuine size case is `size vanishes mid-run: healthy image refused`, on VANISH_SIZE_PATH.
-case_is "both tools vanish mid-run: the FIRST guard fails closed" 1 1 0 "$VANISH_PATH" offroad-master "$I/gutted.elf"
+case_is "both tools vanish mid-run: the FIRST guard fails closed" 1 0 "$VANISH_PATH" offroad-master "$I/gutted.elf"
 rm -f "$H/vanish/.size.n" "$H/vanish/.objdump.n"
 expect_out "objdump broken: wfi scan does NOT read clean" "REFUSED - the wfi scan did not complete" \
   "$VANISH_PATH" offroad-master "$I/sleeper.elf"
 
 echo "== the PI runner: the same refusals, with the same toolchain discipline =="
-echo "-- with the cross toolchain present (locks=1: the guards run under the bench lock)"
-case_is "pi: wfi image refused"                   1 1 0 "$FULL_PATH" master "$I/sleeper.elf"
-case_is "pi: gutted image refused (below floor)"  1 1 0 "$FULL_PATH" master "$I/gutted.elf"
-case_is "pi: missing required symbols refused"    1 1 0 "$FULL_PATH" master "$I/missing.elf"
-case_is "pi: hot symbol above 0x08008000 refused" 1 1 0 "$FULL_PATH" master "$I/cold.elf"
-case_is "pi: healthy image still flashes"         0 1 1 "$FULL_PATH" master "$I/good.elf"
+echo "-- with the cross toolchain present: the guards run"
+case_is "pi: wfi image refused"                   1 0 "$FULL_PATH" master "$I/sleeper.elf"
+case_is "pi: gutted image refused (below floor)"  1 0 "$FULL_PATH" master "$I/gutted.elf"
+case_is "pi: missing required symbols refused"    1 0 "$FULL_PATH" master "$I/missing.elf"
+case_is "pi: hot symbol above 0x08008000 refused" 1 0 "$FULL_PATH" master "$I/cold.elf"
+case_is "pi: healthy image still flashes"         0 1 "$FULL_PATH" master "$I/good.elf"
 
-echo "-- with the cross toolchain ABSENT: refuse, and BEFORE the lock (this used to warn and program)"
+echo "-- with the cross toolchain ABSENT: refuse, and BEFORE the guards (this used to warn and program)"
 for i in wfi gutted missing cold good; do
-  case_is "pi: no cross toolchain: $i refused pre-lock" 2 0 0 "$APPLE_PATH" master "$I/$i.elf"
+  case_is "pi: no cross toolchain: $i refused up front" 2 0 "$APPLE_PATH" master "$I/$i.elf"
 done
-case_is "pi: no binutils at all: refused pre-lock" 2 0 0 "$NONE_PATH" master "$I/good.elf"
-case_is "pi: unreadable non-ELF refused pre-lock"  2 0 0 "$FULL_PATH" master "$H/corrupt.elf"
+case_is "pi: no binutils at all: refused up front" 2 0 "$NONE_PATH" master "$I/good.elf"
+case_is "pi: unreadable non-ELF refused up front"  2 0 "$FULL_PATH" master "$H/corrupt.elf"
 expect_out "pi: the refusal names the Pi and the tool" \
   "REFUSED - (no usable [a-z]+ on the Pi|'[^']*' cannot read .* on the Pi)" \
   "$APPLE_PATH" master "$I/good.elf"
@@ -479,17 +464,17 @@ expect_out "pi: no binutils, healthy image, still refuses" "REFUSED - no usable 
   "$NONE_PATH" master "$I/good.elf"
 
 echo "-- the Pi's tools are exercised ON THE PI, not looked for on this host"
-case_is "pi: toolchain only on the Pi: flashes"    0 1 1 "$NONE_PATH" master "$I/good.elf" \
+case_is "pi: toolchain only on the Pi: flashes"    0 1 "$NONE_PATH" master "$I/good.elf" \
   HARNESS_REMOTE_PATH="$REMOTE_FULL"
-case_is "pi: toolchain only HERE: refused pre-lock" 2 0 0 "$FULL_PATH" master "$I/good.elf" \
+case_is "pi: toolchain only HERE: refused up front" 2 0 "$FULL_PATH" master "$I/good.elf" \
   HARNESS_REMOTE_PATH="$REMOTE_NONE"
-case_is "pi: toolchain only on the Pi: wfi refused" 1 1 0 "$NONE_PATH" master "$I/sleeper.elf" \
+case_is "pi: toolchain only on the Pi: wfi refused" 1 0 "$NONE_PATH" master "$I/sleeper.elf" \
   HARNESS_REMOTE_PATH="$REMOTE_FULL"
-case_is "pi: toolchain only HERE: wfi refused pre-lock" 2 0 0 "$FULL_PATH" master "$I/sleeper.elf" \
+case_is "pi: toolchain only HERE: wfi refused up front" 2 0 "$FULL_PATH" master "$I/sleeper.elf" \
   HARNESS_REMOTE_PATH="$REMOTE_NONE"
 
 echo "-- the guards read the Pi's copy, so a copy that did not happen is not a guard that passed"
-case_is "pi: image copy fails: refused pre-lock"   2 0 0 "$FULL_PATH" master "$I/good.elf" HARNESS_SCP_FAIL=1
+case_is "pi: image copy fails: refused up front"   2 0 "$FULL_PATH" master "$I/good.elf" HARNESS_SCP_FAIL=1
 expect_out "pi: and says the copy failed"          "REFUSED - could not copy" \
   "$FULL_PATH" master "$I/good.elf" HARNESS_SCP_FAIL=1
 
@@ -513,20 +498,12 @@ else
 fi
 if [ ! -e "$d1" ]; then pass "pi: the staged copy is gone afterwards"
 else fail "pi: the staged copy is gone afterwards" "$d1 still exists"; rm -f "$d1"; fi
-if grep -q release "$H/log/lock.log"; then pass "pi: and the lock was released by the same handler"
-else fail "pi: and the lock was released by the same handler" "no release in lock.log"; fi
 pi_run "$FULL_PATH" "$I/good.elf"
 d2=$(staged_dst); rm -f "$d2"
 if [ -n "$d2" ] && [ "$d1" != "$d2" ]; then pass "pi: two runs stage two different names" "$d1 vs $d2"
 else fail "pi: two runs stage two different names" "both were '$d2'"; fi
 
-echo "-- the EXIT handler is best-effort: neither cleanup may change the run's verdict"
-pi_run "$FULL_PATH" "$I/good.elf" HARNESS_LOCK_RELEASE_FAIL=1
-d3=$(staged_dst)
-if [ "$OUT_RC" = 0 ]; then pass "pi: a failed lock release keeps the run's status" "rc=0"
-else fail "pi: a failed lock release keeps the run's status" "rc=$OUT_RC"; fi
-if [ ! -e "$d3" ]; then pass "pi: a failed lock release still removes the staged copy"
-else fail "pi: a failed lock release still removes the staged copy" "$d3 orphaned"; rm -f "$d3"; fi
+echo "-- the EXIT handler is best-effort: its cleanup may not change the run's verdict"
 pi_run "$FULL_PATH" "$I/good.elf" HARNESS_SSH_RM_FAIL=1
 rm -f "$(staged_dst)"
 if [ "$OUT_RC" = 0 ]; then pass "pi: a failed removal keeps a clean run clean" "rc=0"
@@ -543,11 +520,11 @@ if [ ! -s "$H/log/ssh.log" ]; then pass "pi: failed copy: no remote command at a
 else fail "pi: failed copy: no remote command at all" "ssh.log has $(grep -c . "$H/log/ssh.log") line(s)"; fi
 
 echo "-- ALLOW_WFI=1 skips the wfi scan and nothing else"
-case_is "pi: ALLOW_WFI=1 flashes a wfi image"          0 1 1 "$FULL_PATH"  master "$I/sleeper.elf"  ALLOW_WFI=1
-case_is "local: ALLOW_WFI=1 flashes a wfi image"       0 1 1 "$FULL_PATH"  offroad-master "$I/sleeper.elf" ALLOW_WFI=1
-case_is "pi: ALLOW_WFI=1 still needs a usable size"    2 0 0 "$APPLE_PATH" master "$I/good.elf" ALLOW_WFI=1
-case_is "pi: ALLOW_WFI=1 still needs size/nm present"  2 0 0 "$NONE_PATH"  master "$I/good.elf" ALLOW_WFI=1
-case_is "pi: ALLOW_WFI=1 does not excuse a gutted image" 1 1 0 "$FULL_PATH" master "$I/gutted.elf" ALLOW_WFI=1
+case_is "pi: ALLOW_WFI=1 flashes a wfi image"          0 1 "$FULL_PATH"  master "$I/sleeper.elf"  ALLOW_WFI=1
+case_is "local: ALLOW_WFI=1 flashes a wfi image"       0 1 "$FULL_PATH"  offroad-master "$I/sleeper.elf" ALLOW_WFI=1
+case_is "pi: ALLOW_WFI=1 still needs a usable size"    2 0 "$APPLE_PATH" master "$I/good.elf" ALLOW_WFI=1
+case_is "pi: ALLOW_WFI=1 still needs size/nm present"  2 0 "$NONE_PATH"  master "$I/good.elf" ALLOW_WFI=1
+case_is "pi: ALLOW_WFI=1 does not excuse a gutted image" 1 0 "$FULL_PATH" master "$I/gutted.elf" ALLOW_WFI=1
 pi_run "$FULL_PATH" "$I/sleeper.elf" ALLOW_WFI=1
 rm -f "$(staged_dst)"
 if printf '%s' "$OUT" | grep -q "flash: objdump:"; then
@@ -557,12 +534,12 @@ else
 fi
 
 echo "== a guard that cannot run fails closed on BOTH runners =="
-echo "-- healthy image, one tool vanishing after the pre-lock exercise: refuse, do not warn"
+echo "-- healthy image, one tool vanishing after the up-front exercise: refuse, do not warn"
 for b in offroad-master master; do
   rm -f "$H/vanish-size/.n"
-  case_is "$b: size vanishes mid-run: healthy image refused"    1 1 0 "$VANISH_SIZE_PATH" "$b" "$I/good.elf"
+  case_is "$b: size vanishes mid-run: healthy image refused"    1 0 "$VANISH_SIZE_PATH" "$b" "$I/good.elf"
   rm -f "$H/vanish-objdump/.n"
-  case_is "$b: objdump vanishes mid-run: healthy image refused" 1 1 0 "$VANISH_OD_PATH"   "$b" "$I/good.elf"
+  case_is "$b: objdump vanishes mid-run: healthy image refused" 1 0 "$VANISH_OD_PATH"   "$b" "$I/good.elf"
 done
 rm -f "$H/vanish-objdump/.n"
 expect_out "pi: the mid-run refusal says the guard did not run" "REFUSED - the wfi scan did not complete" \
@@ -575,20 +552,20 @@ echo "== the wfi guard rests on Thumb decode, so the disassembler must decode ar
 # The hazard, driven with the input it exists to refuse: a disassembler that RUNS on the image and
 # decodes it as something else. Every one of these ran clean before the architecture assertion
 # existed: objdump resolved, the scan disassembled a wfi image as i386, found no `wfi` mnemonic,
-# printed "clean - no wfi instruction in image", took the lock and programmed the board.
+# printed "clean - no wfi instruction in image" and programmed the board.
 #
 # Re-checked by removing the assertion from a copy of flash.sh: 72 pass, these 9 fail, and the two
-# wfi cases come back rc=0 with one lock and one openocd - clean, and programmed. That control only
+# wfi cases come back rc=0 with one openocd - clean, and programmed. That control only
 # started telling the truth once the wfi scan stopped matching the image's PATH: while it did, these
 # cases refused at the scan on the filename `wfi.elf` and the sentence above was wrong about them.
 for b in offroad-master master; do
-  case_is "$b: wrong-ISA objdump: wfi image refused pre-lock" 2 0 0 "$WRONG_ISA_PATH" "$b" "$I/sleeper.elf" \
+  case_is "$b: wrong-ISA objdump: wfi image refused up front" 2 0 "$WRONG_ISA_PATH" "$b" "$I/sleeper.elf" \
     HARNESS_WRONG_ARCH=i386
-  case_is "$b: wrong-ISA objdump: healthy image refused too"  2 0 0 "$WRONG_ISA_PATH" "$b" "$I/good.elf" \
+  case_is "$b: wrong-ISA objdump: healthy image refused too"  2 0 "$WRONG_ISA_PATH" "$b" "$I/good.elf" \
     HARNESS_WRONG_ARCH=i386
   # A tool that will not say what it decoded is not a tool that decoded arm: fail closed on silence
   # exactly as on a wrong answer.
-  case_is "$b: objdump with no architecture line refused"     2 0 0 "$WRONG_ISA_PATH" "$b" "$I/sleeper.elf"
+  case_is "$b: objdump with no architecture line refused"     2 0 "$WRONG_ISA_PATH" "$b" "$I/sleeper.elf"
 done
 expect_out "the refusal says it does not decode as arm" "REFUSED - .* does not decode .* as arm" \
   "$WRONG_ISA_PATH" offroad-master "$I/sleeper.elf" HARNESS_WRONG_ARCH=i386
@@ -596,8 +573,8 @@ expect_out "pi: the same refusal names the Pi" "REFUSED - .* does not decode .* 
   "$WRONG_ISA_PATH" master "$I/sleeper.elf" HARNESS_WRONG_ARCH=i386
 # ...and the assertion must not become the thing that refuses. An arm decoder still resolves (on an
 # `armv7e-m` line, not the bare `arm` llvm-objdump prints), and it is the WFI SCAN that then refuses
-# the wfi image, under the lock, which is a different exit code and a different message.
-case_is "an arm-reporting objdump resolves, wfi scan refuses" 1 1 0 "$ARM_STUB_PATH" offroad-master "$I/sleeper.elf"
+# the wfi image, which is a different exit code and a different message.
+case_is "an arm-reporting objdump resolves, wfi scan refuses" 1 0 "$ARM_STUB_PATH" offroad-master "$I/sleeper.elf"
 expect_out "and it refuses for the wfi, not the architecture" "REFUSED - image contains a 'wfi'" \
   "$ARM_STUB_PATH" offroad-master "$I/sleeper.elf"
 expect_out "the resolve line records that it decodes arm" "flash: objdump: .*decodes arm" \
@@ -606,13 +583,13 @@ expect_out "the resolve line records that it decodes arm" "flash: objdump: .*dec
 # case above this block: the healthy image still flashes and the wfi image is still caught.
 
 echo "-- the strengthened armed-bridge read reaches the verdict intact"
-case_is "armed bridge refused"                 1 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00008c1c
-case_is "armed bridge, FORCE does not override" 1 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00008c1c FORCE_ARMED_GUARD=1
-case_is "all-zero session refused (bogus link)" 1 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00000000 HARNESS_CPUID=00000000
-case_is "transient zero then armed: refused"   1 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00000000 HARNESS_CCHP2=00008c1c
-case_is "reads disagree: refused"              1 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00000c1c HARNESS_CCHP2=00000c1e
-case_is "no read at all: refused"              1 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP= HARNESS_CCHP2=
-case_is "genuine zero board with live canary"  0 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00000000
+case_is "armed bridge refused"                 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00008c1c
+case_is "armed bridge, FORCE does not override" 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00008c1c FORCE_ARMED_GUARD=1
+case_is "all-zero session refused (bogus link)" 1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00000000 HARNESS_CPUID=00000000
+case_is "transient zero then armed: refused"   1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00000000 HARNESS_CCHP2=00008c1c
+case_is "reads disagree: refused"              1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00000c1c HARNESS_CCHP2=00000c1e
+case_is "no read at all: refused"              1 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP= HARNESS_CCHP2=
+case_is "genuine zero board with live canary"  0 1 "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=00000000
 expect_out "the inconclusive hint is local, not the Pi" "pkill -x openocd .*THIS host" \
   "$FULL_PATH" offroad-master "$I/good.elf" HARNESS_CCHP=
 expect_out "the Pi keeps the Pi hint"          "ssh pi@192\.168\.0\.248" \
@@ -627,27 +604,27 @@ if [ "$t" = 142 ]; then printf 'PASS  %-56s rc=%s\n' "the alarm still fires (SIG
 else printf 'FAIL  %-56s rc=%s, wanted 142\n' "the alarm still fires (SIGALRM)" "$t"; FAIL=$((FAIL+1)); fi
 
 echo "== the image is named by CHIP, and every chip's image is guarded by its own lists =="
-case_is "no CHIP and no IMAGE_PROFILE: refused pre-lock"  2 0 0 "$FULL_PATH" offroad-master "$I/good.elf" CHIP=
+case_is "no CHIP and no IMAGE_PROFILE: refused up front"  2 0 "$FULL_PATH" offroad-master "$I/good.elf" CHIP=
 expect_out "and the refusal names both options" "CHIP=gd32f103c8\|gd32f130c8.*" \
   "$FULL_PATH" offroad-master "$I/good.elf" CHIP=
 expect_out "and names IMAGE_PROFILE too" "IMAGE_PROFILE=imu-bench" \
   "$FULL_PATH" offroad-master "$I/good.elf" CHIP=
-case_is "an unknown CHIP: refused pre-lock"               2 0 0 "$FULL_PATH" offroad-master "$I/good.elf" CHIP=gd32f999
-case_is "CHIP and IMAGE_PROFILE disagree: refused"        2 0 0 "$FULL_PATH" offroad-master "$I/good.elf" \
+case_is "an unknown CHIP: refused up front"               2 0 "$FULL_PATH" offroad-master "$I/good.elf" CHIP=gd32f999
+case_is "CHIP and IMAGE_PROFILE disagree: refused"        2 0 "$FULL_PATH" offroad-master "$I/good.elf" \
   IMAGE_PROFILE=imu-bench
-case_is "IMAGE_PROFILE=mainboard-<chip> alone flashes"    0 1 1 "$FULL_PATH" offroad-master "$I/good.elf" \
+case_is "IMAGE_PROFILE=mainboard-<chip> alone flashes"    0 1 "$FULL_PATH" offroad-master "$I/good.elf" \
   CHIP= IMAGE_PROFILE="mainboard-$CHIP0"
 for chip in $CHIPS; do
   J="$H/$chip"
-  case_is "$chip: healthy image passes to the read"        0 1 1 "$FULL_PATH" offroad-master "$J/good.elf" CHIP="$chip"
-  case_is "$chip: missing required symbols refused"        1 1 0 "$FULL_PATH" offroad-master "$J/missing.elf" CHIP="$chip"
-  case_is "$chip: hot symbol above 0x08008000 refused"     1 1 0 "$FULL_PATH" offroad-master "$J/cold.elf" CHIP="$chip"
-  case_is "$chip: a renamed required symbol refused"       1 1 0 "$FULL_PATH" offroad-master "$J/renamed_req.elf" CHIP="$chip"
-  case_is "$chip: a renamed hot symbol refused"            1 1 0 "$FULL_PATH" offroad-master "$J/renamed_hot.elf" CHIP="$chip"
+  case_is "$chip: healthy image passes to the read"        0 1 "$FULL_PATH" offroad-master "$J/good.elf" CHIP="$chip"
+  case_is "$chip: missing required symbols refused"        1 0 "$FULL_PATH" offroad-master "$J/missing.elf" CHIP="$chip"
+  case_is "$chip: hot symbol above 0x08008000 refused"     1 0 "$FULL_PATH" offroad-master "$J/cold.elf" CHIP="$chip"
+  case_is "$chip: a renamed required symbol refused"       1 0 "$FULL_PATH" offroad-master "$J/renamed_req.elf" CHIP="$chip"
+  case_is "$chip: a renamed hot symbol refused"            1 0 "$FULL_PATH" offroad-master "$J/renamed_hot.elf" CHIP="$chip"
   # The other chip's image under this chip's name: its vector symbols are not on this chip's list.
   for other in $CHIPS; do
     [ "$other" = "$chip" ] && continue
-    case_is "$chip: the $other image refused"     1 1 0 "$FULL_PATH" offroad-master "$H/$other/good.elf" CHIP="$chip"
+    case_is "$chip: the $other image refused"     1 0 "$FULL_PATH" offroad-master "$H/$other/good.elf" CHIP="$chip"
   done
 done
 

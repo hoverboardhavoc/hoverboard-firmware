@@ -28,7 +28,11 @@
 #   tools/swd-disarm-halt.sh freeze                # the TIMER0_HOLD freeze validation, DISARMED
 #   tools/swd-disarm-halt.sh --keep-rail freeze    # ...leaving the rail up for a follow-on step
 #
-# Env overrides: PI_HOST (default pi@192.168.0.248), BENCH_OWNER (default $USER).
+# It takes no bench lock. The operator takes `all` first with ~/dev/hoverboard-bench/bench-lock.sh
+# (it switches the Pi relay, which feeds the offroad pair, and runs `sudo pkill -x openocd` on the
+# Pi, which stops every OpenOCD there) and releases it after.
+#
+# Env overrides: PI_HOST (default pi@192.168.0.248).
 set -euo pipefail
 
 # TIMER0 register map, both families (GD32F10x UM Rev2.6 and GD32F1x0 UM Rev3.6, the TIMERx register
@@ -63,10 +67,6 @@ case "$BOARD" in
 esac
 
 PI="${PI_HOST:-pi@192.168.0.248}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOCK="$SCRIPT_DIR/bench-lock.sh"
-OWNER="${BENCH_OWNER:-${USER:-hoverboardhavoc}}"
-TOOK_LOCK=0
 CM="$HOME/.ssh/disarm-cm-%r@%h"
 
 cleanup() {
@@ -76,7 +76,6 @@ cleanup() {
     ssh "$PI" 'pinctrl set 4 op dh' || true
     echo "swd-disarm-halt: rail OFF"
   fi
-  [ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -106,12 +105,6 @@ rd32() {
 }
 
 moe_set() { [ $(( 0x$(rd32 $CCHP_ADDR) & MOE_BIT )) -ne 0 ]; }
-
-if acq="$("$LOCK" acquire "$OWNER" "swd-disarm-halt: $MODE, $BOARD")"; then
-  case "$acq" in ACQUIRED*) TOOK_LOCK=1 ;; esac
-else
-  echo "swd-disarm-halt: bench is busy, not starting." >&2; echo "$acq" >&2; exit 1
-fi
 
 if [ "$RAIL_ON" = 1 ]; then
   echo "swd-disarm-halt: rail ON"

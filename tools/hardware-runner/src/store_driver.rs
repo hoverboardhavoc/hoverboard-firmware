@@ -23,9 +23,10 @@
 //! `--features gd32f103c8` or `gd32f130c8` image over this driver. The 12-FET 2 KiB part is a DEFERRED bench task (see
 //! [`Chip2kDeferred`]).
 //!
-//! Bench note: hold `tools/bench-lock.sh` around any call here (one shared physical bench); the binary
-//! does. The subject busy-spins after publishing (never `wfi`), so a hung subject is caught by the poll
-//! timeout (the ST-Link clones cannot drive NRST).
+//! Bench note: the operator holds the bench lock for the board behind the probe
+//! (`~/dev/hoverboard-bench/bench-lock.sh`) around any call here. The subject busy-spins after
+//! publishing (never `wfi`), so a hung subject is caught by the poll timeout (the ST-Link clones
+//! cannot drive NRST).
 
 use std::path::Path;
 use std::time::{Duration, Instant};

@@ -2,17 +2,19 @@
 //! each against the store's own value consts. The silicon counterpart of the emulator's
 //! `store_scenarios` matrix (same `(scenario, phase)` ids, same crafted regions).
 //!
-//! Manual, run on the Pi, bench-locked. It takes the chip, probe selector, and `store-test` image path
-//! as arguments (nothing hardcoded), holds `tools/bench-lock.sh` around the hardware op, flashes the
-//! image ONCE, then runs the requested scenario's phases (pre-erasing the region for a clean slate or
+//! Manual, run on the Pi. It takes the chip, probe selector, and `store-test` image path as arguments
+//! (nothing hardcoded), flashes the image ONCE, then runs the requested scenario's phases (pre-erasing the region for a clean slate or
 //! planting a crafted region as the scenario needs), and judges the device's read-back on the host.
 //!
 //! The 12-FET 2 KiB part is a DEFERRED bench task (OpenOCD + ESP32 elaphureLink, which probe-rs has no
 //! backend for); this binary drives only the 1 KiB-page parts (`--features gd32f103c8` or `gd32f130c8`). The 2 KiB-page logic is
 //! CI-covered by the emulated GD32F103RC path.
+//!
+//! It takes no bench lock: the operator takes the resource of the board behind `--probe` first with
+//! `~/dev/hoverboard-bench/bench-lock.sh`, and `probes` for a `VID:PID` selector with no serial,
+//! which is a scan.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
@@ -66,37 +68,6 @@ struct Args {
     /// drive NRST, so we never block forever).
     #[arg(long, default_value_t = 4000)]
     timeout_ms: u64,
-
-    /// Distinct bench-lock owner for this agent (e.g. claude-main, claude-2). Held around the run.
-    #[arg(long, default_value = "hardware-runner")]
-    lock_owner: String,
-}
-
-/// Path to `tools/bench-lock.sh`, found relative to this crate's manifest dir at build time.
-fn bench_lock_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|root| root.join("tools/bench-lock.sh"))
-        .expect("locate tools/bench-lock.sh")
-}
-
-fn bench_lock_acquire(owner: &str) -> Result<(), String> {
-    let status = Command::new(bench_lock_script())
-        .args(["acquire", owner, "hardware-runner store silicon run"])
-        .status()
-        .map_err(|e| format!("spawn bench-lock acquire: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("bench is locked by another owner".to_string())
-    }
-}
-
-fn bench_lock_release(owner: &str) {
-    let _ = Command::new(bench_lock_script())
-        .args(["release", owner])
-        .status();
 }
 
 fn cmd(scenario: u32, phase: u32) -> u32 {
@@ -227,11 +198,6 @@ fn expect_bytes(r: &TestResult, expected: &[u8], msg: &str) -> Result<(), String
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
 
-    if let Err(e) = bench_lock_acquire(&args.lock_owner) {
-        eprintln!("could not acquire bench lock: {e}");
-        return std::process::ExitCode::FAILURE;
-    }
-
     // The 1 KiB parts are the only silicon this driver runs (the 12-FET 2 KiB part is a deferred bench task
     // over OpenOCD + ESP32 elaphureLink, which probe-rs has no backend for).
     let result = (|| -> Result<(), String> {
@@ -245,8 +211,6 @@ fn main() -> std::process::ExitCode {
         .map_err(|e| format!("attach/flash: {e}"))?;
         run_scenario(&mut driver, args.scenario)
     })();
-
-    bench_lock_release(&args.lock_owner);
 
     match result {
         Ok(()) => {

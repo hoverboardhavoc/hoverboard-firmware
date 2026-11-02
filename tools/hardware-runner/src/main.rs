@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Flash one dummy image to a real GD32 over SWD, run it, and assert the same outcome the emulator
-//! does. Manual, run on the Pi, bench-locked. Compiles for the host; the human runs it on hardware.
+//! does. Manual, run on the Pi. Compiles for the host; the human runs it on hardware.
 //!
-//! It takes the chip, the probe selector, and the image path as arguments (nothing hardcoded), holds
-//! `tools/bench-lock.sh` around the hardware op (one shared physical bench), and judges the result
-//! with the shared `output == dummy(input)` check.
+//! It takes the chip, the probe selector, and the image path as arguments (nothing hardcoded), and
+//! judges the result with the shared `output == dummy(input)` check. It takes no bench lock: the
+//! operator takes the resource of the board behind `--probe` first with
+//! `~/dev/hoverboard-bench/bench-lock.sh`, and `probes` for a `VID:PID` selector with no serial,
+//! which is a scan.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use clap::Parser;
@@ -39,10 +40,6 @@ struct Args {
     /// drive NRST, so we never block forever).
     #[arg(long, default_value_t = 2000)]
     timeout_ms: u64,
-
-    /// Distinct bench-lock owner for this agent (e.g. claude-main, claude-2). Held around the run.
-    #[arg(long, default_value = "hardware-runner")]
-    lock_owner: String,
 }
 
 fn parse_u32(s: &str) -> Result<u32, String> {
@@ -55,43 +52,8 @@ fn parse_u32(s: &str) -> Result<u32, String> {
     parsed.map_err(|e| format!("invalid u32 {s:?}: {e}"))
 }
 
-/// Path to `tools/bench-lock.sh`, found relative to this crate's manifest dir at build time.
-fn bench_lock_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|root| root.join("tools/bench-lock.sh"))
-        .expect("locate tools/bench-lock.sh")
-}
-
-/// Acquire the bench lock (one shared physical bench). Returns Ok only if we got it.
-fn bench_lock_acquire(owner: &str) -> Result<(), String> {
-    let status = Command::new(bench_lock_script())
-        .args(["acquire", owner, "hardware-runner silicon run"])
-        .status()
-        .map_err(|e| format!("spawn bench-lock acquire: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("bench is locked by another owner".to_string())
-    }
-}
-
-/// Release the bench lock. Best-effort: a failure to release is logged, not fatal.
-fn bench_lock_release(owner: &str) {
-    let _ = Command::new(bench_lock_script())
-        .args(["release", owner])
-        .status();
-}
-
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
-
-    // Hold tools/bench-lock.sh around the hardware op (acquire before, release after).
-    if let Err(e) = bench_lock_acquire(&args.lock_owner) {
-        eprintln!("could not acquire bench lock: {e}");
-        return std::process::ExitCode::FAILURE;
-    }
 
     let result = run_image(
         &args.image,
@@ -100,8 +62,6 @@ fn main() -> std::process::ExitCode {
         args.input,
         Duration::from_millis(args.timeout_ms),
     );
-
-    bench_lock_release(&args.lock_owner);
 
     match result {
         Ok(r) => {

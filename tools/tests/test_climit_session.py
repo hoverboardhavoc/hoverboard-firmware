@@ -648,7 +648,7 @@ Not measured this session.
 ## Teardown
 
 - neutral: explicit Neutral sent
-- lock_release: released claude-climit
+- tunnel_close: tunnel closed
 
 ## Bench state at close
 
@@ -667,7 +667,7 @@ class Record(unittest.TestCase):
             "outcome": "ABORTED: the operator read 3.8 A on the PSU, above the 3.5 A limit they declared",
             "gates": [{"name": "Gate 1, rest floor", "verdict": "INFO", "lines": ["peak max 1300 counts"]}],
             "typed": [("PSU reading now (A)?", "3.8")],
-            "teardown": ["neutral: explicit Neutral sent", "lock_release: released claude-climit"],
+            "teardown": ["neutral: explicit Neutral sent", "tunnel_close: tunnel closed"],
             "final": ["rail OFF confirmed"], "calibration": None, "psu_declared": 3.5, "prev_limit_ma": 10000,
             "staged_cpa": 455, "cal_raw": 455,
             "staged_floor": 2100, "floor_raw": 2100,
@@ -701,7 +701,7 @@ def answering(**overrides):
 
 
 TEARDOWN_ORDER = ["drive_end", "hold_end", "moe_check", "neutral", "rail_off", "rail_verify", "ocd_kill",
-                  "tunnel_close", "lock_release"]
+                  "tunnel_close"]
 
 
 def cmd_index(shell, needle, start=0, kinds=("run", "spawn", "ask", "connect")):
@@ -719,7 +719,7 @@ class Teardown(unittest.TestCase):
         self.assertEqual(list(cs.TEARDOWN_ORDER), TEARDOWN_ORDER)
         self.assertIn("moe_check: moe_bits 0, mode_byte OFF", s.rec["teardown"])
         self.assertIn("drive_end: demand released (Neutral; the firmware zeroes it in 200 ms)", s.rec["teardown"])
-        # Drive end, inputs end, then the Neutral, rail off, verify, OpenOCD kill, lock release.
+        # Drive end, inputs end, then the Neutral, rail off, verify, OpenOCD kill, tunnel close.
         start = cmd_index(sh, "at demand")
         d = cmd_index(sh, "> neutral (the owner releases", start, kinds=("say",))
         h = cmd_index(sh, "(end the session:", d, kinds=("say",))
@@ -727,7 +727,7 @@ class Teardown(unittest.TestCase):
         j = cmd_index(sh, "pinctrl set 4 op dh", i)
         k = cmd_index(sh, "pinctrl get 4", j)
         m = cmd_index(sh, "sudo pkill -x openocd", k)
-        cmd_index(sh, "bench-lock.sh release", m)
+        cmd_index(sh, "(close the tunnel)", m, kinds=("say",))
         self.assertIsNone(s.inputs)
         self.assertIsNone(s.drive)
 
@@ -889,7 +889,7 @@ class AuditFixes(unittest.TestCase):
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
         self.assertTrue(any("record flush before teardown FAILED" in f for f in s.rec["final"]))
         self.assertIsNone(s.inputs)
-        cmd_index(sh, "bench-lock.sh release")
+        cmd_index(sh, "(close the tunnel)", kinds=("say",))
 
     def test_signal_between_teardown_steps(self):
         class Interrupting(cs.FakeShell):
@@ -904,7 +904,7 @@ class AuditFixes(unittest.TestCase):
         s, _ = run_session(shell=sh)
         self.assertTrue(sh.fired)
         self.assertEqual(s.teardown_log, TEARDOWN_ORDER)
-        cmd_index(sh, "bench-lock.sh release")
+        cmd_index(sh, "(close the tunnel)", kinds=("say",))
         self.assertIn(("signals", "deferred"), sh.log)
 
     def test_signals_are_deferred_for_real(self):
@@ -1076,11 +1076,11 @@ class DryRun(unittest.TestCase):
         self.assertIn("COMPLETED", text)
         self.assertIn("== dry run: RECORD.md would read ==", text)
         # Every command in order.
-        order = ["cargo build", "bench-lock.sh acquire", "pinctrl set 4 op dl", "nohup sudo openocd",
+        order = ["cargo build", "pinctrl set 4 op dl", "nohup sudo openocd",
                  "ssh -N -o ExitOnForwardFailure=yes", "swd-mailbox-config 127.0.0.1:6666 --dst attached 0x4e",
                  "--buttons 0 --rider 0 --hold 600", "--buttons 1 --rider 1 --hold 600",
                  "0x4e=2500", "pinctrl set 4 op dh", "--value 0 --hold 1",
-                 "pinctrl get 4", "sudo pkill -x openocd", "bench-lock.sh release"]
+                 "pinctrl get 4", "sudo pkill -x openocd"]
         i = 0
         for needle in order:
             i = cmd_index(shell, needle, i)

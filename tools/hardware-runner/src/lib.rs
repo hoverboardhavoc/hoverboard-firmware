@@ -59,8 +59,8 @@ impl std::error::Error for RunError {}
 /// string (`VID:PID` or `VID:PID:serial`). Both come from the caller (CLI), nothing is hardcoded.
 ///
 /// Bench note: the GD32 reports a different DAP ID than the STM32 target probe-rs assumes, so a chip
-/// definition with `cpu_tap_id`/CPUTAPID 0 must be selected via `chip`. Hold `tools/bench-lock.sh`
-/// around this call (one shared physical bench); see the binary.
+/// definition with `cpu_tap_id`/CPUTAPID 0 must be selected via `chip`. The caller holds the bench
+/// lock for the board behind `probe_selector` (`~/dev/hoverboard-bench/bench-lock.sh`).
 pub fn run_image(
     image: &Path,
     chip: &str,
