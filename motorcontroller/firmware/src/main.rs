@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The firmware binary: one image per chip, chosen by its chip feature (Cargo.toml `[features]`:
-//! `gd32f103c8`, `gd32f130c8`; `cargo image-f103`, `cargo image-f130`), on the `hal` crate
+//! `gd32f103c8`, `gd32f130c8`, `gd32f103rc`; `cargo image-f103`, `cargo image-f130`,
+//! `cargo image-f103rc`), on the `hal` crate
 //! (specs/hal.md). Each image is built for its chip: no detection, the chip's flash vector table,
 //! its own flash and SRAM.
 //!
@@ -48,17 +49,27 @@
 // `hal` (specs/hal.md). None or two is refused on the target; the host build needs none.
 #[cfg(any(
     all(feature = "gd32f103c8", feature = "gd32f130c8"),
+    all(feature = "gd32f103c8", feature = "gd32f103rc"),
     all(feature = "gd32f103c8", feature = "mm32spin05"),
-    all(feature = "gd32f130c8", feature = "mm32spin05")
-))]
-compile_error!("firmware: enable one chip feature (gd32f103c8, gd32f130c8 or mm32spin05), not two");
-#[cfg(all(
-    target_os = "none",
-    not(any(feature = "gd32f103c8", feature = "gd32f130c8", feature = "mm32spin05"))
+    all(feature = "gd32f130c8", feature = "gd32f103rc"),
+    all(feature = "gd32f130c8", feature = "mm32spin05"),
+    all(feature = "gd32f103rc", feature = "mm32spin05")
 ))]
 compile_error!(
-    "firmware: an image is built for one chip; enable gd32f103c8, gd32f130c8 or mm32spin05 \
-     (cargo image-f103, cargo image-f130, cargo image-mm32)"
+    "firmware: enable one chip feature (gd32f103c8, gd32f130c8, gd32f103rc or mm32spin05), not two"
+);
+#[cfg(all(
+    target_os = "none",
+    not(any(
+        feature = "gd32f103c8",
+        feature = "gd32f130c8",
+        feature = "gd32f103rc",
+        feature = "mm32spin05"
+    ))
+))]
+compile_error!(
+    "firmware: an image is built for one chip; enable gd32f103c8, gd32f130c8, gd32f103rc or \
+     mm32spin05 (cargo image-f103, cargo image-f130, cargo image-f103rc, cargo image-mm32)"
 );
 
 mod arm;
@@ -612,7 +623,7 @@ mod firmware {
         period_health: motor::PeriodHealth,
         /// The period ISR's over-current trip count as of the previous control run: a change
         /// raises the motor-0 fault latch (`specs/motor-integration.md`, "The hard trip").
-        last_trips: u32,
+        last_trips: [u32; motor::COUNT],
     }
 
     /// The shell static. `None` until the boot path builds it (the state is not
@@ -1389,19 +1400,35 @@ mod firmware {
             shell.period_live = motor::periods_live(per_tick);
             shell.period_health.update(motor_running, shell.period_live);
         }
-        shell.orch.motor_fault = motor::motor_fault_level(
-            motor_configured,
-            motor::FAULT[0].load(Ordering::Relaxed),
-            shell.period_health.loss(),
-            arm::hw::refused(),
-        );
-        // The hard over-current trip: the ISR counts trips, and a change since the last run raises
-        // motor 0's fault latch through its seam. The latch consumes the code this same pass and
-        // reaches `fault_a` as `latch_a`, so it is NOT folded into the motor-side level above.
-        let trips = motor::OVER_CURRENT_TRIPS[0].load(Ordering::Relaxed);
-        if trips != shell.last_trips {
-            shell.last_trips = trips;
-            shell.orch.raise_over_current(0);
+        // The level folds every brought-up motor's fault word: a hall or calibration fault on
+        // either motor of a two-motor board shuts the board down, as its one mode machine does.
+        shell.orch.motor_fault =
+            motor::OBS_STATE
+                .iter()
+                .zip(motor::FAULT.iter())
+                .fold(0, |level, (state, fault)| {
+                    level
+                        | motor::motor_fault_level(
+                            motor::obs_configured(state.load(Ordering::Relaxed)),
+                            fault.load(Ordering::Relaxed),
+                            shell.period_health.loss(),
+                            arm::hw::refused(),
+                        )
+                });
+        // The hard over-current trip: the ISR counts trips per motor, and a change since the last
+        // run raises that motor's fault latch through its seam. The latch consumes the code this
+        // same pass and reaches `fault_a` (motor 0) or `fault_b` (motor 1), so it is NOT folded
+        // into the motor-side level above.
+        for (m, (word, last)) in motor::OVER_CURRENT_TRIPS
+            .iter()
+            .zip(shell.last_trips.iter_mut())
+            .enumerate()
+        {
+            let trips = word.load(Ordering::Relaxed);
+            if trips != *last {
+                *last = trips;
+                shell.orch.raise_over_current(m);
+            }
         }
         // The period ISR's speed cell, read ONCE and feeding both of its consumers, so the
         // OFF-inhibit level and the block row cannot disagree about what the wheel did this tick:
@@ -1421,11 +1448,20 @@ mod firmware {
         //     `ref_34` and the cyclic payload. A word written
         //     after the pass would act a tick late.
         //
-        // Motor 0's row only: motor 1 has no producer anywhere in this image (the single-motor
-        // rule, `crate::motor`'s module header), so its row stays at the constructor's 0.
-        let speed = motor::SPEED[0].load(Ordering::Relaxed);
-        shell.orch.motor_moving = arm::off_inhibit(motor_running, shell.period_live, speed);
-        shell.orch.block.wheel_speed[0] = motor::wheel_speed_word(speed);
+        // One row per motor, and the OFF inhibit holds while EITHER wheel turns.
+        let mut moving = false;
+        for (row, word) in shell
+            .orch
+            .block
+            .wheel_speed
+            .iter_mut()
+            .zip(motor::SPEED.iter())
+        {
+            let speed = word.load(Ordering::Relaxed);
+            moving |= arm::off_inhibit(motor_running, shell.period_live, speed);
+            *row = motor::wheel_speed_word(speed);
+        }
+        shell.orch.motor_moving = moving;
         // The period-based rate beside it (`specs/control.md` (o)): the state-feedback law's speed
         // measurement, already in the law's own 1/4096-count unit, so there is nothing to narrow
         // and nothing to convert. One load, like the count's.
@@ -1437,7 +1473,10 @@ mod firmware {
         // The battery-sense count the period ISR stored (rank 2 of the injected group, already
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
         // (`specs/sensing-and-safety.md`, "The battery word"). Loaded every tick on every board;
-        // only a sensing board consumes it, and it stays 0 until the group converts.
+        // only a sensing board consumes it, and it stays 0 until the group converts. On the
+        // two-motor image the count is ADC1's regular conversion instead, started at the end of
+        // the previous pass and read here (`specs/twelve-fet.md` section 5.4).
+        motor::hw::battery_read();
         shell.orch.vbatt_raw = motor::VBATT_RAW.load(Ordering::Relaxed) as u16;
         // The last current window the period ISR closed, for the cyclic payload's appended block
         // (`specs/link-control.md`, the `CYCLIC_STATE` layout), unpacked through the inverse of
@@ -1504,8 +1543,7 @@ mod firmware {
         // `re_read_arm_values`). The other arguments are copied into locals FIRST, so the closure's
         // mutable borrow of `shell` is the only one live across the call.
         let motor_fault = shell.orch.motor_fault;
-        let moe = out.moe[0];
-        arm::hw::enact(moe, motor_configured, motor_fault != 0, || {
+        arm::hw::enact(out.moe, motor_configured, motor_fault != 0, || {
             re_read_arm_values(shell)
         });
         publish_obs(
@@ -1515,6 +1553,8 @@ mod firmware {
             shell.inputs.pads_configured(),
             shell.guest_staged,
         );
+        // The next battery conversion, which the next pass reads (two motors; nothing otherwise).
+        motor::hw::battery_start();
     }
 
     /// The 16 ms input task (scheduler slot 1): sample the configured input pins against the
@@ -1591,15 +1631,16 @@ mod firmware {
         let bias = shell.imu.as_ref().map(|d| d.config().gyro_bias);
         let r = arm::rederive(
             &values,
-            boot.unwrap_or(motor::BootFixed {
-                noise_floor: 0,
-                accepted_offsets: None,
+            boot.map(|b| {
+                b.unwrap_or(motor::BootFixed {
+                    noise_floor: 0,
+                    accepted_offsets: None,
+                })
             }),
             bias,
         );
-        if boot.is_some() {
-            motor::hw::install_rederived(&r.motor);
-        }
+        // Installs each motor that has a runtime, all in one critical section.
+        motor::hw::install_rederived(&r.motor);
         if let (Some(dev), Some(cfg)) = (shell.imu.as_mut(), r.imu) {
             // Reinstalls the axis permutation; touches no bus.
             dev.set_config(cfg);
@@ -1681,7 +1722,7 @@ mod firmware {
                 last_periods: 0,
                 period_live: false,
                 period_health: motor::PeriodHealth::new(),
-                last_trips: 0,
+                last_trips: [0; motor::COUNT],
             });
         }
     }
@@ -1718,7 +1759,7 @@ mod firmware {
         };
         let instance = i2c_label(b.i2c);
         // The GD32F10x routes the I2C by its AFIO remap, the stored one.
-        #[cfg(feature = "gd32f103c8")]
+        #[cfg(any(feature = "gd32f103c8", feature = "gd32f103rc"))]
         hal::afio::remap(instance, b.remap);
         // The per-board zero-rate gyro bias from the store (IMU_GYRO_BIAS x/y/z at indices
         // 0/1/2; default 0 = uncalibrated), a boot calibration.
@@ -2293,19 +2334,25 @@ mod firmware {
         //     successful bring-up hands its configured timer to `arm`, which derives the one arming
         //     gate in the image from it. A board that skips the bring-up never installs a gate and
         //     is therefore UNARMABLE, not merely unarmed.
-        match motor::bring_up(
+        //     Every motor the image drives (`motor::COUNT`), each recorded at its own index: a
+        //     motor that fails a step is `NotUp` there and the other comes up alone, except that
+        //     motor 1 rides on motor 0 (`specs/twelve-fet.md` section 5.5).
+        let outcomes = motor::bring_up(
             &chip,
-            layout.motor.as_ref(),
+            &layout.motors,
             layout.battery,
             PERIOD_HZ,
-            store.get(store::MOTOR_NOISE_FLOOR.at(0)),
-        ) {
-            Ok(summary) => arm::hw::install(&summary.timer),
-            Err(skip) => {
-                if let motor::MotorSkip::StepFailed(_) = skip {
-                    status.record(store::MOTOR_GATE_HI_A.id(), 0, Reason::NotUp, 0);
+            core::array::from_fn(|m| store.get(store::MOTOR_NOISE_FLOOR.at(m as u8))),
+        );
+        for (m, outcome) in outcomes.iter().enumerate() {
+            match *outcome {
+                Ok(summary) => arm::hw::install(m, &summary.timer),
+                Err(skip) => {
+                    if let motor::MotorSkip::StepFailed(_) | motor::MotorSkip::NoMotor0 = skip {
+                        status.record(store::MOTOR_GATE_HI_A.id(), m as u8, Reason::NotUp, 0);
+                    }
+                    motor::record_skip(m, skip);
                 }
-                motor::record_skip(skip);
             }
         }
 
@@ -2470,7 +2517,7 @@ mod firmware {
         let field = store::LINK_TX.id();
         let usart = usart_label(l.usart);
         // The GD32F10x routes the USART by its AFIO remap, the stored one.
-        #[cfg(feature = "gd32f103c8")]
+        #[cfg(any(feature = "gd32f103c8", feature = "gd32f103rc"))]
         hal::afio::remap(usart, l.remap);
         let refused = |status: &mut StatusRecord, e: DescriptorError| {
             status.record(field, i, Reason::NotUp, e.code())

@@ -3,7 +3,7 @@ name = "firmware"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "The firmware binary: one image per chip on the hal crate (`gd32f103c8`, `gd32f130c8` on thumbv7m: `cargo image-f103`, `cargo image-f130`; `mm32spin05` on thumbv6m, a CI-only size build: `cargo image-mm32`). Mounts the flash store at the top of flash and runs the service loop."
+description = "The firmware binary: one image per chip on the hal crate (`gd32f103c8`, `gd32f130c8`, `gd32f103rc` on thumbv7m: `cargo image-f103`, `cargo image-f130`, `cargo image-f103rc`; `mm32spin05` on thumbv6m, a CI-only size build: `cargo image-mm32`). Mounts the flash store at the top of flash and runs the service loop."
 
 # The images this crate builds, one table per image, keyed by image name (specs/firmware-bundle.md
 # section 3.3; the name's form is section 3.2's `<role>-<chip>`). `hoverboard-cli firmware pack`
@@ -24,6 +24,13 @@ targets = [{ family = "gd32f10x", flash_kib = 64 }]
 kind = "board"
 features = ["gd32f130c8"]
 targets = [{ family = "gd32f1x0", flash_kib = 64 }]
+
+# The 12-FET's two-motor image (specs/twelve-fet.md section 3): the GD32F103RC, 256 KiB, whose
+# second advanced timer drives motor 1.
+[package.metadata.hoverboard-image.mainboard-gd32f103rc]
+kind = "board"
+features = ["gd32f103rc"]
+targets = [{ family = "gd32f10x", flash_kib = 256 }]
 
 [dependencies]
 # The libraries firmware assembles; it owns no behavior of its own. `base` is pulled in transitively
@@ -97,6 +104,7 @@ hal = { path = "../hal", optional = true }
 [features]
 gd32f103c8 = ["dep:hal", "hal/gd32f103c8", "store/hal"]
 gd32f130c8 = ["dep:hal", "hal/gd32f130c8", "store/hal"]
+gd32f103rc = ["dep:hal", "hal/gd32f103rc", "store/hal"]
 mm32spin05 = ["dep:hal", "hal/mm32spin05", "store/hal"]
 # Link into a measurement region larger than the chip's flash and SRAM (build.rs), so an image that
 # does not fit still links and its size can be read. The ELF defines `__image_not_flashable`, which

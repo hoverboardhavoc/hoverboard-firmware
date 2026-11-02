@@ -33,8 +33,8 @@ runner = "../tools/board-target-runner.sh"
 rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--icf=all"]
 runner = "../tools/board-target-runner.sh"
 
-# The shipping images, one per chip (specs/hal.md section 6), here and in CI: `cargo image-f103`
-# and `cargo image-f130`. `cargo image-mm32` is not one: see its own comment. Each is the release build of `firmware` with one chip feature, in its own
+# The shipping images, one per chip (specs/hal.md section 6), here and in CI: `cargo image-f103`,
+# `cargo image-f130` and `cargo image-f103rc`. `cargo image-mm32` is not one: see its own comment. Each is the release build of `firmware` with one chip feature, in its own
 # target directory, so the two images never share (or overwrite) a build. The ELF is
 # target/<chip>/thumbv7m-none-eabi/release/firmware; the image is named mainboard-<chip> in the
 # firmware crate's `hoverboard-image` tables.
@@ -53,6 +53,8 @@ runner = "../tools/board-target-runner.sh"
 [alias]
 image-f103 = ["build", "--release", "-p", "firmware", "--features", "gd32f103c8", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f103c8", "-Z", "build-std=core,compiler_builtins"]
 image-f130 = ["build", "--release", "-p", "firmware", "--features", "gd32f130c8", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f130c8", "-Z", "build-std=core,compiler_builtins"]
+# The 12-FET's GD32F103RC image (specs/twelve-fet.md section 3.1), two motors.
+image-f103rc = ["build", "--release", "-p", "firmware", "--features", "gd32f103rc", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f103rc", "-Z", "build-std=core,compiler_builtins"]
 # The MM32SPIN05 mainboard firmware, the full feature set, which does not fit the chip's 32 KiB
 # (specs/hal.md section 9, step 3). `oversize-link` links it into a larger measurement region so CI
 # can read its size, and marks the ELF never-flashable (motorcontroller/firmware/not-flashable.x):
