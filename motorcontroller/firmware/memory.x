@@ -3,7 +3,8 @@
  * crate's build script publishes for the compiled chip (its `links` metadata: flash size, page size,
  * SRAM size), so the numbers have one owner, and writes the result to OUT_DIR/memory.x.
  *
- * FLASH is the chip's flash less the store's two pages at the top. The store is NOT linked: the FMC
+ * FLASH is the chip's flash less the store's two pages at the top (the `oversize-link` build links
+ * into larger regions instead, see the end of this file). The store is NOT linked: the FMC
  * writes it at absolute addresses the store derives from the same descriptor (`store::geometry`), so
  * an image that would overlap it fails at LINK rather than having its tail overwritten by the first
  * store append (specs/decision-flash-budget.md, "memory.x store reserve"; specs/storage-layer.md).
@@ -127,6 +128,9 @@ _stext = ADDR(.hotcode) + SIZEOF(.hotcode);
 ASSERT(ADDR(.hotcode) + SIZEOF(.hotcode) <= 0x08008000,
   "memory.x: .hotcode overflows the GD32F1x0 zero-wait first 32 KiB of flash");
 
-/* The two budgets CI's per-chip size gate reads (absolute symbols; they occupy nothing). */
-__image_flash_budget = LENGTH(FLASH);
-__image_ram_budget = LENGTH(RAM);
+/* The two budgets CI's per-chip size gate reads (absolute symbols; they occupy nothing): the
+ * chip's flash less the store and its SRAM less the mailbox, which are FLASH and RAM above except in
+ * the `oversize-link` build. */
+__image_flash_budget = @FLASH_BUDGET@;
+__image_ram_budget = @RAM_BUDGET@;
+@NOT_FLASHABLE@

@@ -186,6 +186,7 @@ jobs:
           cargo clippy -p hal --features mm32spin05 --target thumbv6m-none-eabi -- -D warnings
           cargo clippy -p hal --features mm32spin05 --all-targets --target ${{ env.HOST_TARGET }} -- -D warnings
           cargo clippy -p hal-bench --features mm32spin05 --target thumbv6m-none-eabi -- -D warnings
+          cargo clippy -p firmware --features mm32spin05,oversize-link --target thumbv6m-none-eabi -- -D warnings
 
       - name: clippy (shared, thumbv7m build surface)
         working-directory: hoverboard-firmware/shared
@@ -612,6 +613,70 @@ jobs:
           name: firmware-elfs
           path: hoverboard-firmware/motorcontroller/target/elfs/
           if-no-files-found: error
+
+  # The MM32SPIN05 mainboard firmware, built so it does not go stale (specs/hal.md section 9, step 3).
+  # It does not fit its chip: `cargo image-mm32` links it into an oversized measurement region
+  # (motorcontroller/firmware/build.rs, the `oversize-link` feature) and marks the ELF
+  # never-flashable, so it is not packed, not uploaded, and every hoverboard-cli install path refuses
+  # it (specs/firmware-bundle.md section 3.2). This job fails only when the image stops building or
+  # loses that marker; its size is printed against the chip's budget (the flash less the store's two
+  # pages, the SRAM less the SWD mailbox) and never gated.
+  mm32-size:
+    name: MM32SPIN05 mainboard firmware (CI-only size build, never flashed)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Install Rust (pinned nightly) + thumbv6m target + rust-src
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          targets: thumbv6m-none-eabi
+          components: rust-src
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware/motorcontroller
+
+      - name: Build the MM32 image (cargo image-mm32)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: cargo image-mm32
+
+      - name: Size against the chip's budget (printed, not gated)
+        run: |
+          sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+          elf=motorcontroller/target/mm32spin05/thumbv6m-none-eabi/release/firmware
+          syms=$(arm-none-eabi-nm "$elf")
+          if ! printf '%s\n' "$syms" | grep -qE ' A __image_not_flashable$'; then
+            echo "FAIL: the MM32 image lost its __image_not_flashable marker (motorcontroller/firmware/not-flashable.x)" >&2
+            exit 1
+          fi
+          arm-none-eabi-objcopy -O binary "$elf" "$elf.bin"
+          span=$(wc -c < "$elf.bin")
+          sec() { arm-none-eabi-size -A "$elf" | awk -v n="$1" '$1==n {print $2+0}'; }
+          text=$(sec .text); hot=$(sec .hotcode)
+          static=$(arm-none-eabi-size -A "$elf" | awk '$1==".data" || $1==".bss" || $1==".uninit" {t+=$2} END{print t+0}')
+          flash=$((16#$(printf '%s\n' "$syms" | awk '$3=="__image_flash_budget"{print $1}')))
+          ram=$((16#$(printf '%s\n' "$syms" | awk '$3=="__image_ram_budget"{print $1}')))
+          echo "mainboard-mm32spin05 (never flashed): flashed span ${span} B against ${flash} B, $((span - flash)) B over"
+          echo ".text ${text} B, .hotcode ${hot} B (code + .rodata in the hot window)"
+          echo "static RAM (.data + .bss + .uninit) ${static} B against ${ram} B, $((ram - static)) B left for the stack"
+          {
+            echo "### MM32SPIN05 mainboard firmware (CI-only, never flashed)"
+            echo "| | Bytes | Budget | Bytes less budget |"
+            echo "|---|---|---|---|"
+            echo "| Flashed span | ${span} | ${flash} | $((span - flash)) |"
+            echo "| .text | ${text} | | |"
+            echo "| .hotcode | ${hot} | | |"
+            echo "| Static RAM | ${static} | ${ram} | $((static - ram)) |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # The firmware bundle (specs/firmware-bundle.md section 5): every image a commit builds, the two
   # board ELFs from the build job (`firmware-elfs`) and the bridge's two images from the bridge job

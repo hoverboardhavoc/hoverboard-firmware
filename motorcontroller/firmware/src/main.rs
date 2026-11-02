@@ -46,15 +46,19 @@
 
 // Which image this build is (Cargo.toml `[features]`): one chip feature is that chip's image on
 // `hal` (specs/hal.md). None or two is refused on the target; the host build needs none.
-#[cfg(all(feature = "gd32f103c8", feature = "gd32f130c8"))]
-compile_error!("firmware: enable one chip feature (gd32f103c8 or gd32f130c8), not two");
+#[cfg(any(
+    all(feature = "gd32f103c8", feature = "gd32f130c8"),
+    all(feature = "gd32f103c8", feature = "mm32spin05"),
+    all(feature = "gd32f130c8", feature = "mm32spin05")
+))]
+compile_error!("firmware: enable one chip feature (gd32f103c8, gd32f130c8 or mm32spin05), not two");
 #[cfg(all(
     target_os = "none",
-    not(any(feature = "gd32f103c8", feature = "gd32f130c8"))
+    not(any(feature = "gd32f103c8", feature = "gd32f130c8", feature = "mm32spin05"))
 ))]
 compile_error!(
-    "firmware: an image is built for one chip; enable gd32f103c8 or gd32f130c8 \
-     (cargo image-f103, cargo image-f130)"
+    "firmware: an image is built for one chip; enable gd32f103c8, gd32f130c8 or mm32spin05 \
+     (cargo image-f103, cargo image-f130, cargo image-mm32)"
 );
 
 mod arm;
@@ -91,9 +95,7 @@ mod firmware {
     };
     use link::{Link, SerialTransport};
     use linkctl::{ChipTag, CyclicState};
-    use net::walk::{
-        Emits, Identity, Responder, CLASS_MOTOR, MCU_F10X, MCU_F1X0, PORT_SWD, PORT_UART,
-    };
+    use net::walk::{Emits, Identity, Responder, CLASS_MOTOR, PORT_SWD, PORT_UART};
     use orchestrator::{
         ble_cyclic_tx, ble_peer_tx, control_task, cyclic_tx, input_task, BoardIdentity,
         InputSample, Obs, OrchestratorState,
@@ -109,9 +111,13 @@ mod firmware {
     /// This firmware's version, reported in `IDENTITY`.
     const FW_VER: u16 = 0x0001;
 
-    /// The production 72 MHz tree (IRC8M -> PLL): the inter-board baud divisor + flash wait states,
-    /// and the sysclk every delay converts against (read as `CLOCK.sysclk_hz`, one owner).
+    /// The production 72 MHz tree (IRC8M -> PLL; the MM32SPIN05's HSI -> PLL): the inter-board
+    /// baud divisor + flash wait states, and the sysclk every delay converts against (read as
+    /// `CLOCK.sysclk_hz`, one owner).
+    #[cfg(not(feature = "mm32spin05"))]
     const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_IRC8M;
+    #[cfg(feature = "mm32spin05")]
+    const CLOCK: ClockConfig = ClockConfig::REFERENCE_72M_HSI;
     /// The inter-board / link-listen UART baud, from its one owner (`link::INTER_BOARD_BAUD`).
     const LINK_BAUD: u32 = link::INTER_BOARD_BAUD;
 
@@ -508,17 +514,31 @@ mod firmware {
         // SAFETY: shared access to the scheduler static; `tick(&self)` is the crate's ISR-safe
         // entry (atomics inside), sound against the thread-side `dispatch(&self)`.
         unsafe { (*addr_of!(SCHEDULER)).tick() };
+        // The Cortex-M0 has no read-modify-write atomics (specs/hal.md section 6); this handler is
+        // the counter's one writer, so a load and a store are the whole update there.
+        #[cfg(target_has_atomic = "32")]
         TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+        #[cfg(not(target_has_atomic = "32"))]
+        TICK_COUNT.store(
+            TICK_COUNT.load(Ordering::Relaxed).wrapping_add(1),
+            Ordering::Relaxed,
+        );
     }
 
     /// The descriptor's identity bytes are values the wire allocates: the `NODE_HELLO` mcu byte is
     /// one of `net`'s family tags and the cyclic chip tag names a part (`ChipTag::Unknown` is the
     /// tag for "cannot name it", which an image built for its chip always can).
+    ///
+    /// Not on the MM32SPIN05: its descriptor's bytes (4 and 4) have no `net` or `linkctl` name,
+    /// because its image is a CI-only size build that never runs (specs/hal.md section 9, step 3).
+    /// The names come with an image that can be installed.
+    #[cfg(not(feature = "mm32spin05"))]
     const CHIP_IDENTITY_IS_ALLOCATED: () = {
         let d = &hal::descriptor::DESCRIPTOR;
-        assert!(d.node_mcu == MCU_F10X || d.node_mcu == MCU_F1X0);
+        assert!(d.node_mcu == net::walk::MCU_F10X || d.node_mcu == net::walk::MCU_F1X0);
         assert!(!matches!(ChipTag::from_u8(d.chip_tag), ChipTag::Unknown));
     };
+    #[cfg(not(feature = "mm32spin05"))]
     const _: () = CHIP_IDENTITY_IS_ALLOCATED;
 
     /// The plan-driven input pins (integration.md, "The input task"): a resolve-once
@@ -1459,7 +1479,16 @@ mod firmware {
         // freshness guard tell a fresh write from a repeated one, so a demand that happens to
         // repeat its value still counts as fresh.
         motor::DEMAND.store(obs.torque_setpoint as i32, Ordering::Relaxed);
+        // The Cortex-M0 has no read-modify-write atomics; the control task and the arm sequence
+        // (`arm::hw::zero_demand`) run in the one main-thread context, so a load and a store are
+        // the whole update there.
+        #[cfg(target_has_atomic = "32")]
         motor::DEMAND_SEQ.fetch_add(1, Ordering::Relaxed);
+        #[cfg(not(target_has_atomic = "32"))]
+        motor::DEMAND_SEQ.store(
+            motor::DEMAND_SEQ.load(Ordering::Relaxed).wrapping_add(1),
+            Ordering::Relaxed,
+        );
         // Step 6's enactment, at last acting (`specs/motor-integration.md`, "MOE enactment"): the
         // mode machine's per-motor allowance, enacted. AFTER the demand publish above, so a
         // shutdown's zeroed demand is the last word written this tick rather than one this same
@@ -2107,7 +2136,9 @@ mod firmware {
         // whole run and a bench operator attached over SWD can take pass-scale timing windows
         // against it (the round-7a characterisation: pass-scale/wall-anchored windows are the
         // trustworthy cycle observable; below-pass NVIC-handler-mode deltas are not, which is why
-        // CTRL_OBS publishes only ISR entry counts). Cheap, idempotent.
+        // CTRL_OBS publishes only ISR entry counts). Cheap, idempotent. Not on the Cortex-M0,
+        // which has no DWT.
+        #[cfg(not(feature = "mm32spin05"))]
         hal::irq::enable_cycle_counter();
 
         // Mount the store; read the persisted address + link-set (0/0 = a fresh, unconfigured board).
@@ -2603,7 +2634,17 @@ mod firmware {
             //      it, then clear the flag (one-shot). Placed before the drain below so this pass's
             //      poll_recv surfaces the self-heal (link_line_errors++ / lap_overruns flat / cyclic_age
             //      fresh, no reset). Drives the shipping self-heal path, fabricating no DMA state.
-            if INJECT_UART_LINE_ERROR.swap(0, Ordering::Relaxed) != 0 {
+            //      The Cortex-M0 has no swap: a load and a store, the operator's poke being the
+            //      only other writer.
+            #[cfg(target_has_atomic = "32")]
+            let inject = INJECT_UART_LINE_ERROR.swap(0, Ordering::Relaxed);
+            #[cfg(not(target_has_atomic = "32"))]
+            let inject = {
+                let v = INJECT_UART_LINE_ERROR.load(Ordering::Relaxed);
+                INJECT_UART_LINE_ERROR.store(0, Ordering::Relaxed);
+                v
+            };
+            if inject != 0 {
                 // Into the first link that came up.
                 if let Some(l) = links.iter().flatten().next() {
                     l.transport().serial().inject_line_error();
@@ -2753,7 +2794,14 @@ mod firmware {
             //    masking.
             // SAFETY: shared access; dispatch(&self) is the thread-side entry of the split.
             unsafe { (*addr_of!(SCHEDULER)).dispatch() };
+            // One writer (this loop): a load and a store on the Cortex-M0.
+            #[cfg(target_has_atomic = "32")]
             DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
+            #[cfg(not(target_has_atomic = "32"))]
+            DISPATCH_COUNT.store(
+                DISPATCH_COUNT.load(Ordering::Relaxed).wrapping_add(1),
+                Ordering::Relaxed,
+            );
 
             // 7. The watchdog feed, AFTER dispatch, never inside the link servicing (R2, the
             //    wdg-bench silicon-proven placement).

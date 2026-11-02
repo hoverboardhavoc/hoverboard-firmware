@@ -3,7 +3,7 @@ name = "firmware"
 version = "0.1.0"
 license.workspace = true
 edition = "2021"
-description = "The firmware binary: one thumbv7m image per chip on the hal crate (`gd32f103c8`, `gd32f130c8`; `cargo image-f103`, `cargo image-f130`). Mounts the flash store at the top of flash and runs the service loop."
+description = "The firmware binary: one image per chip on the hal crate (`gd32f103c8`, `gd32f130c8` on thumbv7m: `cargo image-f103`, `cargo image-f130`; `mm32spin05` on thumbv6m, a CI-only size build: `cargo image-mm32`). Mounts the flash store at the top of flash and runs the service loop."
 
 # The images this crate builds, one table per image, keyed by image name (specs/firmware-bundle.md
 # section 3.3; the name's form is section 3.2's `<role>-<chip>`). `hoverboard-cli firmware pack`
@@ -11,6 +11,10 @@ description = "The firmware binary: one thumbv7m image per chip on the hal crate
 # picks the image whose target equals the family and flash size the board's TARGET_ID reports. The
 # image's guards are keyed by the same name in tools/image-guard-syms.sh. `features` are the cargo
 # features that build the image; the packer checks the name's chip against them.
+#
+# The MM32SPIN05 build (`cargo image-mm32`) has no table and no guards: it is a CI-only size
+# measurement, linked past its chip's flash (the `oversize-link` feature below), and no install path
+# takes it (specs/firmware-bundle.md section 3.2).
 [package.metadata.hoverboard-image.mainboard-gd32f103c8]
 kind = "board"
 features = ["gd32f103c8"]
@@ -93,3 +97,8 @@ hal = { path = "../hal", optional = true }
 [features]
 gd32f103c8 = ["dep:hal", "hal/gd32f103c8", "store/hal"]
 gd32f130c8 = ["dep:hal", "hal/gd32f130c8", "store/hal"]
+mm32spin05 = ["dep:hal", "hal/mm32spin05", "store/hal"]
+# Link into a measurement region larger than the chip's flash and SRAM (build.rs), so an image that
+# does not fit still links and its size can be read. The ELF defines `__image_not_flashable`, which
+# hoverboard-cli refuses on every install path and in the packer. `cargo image-mm32` alone sets it.
+oversize-link = []

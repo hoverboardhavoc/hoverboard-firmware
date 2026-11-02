@@ -198,6 +198,12 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
   `motorcontroller/target/gd32f130c8/thumbv7m-none-eabi/release/firmware`. An F103 board needs the
   F103 image and an F130 board the F130 image: `hoverboard-cli board update` picks it from a bundle by
   the chip the board reports, while `board flash` writes an ELF as given and checks no chip.
+- **The MM32SPIN05 size build: `cargo image-mm32` in `motorcontroller/`** (`specs/hal.md` section 9,
+  step 3). The full mainboard firmware for the MM32SPIN05 (`thumbv6m-none-eabi`), which does not fit
+  its 32 KiB, linked into an oversized measurement region so its size can be read
+  (`motorcontroller/target/mm32spin05/thumbv6m-none-eabi/release/firmware`). It is never flashed:
+  the ELF defines `__image_not_flashable`, `hoverboard-cli` refuses it on every install path and in
+  the packer, and it is not in the bundle. CI's `mm32-size` job builds it and prints its size.
 - **The HAL builds for exactly one chip** (`gd32f103c8`, `gd32f130c8` or `gd32f103rc`), so it,
   `firmware`, `store-test` and the bench images are left out of the workspace's default members and
   are always built with `-p <crate> --features <chip>` (or the image aliases). `./tools/host-test.sh` runs the HAL's host tests once per chip.

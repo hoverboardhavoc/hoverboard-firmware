@@ -26,14 +26,15 @@ rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--icf=all"]
 runner = "../tools/board-target-runner.sh"
 
 # The MM32SPIN05's Cortex-M0 builds (specs/hal.md section 3.1): the hal crate and the validators on
-# it with the `mm32spin05` feature, `--target thumbv6m-none-eabi`. The same link script and folding
-# as the thumbv7m images; no image is built for this target yet.
+# it with the `mm32spin05` feature, `--target thumbv6m-none-eabi`, and the mainboard firmware as a
+# CI-only size build (`cargo image-mm32`, below). The same link script and folding as the thumbv7m
+# images.
 [target.thumbv6m-none-eabi]
 rustflags = ["-C", "link-arg=-Tlink.x", "-C", "link-arg=--icf=all"]
 runner = "../tools/board-target-runner.sh"
 
 # The shipping images, one per chip (specs/hal.md section 6), here and in CI: `cargo image-f103`
-# and `cargo image-f130`. Each is the release build of `firmware` with one chip feature, in its own
+# and `cargo image-f130`. `cargo image-mm32` is not one: see its own comment. Each is the release build of `firmware` with one chip feature, in its own
 # target directory, so the two images never share (or overwrite) a build. The ELF is
 # target/<chip>/thumbv7m-none-eabi/release/firmware; the image is named mainboard-<chip> in the
 # firmware crate's `hoverboard-image` tables.
@@ -52,3 +53,8 @@ runner = "../tools/board-target-runner.sh"
 [alias]
 image-f103 = ["build", "--release", "-p", "firmware", "--features", "gd32f103c8", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f103c8", "-Z", "build-std=core,compiler_builtins"]
 image-f130 = ["build", "--release", "-p", "firmware", "--features", "gd32f130c8", "--target", "thumbv7m-none-eabi", "--target-dir", "target/gd32f130c8", "-Z", "build-std=core,compiler_builtins"]
+# The MM32SPIN05 mainboard firmware, the full feature set, which does not fit the chip's 32 KiB
+# (specs/hal.md section 9, step 3). `oversize-link` links it into a larger measurement region so CI
+# can read its size, and marks the ELF never-flashable (motorcontroller/firmware/not-flashable.x):
+# every hoverboard-cli install path and the bundle packer refuse it. It is not in the bundle.
+image-mm32 = ["build", "--release", "-p", "firmware", "--features", "mm32spin05,oversize-link", "--target", "thumbv6m-none-eabi", "--target-dir", "target/mm32spin05", "-Z", "build-std=core,compiler_builtins"]

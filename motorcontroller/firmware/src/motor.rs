@@ -2731,7 +2731,7 @@ pub mod hw {
     }
 
     /// A per-chip image's period vector: the ADC vector of its flash table (`ADC0_1` on the
-    /// GD32F103, `ADC_CMP` on the GD32F130, the vendor names), which carries the injected end of
+    /// GD32F103, `ADC_CMP` on the GD32F130, `ADC1_COMP` on the MM32SPIN05, the vendor names), which carries the injected end of
     /// conversion. Both run `period_isr`; the trampoline is placed with it in the zero-wait window.
     #[cfg(feature = "gd32f103c8")]
     #[interrupt]
@@ -2743,6 +2743,12 @@ pub mod hw {
     #[interrupt]
     #[link_section = ".hotcode"]
     fn ADC_CMP() {
+        period_isr();
+    }
+    #[cfg(feature = "mm32spin05")]
+    #[interrupt]
+    #[link_section = ".hotcode"]
+    fn ADC1_COMP() {
         period_isr();
     }
 }
