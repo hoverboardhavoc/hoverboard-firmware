@@ -138,6 +138,20 @@ const KEYS: [(Key, Type); N] = [
     (store::LINK_REMAP.at(1).key(), Type::U8),
 ];
 
+/// [`KEYS`]' keys alone, the filter the pass takes.
+const KEY_LIST: [Key; N] = {
+    let mut k = [Key {
+        field_id: 0,
+        index: 0,
+    }; N];
+    let mut i = 0;
+    while i < N {
+        k[i] = KEYS[i].0;
+        i += 1;
+    }
+    k
+};
+
 const fn pin(f: PinField) -> (Key, Type) {
     (f.key(), f.kind())
 }
@@ -159,20 +173,8 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
         stored: false,
         b: [0; 3],
     }; N];
-    let keys: [Key; N] = {
-        let mut k = [Key {
-            field_id: 0,
-            index: 0,
-        }; N];
-        let mut i = 0;
-        while i < N {
-            k[i] = KEYS[i].0;
-            i += 1;
-        }
-        k
-    };
-    s.for_each_in(&keys, |key, tag, bytes| {
-        if let Some(i) = keys.iter().position(|k| *k == key) {
+    s.for_each_in(&KEY_LIST, |key, tag, bytes| {
+        if let Some(i) = KEY_LIST.iter().position(|k| *k == key) {
             let kind = KEYS[i].1;
             let slot = &mut slots[i];
             // Newest wins by log order; a tombstone or a record of another type un-stores.
