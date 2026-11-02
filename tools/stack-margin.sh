@@ -10,7 +10,7 @@
 # Usage:
 #   tools/stack-margin.sh [--board master|slave|offroad-master|offroad-slave]
 #                         (--chip gd32f103c8|gd32f130c8 | --elf <path>) [--watch <seconds>]
-#   tools/stack-margin.sh --selftest      # decode self-check, no hardware, no lock
+#   tools/stack-margin.sh --selftest      # decode self-check, no hardware
 #
 # CTRL_OBS sits at a different address in each chip's image, so the ELF must be the image on the
 # board: --chip (or CHIP=) reads motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware,
@@ -23,8 +23,11 @@
 # margin under load is the only margin worth measuring, and a tool that had to disarm first could
 # only ever read an idle board.
 #
-# It takes the bench lock like every other hardware tool here: an OpenOCD attach is a physical bench
-# op whether or not it writes anything, and two attaches at once garble SWD.
+# It takes no bench lock: an OpenOCD attach is a physical bench op whether or not it writes
+# anything, and two attaches at once garble SWD, so the operator takes the board's resource first
+# with ~/dev/hoverboard-bench/bench-lock.sh: offroad-master/offroad-slave are `offroad`, master (the
+# ST-Link at Pi USB 1-1.2.4, the MM32's probe now) is `mm32`, slave (the dap42 by VID:PID, a scan)
+# is `probes`. Hold it across a --watch window and refresh it if the window runs past 30 minutes.
 set -euo pipefail
 
 PI="${BENCH_PI:-pi@192.168.0.248}"
@@ -81,7 +84,7 @@ report_once() {
   local magic w30 free painted boot ticks line
   # Not `mapfile`: this host runs bash 3.2 (macOS), which does not have it, and the LOCAL runner
   # executes here. A bash-4 builtin would make the offroad path fail at the read with an obscure
-  # "command not found" after the bench lock was already taken.
+  # "command not found" after the probe was already attached.
   local words
   words=()
   while IFS= read -r line; do words+=("$line"); done < <(read_obs)
@@ -132,7 +135,7 @@ report_once() {
 
 # ================================ OFFLINE SELF-TEST ==========================================
 # Exercises the decode and every verdict branch against canned `mdw` output, with no probe, no ELF
-# and no bench lock. It runs the REAL read_obs parser (only the transport is stubbed), so the thing
+# and no bench. It runs the REAL read_obs parser (only the transport is stubbed), so the thing
 # under test is the same sed/tr/grep pipeline and the same arithmetic the hardware path uses.
 if [ "$SELFTEST" = 1 ]; then
   FAILS=0
@@ -264,7 +267,7 @@ case "$RUNNER" in
       echo "stack-margin: REFUSED - OpenOCD tcl tree missing at '$OFFROAD_OCD_TCL'." >&2
       exit 2
     fi
-    # A hung OpenOCD must not sit on the bench lock forever. macOS ships no coreutils `timeout`;
+    # A hung OpenOCD must not hold the probe forever. macOS ships no coreutils `timeout`;
     # perl's alarm(2) survives exec and is the portable stand-in. The trailing `exit 127` is
     # load-bearing: perl's exec RETURNS on failure, and without it a launch that never happened
     # would exit 0 and read as a read that succeeded.
@@ -326,24 +329,6 @@ if [ "$OBS_SIZE" -lt "$NEED" ]; then
 fi
 READ_WORDS=$(( OBS_SIZE / 4 ))
 
-# ================================== THE BENCH LOCK ==========================================
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOCK="$SCRIPT_DIR/bench-lock.sh"
-OWNER="${BENCH_OWNER:-stack-margin@$(hostname -s 2>/dev/null || echo host)}"
-TOOK_LOCK=0
-if acq="$("$LOCK" acquire "$OWNER" "stack-margin: read $BOARD")"; then
-  case "$acq" in
-    ACQUIRED*) TOOK_LOCK=1 ;;   # we took it here, so we release it on exit
-    *) TOOK_LOCK=0 ;;           # ALREADY-OURS: held for a session, leave it held
-  esac
-else
-  echo "stack-margin: bench is busy, not reading." >&2
-  echo "$acq" >&2
-  echo "stack-margin: wait, or coordinate; see $LOCK status" >&2
-  exit 1
-fi
-trap '[ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1 || true' EXIT
-
 echo "stack-margin: board=$BOARD runner=$RUNNER via $PROBE_LABEL on $HOST_LABEL"
 echo "stack-margin: CTRL_OBS=0x$OBS_ADDR size=${OBS_SIZE} B (${READ_WORDS} words) from $ELF"
 
@@ -353,7 +338,6 @@ if [ "$WATCH" -gt 0 ]; then
   end=$(( $(date +%s) + WATCH ))
   while [ "$(date +%s)" -lt "$end" ]; do
     report_once || true
-    "$LOCK" refresh "$OWNER" >/dev/null 2>&1 || true
     sleep 5
   done
   echo "stack-margin: watch window done; the LAST line above is the reading that counts."

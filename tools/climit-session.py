@@ -2,13 +2,17 @@
 """Guided, owner-present session for the current limit's energised bench gates.
 
 The implement contract is specs/current-limit-session.md; the gates themselves are
-specs/motor-integration.md, "The current limit" (the Bench list). One script: it takes the bench
-lock, seats the relay and powers the rail, starts OpenOCD on the Pi and tunnels its TCL port, drives
+specs/motor-integration.md, "The current limit" (the Bench list). One script: it seats the relay
+and powers the rail, starts OpenOCD on the Pi and tunnels its TCL port, drives
 one mailbox session owner as a child process, tells the operator what to do at each step, asks for
 the meter readings only a human can see, samples CTRL_OBS plus the motor statics at 10 Hz into a
 self-describing CSV, writes RECORD.md with the verdicts, and tears everything down on ANY exit.
 
 The operator owns the PSU and the kill. The tool never asks them to type a command.
+
+It takes no bench lock. The operator takes `all` first with ~/dev/hoverboard-bench/bench-lock.sh (it
+switches the Pi relay, which feeds the offroad pair, and runs `sudo pkill -x openocd` on the Pi,
+which stops every OpenOCD there) and releases it after.
 
 Usage:
     tools/climit-session.py [--board master] [--limit-ma 2500] [--cal-demand 3000]
@@ -16,7 +20,7 @@ Usage:
                             [--skip-gate N ...] [--dry-run] [--selftest]
 
     --dry-run   print every command and prompt in order against a simulated board; nothing is
-                executed, no network, no lock, no files written (the RECORD is printed instead).
+                executed, no network, no files written (the RECORD is printed instead).
     --selftest  run tools/tests/test_climit_session.py (parsers, verdicts, calibration arithmetic,
                 the RECORD golden, the teardown order, the dry run), no hardware.
     --brake-fallback  gates 3 and 4 brake a spinning wheel instead of locking the rotor.
@@ -1225,10 +1229,6 @@ class SimBoard:
         if "pinctrl get 4" in cmd:
             return Result(0, "4: op dh pu | hi // GPIO4 = output" if not self.rail else
                           "4: op dl pu | lo // GPIO4 = output")
-        if "bench-lock.sh acquire" in cmd:
-            return Result(0, "ACQUIRED by claude-climit")
-        if "bench-lock.sh release" in cmd:
-            return Result(0, "RELEASED")
         if "pkill -x openocd" in cmd:
             self.ocd = False
             return Result(0, "")
@@ -1499,7 +1499,7 @@ def nominal_answers(prompt):
 # The session.
 # --------------------------------------------------------------------------------------------------
 TEARDOWN_ORDER = ("drive_end", "hold_end", "moe_check", "neutral", "rail_off", "rail_verify", "ocd_kill",
-                  "tunnel_close", "lock_release")
+                  "tunnel_close")
 
 
 def TEARDOWN_STEPS_OF(*fns):  # noqa: N802 - pairs the canonical order with the step functions
@@ -1512,7 +1512,6 @@ class Session:
         self.sh = shell
         self.csv = EvidenceCsv(csv_fh)
         self.record_dir = record_dir
-        self.owner = os.environ.get("BENCH_OWNER", "claude-climit")
         self.bin_dir = os.path.join(REPO, "tools", "target", host_target(), "release")
         self.reader = None
         self.addrs = None
@@ -1526,7 +1525,6 @@ class Session:
         self.trips_base = 0           # trips the session has already explained (gate 4's own chop)
         self.phase_gate2 = False
         self.before_gate5 = True
-        self.took_lock = False
         self.rail_touched = False
         self.ocd_started = False
         self.tunnel = None
@@ -1921,12 +1919,6 @@ class Session:
             self.sh.run(f"cd {tools} && cargo build --release -p swd-bridge --target {host_target()}")
             if not all(self.sh.exists(self.bin(b)) for b in BINS):
                 raise SessionAbort(f"the mailbox tools are missing from {self.bin_dir} after the build")
-        r = self.sh.run(f"{shlex.quote(os.path.join(REPO, 'tools', 'bench-lock.sh'))} acquire {self.owner} "
-                        "'climit-session: current-limit gates'")
-        if "ACQUIRED" in r.stdout:
-            self.took_lock = True
-        elif "ALREADY-OURS" not in r.stdout:
-            raise SessionAbort(f"bench busy: {r.stdout.strip()}")
 
         target = psu_target_a(self.a.limit_ma)
         declared = self.ask_float(f"Set the PSU to 25 V with its current limit at {target:g} A or above "
@@ -2443,7 +2435,7 @@ class Session:
 
     def teardown(self):
         """End the drive hold, end the inputs hold, moe check, explicit Neutral, rail off, verify,
-        OpenOCD kill, tunnel close, lock release. Idempotent. Every step, and the logging around it,
+        OpenOCD kill, tunnel close. Idempotent. Every step, and the logging around it,
         is guarded: a failure or a signal landing anywhere in one step never skips the next."""
         if self.torn_down:
             return
@@ -2525,14 +2517,8 @@ class Session:
             self.tunnel = None
             return "tunnel closed"
 
-        def lock_release():
-            if not self.took_lock:
-                return "skipped: not acquired by this run"
-            self.sh.run(f"{shlex.quote(os.path.join(REPO, 'tools', 'bench-lock.sh'))} release {self.owner}")
-            return f"released {self.owner}"
-
         for tag, fn in TEARDOWN_STEPS_OF(drive_end, hold_end, moe, neutral, rail_off, verify, ocd_kill,
-                                         tunnel_close, lock_release):
+                                         tunnel_close):
             try:
                 text = fn()
             except BaseException as e:  # noqa: BLE001 - a failure or a signal: record it, carry on
@@ -2642,7 +2628,7 @@ def main(argv=None, shell=None):
     if shell.dry:
         csv_fh = io.StringIO()
         record_path = os.path.join(record_dir, "RECORD.md")
-        print(f"{TOOL}: DRY RUN against a simulated board: nothing is executed, no network, no lock, "
+        print(f"{TOOL}: DRY RUN against a simulated board: nothing is executed, no network, "
               f"no files (the record would go to {record_dir}).")
     else:
         os.makedirs(record_dir, exist_ok=True)

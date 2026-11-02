@@ -3,7 +3,7 @@
 # binary it was about to execute, for `cargo run` and for `cargo test`'s test binaries.
 #
 # There is no board on the other end of a cargo invocation here. Boards are programmed by
-# tools/flash.sh, which takes the bench lock, runs the image guards and drives OpenOCD over a probe.
+# tools/flash.sh, which runs the image guards and drives OpenOCD over a probe.
 # Without this runner cargo hands an ARM ELF to the host loader, which refuses it with an OS error
 # that names neither the target nor the command the caller wanted.
 set -euo pipefail
@@ -16,5 +16,5 @@ echo >&2
 echo "  host tests      ./tools/host-test.sh               (forwards cargo args: -p base, a test name)" >&2
 echo "  shipping image  cd motorcontroller && cargo image-f103   (GD32F103C8)" >&2
 echo "                  cd motorcontroller && cargo image-f130   (GD32F130C8)" >&2
-echo "  onto a board    CHIP=<chip> tools/flash.sh <image> (bench lock + image guards + OpenOCD)" >&2
+echo "  onto a board    CHIP=<chip> tools/flash.sh <image> (image guards + OpenOCD)" >&2
 exit 2

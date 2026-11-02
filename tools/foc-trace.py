@@ -21,8 +21,9 @@ Usage:
 The cal and FOC_GAINS reads are one `hoverboard-cli` call each before the stream starts, since the
 bridge's console serves one connection at a time.
 
-Ctrl-C to stop. It takes no bench lock: it touches no probe, only the bridge, and the gate
-session it samples for holds the lock (specs/foc-torque.md section 10).
+Ctrl-C to stop. It touches no probe, only the bridge, and the gate session it samples for runs
+under the operator's lock on the pair (~/dev/hoverboard-bench/bench-lock.sh; specs/foc-torque.md
+section 10).
 
 What it prints, per sample (words of motorcontroller/firmware/src/main.rs `CtrlObs`, through the
 tools/swdobs.py word map, which owns the indices):

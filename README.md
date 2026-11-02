@@ -214,6 +214,11 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
 The firmware is written to the mainboard MCU over SWD, using either a wireless ESP32-C3 debug probe
 or an ST-Link V2 clone. See [docs/flashing.md](docs/flashing.md).
 
+On the shared bench, `tools/flash.sh` and the other bench tools take no lock. Whoever runs bench
+work takes the lock first with `~/dev/hoverboard-bench/bench-lock.sh` (the `hoverboard-bench` repo),
+naming the resource the tool's header gives for its board (`rover`, `offroad`, `mm32`, `probes`, or
+`all`), and releases it after.
+
 ## Documentation
 
 See [docs/](docs/) for hardware-facing references:

@@ -9,23 +9,21 @@
 #   local - the classywalk offroad pair, on LAN-attached ESP32-C3 elaphureLink probes.
 # The guards are the same text and run in the same order on both; only the host they execute on differs.
 # That includes the binutils the guards read the image through: on BOTH runners they are resolved and
-# exercised on the real image, on the host that will run the guard, before the bench lock is taken, and
+# exercised on the real image, on the host that will run the guard, before any guard runs, and
 # a guard that cannot run refuses the flash rather than warning past it.
 #
-# Flashing touches the shared bench, so this runner holds the bench lock (tools/bench-lock.sh) for the
-# duration. If another agent holds it, the flash is refused instead of colliding. Set BENCH_OWNER to your
-# agent name (e.g. claude-main) so the lock is attributed to you; if you already hold the lock for a
-# session this runner reuses it and does not release it (only releases a lock it acquired itself).
-# The lock lives on the Pi for BOTH runners on purpose: it is the mutex for the whole physical bench,
-# so a local-runner flash must still serialize against an agent working through the Pi.
+# This tool takes no bench lock. The operator takes it first with
+# ~/dev/hoverboard-bench/bench-lock.sh (hoverboard-bench, bench-locks.md) and releases it after. The
+# resource follows from BOARD: rover-master/rover-slave are `rover`, offroad-master/offroad-slave
+# are `offroad`, master (the ST-Link at Pi USB 1-1.2.4, which is the MM32's probe now) is `mm32`, and
+# slave (the dap42 opened by VID:PID, a probe scan) is `probes`.
 set -euo pipefail
 
 ELF="${1:?usage: flash.sh <elf>}"
 PI="${PI_HOST:-pi@192.168.0.248}"
-# Per-run remote name, and it has to be: the Pi runner's copy is made BEFORE the bench lock is taken
-# (so the binutils can be exercised on the real image without holding the mutex), which is outside the
-# mutex that used to make one fixed /tmp name safe. A shared name copied outside the lock is how one
-# run's image gets programmed by another run. Removed on exit.
+# Per-run remote name, and it has to be: two runs can stage on the Pi at once (the locks are per
+# resource, so two boards can be flashed side by side), and a shared name is how one run's image gets
+# programmed by another run. Removed on exit.
 REMOTE="/tmp/hoverboard-fw.$$.elf"
 
 # The offroad pair needs the PATCHED OpenOCD (the elaphureLink CMSIS-DAP-over-TCP driver); the stock
@@ -127,7 +125,7 @@ case "$RUNNER" in
       echo "flash: REFUSED - OpenOCD tcl tree missing at '$OFFROAD_OCD_TCL'." >&2
       exit 2
     fi
-    # A hung OpenOCD must not sit on the bench lock forever, so every probe-touching command runs
+    # A hung OpenOCD must not hold the probe forever, so every probe-touching command runs
     # under a wall-clock cap. macOS ships no coreutils `timeout`; perl's alarm(2) survives exec and
     # is the portable stand-in (SIGALRM's default action terminates the exec'd OpenOCD). If none of
     # the three exists, refuse rather than run uncapped while claiming a cap.
@@ -154,30 +152,24 @@ target_sh() {
   esac
 }
 
-# Release a lock this runner acquired, and remove the Pi's copy of the image, however the script
-# leaves. One handler for both, because bash keeps ONE EXIT trap and a second `trap ... EXIT` later
-# would silently replace the first. TOOK_LOCK/STAGED are initialised here so the handler is safe
-# under `set -u` at any exit point; LOCK/OWNER only exist by the time TOOK_LOCK can be 1.
+# Remove the Pi's copy of the image, however the script leaves. bash keeps ONE EXIT trap, so any
+# later cleanup goes in this handler rather than a second `trap ... EXIT`. STAGED is initialised here
+# so the handler is safe under `set -u` at any exit point.
 #
-# `set -e` is live in here, so BOTH cleanups end in `|| true` and the status is captured first and
-# returned last. Without that, either one failing takes the handler down with it: a failed release
-# would skip the removal and leave the staged image on the Pi, and a failed removal after a
-# SUCCESSFUL flash would report failure to the caller for a board that was in fact programmed, which
-# invites exactly the re-flash of a live board this tool exists to prevent. The cleanups are
-# best-effort; the run's own verdict is not theirs to change.
-TOOK_LOCK=0
+# `set -e` is live in here, so the cleanup ends in `|| true` and the status is captured first and
+# returned last. Without that, a failed removal after a SUCCESSFUL flash would report failure to the
+# caller for a board that was in fact programmed, which invites exactly the re-flash of a live board
+# this tool exists to prevent. The cleanup is best-effort; the run's own verdict is not its to change.
 STAGED=""
 cleanup() {
   local rc=$?
-  if [ "$TOOK_LOCK" = 1 ]; then "$LOCK" release "$OWNER" >/dev/null 2>&1 || true; fi
   if [ -n "$STAGED" ]; then ssh "$PI" "rm -f $(printf '%q' "$STAGED")" >/dev/null 2>&1 || true; fi
   return "$rc"
 }
 trap cleanup EXIT
 
 # The Pi runner programs from a copy, and the guards read that copy, so it has to exist before the
-# binutils are exercised on it. That is BEFORE the bench lock: a host that cannot read the image must
-# cost nobody the mutex. The local runner has the ELF already and every step below reads $IMG, so
+# binutils are exercised on it, before any guard runs. The local runner has the ELF already and every step below reads $IMG, so
 # nothing downstream refers to the remote temp path on that path.
 if [ "$RUNNER" = pi ]; then
   echo "flash: copying $(basename "$ELF") to $PI"
@@ -199,7 +191,7 @@ fi
 # an image with no disassembler behind it would let a `wfi` through, which locks SWD re-attach on
 # these boards for good. So each tool is resolved in the SAME order the guards resolve it and then
 # actually RUN against this image, ON THE HOST THAT WILL RUN THE GUARD (through target_sh, so the Pi's
-# tools are exercised on the Pi and not merely looked for here), BEFORE the bench lock is taken.
+# tools are exercised on the Pi and not merely looked for here), BEFORE any guard runs.
 #
 # This applies to both runners. The Pi's native armv6l binutils do work on these images today,
 # including Thumb wfi decode, but that is a property of the current Pi and not of the path: an arm64
@@ -269,14 +261,14 @@ resolve_binutil size -A arm-none-eabi-size llvm-size size || exit 2
 resolve_binutil nm '' arm-none-eabi-nm llvm-nm rust-nm nm || exit 2
 
 # "The guard could not RUN" is not "the image passed the guard". Every binutil was resolved and
-# exercised against this image, on the host that runs the guards, before the bench lock was taken, so
+# exercised against this image, on the host that runs the guards, before the guards ran, so
 # a tool that is missing or unusable by the time a guard runs means the ground moved under the run:
 # fail closed, on either runner.
 refuse_unrunnable() {
   echo "flash: REFUSED - $1" >&2
   echo "flash: a guard that cannot run is not a guard that passed, and this image would be" >&2
   echo "flash: programmed onto a board whose probe cannot drive NRST. The binutils were resolved AND" >&2
-  echo "flash: exercised on $HOST_LABEL before the bench lock was taken, so they changed under this" >&2
+  echo "flash: exercised on $HOST_LABEL before the guards ran, so they changed under this" >&2
   echo "flash: run. Fix PATH on $HOST_LABEL (arm-none-eabi-objdump/size/nm) and re-run." >&2
   exit 1
 }
@@ -332,25 +324,6 @@ case "$IMAGE_PROFILE" in
     PROFILE_HOT_SYMS="$IMAGE_GUARD_HOT_SYMS" ;;
 esac
 
-LOCK="$SCRIPT_DIR/bench-lock.sh"
-OWNER="${BENCH_OWNER:-flash-runner@$(hostname -s 2>/dev/null || echo host)}"
-
-# Acquire the bench. exit 0 = ACQUIRED (we took it) or ALREADY-OURS (we already held it); exit 1 = held
-# by someone else, so refuse to flash.
-if acq="$("$LOCK" acquire "$OWNER" "flash.sh: $(basename "$ELF")")"; then
-  case "$acq" in
-    ACQUIRED*) TOOK_LOCK=1 ;;   # we took it here, so we release it on exit
-    *) TOOK_LOCK=0 ;;           # ALREADY-OURS: held for a session, leave it held
-  esac
-else
-  echo "flash: bench is busy, not flashing." >&2
-  echo "$acq" >&2
-  echo "flash: wait, or coordinate; see $LOCK status" >&2
-  exit 1
-fi
-# The EXIT handler installed above releases it (only a lock this runner acquired) and removes the
-# Pi's copy of the image, whichever way the script leaves.
-
 # GD32 SWD-lockout guard: a bare `wfi`/sleep executed with DBG_CTL0=0 (debug-hold bits unset) locks SWD
 # re-attach on the GD32. The bench probes (ST-Link clone / dap42) cannot drive NRST, so it is an
 # unrecoverable-looking brick. Refuse any image containing a `wfi` instruction unless ALLOW_WFI=1 asserts the
@@ -392,7 +365,7 @@ fi
 # the only tell). Before programming, refuse an image whose .text has collapsed below a floor, or
 # that is missing a core symbol the live firmware must contain. Dependency-light: the same binutils
 # the wfi scan relies on (size + nm). Missing or unusable tools REFUSE on BOTH runners: they were
-# resolved and exercised on the guard's own host before the lock was taken, so reaching that branch
+# resolved and exercised on the guard's own host before the guards ran, so reaching that branch
 # usually means the toolchain changed under the run, which is never a routine condition. It is not the
 # only way in: an image whose code sits in neither `.text` nor `.hotcode` also lands here, with a
 # working `size`. Both are refusals, which is the point of the branch.

@@ -38,9 +38,12 @@ USAGE
 -----
     tools/vbatt-calibrate.py [--board master] [--points 25,20,16,12] [-n 64]
 
-It takes the bench lock, starts OpenOCD on the Pi for that board, and releases both on exit, the
-same way tools/motor-trace.py does. Use --attach HOST:PORT to drive an OpenOCD you started
-yourself, in which case it takes no lock and leaves it running.
+It starts OpenOCD on the Pi for that board and stops it on exit, the same way tools/motor-trace.py
+does. Use --attach HOST:PORT to drive an OpenOCD you started yourself, which it leaves running.
+
+It takes no bench lock. The operator takes `probes` first with ~/dev/hoverboard-bench/bench-lock.sh
+(the OpenOCD it starts on the Pi is stopped with `sudo pkill -x openocd`, which stops every OpenOCD
+there) and releases it after.
 
 The low end of the sweep is bounded by the board, not by this script: below some rail the regulator
 drops out and the board stops running. There is no established figure for that, so the script
@@ -57,7 +60,6 @@ import subprocess
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PI = os.environ.get("PI_HOST", "pi@192.168.0.248")
 
 # NOTE: this probe table is a THIRD copy of a fact that already lives in tools/flash.sh and
@@ -216,10 +218,6 @@ def main():
         host, port = args.attach.split(":")
         port = int(port)
     else:
-        r = sh(f"{REPO}/tools/bench-lock.sh acquire claude-vbatt 'vbatt calibration'")
-        if "ACQUIRED" not in r.stdout and "ALREADY-OURS" not in r.stdout:
-            sys.exit(f"vbatt-calibrate: bench busy\n{r.stdout}{r.stderr}")
-        atexit.register(lambda: sh(f"{REPO}/tools/bench-lock.sh release claude-vbatt"))
         host, port = start_remote_ocd(args.board), 6666
         atexit.register(lambda: sh(f"ssh {PI} 'sudo pkill -x openocd'"))
         if args.board != "master":

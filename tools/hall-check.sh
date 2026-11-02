@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot runbook for the hall-code hand-spin check (specs/hall-check.md, the one user step of
 # motor-integration silicon stage 1). It stands up everything against the bench Pi and drops you into
-# a live hall-code readout, then tears it ALL down on exit -- rail off, bench lock released -- even
+# a live hall-code readout, then tears it ALL down on exit -- OpenOCD stopped, rail off -- even
 # if a step in the middle fails. The tools/tilt-session.sh pattern, minus the tunnel: this readout is
 # a plain SWD word read, so it needs no host-side tool.
 #
@@ -23,7 +23,11 @@
 # motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware, --elf <path> reads another ELF.
 # There is no default chip; with none of --chip, --elf or --addr the tool refuses.
 #
-# Env overrides: PI_HOST (default pi@192.168.0.248), BENCH_OWNER (default $USER, else hoverboardhavoc).
+# It takes no bench lock. The operator takes `all` first with ~/dev/hoverboard-bench/bench-lock.sh
+# (it switches the Pi relay, which feeds the offroad pair, and runs `sudo pkill -x openocd` on the
+# Pi, which stops every OpenOCD there) and releases it after.
+#
+# Env overrides: PI_HOST (default pi@192.168.0.248).
 set -euo pipefail
 
 BOARD=master
@@ -60,10 +64,6 @@ if [ -z "$ADDR" ] && [ -z "$ELF" ]; then
   echo "hall-check: name the image on the board: --chip gd32f103c8|gd32f130c8, or --elf <path> (or --addr)" >&2
   exit 2
 fi
-LOCK="$SCRIPT_DIR/bench-lock.sh"
-OWNER="${BENCH_OWNER:-${USER:-hoverboardhavoc}}"
-TOOK_LOCK=0
-
 cleanup() {
   echo
   echo "hall-check: tearing down"
@@ -75,7 +75,6 @@ cleanup() {
   else
     echo "hall-check: rail left ON (--keep-rail)"
   fi
-  [ "$TOOK_LOCK" = 1 ] && "$LOCK" release "$OWNER" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -88,12 +87,6 @@ if [ -z "$ADDR" ]; then
   [ "$ADDR" != "0x" ] || { echo "hall-check: CTRL_OBS not found in $ELF" >&2; exit 1; }
 fi
 echo "hall-check: board=$BOARD  CTRL_OBS=$ADDR"
-
-if acq="$("$LOCK" acquire "$OWNER" "hall-check: hand-spin, $BOARD")"; then
-  case "$acq" in ACQUIRED*) TOOK_LOCK=1 ;; esac
-else
-  echo "hall-check: bench is busy, not starting." >&2; echo "$acq" >&2; exit 1
-fi
 
 echo "hall-check: rail ON"
 ssh "$PI" 'pinctrl set 4 op dl'

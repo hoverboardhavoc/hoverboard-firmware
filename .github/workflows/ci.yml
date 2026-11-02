@@ -807,7 +807,7 @@ jobs:
         run: bash tools/tests/armed-guard-verdict-test.sh
 
       # The flash guard end to end, against fabricated images and stubbed ssh/scp/openocd: every
-      # refusal path, which of them fire BEFORE the bench lock is taken, and that the exit handler
+      # refusal path, which of them fire BEFORE the guards run, and that the exit handler
       # cannot change a run's verdict. Its fabricated images take their symbol names from
       # tools/image-guard-syms.sh, the same file the guard reads, so this suite cannot fall behind
       # the list again.

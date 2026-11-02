@@ -8,7 +8,12 @@ Usage:
     tools/motor-trace.py [--board master|slave] [--hz 10] [--csv FILE] (--chip CHIP | --elf PATH)
     tools/motor-trace.py --attach HOST:PORT     # use an OpenOCD that is already running
 
-Ctrl-C to stop. It stops the OpenOCD it started and releases the bench lock it took.
+Ctrl-C to stop. It stops the OpenOCD it started.
+
+It takes no bench lock. The operator takes the board's resource first with
+~/dev/hoverboard-bench/bench-lock.sh: rover-master/rover-slave are `rover`; master and slave are
+`probes`, since their OpenOCD runs on the Pi and is started and stopped with `sudo pkill -x openocd`,
+which stops every OpenOCD there.
 
 Every address is resolved from the ELF's symbol table at startup, never hardcoded: these are
 Rust-mangled statics whose addresses move with any build, and a stale address reads plausible
@@ -108,10 +113,6 @@ def main():
         port = int(port)
         started = False
     else:
-        r = sh(f"{REPO}/tools/bench-lock.sh acquire claude-trace 'motor-trace sampling'")
-        if "ACQUIRED" not in r.stdout and "ALREADY-OURS" not in r.stdout:
-            sys.exit(f"motor-trace: bench busy\n{r.stdout}{r.stderr}")
-        atexit.register(lambda: sh(f"{REPO}/tools/bench-lock.sh release claude-trace"))
         if args.board in LOCAL_BOARDS:
             proc = start_local_ocd(args.board)
             atexit.register(stop_local_ocd, proc)

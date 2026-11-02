@@ -2,9 +2,13 @@
 # One-shot runbook for the hand-tilt IMU sign-validation session (specs/imu-tilt-tool.md,
 # specs/silicon-queue.md section 2). It stands up everything the session needs against the bench Pi
 # and drops you into the live pitch readout, then tears it ALL down on exit -- rail off, probe
-# server killed, tunnel closed, bench lock released -- even if a step in the middle fails.
+# server killed, tunnel closed -- even if a step in the middle fails.
 #
-# Flow: acquire the bench lock -> rail ON -> ensure the local firmware ELF -> start OpenOCD (slave
+# It takes no bench lock. The operator takes `all` first with ~/dev/hoverboard-bench/bench-lock.sh
+# (it switches the Pi relay, which feeds the offroad pair, and runs `sudo pkill -x openocd` on the
+# Pi, which stops every OpenOCD there) and releases it after.
+#
+# Flow: rail ON -> ensure the local firmware ELF -> start OpenOCD (slave
 # probe cfg) on the Pi -> tunnel its TCL RPC port to localhost -> imu-tilt.py --selftest -> launch
 # imu-tilt.py in the foreground (your args pass straight through).
 #
@@ -24,19 +28,16 @@
 # Any argument this script does not recognize is forwarded verbatim to tools/imu-tilt.py, so
 # `--checklist`, `--record FILE`, `--no-graph`, `--addr`, etc. all just work.
 #
-# Env overrides: PI_HOST (default pi@192.168.0.248), TILT_PORT (default 6666),
-#                BENCH_OWNER (default the invoking user, else hoverboardhavoc).
+# Env overrides: PI_HOST (default pi@192.168.0.248), TILT_PORT (default 6666).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-LOCK="$SCRIPT_DIR/bench-lock.sh"
 FLASH_SH="$SCRIPT_DIR/flash.sh"
 IMU_TILT="$SCRIPT_DIR/imu-tilt.py"
 
 PI="${PI_HOST:-pi@192.168.0.248}"
 PORT="${TILT_PORT:-6666}"
-OWNER="${BENCH_OWNER:-${USER:-hoverboardhavoc}}"
 BOARD="slave"
 CHIP=""
 KEEP_RAIL=0
@@ -96,7 +97,6 @@ if [ -z "$OC_CFG" ]; then
 fi
 
 # --- state for the cleanup trap (set BEFORE anything that can fail) ---
-TOOK_LOCK=0
 TUNNEL_PID=""
 CLEANED=0
 
@@ -115,7 +115,7 @@ cleanup() {
     if [ "$DRY_RUN" = 0 ]; then kill "$TUNNEL_PID" 2>/dev/null || true; fi
   fi
 
-  # 2. remote OpenOCD (best-effort: we hold the lock, so no other openocd should be running)
+  # 2. remote OpenOCD (best-effort: the operator holds `all`, so no other openocd should be running)
   cmd "ssh $PI 'sudo pkill -x openocd; sudo rm -f /tmp/tilt-openocd.pid /tmp/tilt-openocd.log'"
   if [ "$DRY_RUN" = 0 ]; then
     ssh "$PI" 'sudo pkill -x openocd 2>/dev/null; sudo rm -f /tmp/tilt-openocd.pid /tmp/tilt-openocd.log 2>/dev/null' >/dev/null 2>&1 || true
@@ -137,34 +137,8 @@ cleanup() {
       cmd "ssh $PI 'pinctrl get 4'   (expect: hi)"
     fi
   fi
-
-  # 4. bench lock (release only a lock this run acquired)
-  if [ "$TOOK_LOCK" = 1 ]; then
-    cmd "$LOCK release $OWNER"
-    if [ "$DRY_RUN" = 0 ]; then "$LOCK" release "$OWNER" >/dev/null 2>&1 || true; fi
-  else
-    cmd "(lock not released: not acquired by this run)"
-  fi
 }
 trap cleanup EXIT INT TERM
-
-# --------------------------------------------------------------------------------------------------
-log "bench lock"
-cmd "$LOCK acquire $OWNER 'tilt session'"
-if [ "$DRY_RUN" = 0 ]; then
-  if acq="$("$LOCK" acquire "$OWNER" "tilt session")"; then
-    case "$acq" in
-      ACQUIRED*) TOOK_LOCK=1 ;;   # we took it; release on exit
-      *)         TOOK_LOCK=0 ;;   # ALREADY-OURS: held for a session, leave it
-    esac
-    echo "  $acq"
-  else
-    echo "tilt-session: bench is busy, aborting." >&2
-    echo "  $acq" >&2
-    echo "tilt-session: wait or coordinate; see: $LOCK status" >&2
-    exit 1
-  fi
-fi
 
 # --------------------------------------------------------------------------------------------------
 log "rail ON (pinctrl GPIO4 dl) + settle"
