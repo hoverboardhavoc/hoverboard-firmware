@@ -159,7 +159,8 @@ data class LampFacts(val address: Int, val imuModel: Int?) {
  * - TILT and IMU apply on a board whose IMU is fitted ([LampFacts.imuFitted]): the cutout and the
  *   loss level run only on a board whose IMU answered at power-up, in Throttle as in Balance.
  * - LATCH 2 shows only while its bit is set: motor 1's latch exists only on a two-motor board (the
- *   12-FET, `specs/twelve-fet.md`), and the app does not read a board's motor count for the lamp.
+ *   12-FET, `specs/twelve-fet.md` section 4.2), and the app does not read a board's motor count for
+ *   the lamp.
  * - CONFIG never applies either: it shows only on a board whose boot left a configured function
  *   down, which is its bit. MACHINE likewise shows only while a board reports it.
  * - LATCH and the four motor causes apply on every motor controller: the motor bring-up they gate
