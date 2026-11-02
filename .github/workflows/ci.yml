@@ -678,6 +678,44 @@ jobs:
             echo "| Static RAM | ${static} | ${ram} | $((static - ram)) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The one-motor images against main (specs/twelve-fet.md section 4.3): the GD32F103C8, GD32F130C8
+  # and MM32SPIN05 images built at this commit and at its merge base with main (the first parent on
+  # main itself), failing if any image's flashed span, `.hotcode` or static RAM is larger here. The
+  # log carries, per image, "byte-identical" or the `nm -S` symbol diff. The 12-FET's
+  # mainboard-gd32f103rc image is not in it: its second motor is what it is for.
+  size-vs-main:
+    name: One-motor images no larger than main
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+          fetch-depth: 0
+
+      - name: Install Rust (pinned nightly) + thumbv7m and thumbv6m targets + rust-src
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          targets: thumbv7m-none-eabi, thumbv6m-none-eabi
+          components: rustfmt, clippy, rust-src
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware/motorcontroller
+
+      - name: Size against the base
+        run: |
+          sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+          base=$(git merge-base HEAD origin/main)
+          if [ "$base" = "$(git rev-parse HEAD)" ]; then base=$(git rev-parse HEAD^1); fi
+          echo "base $(git rev-parse --short "$base")"
+          tools/size-vs-base.sh "$base" image-f103 image-f130 image-mm32
+
   # The firmware bundle (specs/firmware-bundle.md section 5): every image a commit builds, the two
   # board ELFs from the build job (`firmware-elfs`) and the bridge's two images from the bridge job
   # (`bridge-images`), in one .hbfw (a zip of the files and a manifest), which `hoverboard-cli board
