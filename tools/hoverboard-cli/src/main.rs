@@ -896,6 +896,8 @@ fn guest_boards(wire: &mut impl Wire, targets: &[String]) -> Result<(u8, Vec<u8>
 const CONSOLE_PORT: u16 = 5333;
 /// How long `machine update` waits for a flashed board's boot report.
 const STATUS_WAIT: Duration = Duration::from_secs(10);
+/// How long `machine update`'s report walks again for a node the plan walked.
+const REPORT_WAIT: Duration = Duration::from_secs(20);
 
 /// Whether the node that answers an attach on `link` holds `addr`.
 fn reaches(link: &Link, addr: u8) -> Result<(), String> {
@@ -1087,7 +1089,7 @@ fn machine_update(link: &Link, path: &str, yes: bool) -> Result<u8, String> {
         println!("{l}");
     }
     println!("== report");
-    if let Err(e) = machine_report(link, &plan, &outcomes) {
+    if let Err(e) = machine_report(link, &w.found, &plan, &outcomes) {
         println!("report: {e}");
     }
     Ok(u8::from(!fleet::all_done(&outcomes)))
@@ -1097,11 +1099,36 @@ fn machine_update(link: &Link, path: &str, yes: bool) -> Result<u8, String> {
 /// `ESP_INFO`, each board's image, and whether the boards' machine digests agree.
 fn machine_report(
     link: &Link,
+    planned: &[Found],
     plan: &fleet::Plan,
     outcomes: &[fleet::Outcome],
 ) -> Result<(), String> {
-    let mut wire = wire_on(link)?;
-    let w = walk(&mut wire)?;
+    // A board that has just booted may not answer the first walk, nor the boards beyond it: walk
+    // again until every node the plan walked is found, or REPORT_WAIT has passed.
+    let t0 = Instant::now();
+    let (mut wire, w) = loop {
+        let mut wire = wire_on(link)?;
+        let w = walk(&mut wire)?;
+        let all = planned
+            .iter()
+            .all(|p| w.found.iter().any(|f| f.addr == p.addr));
+        if all || t0.elapsed() >= REPORT_WAIT {
+            break (wire, w);
+        }
+        std::thread::sleep(RECONNECT_GAP);
+    };
+    let missing: Vec<String> = planned
+        .iter()
+        .filter(|p| !w.found.iter().any(|f| f.addr == p.addr))
+        .map(node_name)
+        .collect();
+    if !missing.is_empty() {
+        println!(
+            "not found by the walk within {} s: {}",
+            REPORT_WAIT.as_secs(),
+            missing.join(", ")
+        );
+    }
     let src = w.src;
     let gateway = w.topology.gateway;
     for f in w.found.iter().filter(|f| f.class() == Some(CLASS_BRIDGE)) {
