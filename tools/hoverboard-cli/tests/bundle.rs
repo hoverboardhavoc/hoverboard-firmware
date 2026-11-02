@@ -34,6 +34,11 @@ const F10X_64: BoardTarget = BoardTarget {
     family: Family::Gd32f10x,
     flash_kib: 64,
 };
+/// The 12-FET's GD32F103RC (`specs/twelve-fet.md` section 3.1).
+const F10X_256: BoardTarget = BoardTarget {
+    family: Family::Gd32f10x,
+    flash_kib: 256,
+};
 const F1X0_64: BoardTarget = BoardTarget {
     family: Family::Gd32f1x0,
     flash_kib: 64,
@@ -520,6 +525,7 @@ fn the_image_tables_are_in_their_cargo_toml() {
     for (name, target) in [
         ("mainboard-gd32f103c8", F10X_64),
         ("mainboard-gd32f130c8", F1X0_64),
+        ("mainboard-gd32f103rc", F10X_256),
     ] {
         let chip = name.strip_prefix("mainboard-").unwrap();
         assert_eq!(
@@ -531,9 +537,9 @@ fn the_image_tables_are_in_their_cargo_toml() {
             }
         );
     }
-    assert!(image_table(FIRMWARE_TOML, "mainboard-gd32f103rc")
+    assert!(image_table(FIRMWARE_TOML, "mainboard-mm32spin05")
         .unwrap_err()
-        .contains("no [package.metadata.hoverboard-image.mainboard-gd32f103rc]"));
+        .contains("no [package.metadata.hoverboard-image.mainboard-mm32spin05]"));
     let bad = "[package.metadata.hoverboard-image.x]\nkind = \"board\"\nfeatures = []\n\
                targets = [{ family = \"gd32f10x\", flash_kib = 64, ram_kib = 20 }]\n";
     assert!(image_table(bad, "x").is_err());

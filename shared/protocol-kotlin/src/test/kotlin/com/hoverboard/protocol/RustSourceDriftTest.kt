@@ -1460,22 +1460,22 @@ class RustSourceDriftTest {
         val arm = rust("motorcontroller/firmware/src/arm.rs")
         val decl = findOne(
             arm,
-            """^(?:pub\s+)?const\s+ARM_ROW\s*:\s*\[\s*store::Key\s*;\s*(\d+)\s*\]\s*=\s*\[""",
-            "the ARM_ROW declaration",
+            """^(?:pub\s+)?const\s+ARM_ROW_BASE\s*:\s*\[\s*store::Key\s*;\s*(\d+)\s*\]\s*=\s*\[""",
+            "the ARM_ROW_BASE declaration",
         )
         val open = decl.range.last
         val end = arm.indexOf("\n];", open)
-        check(end > open) { "Unterminated `ARM_ROW` array in motorcontroller/firmware/src/arm.rs" }
+        check(end > open) { "Unterminated `ARM_ROW_BASE` array in motorcontroller/firmware/src/arm.rs" }
         val armRows = findAllClaiming(
             arm.substring(open + 1, end),
             """store::([A-Z0-9_]+)\s*(?:\.at\(\s*\d+\s*\))?\s*\.key\(\)\s*,""",
             """\S""",
-            "the ARM_ROW entries",
+            "the ARM_ROW_BASE entries",
         )
         assertEquals(
-            literal("ARM_ROW", decl.groupValues[1], "the declared row length"),
+            literal("ARM_ROW_BASE", decl.groupValues[1], "the declared row length"),
             armRows.size,
-            "ARM_ROW declares a length its entries do not add up to",
+            "ARM_ROW_BASE declares a length its entries do not add up to",
         )
         assertEquals(
             armRows.map { it.groupValues[1] }.toSet(),
