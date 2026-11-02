@@ -24,9 +24,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
-import com.hoverboard.protocol.board.PIN_ABSENT
-import com.hoverboard.protocol.board.candidatePins
+import com.hoverboard.protocol.board.candidates
 import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.LayoutActions
 import com.hoverboard.remote.LayoutState
 import com.hoverboard.remote.R
@@ -43,59 +43,40 @@ import com.hoverboard.remote.model.LayoutRow
  *
  * Not cosmetic. A platform-width dialog holding a text field never settles its measure pass, and
  * under Robolectric that is an outright hang, so the edit dialog cannot be tested with the platform
- * width at all. The two choosers take the same width so the three dialogs are one shape.
+ * width at all. The pin chooser takes the same width so the two dialogs are one shape.
  */
 private val DIALOG_WIDTH = DialogProperties(usePlatformDefaultWidth = false)
 
 /** Test tag on the dialog that stages one field. */
 fun layoutDialogTag(key: Key): String = "layout_dialog_${key.fieldId}_${key.index}"
 
-/** Test tag on the dialog's offer of [value] (a packed pin, [PIN_ABSENT], or a choice's byte). */
-fun layoutOptionTag(key: Key, value: Int): String = "layout_option_${key.fieldId}_${key.index}_$value"
+/** Test tag on the dialog's offer of [option], a pin as [valueText] spells it (`PA8 AF2`). */
+fun layoutOptionTag(key: Key, option: String): String = "layout_option_${key.fieldId}_${key.index}_$option"
 
 /**
- * The pin picker: the pins this part bonds that no other field holds, less SWD
- * ([candidatePins]). It needs the part, because which pins exist is a fact about silicon.
+ * The pin picker: what the part's table offers for this slot, the pins no other field holds, less
+ * SWD, each with the alternate function or ADC channel it carries there ([candidates]). It needs
+ * the part, because which pins exist is a fact about silicon. A pin is changed here, not removed:
+ * a layout edit writes values and never un-stores one.
  */
 @Composable
 internal fun PinDialog(row: LayoutRow, state: LayoutState, onClose: () -> Unit, actions: LayoutActions) {
     val part = state.part ?: return
     val staged = state.staged ?: return
-    val candidates = candidatePins(row.slot, staged, part)
+    val offers = candidates(row.slot, staged, part)
     OptionDialog(row, onClose) {
-        Option(layoutOptionTag(row.slot.key, PIN_ABSENT), stringResource(R.string.layout_unset)) {
-            actions.stage(row.slot, PIN_ABSENT)
-            onClose()
-        }
-        for (pin in candidates) {
-            Option(layoutOptionTag(row.slot.key, pin.packed), pin.name) {
-                actions.stage(row.slot, pin.packed)
+        for (value in offers) {
+            val text = valueText(value, part) ?: value.toString()
+            Option(layoutOptionTag(row.slot.key, text), text) {
+                actions.stage(row.slot, value)
                 onClose()
             }
         }
-        if (candidates.isEmpty()) Caption(R.string.layout_no_candidates)
+        if (offers.isEmpty()) Caption(R.string.layout_no_candidates)
     }
 }
 
-/** One of a fixed set of byte values: the IMU model, the phase-current declaration. */
-@Composable
-internal fun ChoiceDialog(
-    row: LayoutRow,
-    editor: LayoutEditor.Choices,
-    onClose: () -> Unit,
-    actions: LayoutActions,
-) {
-    OptionDialog(row, onClose) {
-        for (choice in editor.choices) {
-            Option(layoutOptionTag(row.slot.key, choice.value), stringResource(choice.label)) {
-                actions.stage(row.slot, choice.value)
-                onClose()
-            }
-        }
-    }
-}
-
-/** The edit dialog: the dead time, which is a number rather than a choice from a list. */
+/** The edit dialog: a `u8` such as the dead time or an instance, a number rather than a choice. */
 @Composable
 internal fun NumberDialog(
     row: LayoutRow,
@@ -121,7 +102,7 @@ internal fun NumberDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    parsed?.let { actions.stage(row.slot, it.toInt()) }
+                    parsed?.let { actions.stage(row.slot, Value.U8(it.toInt())) }
                     onClose()
                 },
                 enabled = parsed != null,
@@ -136,7 +117,7 @@ internal fun NumberDialog(
 }
 
 /**
- * The simple dialog both choosers are: the field's name, its options, and one action.
+ * The simple dialog the pin chooser is: the field's name, its options, and one action.
  *
  * The options are a plain scrolling column rather than a lazy list because a pin list is short
  * enough to compose whole, and tapping one commits it and closes, so there is no confirm step to

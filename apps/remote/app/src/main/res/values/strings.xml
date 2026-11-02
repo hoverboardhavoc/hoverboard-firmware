@@ -312,7 +312,6 @@
     <string name="setup_field_align_offset">Align offset</string>
     <string name="setup_field_dead_time">Dead time (raw DTG)</string>
     <string name="setup_field_current_limit">Current limit (mA)</string>
-    <string name="setup_field_imu_model">IMU model</string>
     <string name="setup_field_control_frame">Frame (both boards must match)</string>
     <string name="setup_field_control_side">Wheel side (this board)</string>
     <string name="setup_field_trim_pitch">Level trim, pitch (centidegrees)</string>
@@ -335,9 +334,6 @@
     <string name="setup_choice_foc">FOC</string>
     <string name="setup_choice_forward">Forward</string>
     <string name="setup_choice_reverse">Reverse</string>
-    <string name="setup_choice_imu_none">None fitted</string>
-    <string name="setup_choice_imu_mpu6050">MPU-6050</string>
-    <string name="setup_choice_imu_clone">MPU-6050 clone</string>
     <string name="setup_choice_frame_pivoting">Pivoting platforms</string>
     <string name="setup_choice_frame_rigid">Rigid body</string>
     <string name="setup_choice_side_left">Left wheel</string>
@@ -350,7 +346,7 @@
     <string name="setup_note_device_name">The Bluetooth module takes a new name only after it is power-cycled out of data mode.</string>
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
     <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control drives a current instead of a voltage and has not been proven on a wheel yet; set both boards of a machine to the same method. A board whose current sensing was not calibrated at start-up falls back to six-step.</string>
-    <string name="setup_note_dead_time">0 = unset. A configured gate group needs %1$d DTG ticks or more.</string>
+    <string name="setup_note_dead_time">%1$d DTG ticks or more; a shorter one lets both FETs of a leg conduct.</string>
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
@@ -485,6 +481,8 @@
     <string name="setup_notice_roles">The axis roles would name one chip axis twice or a value outside 0 to 3. Nothing was written.</string>
     <!-- %1$s is a field label. -->
     <string name="setup_notice_out_of_range">%1$s does not take that value.</string>
+    <!-- %1$s is the refusal: the field\'s path and the reason. -->
+    <string name="setup_notice_check_refused">Nothing was written. %1$s</string>
     <string name="setup_notice_no_telemetry">This board has not reported its attitude.</string>
     <string name="setup_notice_not_read">The stored values this needs have not been read.</string>
     <string name="setup_notice_awaiting_arm">The board is running a value the app cannot know: a field this depends on was written this session and the board takes it up at its next arm.</string>
@@ -545,7 +543,7 @@
     <string name="layout_field_button">Power button</string>
     <string name="layout_field_imu_scl">IMU SCL</string>
     <string name="layout_field_imu_sda">IMU SDA</string>
-    <string name="layout_field_imu_model">IMU model</string>
+    <string name="layout_field_imu_i2c">IMU I2C instance</string>
     <string name="layout_field_hall_a">Hall A</string>
     <string name="layout_field_hall_b">Hall B</string>
     <string name="layout_field_hall_c">Hall C</string>
@@ -555,15 +553,16 @@
     <string name="layout_field_gate_lo_a">Gate, low side A</string>
     <string name="layout_field_gate_lo_b">Gate, low side B</string>
     <string name="layout_field_gate_lo_c">Gate, low side C</string>
+    <string name="layout_field_gate_timer">Gate timer</string>
     <string name="layout_field_dead_time">Dead time (DTG)</string>
     <string name="layout_field_phase_a">Phase A sense</string>
     <string name="layout_field_phase_b">Phase B sense</string>
 
     <string name="layout_note_self_hold">Set from hoverboard-cli when the board is onboarded, not in this app. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
-    <string name="layout_note_imu">Both pins and a model, or none: a half-staged IMU does not come up, and the board lists it in its status.</string>
-    <string name="layout_note_gates">All six gates with a dead time at or above the floor, or none, and the six have to be one advanced timer\'s complementary set. The board lists a gate group it could not bring up in its status.</string>
+    <string name="layout_note_imu">Both pins and the I2C instance, or none, and the two pins that instance\'s clock and data. Apply refuses anything else and names the field.</string>
+    <string name="layout_note_gates">All six gates, the gate timer and a dead time at or above the floor, or none, and the six have to be that timer\'s complementary set. Apply refuses anything else and names the field.</string>
     <string name="layout_note_halls">All three halls, or none.</string>
-    <string name="layout_note_phase">Phase-current sense is fitted exactly when both pins are set, and both on an analog pin.</string>
+    <string name="layout_note_phase">Phase-current sense is fitted exactly when both pins are set, each with its pin\'s ADC channel.</string>
     <string name="layout_note_dead_time">%1$d DTG ticks or more once the gates are configured; 0 only with them unset. A shorter one lets both FETs of a leg conduct.</string>
 
     <string name="layout_absent">not set</string>
@@ -571,12 +570,8 @@
     <string name="layout_change">Change</string>
     <string name="layout_cancel">Cancel</string>
     <string name="layout_set">Set</string>
-    <string name="layout_unset">Not set</string>
     <string name="layout_row_part_unknown">No pin can be picked: the board\'s part is not known.</string>
     <string name="layout_no_candidates">No pin on this part is free.</string>
-    <string name="layout_choice_imu_none">None fitted</string>
-    <string name="layout_choice_imu_mpu6050">MPU-6050</string>
-    <string name="layout_choice_imu_clone">MPU-6050 clone</string>
 
     <string name="layout_notice_armed">The board is armed. A layout is written to flash, which it refuses while armed.</string>
     <string name="layout_notice_not_attached">No board is attached, so nothing was sent.</string>
@@ -590,6 +585,9 @@
     <string name="layout_notice_refused">The board refused the write to %1$s.</string>
     <!-- %1$s is the previous board\'s address. -->
     <string name="layout_notice_board_changed">A different board attached. The layout read from board %1$s was dropped: pins are a fact about one board.</string>
+    <!-- %1$s is the refusal: the field\'s path and the reason. -->
+    <string name="layout_notice_check_refused">Nothing was written. %1$s</string>
+    <string name="layout_notice_chip_unknown">Nothing was written: pins and instances are checked against the board\'s part, and the part is not known.</string>
 
     <!-- The fault lamp grid and each lamp's sheet (`specs/remote-ui.md` 3.1b), verbatim from what the firmware does. -->
     <string name="lamp_link_title">Board link lost</string>
@@ -750,19 +748,9 @@
     <string name="status_fn_battery">battery sense</string>
     <!-- %1$s is the field id in hex, %2$d the index: a field this app has no name for. -->
     <string name="status_fn_unknown">field %1$s[%2$d]</string>
-    <!-- The reasons. %1$s is a byte in hex, a field path or a pin name. -->
-    <string name="status_reason_not_a_pin">stored byte %1$s is not a pin</string>
-    <string name="status_reason_incomplete">incomplete: %1$s is not set</string>
-    <string name="status_reason_not_routed">the chip does not route %1$s</string>
-    <string name="status_reason_link_not_routed">no USART routes this pair on this chip (%1$s)</string>
-    <string name="status_reason_swd">%1$s is an SWD pin</string>
-    <!-- %1$d is the stored dead time, %2$d the floor. -->
-    <string name="status_reason_dead_time">dead time %1$d is below the floor of %2$d</string>
     <!-- %1$d is the HAL's error code. -->
     <string name="status_reason_not_up">did not come up (HAL error %1$d)</string>
     <string name="status_reason_no_answer">did not answer its probe</string>
-    <!-- %1$d is the first imu.axis_sign index of the refused triple. -->
-    <string name="status_reason_imu_frame">the IMU frame is not a rotation (axis_sign from index %1$d)</string>
     <!-- %1$d is the reason byte, %2$d the detail byte. -->
     <string name="status_reason_unknown">reason %1$d, detail %2$d</string>
 </resources>

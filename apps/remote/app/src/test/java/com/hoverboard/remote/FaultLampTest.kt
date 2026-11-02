@@ -19,20 +19,20 @@ import org.junit.jupiter.api.Test
  */
 class FaultLampTest {
 
-    private fun one(imu: Int?) = listOf(LampFacts(0x01, imu))
-    private fun two(imu: Int?) = listOf(LampFacts(0x01, imu), LampFacts(0x02, imu))
+    private fun one(imu: Boolean?) = listOf(LampFacts(0x01, imu))
+    private fun two(imu: Boolean?) = listOf(LampFacts(0x01, imu), LampFacts(0x02, imu))
 
-    /** Every lamp against one and two motor controllers and `imu.model` 0, not 0 and unread. */
+    /** Every lamp against one and two motor controllers and an IMU not fitted, fitted and unread. */
     @Test
     fun `each lamp applies where the firmware can light it`() {
         for (count in listOf(1, 2)) {
-            for (imu in listOf(0, 1, null)) {
+            for (imu in listOf(false, true, null)) {
                 val facts = if (count == 1) one(imu) else two(imu)
                 val shown = shownLamps(facts, facts.associate { it.address to 0 })
                 assertEquals(count == 2, FaultLamp.LINK in shown, "LINK on $count boards")
                 // Unread counts as fitted, so an unread fact never hides a lamp.
-                assertEquals(imu != 0, FaultLamp.TILT in shown, "TILT with imu.model $imu")
-                assertEquals(imu != 0, FaultLamp.IMU in shown, "IMU with imu.model $imu")
+                assertEquals(imu != false, FaultLamp.TILT in shown, "TILT with an IMU fitted: $imu")
+                assertEquals(imu != false, FaultLamp.IMU in shown, "IMU with an IMU fitted: $imu")
                 for (lamp in listOf(FaultLamp.LATCH, FaultLamp.HALL, FaultLamp.CAL, FaultLamp.PERIOD, FaultLamp.ARM)) {
                     assertTrue(lamp in shown, "$lamp on every motor controller")
                 }
@@ -45,20 +45,20 @@ class FaultLampTest {
     /** TILT and IMU apply when either board has an IMU: a rigid follower has none, its leader does. */
     @Test
     fun `an imu on one board shows the imu lamps for the machine`() {
-        val shown = shownLamps(listOf(LampFacts(0x01, 1), LampFacts(0x02, 0)), emptyMap())
+        val shown = shownLamps(listOf(LampFacts(0x01, true), LampFacts(0x02, false)), emptyMap())
         assertTrue(FaultLamp.TILT in shown && FaultLamp.IMU in shown)
     }
 
     @Test
     fun `latch 2 is absent until its bit is set`() {
-        assertFalse(FaultLamp.LATCH_2 in shownLamps(two(1), mapOf(0x01 to 0, 0x02 to 0)))
-        assertTrue(FaultLamp.LATCH_2 in shownLamps(two(1), mapOf(0x01 to 0, 0x02 to CyclicState.EV_LATCH_B)))
+        assertFalse(FaultLamp.LATCH_2 in shownLamps(two(true), mapOf(0x01 to 0, 0x02 to 0)))
+        assertTrue(FaultLamp.LATCH_2 in shownLamps(two(true), mapOf(0x01 to 0, 0x02 to CyclicState.EV_LATCH_B)))
     }
 
     @Test
     fun `config is absent until its bit is set, and blocks nothing`() {
-        assertFalse(FaultLamp.CONFIG in shownLamps(two(1), mapOf(0x01 to 0, 0x02 to 0)))
-        assertTrue(FaultLamp.CONFIG in shownLamps(two(1), mapOf(0x01 to 0, 0x02 to CyclicState.EV_CONFIG)))
+        assertFalse(FaultLamp.CONFIG in shownLamps(two(true), mapOf(0x01 to 0, 0x02 to 0)))
+        assertTrue(FaultLamp.CONFIG in shownLamps(two(true), mapOf(0x01 to 0, 0x02 to CyclicState.EV_CONFIG)))
         assertEquals("F12", FaultLamp.CONFIG.code)
         assertFalse(FaultLamp.CONFIG.blocksArm)
         assertEquals(FaultLamp.entries - FaultLamp.CONFIG, FaultLamp.entries.filter { it.blocksArm })
@@ -69,7 +69,8 @@ class FaultLampTest {
     fun `a set bit is never hidden`() {
         // One board with no IMU: LINK, TILT, IMU and LATCH 2 do not apply.
         for (lamp in FaultLamp.entries) {
-            assertTrue(lamp in shownLamps(one(0), mapOf(0x01 to lamp.bit)), "$lamp set on a board it does not apply on")
+            val shown = shownLamps(one(false), mapOf(0x01 to lamp.bit))
+            assertTrue(lamp in shown, "$lamp set on a board it does not apply on")
         }
         // A bit set on a reporting board the walk has not classed is shown too.
         assertTrue(FaultLamp.HALL in shownLamps(emptyList(), mapOf(0x05 to CyclicState.EV_MOTOR_HALL)))
@@ -79,7 +80,7 @@ class FaultLampTest {
     fun `the lamps keep the grid's order`() {
         assertEquals(
             FaultLamp.entries.filter { it != FaultLamp.LATCH_2 && it != FaultLamp.MACHINE && it != FaultLamp.CONFIG },
-            shownLamps(two(1), emptyMap()),
+            shownLamps(two(true), emptyMap()),
         )
     }
 
@@ -94,7 +95,7 @@ class FaultLampTest {
         assertEquals(5, lampColumns(10))
         assertEquals(6, lampColumns(11))
         val all = shownLamps(
-            two(1),
+            two(true),
             mapOf(0x01 to (CyclicState.EV_LATCH_B or CyclicState.EV_MACHINE), 0x02 to CyclicState.EV_CONFIG),
         )
         assertEquals(11, all.size)

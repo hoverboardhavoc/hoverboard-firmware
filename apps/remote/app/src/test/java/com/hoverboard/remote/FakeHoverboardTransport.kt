@@ -112,7 +112,8 @@ class FakeHoverboardTransport(
 
     /**
      * The fake board's store, by (target, key). A read of a key it does not hold answers the
-     * caller's [defaults] entry, the way a real board answers a registered field's default.
+     * caller's [defaults] entry as a default (`CFG_DEFAULT`), the way a real board answers a
+     * registered field's default.
      *
      * Every node starts out answering what every board running this firmware answers unwritten:
      * its default `device.name`, `machine.mode` throttle, `machine.frame` pivoting and
@@ -239,7 +240,7 @@ class FakeHoverboardTransport(
             key in garbledReads ->
                 Malformed(ConfigResp(key.fieldId, key.index, Walk.CFG_OK, undecodableTag, byteArrayOf(1)))
             v == null -> Refused(CfgRefusal.UNKNOWN_KEY)
-            else -> ReadValue(v)
+            else -> ReadValue(v, isDefault = store[target to key] == null)
         }
     }
 

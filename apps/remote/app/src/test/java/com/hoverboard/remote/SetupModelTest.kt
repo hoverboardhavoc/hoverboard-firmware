@@ -80,7 +80,7 @@ class SetupModelTest {
         rig.model.onShown()
         runCurrent()
         assertEquals(rideFacts + SetupFields.ALL.map { board to it.key }, rig.transport.reads)
-        assertEquals(SetupFields.ALL.associate { it.key to it.def.default }, rig.state.values)
+        assertEquals((SetupFields.ALL + SetupFields.IMU_SCL).associate { it.key to it.def.default }, rig.state.values)
 
         rig.model.onHidden()
         rig.model.onShown()
@@ -146,8 +146,8 @@ class SetupModelTest {
     fun `each board's status is read on attach and decoded`() = runTest {
         val rig = SetupRig(this)
         rig.transport.statuses[other] = listOf(
-            BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.DEAD_TIME.code, 10),
-            BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED.code, 0x16),
+            BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.NOT_UP.code, 5),
+            BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_UP.code, 3),
         )
 
         rig.transport.setAttachedBoard(board, other)
@@ -156,8 +156,8 @@ class SetupModelTest {
         assertEquals(emptyList<BoardStatus.Entry>(), rig.state.setupOf(board).status, "everything came up")
         assertEquals(
             listOf(
-                BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.DEAD_TIME.code, 10),
-                BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED.code, 0x16),
+                BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.NOT_UP.code, 5),
+                BoardStatus.Entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_UP.code, 3),
             ),
             rig.state.setupOf(other).status,
         )

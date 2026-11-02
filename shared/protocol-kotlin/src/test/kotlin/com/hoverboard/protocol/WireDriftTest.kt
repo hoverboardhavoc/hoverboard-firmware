@@ -584,6 +584,9 @@ class WireDriftTest {
         assertEquals(0x08, Type.Bool.tag)
         assertEquals(0x09, Type.Blob.tag)
         assertEquals(0x0A, Type.Str.tag)
+        assertEquals(0x0B, Type.Pin.tag)
+        assertEquals(0x0C, Type.PinAf.tag)
+        assertEquals(0x0D, Type.PinAdc.tag)
     }
 
     // --- Forward-compatibility contract -----------------------------------------------------------

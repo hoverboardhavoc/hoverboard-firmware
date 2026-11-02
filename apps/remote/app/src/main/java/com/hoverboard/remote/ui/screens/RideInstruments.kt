@@ -227,13 +227,13 @@ private fun BoxScope.PackLine(battery: BatteryReading, low: Boolean, k: Float) {
 
 /**
  * One board's attitude: its slot label in [Neon], the mini horizon, and its own pitch and roll to
- * 0.1 degree; the horizon's ring alone and dashes for a silent board, and "no IMU" for a board whose
- * `imu.model` reads 0.
+ * 0.1 degree; the horizon's ring alone and dashes for a silent board, and "no IMU" for a board with
+ * no IMU fitted.
  */
 @Composable
 private fun AttitudeCorner(state: UiState, slot: RideSlot, modifier: Modifier = Modifier) {
     val cyclic = state.telemetryOf(slot.address)?.cyclic
-    val noImu = state.imuModel[slot.address] == 0
+    val noImu = state.imuFitted[slot.address] == false
     Column(modifier = modifier.width(CORNER_WIDTH), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(slotLabel(slot), style = ride(11.sp, FontWeight.Bold), color = Neon)
         Spacer(Modifier.height(2.dp))

@@ -3,7 +3,7 @@ package com.hoverboard.remote.ui.screens
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.res.stringResource
 import com.hoverboard.protocol.board.Layout
-import com.hoverboard.protocol.board.PIN_ABSENT
+import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.LayoutNotice
@@ -16,7 +16,7 @@ import com.hoverboard.remote.R
  */
 @Suppress("CyclomaticComplexMethod")
 @Composable
-internal fun layoutNoticeText(n: LayoutNotice): String = when (n) {
+internal fun layoutNoticeText(n: LayoutNotice, chip: Chip?): String = when (n) {
     LayoutNotice.ReadOnlyWhileArmed -> stringResource(R.string.layout_notice_armed)
     LayoutNotice.NotAttached -> stringResource(R.string.layout_notice_not_attached)
     LayoutNotice.NotRead -> stringResource(R.string.layout_not_read)
@@ -25,21 +25,19 @@ internal fun layoutNoticeText(n: LayoutNotice): String = when (n) {
     is LayoutNotice.Mismatch -> stringResource(
         R.string.layout_notice_mismatch,
         keyLabel(n.key),
-        valueOfKey(n.key, n.wrote.let { v -> rawOf(n.key, v) }),
-        n.stored?.let { valueOfKey(n.key, rawOf(n.key, it)) } ?: "?",
+        valueOfKey(n.key, n.wrote, chip),
+        n.stored?.let { valueOfKey(n.key, it, chip) } ?: "?",
     )
     is LayoutNotice.Unanswered -> stringResource(R.string.layout_notice_unanswered, keyLabel(n.key))
     is LayoutNotice.Garbled -> stringResource(R.string.layout_notice_garbled, keyLabel(n.key))
     is LayoutNotice.BoardChanged -> stringResource(R.string.layout_notice_board_changed, boardHex(n.previous))
+    is LayoutNotice.CheckRefused -> stringResource(R.string.layout_notice_check_refused, n.refusal.msg)
+    LayoutNotice.ChipUnknown -> stringResource(R.string.layout_notice_chip_unknown)
 }
 
 @Composable
-private fun keyLabel(key: com.hoverboard.protocol.store.Key): String =
-    Layout.forKey(key)?.let { layoutFieldLabel(it) } ?: key.toString()
-
-private fun rawOf(key: com.hoverboard.protocol.store.Key, value: com.hoverboard.protocol.store.Value): Int =
-    Layout.forKey(key)?.raw(value) ?: PIN_ABSENT
+private fun keyLabel(key: Key): String = Layout.forKey(key)?.let { layoutFieldLabel(it) } ?: key.toString()
 
 @Composable
-private fun valueOfKey(key: com.hoverboard.protocol.store.Key, raw: Int): String =
-    Layout.forKey(key)?.let { layoutValueText(it, raw) } ?: raw.toString()
+private fun valueOfKey(key: Key, value: Value, chip: Chip?): String =
+    Layout.forKey(key)?.let { layoutValueText(it, value, chip) } ?: value.toString()

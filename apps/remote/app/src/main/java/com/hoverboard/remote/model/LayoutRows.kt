@@ -1,7 +1,6 @@
 package com.hoverboard.remote.model
 
 import androidx.annotation.StringRes
-import com.hoverboard.protocol.board.BoardFields
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
@@ -20,14 +19,11 @@ enum class LayoutGroup(@StringRes val title: Int) {
 
 /** How one layout field is edited. */
 sealed interface LayoutEditor {
-    /** A pin, chosen from the pins the picker offers for this slot. */
+    /** A pin, chosen from the values the chip's table offers for this slot. */
     data object Pin : LayoutEditor
 
-    /** One of a fixed set of byte values. */
-    data class Choices(val choices: List<Choice>) : LayoutEditor
-
     /**
-     * A number in an inclusive range, plus [unset]: the one value outside that range the field
+     * A `u8` in an inclusive range, plus [unset]: the one value outside that range the field
      * also takes, where its unset state is not the bottom of its valid one (`motor.dead_time`,
      * whose 0 means no gates while its configured values start at a safety floor).
      */
@@ -58,10 +54,11 @@ data class LayoutRow(
 /**
  * The editor's rows: the pins of a layout and the few facts that configure them, with their labels.
  *
- * Not every field of a layout has a row. The three carried per-motor facts (direction, align offset,
+ * Not every key of a layout has a row. The three carried per-motor facts (direction, align offset,
  * counts per amp) are read with the rest, because a layout is one object, but the Setup screen
  * already edits the two that anyone edits, so a row for them here would be a second editor for a
- * field that is not this screen's subject.
+ * field that is not this screen's subject. The links and the remap keys are read so the checks see
+ * the whole board, and are written from `hoverboard-cli`.
  *
  * The power latch has a row and no editor, which is the one deliberate exception
  * (`specs/remote-ui.md` section 3.5, "Safety rails"): on battery that pin is what holds the board's
@@ -69,12 +66,6 @@ data class LayoutRow(
  * an operator can SEE what the board latches through, and it is not offered in the picker.
  */
 object LayoutRows {
-
-    private val imuModels = listOf(
-        Choice(Fields.ImuModel.NONE, R.string.layout_choice_imu_none),
-        Choice(Fields.ImuModel.MPU6050, R.string.layout_choice_imu_mpu6050),
-        Choice(Fields.ImuModel.CLONE_2E, R.string.layout_choice_imu_clone),
-    )
 
     /** Every row, in screen order. */
     val ALL: List<LayoutRow> = buildList {
@@ -119,11 +110,11 @@ object LayoutRows {
         row(Fields.IMU_SCL_PIN, null, R.string.layout_field_imu_scl, LayoutGroup.IMU, note = R.string.layout_note_imu)
         row(Fields.IMU_SDA_PIN, null, R.string.layout_field_imu_sda, LayoutGroup.IMU)
         row(
-            Fields.IMU_MODEL, null, R.string.layout_field_imu_model, LayoutGroup.IMU,
-            editor = LayoutEditor.Choices(imuModels),
+            Fields.IMU_I2C, null, R.string.layout_field_imu_i2c, LayoutGroup.IMU,
+            editor = LayoutEditor.Number(0L..U8_MAX),
         )
 
-        for (m in 0 until BoardFields.MOTORS) {
+        for (m in 0 until Fields.MOTORS) {
             row(
                 Fields.MOTOR_HALL_A, m, R.string.layout_field_hall_a, LayoutGroup.MOTOR,
                 note = R.string.layout_note_halls,
@@ -139,6 +130,10 @@ object LayoutRows {
             row(Fields.MOTOR_GATE_LO_A, m, R.string.layout_field_gate_lo_a, LayoutGroup.MOTOR)
             row(Fields.MOTOR_GATE_LO_B, m, R.string.layout_field_gate_lo_b, LayoutGroup.MOTOR)
             row(Fields.MOTOR_GATE_LO_C, m, R.string.layout_field_gate_lo_c, LayoutGroup.MOTOR)
+            row(
+                Fields.MOTOR_GATE_TIMER, m, R.string.layout_field_gate_timer, LayoutGroup.MOTOR,
+                editor = LayoutEditor.Number(0L..U8_MAX),
+            )
             row(
                 Fields.MOTOR_DEAD_TIME, m, R.string.layout_field_dead_time, LayoutGroup.MOTOR,
                 editor = LayoutEditor.Number(DEAD_TIME_MIN_DTG.toLong()..DEAD_TIME_MAX, unset = DEAD_TIME_UNSET),
@@ -162,9 +157,12 @@ object LayoutRows {
     /** The dead time is a raw DTG byte, so the type is its only upper bound. */
     const val DEAD_TIME_MAX = 255L
 
+    /** A `u8`'s top: the instance rows take any byte and the checks judge it against the chip. */
+    private const val U8_MAX = 255L
+
     /**
-     * The dead time with no gate group behind it. The motor bring-up takes 0 only with the gates
-     * unset, and a configured gate group at or above [DEAD_TIME_MIN_DTG], so the row offers
+     * The dead time with no gate group behind it. The checks take 0 only with the gates unset, and
+     * a configured gate group at or above [DEAD_TIME_MIN_DTG], so the row offers
      * the floor upwards plus this one value (`protocol-kotlin`'s `DEAD_TIME_MIN_DTG` owns why).
      */
     const val DEAD_TIME_UNSET = 0L

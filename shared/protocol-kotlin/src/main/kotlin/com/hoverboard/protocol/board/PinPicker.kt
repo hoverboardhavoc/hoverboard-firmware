@@ -1,25 +1,46 @@
 package com.hoverboard.protocol.board
 
+import com.hoverboard.protocol.checks.Checks
+import com.hoverboard.protocol.checks.Role
+import com.hoverboard.protocol.pincap.Chip
+import com.hoverboard.protocol.pincap.SWD
+import com.hoverboard.protocol.store.Value
+
 /**
- * Which pins a client may offer for one layout slot (`specs/remote-ui.md`, section 3.5, "THE PIN
- * GRID"): the pins [chip] bonds, less the SWD pair and the pins another slot already holds.
+ * The values a client may offer for one layout slot (`specs/remote-ui.md` section 3.5, "THE PIN
+ * GRID"), taken from [chip]'s table ([com.hoverboard.protocol.pincap]): every pin the chip bonds,
+ * less the SWD pair and the pins another function holds, that can carry the slot's function. A
+ * plain pin is any such pin; an ADC input carries its pin's channel; an alternate-function pin
+ * carries the AF number of each route the table has for its function (0 on a chip that remaps,
+ * whose group's remap key selects the route instead).
  *
- * It does not ask what the chip can route to the slot's function (an ADC channel, an I2C pair, a
- * gate timer). The firmware asks the HAL that at boot, per board, and a pin it cannot use is
- * listed in the board's status after the reboot ([BoardStatus]); a table here would be a second,
- * unpinned answer to the same question.
- *
- * Returns an empty list for a slot that holds no pin ([LayoutSlot.isPin] false), which has choices
- * of its own rather than pins. [PIN_ABSENT] is not among the offers: unsetting a function is always
- * available and is not a pin. A slot's own current value is offered, so a row shows what it holds.
+ * The offer narrows what can be expressed; it does not judge the layout as a whole. Which
+ * instance a group uses, and whether the group is complete, are the checks' to answer before the
+ * write ([Checks]). A slot that holds no pin, or no pin of a group, offers nothing.
  */
-fun candidatePins(slot: LayoutSlot, fields: BoardFields, chip: ChipFamily): List<Pin> {
-    if (!slot.isPin) return emptyList()
-    val taken = Layout.SLOTS
-        .filter { it.isPin && it.key != slot.key }
-        .mapNotNull { (Pin.parse(it.of(fields)) as? Parsed.Valid)?.pin?.packed }
+fun candidates(slot: LayoutSlot, fields: BoardFields, chip: Chip): List<Value> {
+    val role = Checks.roleOf(slot.key) ?: return emptyList()
+    val t = chip.table
+    val taken = Checks.GROUPS.flatMap { g -> g.pins.map { it.first.key } }
+        .filter { it != slot.key }
+        .mapNotNull { Checks.pinAt(fields.values, it) }
         .toSet()
-    return (0 until PIN_ABSENT)
-        .mapNotNull { (Pin.parse(it) as? Parsed.Valid)?.pin }
-        .filter { chip.pinExists(it) && it.packed !in SWD_PINS && it.packed !in taken }
+    val free = (0 until PORTS).flatMap { port -> (0 until PINS).map { port to it } }
+        .filter { (port, pin) -> t.bonded(port, pin) && (port to pin) !in SWD && (port to pin) !in taken }
+    return free.flatMap { (port, pin) ->
+        when (role) {
+            Role.Plain -> listOf(Value.Pin(port, pin))
+            Role.Adc -> listOfNotNull(t.adcChannel(port, pin)?.let { Value.PinAdc(port, pin, it) })
+            is Role.Af -> t.routes
+                .filter { it.port == port && it.pin == pin && it.func.kind == role.kind && it.func.ch == role.ch }
+                .map { Value.PinAf(port, pin, if (chip.remaps) 0 else it.sel) }
+                .distinct()
+        }
+    }
 }
+
+/** The ports a pin table describes, `A` to `F`. */
+private const val PORTS = 6
+
+/** The pins of one port. */
+private const val PINS = 16

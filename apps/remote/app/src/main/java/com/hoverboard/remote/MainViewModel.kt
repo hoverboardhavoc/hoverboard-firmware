@@ -124,7 +124,8 @@ import kotlinx.coroutines.launch
  *   slot ([slots]).
  * @param batteryFloor each board's `board.battery.floor`, centivolts, from the same read: where the
  *   Ride ring turns caution ([batteryLow]).
- * @param imuModel each board's `imu.model`, from the same read: 0 is no IMU fitted.
+ * @param imuFitted whether each board has an IMU fitted, from its `imu.scl` in the same read
+ *   ([SetupFields.imuFitted]).
  * @param boardStatus each board's boot status record entries (`STATUS_READ`), from the same read:
  *   the functions its last boot configured and could not bring up; empty when they all came up,
  *   absent while unread.
@@ -176,7 +177,7 @@ data class UiState(
     val speedFacts: List<SpeedFacts> = emptyList(),
     val sides: Map<Int, Int> = emptyMap(),
     val batteryFloor: Map<Int, Int> = emptyMap(),
-    val imuModel: Map<Int, Int> = emptyMap(),
+    val imuFitted: Map<Int, Boolean> = emptyMap(),
     val boardStatus: Map<Int, List<BoardStatus.Entry>> = emptyMap(),
     val machineDifferences: Map<Key, Map<Int, Value>> = emptyMap(),
     val currentLimit: Map<Int, Int> = emptyMap(),
@@ -301,7 +302,7 @@ data class UiState(
 
     /** The lamps the grid shows ([shownLamps]). */
     val lamps: List<FaultLamp>
-        get() = shownLamps(motorControllers.map { LampFacts(it.address, imuModel[it.address]) }, lampWords)
+        get() = shownLamps(motorControllers.map { LampFacts(it.address, imuFitted[it.address]) }, lampWords)
 
     /**
      * Whether the fault grid is drawn: a lamp that refuses the arm is lit, or the lamp test is on
@@ -618,7 +619,9 @@ class MainViewModel(
                 },
                 sides = b.setup.rideFacts(mcs, SetupFields.CONTROL_SIDE),
                 batteryFloor = b.setup.rideFacts(mcs, SetupFields.BATTERY_FLOOR),
-                imuModel = b.setup.rideFacts(mcs, SetupFields.IMU_MODEL),
+                imuFitted = mcs.mapNotNull { a ->
+                    b.setup.setupOf(a).values[SetupFields.IMU_SCL.key]?.let { a to SetupFields.imuFitted(it) }
+                }.toMap(),
                 boardStatus = mcs.mapNotNull { a -> b.setup.setupOf(a).status?.let { a to it } }.toMap(),
                 machineDifferences = b.setup.machineDifferences,
                 currentLimit = b.setup.rideFacts(mcs, SetupFields.MOTOR_CURRENT_LIMIT),

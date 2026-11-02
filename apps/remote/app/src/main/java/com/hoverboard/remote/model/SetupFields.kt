@@ -10,6 +10,7 @@ import com.hoverboard.protocol.store.FieldDef
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.NO_PORT
 import com.hoverboard.protocol.store.Scope
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
@@ -148,7 +149,7 @@ fun Value.asLong(): Long? = when (this) {
     is Value.I16 -> v.toLong()
     is Value.I32 -> v.toLong()
     is Value.I64 -> v
-    is Value.Bool, is Value.Str, is Value.Bytes -> null
+    is Value.Bool, is Value.Str, is Value.Bytes, is Value.Pin, is Value.PinAf, is Value.PinAdc -> null
 }
 
 /** How a value reads on screen. */
@@ -170,7 +171,7 @@ private fun integer(type: Type, n: Long): Value? {
         Type.I16 -> Value.I16(n.toInt())
         Type.I32 -> Value.I32(n.toInt())
         Type.I64 -> Value.I64(n)
-        Type.Bool, Type.Str, Type.Blob -> null
+        Type.Bool, Type.Str, Type.Blob, Type.Pin, Type.PinAf, Type.PinAdc -> null
     }
 }
 
@@ -183,7 +184,7 @@ private fun naturalRange(type: Type): LongRange? = when (type) {
     Type.I16 -> Short.MIN_VALUE.toLong()..Short.MAX_VALUE.toLong()
     Type.I32 -> Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()
     Type.I64 -> Long.MIN_VALUE..Long.MAX_VALUE
-    Type.Bool, Type.Str, Type.Blob -> null
+    Type.Bool, Type.Str, Type.Blob, Type.Pin, Type.PinAf, Type.PinAdc -> null
 }
 
 private const val U8_MAX = 0xFFL
@@ -293,14 +294,15 @@ object SetupFields {
         Editor.Range(0L..ALIGN_OFFSET_MAX),
     )
     /**
-     * `motor.dead_time`, the SECOND editor of the field the layout screen also offers. The board
-     * does not bring up a configured gate group below [DEAD_TIME_MIN_DTG] (shoot-through), and 0
-     * means the gates are unset, so this row offers exactly what the motor bring-up takes rather
-     * than the whole byte.
+     * `motor.dead_time`, the SECOND editor of the field the layout screen also offers. The checks
+     * refuse a configured gate group below [DEAD_TIME_MIN_DTG] (shoot-through), and judging that
+     * needs the gate pins and the chip, which the layout editor reads and this screen does not. So
+     * this row offers the floor upwards and nothing below it, which no check refuses whatever the
+     * gates are.
      */
     val MOTOR_DEAD_TIME = SetupField(
         Fields.MOTOR_DEAD_TIME, 0, R.string.setup_field_dead_time, SetupGroup.DRIVE,
-        Editor.Range(DEAD_TIME_MIN_DTG.toLong()..U8_MAX, unset = 0L),
+        Editor.Range(DEAD_TIME_MIN_DTG.toLong()..U8_MAX),
         note = R.string.setup_note_dead_time, noteArgs = listOf(DEAD_TIME_MIN_DTG),
     )
     val MOTOR_CURRENT_LIMIT = SetupField(
@@ -339,16 +341,13 @@ object SetupFields {
         ),
         note = R.string.setup_note_control_side, advanced = true,
     )
-    val IMU_MODEL = SetupField(
-        Fields.IMU_MODEL, 0, R.string.setup_field_imu_model, SetupGroup.IMU,
-        Editor.Chips(
-            listOf(
-                Choice(Fields.ImuModel.NONE, R.string.setup_choice_imu_none),
-                Choice(Fields.ImuModel.MPU6050, R.string.setup_choice_imu_mpu6050),
-                Choice(Fields.ImuModel.CLONE_2E, R.string.setup_choice_imu_clone),
-            ),
-        ),
-    )
+    /**
+     * `imu.scl`, read with the ride facts for one fact: whether the board has an IMU fitted. The IMU
+     * is fitted when its two pins and its I2C instance are stored (`shared/store/src/field.rs, IMU_I2C`),
+     * and the checks refuse a half-stored group, so a stored SCL pin is a fitted IMU; an unstored one
+     * reads back as the absent bytes ([imuFitted]). The layout editor edits it; Setup lists no row.
+     */
+    val IMU_SCL = SetupField(Fields.IMU_SCL_PIN, 0, R.string.layout_field_imu_scl, null, Editor.ReadOnly)
 
     /** `ATTITUDE_LEVEL_TRIM` index 0 (pitch) and 1 (roll); the "set level" flow writes both. */
     val LEVEL_TRIM: List<SetupField> = listOf(
@@ -492,14 +491,15 @@ object SetupFields {
      * the control mode the drive mode is derived from (`specs/machine-settings.md` section 7), the
      * pack's cell count and chemistry, the rider requirement, and what the Ride screen's
      * instruments read beside the telemetry (`specs/remote-ui.md` 3.1): the low-battery floor the
-     * ring turns caution at, the IMU model that decides the attitude corner and the TILT and IMU
-     * lamps, and the current limit a phase bar is full at. Each is a fact a screen states before
-     * Setup has ever been opened. A machine field among them is read once and stands for every
-     * motor controller ([SetupField.machine]); the rest are read from each.
+     * ring turns caution at, the IMU pin that says whether an IMU is fitted, which decides the
+     * attitude corner and the TILT and IMU lamps, and the current limit a phase bar is full at.
+     * Each is a fact a screen states before Setup has ever been opened. A machine field among them
+     * is read once and stands for every motor controller ([SetupField.machine]); the rest are read
+     * from each.
      */
     val MOTOR_FACTS: List<SetupField> =
-        MACHINE + CONTROL_MODE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED + BATTERY_FLOOR + IMU_MODEL +
-            MOTOR_CURRENT_LIMIT
+        MACHINE + CONTROL_MODE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED + BATTERY_FLOOR +
+            IMU_SCL + MOTOR_CURRENT_LIMIT
 
 
     /**
@@ -524,10 +524,9 @@ object SetupFields {
         DEVICE_NAME, NODE_ADDRESS,
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_CHEMISTRY, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
         MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE,
-        IMU_MODEL,
     ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
-    private val byKey: Map<Key, SetupField> = (ALL + DRIVE_BOUNDS).associateBy { it.key }
+    private val byKey: Map<Key, SetupField> = (ALL + DRIVE_BOUNDS + IMU_SCL).associateBy { it.key }
 
     /**
      * The row editing [key], or null when no screen has one. The Tune screen's [DRIVE_BOUNDS] are
@@ -552,5 +551,8 @@ object SetupFields {
 
     /** The largest axis role, chip Z (`1 = X`, `2 = Y`, `3 = Z`). */
     const val ROLE_MAX = 3L
+
+    /** Whether [scl], an `imu.scl` read, is a stored pin: an IMU is fitted ([IMU_SCL]). */
+    fun imuFitted(scl: Value): Boolean = (scl as? Value.PinAf)?.port?.let { it != NO_PORT } == true
 
 }

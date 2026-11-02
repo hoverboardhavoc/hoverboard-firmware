@@ -64,5 +64,15 @@
       }
     },
     "refused": null
+  },
+  {
+    "name": "wifi.tx_power outside its range is the tool's forceable check, not a board check",
+    "chip": "gd32f130c8",
+    "board": {
+      "wifi": {
+        "tx_power": 90
+      }
+    },
+    "refused": null
   }
 ]

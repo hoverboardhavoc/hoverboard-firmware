@@ -274,7 +274,7 @@ class ScreenshotTest {
     private fun unknown(): UiState = sided(armed = false).copy(
         telemetryByBoard = mapOf(0x01 to board(battery = 0, pitch = 120, roll = -40)),
         countsPerAmp = mapOf(0x02 to DRIVING_CAL),
-        imuModel = mapOf(0x01 to 0, 0x02 to IMU_FITTED),
+        imuFitted = mapOf(0x01 to false, 0x02 to true),
         speedFacts = listOf(
             SpeedFacts(0x01, 0, polePairs = POLE_PAIRS, diameterMm = 0, side = Fields.ControlSide.LEFT),
         ),
@@ -373,7 +373,8 @@ class ScreenshotTest {
 
     @Test
     fun layout_editor() {
-        val values = Layout.SLOTS.associate { it.key to it.def.default }
+        // A board that stores nothing: every key read, each answered with its default.
+        val values = Layout.SLOTS.associate<LayoutSlot, Key, Value?> { it.key to null }
         val state = LayoutState(
             board = 0x01,
             chip = ChipTag.F103C8,
@@ -489,7 +490,7 @@ class ScreenshotTest {
             packChemistry = boards.associateWith { Fields.BatteryChemistry.LI_ION },
             sides = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.RIGHT),
             currentLimit = boards.associateWith { LIMIT_MA },
-            imuModel = boards.associateWith { IMU_FITTED },
+            imuFitted = boards.associateWith { true },
             batteryFloor = boards.associateWith { 0 },
             wheelGeometry = boards.associateWith { WheelGeometry(POLE_PAIRS, DIAMETER_MM) },
             speedFacts = listOf(
@@ -552,7 +553,7 @@ class ScreenshotTest {
         override fun onShown() = Unit
         override fun onHidden() = Unit
         override fun refresh() = Unit
-        override fun stage(slot: LayoutSlot, raw: Int) = Unit
+        override fun stage(slot: LayoutSlot, value: Value) = Unit
         override fun revert(slot: LayoutSlot) = Unit
         override fun revertAll() = Unit
         override fun apply() = Unit
@@ -600,7 +601,6 @@ class ScreenshotTest {
         const val LIMIT_MA = 15_000
         const val LEFT_AMPS = 6.8f
         const val RIGHT_AMPS = 5.1f
-        const val IMU_FITTED = 1
         const val POLE_PAIRS = 15
         const val DIAMETER_MM = 165
         const val RIDING_KMH = 7.4

@@ -8,8 +8,7 @@ import org.junit.jupiter.api.Test
 /**
  * The `STATUS` decode, against the record's encoding (`StatusRecord` in
  * `motorcontroller/board/src/status.rs`) and the crate's own vectors for it
- * (`motorcontroller/board/src/tests.rs` (entries_encode_as_four_bytes_each_in_record_order,
- * a_trailing_partial_entry_is_ignored)).
+ * (`motorcontroller/board/src/tests.rs, every_reason_round_trips_through_its_byte`).
  */
 class BoardStatusTest {
 
@@ -24,29 +23,21 @@ class BoardStatusTest {
     fun entriesDecodeFourBytesEachInRecordOrder() {
         val entries = BoardStatus.decode(
             bytes(
-                0x0F, 1, 3, 0x16, // links[1]: not routed, PB6
-                0x43, 0, 5, 10, // motors[0] gate: dead time 10
+                0x0F, 1, 6, 3, // links[1]: the HAL refused it, code 3
                 0x11, 0, 6, 0, // IMU: did not answer its probe
             ),
         )
         assertEquals(
-            listOf(
-                BoardStatus.Entry(Fields.LINK_TX.id, 1, 3, 0x16),
-                BoardStatus.Entry(Fields.MOTOR_GATE_HI_A.id, 0, 5, 10),
-                BoardStatus.Entry(Fields.IMU_SCL_PIN.id, 0, 6, 0),
-            ),
+            listOf(BoardStatus.Entry(Fields.LINK_TX.id, 1, 6, 3), BoardStatus.Entry(Fields.IMU_SCL_PIN.id, 0, 6, 0)),
             entries,
         )
-        assertEquals(
-            listOf(BoardStatus.Reason.NOT_ROUTED, BoardStatus.Reason.DEAD_TIME, BoardStatus.Reason.NOT_UP),
-            entries.map { it.reason },
-        )
+        assertEquals(listOf(BoardStatus.Reason.NOT_UP, BoardStatus.Reason.NOT_UP), entries.map { it.reason })
     }
 
     @Test
     fun aTrailingPartialEntryIsIgnored() {
-        val entries = BoardStatus.decode(bytes(0x07, 0, 1, 0x40, 0x4A, 0))
-        assertEquals(listOf(BoardStatus.Entry(Fields.BOARD_BATTERY_PIN.id, 0, 1, 0x40)), entries)
+        val entries = BoardStatus.decode(bytes(0x07, 0, 6, 0x40, 0x4A, 0))
+        assertEquals(listOf(BoardStatus.Entry(Fields.BOARD_BATTERY_PIN.id, 0, 6, 0x40)), entries)
     }
 
     @Test
@@ -57,26 +48,9 @@ class BoardStatusTest {
     }
 
     @Test
-    fun theReasonsAreTheSevenCodesInOrder() {
-        assertEquals((1..7).toList(), BoardStatus.Reason.entries.map { it.code })
-        for (r in BoardStatus.Reason.entries) assertEquals(r, BoardStatus.Reason.of(r.code))
-        assertNull(BoardStatus.Reason.of(0))
-        assertNull(BoardStatus.Reason.of(8))
-    }
-
-    @Test
-    fun aNamePrintsItsIndexTheWayTheCliDoes() {
-        assertEquals("motors[1].hall.c", BoardStatus.NAMES.getValue(Fields.MOTOR_HALL_C.id).at(1))
-        assertEquals("links[0].rx", BoardStatus.NAMES.getValue(Fields.LINK_RX.id).at(0))
-        assertEquals("pads.a", BoardStatus.NAMES.getValue(Fields.PAD_A.id).at(0))
-        assertEquals("imu.axis_sign[2]", BoardStatus.NAMES.getValue(Fields.IMU_AXIS_SIGN.id).at(2))
-    }
-
-    @Test
-    fun everyLayoutFieldHasAName() {
-        // A detail of INCOMPLETE names any member of a group, which is a layout field or a link pin.
-        val unnamed = Layout.SLOTS.map { it.def.id }.distinct().filter { it !in BoardStatus.NAMES } -
-            setOf(Fields.MOTOR_DIRECTION.id, Fields.MOTOR_ALIGN_OFFSET.id, Fields.MOTOR_CURRENT_CAL.id)
-        assertEquals(emptyList<Int>(), unnamed)
+    fun notUpIsTheOneReasonAndKeepsItsNumber() {
+        assertEquals(listOf(6), BoardStatus.Reason.entries.map { it.code })
+        assertEquals(BoardStatus.Reason.NOT_UP, BoardStatus.Reason.of(6))
+        for (gone in listOf(1, 2, 3, 4, 5, 7)) assertNull(BoardStatus.Reason.of(gone), "reason $gone went with the firmware's checks")
     }
 }

@@ -1,10 +1,11 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.board.BoardFields
-import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
-import com.hoverboard.protocol.board.PIN_ABSENT
+import com.hoverboard.protocol.checks.Checks
+import com.hoverboard.protocol.checks.PinForm
+import com.hoverboard.protocol.checks.Refusal
 import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.ConfigReadResult
@@ -16,7 +17,9 @@ import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.config.WriteMismatch
 import com.hoverboard.protocol.config.WriteVerified
 import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ble.HoverboardTransport
 import com.hoverboard.remote.model.TelemetryUi
@@ -59,6 +62,18 @@ sealed interface LayoutNotice {
 
     /** A different board attached: the edits belonged to [previous] and were dropped. */
     data class BoardChanged(val previous: Int) : LayoutNotice
+
+    /**
+     * The configuration checks refused the staged layout (`specs/config-read-once.md` section 4),
+     * so nothing was written: [refusal] names the field and the reason.
+     */
+    data class CheckRefused(val refusal: Refusal) : LayoutNotice
+
+    /**
+     * The staged layout changes a pin, an instance or the dead time, which the checks judge
+     * against the board's chip, and the board has named no chip this app has a table for.
+     */
+    data object ChipUnknown : LayoutNotice
 }
 
 /**
@@ -70,9 +85,10 @@ sealed interface LayoutNotice {
  *   all, since every one of them carries the part. It survives a link drop the way the staged
  *   layout does, because power-cycling the board is part of applying a layout, and it is dropped
  *   when a DIFFERENT board attaches: the part is that board's fact, not the session's.
- * @param values the stored value of each layout field, as last read or verified-written.
+ * @param values each layout key as last read or verified-written: the value the board stores, or
+ *   null for a key it answered with its default (stores none).
  * @param unread fields whose last read failed.
- * @param staged the layout being edited: ONE object, the whole field set, never a basket of
+ * @param staged the layout being edited: ONE object, the whole key set, never a basket of
  *   independent values. Null until a read pass has produced a layout to edit.
  * @param written fields written AND verified this session: the firmware reads the layout once at
  *   boot, so these run only after a power-cycle. Dropped when the board's boot counter on the wire
@@ -81,7 +97,7 @@ sealed interface LayoutNotice {
 data class LayoutState(
     val board: Int? = null,
     val chip: ChipTag? = null,
-    val values: Map<Key, Value> = emptyMap(),
+    val values: Map<Key, Value?> = emptyMap(),
     val unread: Set<Key> = emptySet(),
     val staged: BoardFields? = null,
     val reading: Boolean = false,
@@ -92,11 +108,12 @@ data class LayoutState(
     val busy: Boolean get() = reading || applying
 
     /**
-     * The part the pin picker offers pins of: the one the board's own [chip] tag names, or null
-     * when the board named no part this app models ([ChipFamily.forTag]). With no part the pin
-     * rows cannot be picked, since which pins exist is a fact about the silicon.
+     * The part the pin picker offers pins of and the checks judge against: the one the board's own
+     * [chip] tag names, or null when the board named no part this app has a table for
+     * ([Chip.forTag]). With no part the pin rows cannot be picked, since which pins exist is a fact
+     * about the silicon.
      */
-    val part: ChipFamily? get() = chip?.let { ChipFamily.forTag(it) }
+    val part: Chip? get() = chip?.let { Chip.forTag(it) }
 
     /** The layout the board stores, or null while any field of it is unread. */
     val stored: BoardFields? get() = Layout.fieldsFrom(values)
@@ -111,8 +128,7 @@ data class LayoutState(
 
     /**
      * Whether Apply may run: a board attached and disarmed, nothing in flight, and something to
-     * write. Nothing judges the layout first: the board brings up what it can at its next boot and
-     * lists what it could not in its status (Setup's machine status).
+     * write. Apply then runs the configuration checks before it writes anything ([LayoutModel.apply]).
      */
     fun canApply(armed: Boolean): Boolean =
         board != null && !armed && !busy && delta.isNotEmpty()
@@ -128,7 +144,7 @@ data class LayoutState(
      */
     fun motorHoldsAPin(motor: Int): Boolean {
         val fields = staged ?: return false
-        return Layout.SLOTS.any { it.motor == motor && it.isPin && it.of(fields) != PIN_ABSENT }
+        return Layout.SLOTS.any { it.motor == motor && it.isPin && it.of(fields) != null }
     }
 }
 
@@ -144,7 +160,7 @@ interface LayoutActions {
     fun refresh()
 
     /** Set one field of the staged layout. */
-    fun stage(slot: LayoutSlot, raw: Int)
+    fun stage(slot: LayoutSlot, value: Value)
 
     /** Put one field back to what the board stores. */
     fun revert(slot: LayoutSlot)
@@ -165,9 +181,9 @@ interface LayoutActions {
  *
  * The thing being edited is ONE object, so there is no basket of independent values: [stage] edits
  * a copy of the whole layout, and [LayoutState.delta] is what it would take to make the board hold
- * it. Nothing judges the layout here. The firmware brings up each function from its own fields at
- * boot and lists what did not come up in its boot status record, which Setup's machine status shows
- * (`specs/configured-links.md` sections 3 and 5).
+ * it. The firmware applies what is stored and checks nothing, so [apply] runs the configuration
+ * checks (`specs/config-read-once.md` section 4) on the board as the delta would leave it, against
+ * the board's own chip, and writes nothing when one refuses.
  *
  * Writes go one field at a time, verified, because that is what the wire offers. A write that
  * fails mid-Apply leaves the rest staged, and applying again finishes it.
@@ -312,7 +328,7 @@ class LayoutModel(
     private fun record(key: Key, r: ConfigReadResult) {
         _state.update {
             if (r is ReadValue) {
-                it.copy(values = it.values + (key to r.value), unread = it.unread - key)
+                it.copy(values = it.values + (key to r.value.takeUnless { r.isDefault }), unread = it.unread - key)
             } else {
                 it.copy(values = it.values - key, unread = it.unread + key)
             }
@@ -333,18 +349,19 @@ class LayoutModel(
         s.copy(staged = s.staged ?: stored)
     }
 
-    override fun stage(slot: LayoutSlot, raw: Int) {
+    override fun stage(slot: LayoutSlot, value: Value) {
         if (refuseWhileArmed()) return
         _state.update { s ->
             val staged = s.staged ?: return@update s
-            s.copy(staged = slot.on(staged, raw), notice = null)
+            s.copy(staged = staged.with(slot, value), notice = null)
         }
     }
 
     override fun revert(slot: LayoutSlot) = _state.update { s ->
         val stored = s.stored ?: return@update s
         val staged = s.staged ?: return@update s
-        s.copy(staged = slot.on(staged, slot.of(stored)))
+        val back = slot.of(stored)
+        s.copy(staged = if (back == null) BoardFields(staged.values - slot.key) else staged.with(slot, back))
     }
 
     override fun revertAll() = _state.update { s -> s.copy(staged = s.stored ?: s.staged) }
@@ -357,7 +374,9 @@ class LayoutModel(
             _state.update { it.copy(notice = LayoutNotice.NotAttached) }
             return
         }
-        if (s.delta.isEmpty() || !op.tryLock()) return
+        val refused = s.delta.takeIf { it.isNotEmpty() }?.let { checkFirst(s) }
+        if (refused != null) _state.update { it.copy(notice = refused) }
+        if (s.delta.isEmpty() || refused != null || !op.tryLock()) return
         _state.update { it.copy(applying = true, notice = null) }
         scope.launch {
             try {
@@ -367,6 +386,27 @@ class LayoutModel(
                 op.unlock()
             }
         }
+    }
+
+    /**
+     * The configuration checks on the board as the delta would leave it (`specs/config-read-once.md`
+     * section 4), or null when they pass: the value checks always, and the pin checks against the
+     * board's chip. A delta that touches a key the pin checks read is refused while the chip is not
+     * known, as the CLI refuses one it cannot read `TARGET_ID` for. The `af` of a pin the editor
+     * offers follows the chip ([com.hoverboard.protocol.board.candidates]), given on a mux chip and
+     * left out on one that remaps, so its form is the chip's.
+     */
+    private fun checkFirst(s: LayoutState): LayoutNotice? {
+        val staged = s.staged ?: return LayoutNotice.NotRead
+        val part = s.part
+        val refused = if (part == null) {
+            if (s.delta.any { Checks.needsChip(it.key) }) return LayoutNotice.ChipUnknown
+            Checks.checkValues(staged.values)
+        } else {
+            val forms = s.delta.filter { it.def.type == Type.PinAf }.map { PinForm(it.key, afGiven = !part.remaps) }
+            Checks.run(part, staged.values, forms)
+        }
+        return refused.firstOrNull()?.let { LayoutNotice.CheckRefused(it) }
     }
 
     /**
@@ -381,9 +421,8 @@ class LayoutModel(
         for (slot in _state.value.delta) {
             // A field the board already holds is skipped, which is also what makes applying again
             // the way to finish an Apply a link drop cut short.
-            if (slot.of(staged) == _state.value.stored?.let(slot::of)) continue
+            val want = slot.of(staged)?.takeIf { it != _state.value.stored?.let(slot::of) } ?: continue
             if (refuseWhileArmed()) return
-            val want = slot.value(slot.of(staged))
             val answer = awaitSlot { transport.writeConfig(slot.key, want, board) }
             if (answer == null) {
                 _state.update { it.copy(notice = LayoutNotice.NotAttached) }

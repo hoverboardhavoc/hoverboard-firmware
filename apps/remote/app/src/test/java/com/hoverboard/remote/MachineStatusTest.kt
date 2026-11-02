@@ -21,7 +21,6 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.board.BoardStatus
-import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
@@ -505,21 +504,21 @@ class MachineStatusTest {
     @Test
     fun eachStatusEntryIsALineUnderItsBoard() {
         val entries = listOf(
-            entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_ROUTED, 0x16),
-            entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.DEAD_TIME, 10),
+            entry(Fields.LINK_TX.id, 1, BoardStatus.Reason.NOT_UP, 3),
+            entry(Fields.MOTOR_GATE_HI_A.id, 0, BoardStatus.Reason.NOT_UP, 5),
         )
         showState(pair(DriveInForce.NONE).copy(boardStatus = mapOf(0x01 to emptyList(), 0x02 to entries)))
 
         val link = line(
             context.getString(R.string.status_fn_link, 1),
-            context.getString(R.string.status_reason_link_not_routed, "PB6"),
+            context.getString(R.string.status_reason_not_up, 3),
         )
         val gate = line(
             context.getString(R.string.status_fn_gate, 0),
-            context.getString(R.string.status_reason_dead_time, 10, DEAD_TIME_MIN_DTG),
+            context.getString(R.string.status_reason_not_up, 5),
         )
-        assertEquals("link[1]: no USART routes this pair on this chip (PB6)", link)
-        assertEquals("motors[0] gate: dead time 10 is below the floor of 18", gate)
+        assertEquals("link[1]: did not come up (HAL error 3)", link)
+        assertEquals("motors[0] gate: did not come up (HAL error 5)", gate)
         compose.onNodeWithText(link).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(gate).performScrollTo().assertIsDisplayed()
         val right = compose.onNodeWithTag(statusBoardTag(0x02)).fetchSemanticsNode().boundsInRoot
@@ -528,29 +527,27 @@ class MachineStatusTest {
         compose.onNodeWithTag(statusEntryTag(0x01, 0)).assertDoesNotExist()
     }
 
-    /** Every reason has its words, and the function is named by its field. */
+    /** Every reason has its words, and the function is named by its group or its path. */
     @Test
     fun everyReasonIsWorded() {
         val entries = listOf(
-            entry(Fields.BOARD_BATTERY_PIN.id, 0, BoardStatus.Reason.NOT_A_PIN, 0x40),
-            entry(Fields.MOTOR_HALL_A.id, 0, BoardStatus.Reason.INCOMPLETE, Fields.MOTOR_HALL_C.id),
-            entry(Fields.MOTOR_PHASE_A.id, 0, BoardStatus.Reason.NOT_ROUTED, 0x2D),
-            entry(Fields.LED_GREEN.id, 0, BoardStatus.Reason.SWD_PIN, 0x0D),
+            entry(Fields.BOARD_BATTERY_PIN.id, 0, BoardStatus.Reason.NOT_UP, 2),
+            entry(Fields.MOTOR_PHASE_A.id, 0, BoardStatus.Reason.NOT_UP, 4),
+            entry(Fields.LED_GREEN.id, 0, BoardStatus.Reason.NOT_UP, 1),
             entry(Fields.IMU_SCL_PIN.id, 0, BoardStatus.Reason.NOT_UP, 0),
             entry(Fields.LINK_TX.id, 0, BoardStatus.Reason.NOT_UP, 7),
-            entry(Fields.IMU_AXIS_SIGN.id, 0, BoardStatus.Reason.IMU_FRAME, 0),
+            BoardStatus.Entry(Fields.MOTOR_HALL_A.id, 0, 2, 0),
             BoardStatus.Entry(0x99, 2, 9, 1),
         )
         showState(pair(DriveInForce.NONE).copy(boardStatus = mapOf(0x01 to entries)))
 
         for (text in listOf(
-            "battery sense: stored byte 0x40 is not a pin",
-            "motors[0] hall: incomplete: hall.c is not set",
-            "motors[0] current sense: the chip does not route PC13",
-            "leds.green: PA13 is an SWD pin",
+            "battery sense: did not come up (HAL error 2)",
+            "motors[0] current sense: did not come up (HAL error 4)",
+            "leds.green: did not come up (HAL error 1)",
             "IMU: did not answer its probe",
             "link[0]: did not come up (HAL error 7)",
-            "IMU: the IMU frame is not a rotation (axis_sign from index 0)",
+            "motors[0] hall: reason 2, detail 0",
             "field 0x99[2]: reason 9, detail 1",
         )) {
             compose.onNodeWithText(text).performScrollTo().assertIsDisplayed()

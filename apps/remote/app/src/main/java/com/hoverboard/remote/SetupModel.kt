@@ -1,6 +1,8 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.board.BoardStatus
+import com.hoverboard.protocol.checks.Checks
+import com.hoverboard.protocol.checks.Refusal
 import com.hoverboard.protocol.config.Busy
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.ConfigReadResult
@@ -126,6 +128,12 @@ sealed interface SetupNotice {
 
     /** The value is outside what the field takes. */
     data class OutOfRange(val key: Key) : SetupNotice
+
+    /**
+     * The configuration checks refused the write (`specs/config-read-once.md` section 4), so
+     * nothing was written: [refusal] names the field and the reason.
+     */
+    data class CheckRefused(val refusal: Refusal) : SetupNotice
 
     /** "Set level" could not compute a trim. */
     data class LevelUnavailable(val reason: Blocked) : SetupNotice
@@ -1146,17 +1154,31 @@ class SetupModel(
      * A re-edit moves the entry to the BACK of the queue rather than leaving it where it was, so
      * the send order is always the order the edits were last made in. The right wheel depends on
      * that: picking another board must not leave the previous pick's writes in their old order.
+     *
+     * The value checks (`specs/config-read-once.md` section 4: the range table and the IMU frame)
+     * run first, on [node]'s values as [together] would leave them: the one write, or every write
+     * of a frame that goes as one. The firmware applies what is stored, so a value a check refuses
+     * is never queued. A refusal of a key this write does not touch (a value the board already
+     * holds) does not stop it: each edit is its own transaction, and the refused value is the one
+     * its own row's edit must fix. A frame goes as one, so all five of its keys are in [together]
+     * and the frame check's refusal, which names the first sign or the first role, names one of them.
      */
-    private fun enqueue(node: Int, key: Key, value: Value): Boolean {
+    private fun enqueue(node: Int, key: Key, value: Value, together: Map<Key, Value> = mapOf(key to value)): Boolean {
         val field = SetupFields.forKey(key)?.takeIf { it.takesEffect != null } ?: return false
-        if (!field.accepts(value)) {
-            notice(SetupNotice.OutOfRange(key))
+        val board = _state.value.setupOf(node)
+        val refused = if (field.accepts(value)) {
+            Checks.checkValues(board.values + together).firstOrNull { it.key in together }
+                ?.let { SetupNotice.CheckRefused(it) }
+        } else {
+            SetupNotice.OutOfRange(key)
+        }
+        if (refused != null) {
+            notice(refused)
             return false
         }
         val target = Target(node, key)
         queue.remove(target)
         waitsFor.remove(target)
-        val board = _state.value.setupOf(node)
         if (board.values[key] != value) {
             queue[target] = value
             edits++
@@ -1354,9 +1376,10 @@ class SetupModel(
             notice(SetupNotice.FrameRefused(refusal))
             return
         }
+        val frame = SetupFields.AXIS_SIGN.mapIndexed { i, f -> f.key to Value.I32(signs[i]) } +
+            SetupFields.AXIS_ROLE.mapIndexed { i, f -> f.key to Value.U8(target[i]) }
         var due = false
-        SetupFields.AXIS_SIGN.forEachIndexed { i, f -> due = enqueue(node, f.key, Value.I32(signs[i])) || due }
-        SetupFields.AXIS_ROLE.forEachIndexed { i, f -> due = enqueue(node, f.key, Value.U8(target[i])) || due }
+        for ((key, value) in frame) due = enqueue(node, key, value, together = frame.toMap()) || due
         if (!due) return
         update(node) { it.copy(rotationCheck = RotationCheck()) }
         notice(null)

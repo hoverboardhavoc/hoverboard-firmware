@@ -498,11 +498,14 @@ pub fn check_forms(chip: Chip, entries: &[Entry]) -> Vec<Refusal> {
     out
 }
 
-/// Every check that needs no chip: the range table and the IMU frame.
+/// Every check that needs no chip: the range table over the arm row and the calibration, and the
+/// IMU frame. Another field's range (`wifi.tx_power`) is the forceable one encoding makes.
 pub fn check_values(state: &State) -> Vec<Refusal> {
     let mut out = Vec::new();
     for (key, (t, b)) in state {
-        let Some((lo, hi)) = store::range_of(*key) else {
+        let board_check = store::lookup_key(*key).is_some_and(|d| d.effect == store::Effect::Arm)
+            || store::CALIBRATION.contains(&key.field_id);
+        let Some((lo, hi)) = store::range_of(*key).filter(|_| board_check) else {
             continue;
         };
         let Some(v) = int_of(*t, b) else { continue };

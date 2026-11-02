@@ -21,11 +21,14 @@ shared/protocol-kotlin/
     linkctl/              the four L7 control payload families              (shared/linkctl)
     store/                CONFIG_* value type tags and encoding             (shared/store)
     imu/                  the frames a staged IMU orientation may hold      (motorcontroller/imu)
-    board/                pins, the layout field set, board.status          (motorcontroller/board)
+    board/                the layout key set, the pin offers, board.status  (motorcontroller/board)
+    pincap/               every chip's pin table                            (motorcontroller/hal/src/pincap.rs)
+    checks/               the configuration checks before a write           (tools/hoverboard-cli/src/checks.rs)
   src/test/kotlin/com/hoverboard/protocol/
     L2Test, PduTest, StoreWireTest, WalkTest, BleWalkTest    behaviour, ported with the code
     OrientationTest, BoardLayoutTest, BoardStatusTest        the Rust's own vectors, ported
-    PinPickerTest, ChipFamilyTest                            the layout editor's pin offers
+    PinPickerTest                                            the layout editor's pin offers
+    checks/SharedCheckCasesTest                              shared/config-checks/, as the CLI runs it
     WireDriftTest                                            hand-copied wire pins
     RustSourceDriftTest                                      reads the Rust and compares
 ```
@@ -81,15 +84,17 @@ compares it to the Kotlin:
 - `shared/link/src/framer.rs`, `frag.rs`: framing and fragmentation constants
 - `shared/store/src/key.rs`: value type tags
 - `shared/base/src/crc16.rs`: the CRC algorithm the firmware instantiates
-- `motorcontroller/board/src/lib.rs`, `status.rs`: the pin sentinel and the dead-time floor, and
-  the boot status record `board.status` carries (its reasons, entry size and cap), with the
-  `store::NAMES` paths an entry is printed through
+- `shared/store/src/field.rs`: the registry, the name table (`store::NAMES`), the range table
+  (`store::RANGES`) and the calibration fields
+- `motorcontroller/hal/src/pincap.rs`: every chip's bonding, routes and ADC inputs, and the SWD pair
+- `motorcontroller/board/src/lib.rs`, `status.rs`: the dead-time floor, and the boot status record
+  `board.status` carries (its one reason, entry size and cap)
 - `motorcontroller/orchestrator/src/events.rs`: the `fault` word's bits
 
-There is no layout verdict to mirror: the firmware brings up each function from its own fields and
-lists what did not come up in `board.status` (`specs/configured-links.md`), which a client reads
-after the board boots. The board mirror is the vocabulary to name and pick pins with, and the decode
-of that record.
+The firmware checks no configuration (`specs/config-read-once.md`): the CLI and the app check every
+write first. `checks/` is the app's port of the CLI's checks, and `checks/SharedCheckCasesTest` runs
+the same case files (`shared/config-checks/`) the CLI's tests run, so the two implementations are
+held to one set of verdicts.
 
 Where the Rust enumerates something, the comparison is an **exact set comparison**, so a firmware
 change that *adds* a fifth control opcode also fails, rather than passing quietly and leaving this

@@ -3,7 +3,8 @@ package com.hoverboard.protocol.imu
 /**
  * The IMU orientation as the `IMU_AXIS_SIGN` and `IMU_AXIS_ROLE` fields can hold it,
  * and the rule that decides which frames are legal: a mirror of `imu::Config::default()`,
- * `imu::DEFAULT_ROLES`, `imu::Config::staged` (the unset rule and its refusal order),
+ * `imu::DEFAULT_ROLES`, `imu::Config::staged` (the unset rule), `imu::Config::frame_error` (its
+ * refusal order),
  * `imu::Config::frame_is_rotation` and `imu::Config::triple_is_rotation` in `motorcontroller/imu/src/lib.rs`,
  * which `RustSourceDriftTest` pins.
  *
@@ -89,7 +90,7 @@ object Orientation {
         return staged.mapIndexed { i, r -> if (r != 0) r else DEFAULT_ROLES[i] }
     }
 
-    /** Why the board refuses a staged frame at boot: `imu::FrameError`, one entry per variant. */
+    /** Why a staged frame is refused before it is written: `imu::FrameError`, one entry per variant. */
     enum class FrameError {
         /** A role is outside `1..3`, or the two roles name the same chip axis. */
         ROLES,
@@ -102,9 +103,10 @@ object Orientation {
     }
 
     /**
-     * The refusal `imu::Config::staged` returns for a staged sign map and staged roles, or null
-     * when the board accepts the frame: the unset rule on both fields, then the roles and the sign
-     * triple checked in that order.
+     * The refusal `imu::Config::frame_error` returns for a staged sign map and staged roles, or
+     * null for a proper rotation: the unset rule on both fields, then the roles and the sign triple
+     * checked in that order. The configuration checks' frame check
+     * ([com.hoverboard.protocol.checks.Check.FRAME]).
      */
     fun frameError(stagedSigns: List<Int>, stagedRoles: List<Int>): FrameError? {
         val signs = effective(stagedSigns)

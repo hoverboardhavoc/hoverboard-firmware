@@ -27,6 +27,9 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
+    // The shared configuration check cases are JSON (`shared/config-checks/`); the tests read them
+    // with Gson, whose objects keep their members in file order as the CLI's reader does.
+    testImplementation("com.google.code.gson:gson:2.11.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
@@ -63,6 +66,13 @@ tasks.test {
                 .withPropertyName(name)
                 .withPathSensitivity(PathSensitivity.RELATIVE)
         }
+    }
+
+    // The shared configuration check cases (`shared/config-checks/`), which SharedCheckCasesTest runs:
+    // a case added or changed with no Kotlin change must still run.
+    val checkCases = repo?.resolve("shared/config-checks")
+    if (checkCases != null && checkCases.isDirectory) {
+        inputs.dir(checkCases).withPropertyName("sharedCheckCases").withPathSensitivity(PathSensitivity.RELATIVE)
     }
 
     // The same reasoning, for the one file outside the Rust workspaces that the gate reads:

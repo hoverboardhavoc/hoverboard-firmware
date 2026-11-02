@@ -21,6 +21,15 @@ enum class Type(val tag: Int) {
     Bool(0x08),
     Blob(0x09),
     Str(0x0A),
+
+    /** A pin: port (`0` = A to `5` = F), pin number (`specs/config-read-once.md` section 3). */
+    Pin(0x0B),
+
+    /** A pin and its alternate function: port, pin, af. */
+    PinAf(0x0C),
+
+    /** A pin and its ADC channel: port, pin, channel. */
+    PinAdc(0x0D),
     ;
 
     companion object {
@@ -48,6 +57,15 @@ sealed class Value {
         override fun hashCode(): Int = v.contentHashCode()
     }
 
+    /** A pin ([Type.Pin]): its port (`0` = A) and pin number. */
+    data class Pin(val port: Int, val pin: Int) : Value()
+
+    /** A pin and its alternate function ([Type.PinAf]); `af` is 0 on a chip that remaps. */
+    data class PinAf(val port: Int, val pin: Int, val af: Int) : Value()
+
+    /** A pin and its ADC channel ([Type.PinAdc]). */
+    data class PinAdc(val port: Int, val pin: Int, val adc: Int) : Value()
+
     /** The storage [Type] this value carries (the tag a schema-less consumer reads). */
     fun kind(): Type = when (this) {
         is U8 -> Type.U8
@@ -60,6 +78,9 @@ sealed class Value {
         is Bool -> Type.Bool
         is Str -> Type.Str
         is Bytes -> Type.Blob
+        is Pin -> Type.Pin
+        is PinAf -> Type.PinAf
+        is PinAdc -> Type.PinAdc
     }
 
     /** Encode the value payload little-endian (the record `type` byte is [kind].tag, written separately). */
@@ -74,6 +95,9 @@ sealed class Value {
         is I64 -> le(v, 8)
         is Str -> v.toByteArray(Charsets.UTF_8)
         is Bytes -> v
+        is Pin -> byteArrayOf(port.toByte(), pin.toByte())
+        is PinAf -> byteArrayOf(port.toByte(), pin.toByte(), af.toByte())
+        is PinAdc -> byteArrayOf(port.toByte(), pin.toByte(), adc.toByte())
     }
 
     companion object {
@@ -96,7 +120,12 @@ sealed class Value {
                 null
             }
             Type.Blob -> Bytes(bytes)
+            Type.Pin -> fixed(bytes, 2)?.let { Pin(u(it, 0), u(it, 1)) }
+            Type.PinAf -> fixed(bytes, 3)?.let { PinAf(u(it, 0), u(it, 1), u(it, 2)) }
+            Type.PinAdc -> fixed(bytes, 3)?.let { PinAdc(u(it, 0), u(it, 1), u(it, 2)) }
         }
+
+        private fun u(bytes: ByteArray, i: Int): Int = bytes[i].toInt() and 0xFF
 
         private fun le(value: Long, n: Int): ByteArray {
             val out = ByteArray(n)

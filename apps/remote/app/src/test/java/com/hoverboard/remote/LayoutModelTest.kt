@@ -1,14 +1,15 @@
 package com.hoverboard.remote
 
-import com.hoverboard.protocol.board.ChipFamily
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.board.Layout
-import com.hoverboard.protocol.board.Pin
+import com.hoverboard.protocol.checks.Check
 import com.hoverboard.protocol.config.CfgRefusal
 import com.hoverboard.protocol.config.Refused
 import com.hoverboard.protocol.config.TimedOut
 import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.LayoutEditor
 import com.hoverboard.remote.model.LayoutRows
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -24,15 +25,19 @@ import org.junit.Test
 /**
  * The board layout editor's model (`specs/remote-ui.md` section 3.5).
  *
- * The properties here: the layout is read as one object, Apply writes the delta and nothing else
- * whenever the board is attached and disarmed, nothing judges the staged layout first (the board
- * reports what it could not bring up in its boot status record after the reboot), and a half-written layout
- * is finished by applying again.
+ * The properties here: the layout is read as one object, Apply runs the configuration checks on
+ * the board as the delta would leave it against the board's own chip and writes nothing when one
+ * refuses (`specs/config-read-once.md` section 4), Apply writes the delta and nothing else whenever
+ * the board is attached and disarmed, and a half-written layout is finished by applying again.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class LayoutModelTest {
 
-    private fun pin(name: String) = checkNotNull(Pin.byName(name)).packed
+    /** A plain pin by its bench name, `PB5`. */
+    private fun pin(name: String) = Value.Pin(name[1] - 'A', name.drop(2).toInt())
+
+    /** A pin with its alternate function, as the F103's table offers it: the af is 0 there. */
+    private fun af(name: String, af: Int = 0) = Value.PinAf(name[1] - 'A', name.drop(2).toInt(), af)
 
     @Test
     fun aReadPassProducesTheBoardsOwnLayoutWithNothingStaged() = runTest {
@@ -49,24 +54,29 @@ class LayoutModelTest {
     }
 
     @Test
-    fun thePartComesFromTheBoardsOwnTagAndApplyDoesNotNeedIt() = runTest {
-        // The part is what the pin picker offers pins of. A board that has sent nothing yet, or a
-        // tag this app models no part for, has none; the layout can still be written.
+    fun thePartComesFromTheBoardsOwnTagAndAPinIsNotWrittenWithoutIt() = runTest {
+        // The part is what the pin picker offers pins of and what the checks judge against. A board
+        // that has sent nothing yet, or a tag this app has no table for, has none, and a pin is not
+        // written without it, as the CLI writes none without the board's TARGET_ID.
         val rig = layoutRig(BOARD, chip = null)
 
         assertNotNull(rig.state.stored)
         assertNull(rig.state.part)
         rig.stage(Fields.BOARD_BUZZER, pin("PB5"))
         assertTrue(rig.state.canApply(armed = false))
+        rig.model.apply()
+        runCurrent()
+        assertEquals(LayoutNotice.ChipUnknown, rig.state.notice)
+        assertEquals(emptyList<Any>(), rig.written)
 
         rig.reports(ChipTag.Unknown)
         runCurrent()
         assertEquals("the tag is recorded as the board sent it", ChipTag.Unknown, rig.state.chip)
-        assertNull("a tag this app models no part for is no part", rig.state.part)
+        assertNull("a tag this app has no table for is no part", rig.state.part)
 
         rig.reports(ChipTag.F103C8)
         runCurrent()
-        assertEquals(ChipFamily.F103C8, rig.state.part)
+        assertEquals(Chip.GD32F103C8, rig.state.part)
 
         rig.model.apply()
         runCurrent()
@@ -74,25 +84,57 @@ class LayoutModelTest {
     }
 
     @Test
-    fun nothingJudgesTheLayoutBeforeItIsWritten() = runTest {
-        // A pin another function would want, a gate-capable pin on an LED and a half-staged hall
-        // group: the board brings up what it can and lists the rest in its status after the reboot,
-        // so Apply writes them as staged.
+    fun theChecksRefuseALayoutBeforeAnythingIsWritten() = runTest {
+        // A half-staged hall group: the checks name its first key and nothing is written.
         val rig = layoutRig(BOARD)
-        rig.stage(Fields.BOARD_BUZZER, pin("PA2"))
-        rig.stage(Fields.LED_GREEN, pin("PA8"))
         rig.stage(Fields.MOTOR_HALL_A, pin("PC13"), motor = 0)
-
-        assertTrue(rig.state.canApply(armed = false))
         rig.model.apply()
         runCurrent()
 
-        assertEquals(
-            listOf(Fields.BOARD_BUZZER.key(), Fields.LED_GREEN.key(), Fields.MOTOR_HALL_A.key(0)),
-            rig.written,
-        )
+        val group = rig.state.notice as LayoutNotice.CheckRefused
+        assertEquals(Check.GROUP, group.refusal.check)
+        assertEquals(Fields.MOTOR_HALL_A.key(0), group.refusal.key)
+        assertEquals("motors[0].hall.a: the group is incomplete: motors[0].hall.b is not stored", group.refusal.msg)
+        assertEquals(emptyList<Any>(), rig.written)
+
+        // The group completed, and an LED staged onto the pin the buzzer holds by its fleet default.
+        rig.stage(Fields.MOTOR_HALL_B, pin("PA1"), motor = 0)
+        rig.stage(Fields.MOTOR_HALL_C, pin("PC14"), motor = 0)
+        rig.stage(Fields.LED_GREEN, pin("PB9"))
+        rig.model.apply()
+        runCurrent()
+        val twice = rig.state.notice as LayoutNotice.CheckRefused
+        assertEquals(Check.PIN_TWICE, twice.refusal.check)
+        assertEquals(Fields.LED_GREEN.key(), twice.refusal.key)
+        assertEquals(emptyList<Any>(), rig.written)
+
+        rig.stage(Fields.LED_GREEN, pin("PB5"))
+        rig.model.apply()
+        runCurrent()
         assertNull(rig.state.notice)
-        assertTrue(rig.state.awaitingPowerCycle)
+        assertEquals(4, rig.written.size)
+    }
+
+    @Test
+    fun theChecksJudgeTheLayoutOnTheBoardsOwnChip() = runTest {
+        // The F103's gate set stores af 0 and routes by its remap; the same bytes on an F130, whose
+        // mux selects TIMER0 at AF2, are refused at the first gate.
+        val rig = layoutRig(BOARD, chip = ChipTag.F130C8)
+        for ((field, name) in listOf(
+            Fields.MOTOR_GATE_HI_A to "PA8", Fields.MOTOR_GATE_HI_B to "PA9", Fields.MOTOR_GATE_HI_C to "PA10",
+            Fields.MOTOR_GATE_LO_A to "PB13", Fields.MOTOR_GATE_LO_B to "PB14", Fields.MOTOR_GATE_LO_C to "PB15",
+        )) {
+            rig.stage(field, af(name), motor = 0)
+        }
+        rig.stage(Fields.MOTOR_GATE_TIMER, Value.U8(0), motor = 0)
+        rig.stage(Fields.MOTOR_DEAD_TIME, Value.U8(28), motor = 0)
+        rig.model.apply()
+        runCurrent()
+
+        val refused = rig.state.notice as LayoutNotice.CheckRefused
+        assertEquals(Check.AF, refused.refusal.check)
+        assertEquals(Fields.MOTOR_GATE_HI_A.key(0), refused.refusal.key)
+        assertEquals(emptyList<Any>(), rig.written)
     }
 
     @Test
@@ -237,7 +279,7 @@ class LayoutModelTest {
 
         rig.reports(ChipTag.F130C8)
         runCurrent()
-        assertEquals("and comes back as the board that is attached now reports it", ChipFamily.F130C8, rig.state.part)
+        assertEquals("and comes back as the board that is attached now reports it", Chip.GD32F130C8, rig.state.part)
     }
 
     @Test
@@ -313,12 +355,17 @@ class LayoutModelTest {
         val readOnly = LayoutRows.ALL.filter { it.editor == LayoutEditor.ReadOnly }
         assertEquals(1, readOnly.size)
         assertEquals(Fields.BOARD_SELF_HOLD, readOnly.single().slot.def)
-        // And every other field of the layout has an editor, but the three carried motor facts,
-        // which are the Setup screen's rows.
-        val carried = setOf(Fields.MOTOR_DIRECTION, Fields.MOTOR_ALIGN_OFFSET, Fields.MOTOR_CURRENT_CAL)
+        // And every other key of the layout has an editor, but the three carried motor facts, which
+        // are the Setup screen's rows, and the links and remaps, which are read for the checks and
+        // written from hoverboard-cli.
+        val carried = setOf(
+            Fields.MOTOR_DIRECTION.id, Fields.MOTOR_ALIGN_OFFSET.id, Fields.MOTOR_CURRENT_CAL.id,
+            Fields.LINK_TX.id, Fields.LINK_RX.id, Fields.LINK_USART.id, Fields.LINK_REMAP.id,
+            Fields.IMU_REMAP.id, Fields.MOTOR_GATE_REMAP.id,
+        )
         val offered = LayoutRows.ALL.filterNot { it.editor == LayoutEditor.ReadOnly }.map { it.slot.key }
         for (slot in Layout.SLOTS) {
-            val edited = slot.def !in carried && slot.def != Fields.BOARD_SELF_HOLD
+            val edited = slot.def.id !in carried && slot.def != Fields.BOARD_SELF_HOLD
             assertEquals("${slot.key} offered?", edited, slot.key in offered)
         }
     }
@@ -326,21 +373,28 @@ class LayoutModelTest {
     @Test
     fun applyingAWholeLayoutWritesEveryFieldItChangesAndNothingElse() = runTest {
         // A board taken from the blank defaults to a full single-motor layout in one Apply: battery
-        // sense, the IMU, halls, the six gates with their dead time, and the phase-current pair.
+        // sense, the IMU, halls, the six gates with their timer and dead time, and the
+        // phase-current pair, every pin with what the F103's table gives it.
         val rig = layoutRig(BOARD)
-        rig.stage(Fields.BOARD_BATTERY_PIN, pin("PA4"))
-        rig.stage(Fields.IMU_SCL_PIN, pin("PB6"))
-        rig.stage(Fields.IMU_SDA_PIN, pin("PB7"))
-        rig.stage(Fields.IMU_MODEL, Fields.ImuModel.CLONE_2E)
+        rig.stage(Fields.BOARD_BATTERY_PIN, Value.PinAdc(0, 4, 4))
+        rig.stage(Fields.IMU_SCL_PIN, af("PB6"))
+        rig.stage(Fields.IMU_SDA_PIN, af("PB7"))
+        rig.stage(Fields.IMU_I2C, Value.U8(0))
         for ((field, name) in listOf(
             Fields.MOTOR_HALL_A to "PC13", Fields.MOTOR_HALL_B to "PA1", Fields.MOTOR_HALL_C to "PC14",
-            Fields.MOTOR_GATE_HI_A to "PA8", Fields.MOTOR_GATE_HI_B to "PA9", Fields.MOTOR_GATE_HI_C to "PA10",
-            Fields.MOTOR_GATE_LO_A to "PB13", Fields.MOTOR_GATE_LO_B to "PB14", Fields.MOTOR_GATE_LO_C to "PB15",
-            Fields.MOTOR_PHASE_A to "PA0", Fields.MOTOR_PHASE_B to "PB0",
         )) {
             rig.stage(field, pin(name), motor = 0)
         }
-        rig.stage(Fields.MOTOR_DEAD_TIME, 25, motor = 0)
+        for ((field, name) in listOf(
+            Fields.MOTOR_GATE_HI_A to "PA8", Fields.MOTOR_GATE_HI_B to "PA9", Fields.MOTOR_GATE_HI_C to "PA10",
+            Fields.MOTOR_GATE_LO_A to "PB13", Fields.MOTOR_GATE_LO_B to "PB14", Fields.MOTOR_GATE_LO_C to "PB15",
+        )) {
+            rig.stage(field, af(name), motor = 0)
+        }
+        rig.stage(Fields.MOTOR_GATE_TIMER, Value.U8(0), motor = 0)
+        rig.stage(Fields.MOTOR_PHASE_A, Value.PinAdc(0, 0, 0), motor = 0)
+        rig.stage(Fields.MOTOR_PHASE_B, Value.PinAdc(1, 0, 8), motor = 0)
+        rig.stage(Fields.MOTOR_DEAD_TIME, Value.U8(25), motor = 0)
         val delta = rig.state.delta.map { it.key }
         assertFalse("the fleet pins it already holds are not in it", Fields.BOARD_BUZZER.key() in delta)
 
@@ -348,6 +402,7 @@ class LayoutModelTest {
         runCurrent()
 
         assertEquals("one write per changed field and nothing else", delta, rig.written)
+        assertNull("the checks passed", rig.state.notice)
         assertEquals(rig.state.staged, rig.state.stored)
         assertTrue(rig.state.awaitingPowerCycle)
     }
