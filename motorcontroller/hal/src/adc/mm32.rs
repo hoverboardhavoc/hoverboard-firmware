@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The MM32SPIN05 ADC (MindMotion's `reg_adc.h` and `hal_adc.c`, LibSamples V1.13): the
-//! timer-triggered group the period ISR reads and the polled single conversion. The `adc` module of
-//! the MM32 build, in place of the GD32 one: the block shares no register with the GD32 ADC.
+//! timer-triggered group the period ISR reads and the polled single conversion. The `mm32` model of
+//! [`crate::adc`]: the block shares no register with the GD32 ADC.
 //!
 //! The block has no injected group. It converts the channels whose bits are set in `ADCHS`, in
 //! channel order, once per start (`ADCR.MODE` = scan), and keeps each channel's result in its own
@@ -26,12 +26,12 @@
 //! sequence in MindMotion's library, so [`Adc`] has no `calibrate` and the group's bring-up runs
 //! none (specs/hal.md section 4.1: a capability the chip lacks is absent from its build).
 
+use super::{InjectedAdcController, TriggeredAdc, ADC0_BASE, ADC_TIMEOUT};
 use crate::addr::PeriphLabel;
 use crate::chip::Chip;
 use crate::config::{
     AdcClockDiv, InjectedAdcConfig, InjectedChannel, TimerTriggerLink, MAX_INJECTED_CHANNELS,
 };
-use crate::descriptor::DESCRIPTOR;
 use crate::error::{AdcError, BringUpError, DescriptorError};
 use crate::reg::{Field, Reg32};
 
@@ -88,15 +88,6 @@ fn settle() {
     #[cfg(target_arch = "arm")]
     cortex_m::asm::delay(ADC_STAB_CYCLES);
 }
-
-/// Polls of a conversion flag before the wait gives up, as on the GD32 model.
-const ADC_TIMEOUT: u32 = 100_000;
-
-/// ADC1's base.
-const ADC0_BASE: u32 = match DESCRIPTOR.addrs.get(PeriphLabel::Adc0) {
-    Some(b) => b,
-    None => panic!("the descriptor carries no ADC0"),
-};
 
 /// A channel with a data register: 0 to 11, the temperature sensor and VREFINT.
 const fn readable(channel: u8) -> bool {
@@ -243,28 +234,6 @@ impl Adc {
 }
 
 // --- the timer-triggered group --------------------------------------------------------------------
-
-/// A timer-triggered ADC group that configures into a per-period handle.
-pub trait TriggeredAdc {
-    /// The per-period handle the configuration resolves into.
-    type Handle: Copy;
-
-    /// Configure the group from `cfg` and return its handle.
-    fn configure(&self, chip: &Chip, cfg: &InjectedAdcConfig)
-        -> Result<Self::Handle, BringUpError>;
-}
-
-/// The triggered group's bring-up (the GD32 build's injected group; here the triggered scan).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct InjectedAdcController;
-
-impl InjectedAdcController {
-    /// The controller; the ADC instance comes from the configuration.
-    #[inline]
-    pub const fn new() -> Self {
-        InjectedAdcController
-    }
-}
 
 /// The one sample-time code of `channels`, or `None` if they differ or one is past the field.
 fn shared_sample_time(channels: &[InjectedChannel]) -> Option<u8> {
