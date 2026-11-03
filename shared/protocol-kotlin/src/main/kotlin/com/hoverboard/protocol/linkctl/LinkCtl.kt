@@ -699,7 +699,7 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int, val mot
  *
  * Wire layout, 2 bytes (`shared/linkctl/src/lib.rs`, `Inputs::encode`):
  * ```
- * off 0      u8      buttons   bit0 power request
+ * off 0      u8      buttons   bit0 power request, bit1 horn
  * off 1      u8      rider     bit0 rider present
  * ```
  *
@@ -711,6 +711,9 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int, val mot
 data class Inputs(val buttons: Int, val rider: Int) {
     /** Power-request level, `buttons` bit0. `shared/linkctl/src/lib.rs`, `Inputs::power_request`. */
     fun powerRequest(): Boolean = buttons and BUTTON_POWER != 0
+
+    /** Horn level, `buttons` bit1. `shared/linkctl/src/lib.rs`, `Inputs::horn`. */
+    fun horn(): Boolean = buttons and BUTTON_HORN != 0
 
     /** Rider-present level, `rider` bit0. `shared/linkctl/src/lib.rs`, `Inputs::rider_present`. */
     fun riderPresent(): Boolean = rider and RIDER_PRESENT != 0
@@ -729,6 +732,12 @@ data class Inputs(val buttons: Int, val rider: Int) {
 
         /** `buttons` bit0: power request. `shared/linkctl/src/lib.rs`, `Inputs::BUTTON_POWER`. */
         const val BUTTON_POWER = 1 shl 0
+
+        /**
+         * `buttons` bit1: the horn, a level (`specs/tones.md` section 4.3).
+         * `shared/linkctl/src/lib.rs`, `Inputs::BUTTON_HORN`.
+         */
+        const val BUTTON_HORN = 1 shl 1
 
         /** `rider` bit0: rider present. `shared/linkctl/src/lib.rs`, `Inputs::RIDER_PRESENT`. */
         const val RIDER_PRESENT = 1 shl 0

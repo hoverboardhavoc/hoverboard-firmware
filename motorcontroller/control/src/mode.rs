@@ -252,6 +252,12 @@ impl<const M: usize> ControlDispatch<M> {
         self.rider_required
     }
 
+    /// The low-battery floor in force, centivolts (`<= 0` = none): the battery-critical alarm's
+    /// threshold (`specs/tones.md` section 4.4) beside the engage gate's.
+    pub fn battery_floor(&self) -> i16 {
+        self.battery_floor
+    }
+
     /// The balance engage's battery term (`FsmInputs::battery_ok`): the effective battery word
     /// `battery` (centivolts, 0 = UNKNOWN) is known AND at or above the floor, or the floor is
     /// `<= 0` (none). Read only by the engage conjunction, so a word falling under the floor

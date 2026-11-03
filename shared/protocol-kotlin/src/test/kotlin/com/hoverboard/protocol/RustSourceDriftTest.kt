@@ -1006,6 +1006,7 @@ class RustSourceDriftTest {
             "CyclicState::FLAG_PEER_SILENT" to CyclicState.FLAG_PEER_SILENT,
             "CyclicState::FLAG_LOCKDOWN" to CyclicState.FLAG_LOCKDOWN,
             "Inputs::BUTTON_POWER" to Inputs.BUTTON_POWER,
+            "Inputs::BUTTON_HORN" to Inputs.BUTTON_HORN,
             "Inputs::RIDER_PRESENT" to Inputs.RIDER_PRESENT,
         )
         assertEquals(rustPayloadBits(linkctl), fromKotlin, "the payload bit constants drifted from the Rust")

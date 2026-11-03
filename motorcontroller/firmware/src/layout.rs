@@ -141,6 +141,9 @@ pub struct Layout {
     pub imu: Option<ImuBus>,
     /// The stored `imu.model` (0 when not stored): whether the store asks for an IMU at all.
     pub imu_model: u8,
+    /// The buzzer (`specs/tones.md` section 2): the stored pin, `None` (absent and silent) when none
+    /// is stored.
+    pub buzzer: Option<Pin>,
 }
 
 /// The slots of the pass: one per key it reads, in [`KEYS`] order. One group of wheel keys per
@@ -161,9 +164,11 @@ const IMU_REMAP: usize = BOARD + 8;
 const LINK: usize = BOARD + 9;
 /// `imu.model`, after the links.
 const IMU_MODEL: usize = LINK + 4 * store::LINKS as usize;
-/// `active_high`, after `imu.model`, read for the break inputs' polarity where the image reads them
+/// The buzzer's pin (`specs/tones.md` section 2), after `imu.model`.
+const BUZZER: usize = IMU_MODEL + 1;
+/// `active_high`, after the buzzer, read for the break inputs' polarity where the image reads them
 /// (two motors, [`WHEEL`]'s rule).
-const POLARITY: usize = IMU_MODEL + 1;
+const POLARITY: usize = BUZZER + 1;
 /// How many board keys the pass reads.
 const BOARD_N: usize = if COUNT > 1 { POLARITY + 1 } else { POLARITY } - BOARD;
 
@@ -206,6 +211,7 @@ const BOARD_KEYS: [(Key, Type); POLARITY + 1 - BOARD] = [
     (store::LINK_USART.at(1).key(), Type::U8),
     (store::LINK_REMAP.at(1).key(), Type::U8),
     (store::IMU_MODEL.key(), Type::U8),
+    pin(store::BOARD_BUZZER),
     (store::BOARD_INPUT_POLARITY.key(), Type::U8),
 ];
 
@@ -387,6 +393,7 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
         links: [link(0), link(1)],
         imu,
         imu_model,
+        buzzer: p(BUZZER),
     }
 }
 
@@ -434,6 +441,7 @@ mod tests {
     #[test]
     fn nothing_stored_is_nothing_at_all() {
         let l = with(|_| {});
+        assert_eq!(l.buzzer, None, "no buzzer until stored");
         assert_eq!(
             (
                 l.self_hold,
@@ -685,6 +693,18 @@ mod tests {
             set(s, store::PAD_A.key(), Value::Pin([0, 12]));
         });
         assert_eq!(l.inputs[1], Some([0, 12]));
+    }
+
+    /// The buzzer as stored, and absent once un-stored.
+    #[test]
+    fn the_buzzer_is_its_stored_pin_or_absent() {
+        let l = with(|s| set(s, store::BOARD_BUZZER.key(), Value::Pin([0, 5])));
+        assert_eq!(l.buzzer, Some([0, 5]));
+        let l = with(|s| {
+            set(s, store::BOARD_BUZZER.key(), Value::Pin([0, 5]));
+            s.erase_value(store::BOARD_BUZZER.key()).unwrap();
+        });
+        assert_eq!(l.buzzer, None);
     }
 
     /// The pass reads exactly the registry's pin keys, the groups' instance and remap keys and the

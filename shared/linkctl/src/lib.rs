@@ -687,7 +687,7 @@ impl DriveCmd {
 /// and the firmware and the Kotlin mirror had to move together or the drift gate fails the build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inputs {
-    /// Button bits: [`Self::BUTTON_POWER`] (bit0).
+    /// Button bits: [`Self::BUTTON_POWER`] (bit0), [`Self::BUTTON_HORN`] (bit1).
     pub buttons: u8,
     /// Rider bits: [`Self::RIDER_PRESENT`] (bit0).
     pub rider: u8,
@@ -700,12 +700,21 @@ impl Inputs {
     /// `buttons` bit0: power request (level).
     pub const BUTTON_POWER: u8 = 1 << 0;
 
+    /// `buttons` bit1: the horn (level, `specs/tones.md` section 4.3): the board plays its horn
+    /// tune while the mirror it consumes carries it.
+    pub const BUTTON_HORN: u8 = 1 << 1;
+
     /// `rider` bit0: rider present.
     pub const RIDER_PRESENT: u8 = 1 << 0;
 
     /// Power-request level (`buttons` bit0).
     pub const fn power_request(&self) -> bool {
         self.buttons & Self::BUTTON_POWER != 0
+    }
+
+    /// Horn level (`buttons` bit1).
+    pub const fn horn(&self) -> bool {
+        self.buttons & Self::BUTTON_HORN != 0
     }
 
     /// Rider-present level (`rider` bit0).
@@ -888,6 +897,23 @@ mod tests {
         let mut buf = [0u8; Inputs::LEN];
         assert_eq!(inp.encode(&mut buf), Inputs::LEN);
         assert_eq!(buf, [0x01, 0x01]);
+    }
+
+    #[test]
+    fn the_horn_is_buttons_bit1() {
+        assert_eq!(Inputs::BUTTON_HORN, 0x02);
+        let inp = Inputs {
+            buttons: Inputs::BUTTON_HORN,
+            rider: 0,
+        };
+        let mut buf = [0u8; Inputs::LEN];
+        inp.encode(&mut buf);
+        assert_eq!(buf, [0x02, 0x00]);
+        let back = Inputs::decode(&buf).unwrap();
+        assert!(back.horn() && !back.power_request());
+        let both = Inputs::decode(&[0x03, 0x00]).unwrap();
+        assert!(both.horn() && both.power_request());
+        assert!(!Inputs::decode(&[0x01, 0x00]).unwrap().horn());
     }
 
     // -- Round trips ----------------------------------------------------------------------------

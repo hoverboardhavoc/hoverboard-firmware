@@ -538,6 +538,12 @@ impl<const M: usize> LinkInbox<M> {
             .unwrap_or(false)
     }
 
+    /// The remote horn mirror bit (`INPUTS.buttons` bit 1, level, `specs/tones.md` section 4.3).
+    /// A stale mirror reads RELEASED, so the horn stops when the controller goes quiet.
+    pub fn remote_horn(&self) -> bool {
+        self.fresh_remote().map(|i| i.horn()).unwrap_or(false)
+    }
+
     /// The remote rider-present mirror bit (`INPUTS.rider` bit 0, level). A stale mirror reads
     /// NO RIDER, for the same reason the power bit does: it is a permissive level (it folds in by
     /// OR with the local pads, `dispatch::rider_level`), so holding it true on a dead link would

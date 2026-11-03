@@ -528,6 +528,50 @@ pub static OBS_FOC_HOLD: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUN
 /// or never converts, which the reader takes as "no conversion yet" (the word stays UNKNOWN).
 pub static VBATT_RAW: AtomicU32 = AtomicU32::new(0);
 
+/// The buzzer's tone (`specs/tones.md` section 1): its full period in period-ISR periods (`P`,
+/// `crate::tones::period`), 0 for silence. The 250 Hz task's tone player is its only writer; the
+/// period ISR is its only reader, and makes the waveform from it ([`ToneStep`]).
+pub static TONE_PERIOD: AtomicU32 = AtomicU32::new(0);
+
+/// The period ISR's tone step (`specs/tones.md` section 1): a phase counter over the tone period
+/// `P`, high for the first half of each period and low for the rest, a 50% square wave at
+/// `rate / P`. Silence (`P == 0`) is low.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ToneStep {
+    phase: u32,
+    high: bool,
+}
+
+impl ToneStep {
+    pub const fn new() -> Self {
+        ToneStep {
+            phase: 0,
+            high: false,
+        }
+    }
+
+    /// One period at tone period `p`: the level the pin takes when it changes, `None` when it
+    /// keeps its level (the pin is written only on a change).
+    #[inline(always)]
+    pub fn step(&mut self, p: u32) -> Option<bool> {
+        let level = if p == 0 {
+            self.phase = 0;
+            false
+        } else {
+            self.phase += 1;
+            if self.phase >= p {
+                self.phase = 0;
+            }
+            self.phase < p / 2
+        };
+        if level == self.high {
+            return None;
+        }
+        self.high = level;
+        Some(level)
+    }
+}
+
 /// The one-motor images' injected group, its channel list in rank order
 /// (`specs/motor-integration.md` bring-up step 5): the motor's sensed pair (ranks 0 and 1, the
 /// lower phase first, the ranks the current limit reads), plus the battery rank after them when
@@ -2027,15 +2071,22 @@ pub mod hw {
     use commutation::foc::PhaseOffsets;
     use commutation::Commutator;
     use core::ptr::addr_of_mut;
+    use embedded_hal::digital::OutputPin;
     use hal::config::{
         AdcClockDiv, BreakConfig, ClockDiv, InjectedAdcConfig, InjectedChannel, OcMode, PwmAlign,
         PwmChannelConfig, PwmConfig, TimerTriggerLink, TrgoSource,
     };
     use hal::interrupt;
-    use hal::{clock, irq, Chip, InputGroup, PeriphLabel, PinAf, PinId, PwmHandle, PwmTimer};
+    use hal::{
+        clock, irq, Chip, InputGroup, Output, PeriphLabel, Pin, PinAf, PinId, PushPull, PwmHandle,
+        PwmTimer,
+    };
     #[cfg(not(feature = "gd32f103rc"))]
     use hal::{InjectedAdcController, InjectedHandle, TriggeredAdc};
     use heapless::Vec;
+
+    /// The buzzer's pin, a push-pull output the period ISR drives (`specs/tones.md` section 2).
+    pub type BuzzerPin = Pin<Output<PushPull>>;
 
     /// The period ISR's ADC surface: ADC0's injected group on a one-motor image; ADC0 and ADC1 in
     /// inserted parallel mode on the two-motor image (`specs/twelve-fet.md` section 5.2). The same
@@ -2207,6 +2258,11 @@ pub mod hw {
         /// The cause bits the open window's floated periods raised ([`coast_causes`]), plus the
         /// boot's calibration bits (`HOLD_CAL_*`), which are set once and ORed in at every close.
         causes: u32,
+        /// The buzzer, `None` when the board has none, and on every motor but motor 0, whose
+        /// runtime the period ISR steps the tone on: the tone step then drives nothing.
+        buzzer: Option<BuzzerPin>,
+        /// The tone step's phase and the level last written (motor 0's alone is stepped).
+        tone: ToneStep,
     }
 
     /// The ISR's state. Written by the bring-up before the period vector is unmasked, and
@@ -2525,6 +2581,7 @@ pub mod hw {
         chip: &Chip,
         motors: &[Option<Motor>; COUNT],
         vbatt: Option<Pin3>,
+        buzzer: Option<BuzzerPin>,
         period_hz: u32,
         boot_read: [BootRead; COUNT],
         cal_moe: fn(&PwmTimer, bool),
@@ -2535,6 +2592,7 @@ pub mod hw {
             chip,
             motors,
             vbatt,
+            buzzer,
             period_hz,
             boot_read,
             cal_moe,
@@ -2552,11 +2610,14 @@ pub mod hw {
     /// [`bring_up`]'s body: motor 0's steps in order, stopping at the first that fails, with
     /// motor 1's share of each step beside motor 0's (`COUNT > 1`, compiled out on a one-motor
     /// image). A failure of motor 1's own share stops motor 1 alone and is written to `second`;
-    /// motor 1's success is written there at the end.
+    /// motor 1's success is written there at the end. The buzzer goes to motor 0's runtime, whose
+    /// period ISR steps the tone.
+    #[allow(clippy::too_many_arguments)]
     fn bring_up_motors(
         chip: &Chip,
         motors: &[Option<Motor>; COUNT],
         vbatt: Option<Pin3>,
+        mut buzzer: Option<BuzzerPin>,
         period_hz: u32,
         boot_read: [BootRead; COUNT],
         cal_moe: fn(&PwmTimer, bool),
@@ -2917,6 +2978,7 @@ pub mod hw {
                         cal[0],
                         boot_read[0].noise_floor,
                         protect(0, &m),
+                        buzzer.take(),
                         period_hz,
                         requested,
                     );
@@ -2933,6 +2995,7 @@ pub mod hw {
                                 cal[i],
                                 boot_read[i].noise_floor,
                                 protect(i, &m1m),
+                                None,
                                 period_hz,
                                 requested,
                             );
@@ -2996,6 +3059,7 @@ pub mod hw {
         (accepted, offsets, cal_bits): (Option<PhaseOffsets>, (u16, u16), u32),
         noise_floor: u16,
         protect: Protect,
+        buzzer: Option<BuzzerPin>,
         period_hz: u32,
         requested: commutation::CommutationMethod,
     ) {
@@ -3072,6 +3136,8 @@ pub mod hw {
                 brk: protect.brk,
                 coasted: 0,
                 causes: cal_bits,
+                buzzer,
+                tone: ToneStep::new(),
             });
         }
         // The sample hold's threshold for THIS motor (`specs/foc-torque.md` section 14): the bound
@@ -3361,7 +3427,8 @@ pub mod hw {
         let broken = false;
         let armed = period_armed(crate::arm::hw::armed(), broken);
         // Motor 0 owns the injected groups and TIMER0's trigger: motor 1 is up only with it.
-        let Some(m0) = motors[0].as_mut() else {
+        let (first, rest) = motors.split_at_mut(1);
+        let Some(m0) = first[0].as_mut() else {
             return;
         };
         // FIRST: clear the injected end-of-conversion flag (on the RC both parallel converters'). It
@@ -3385,10 +3452,18 @@ pub mod hw {
         }
         // Motor `i`'s sensed pair is ranks `2i` and `2i + 1`.
         motor_period(m0, 0, [samples[0], samples[1]], armed);
-        for (k, slot) in motors[1..].iter_mut().enumerate() {
+        for (k, slot) in rest.iter_mut().enumerate() {
             let i = k + 1;
             if let Some(m) = slot.as_mut() {
                 motor_period(m, i, [samples[2 * i], samples[2 * i + 1]], armed);
+            }
+        }
+        // LAST, after every motor's writes, so it never delays the commutation: the buzzer's tone
+        // (`specs/tones.md` section 1) on motor 0's runtime, the pin written only when its level
+        // changes.
+        if let Some(level) = m0.tone.step(TONE_PERIOD.load(Ordering::Relaxed)) {
+            if let Some(pin) = m0.buzzer.as_mut() {
+                let _ = if level { pin.set_high() } else { pin.set_low() };
             }
         }
     }
@@ -3615,6 +3690,59 @@ mod tests {
     /// `store::MOTOR_NOISE_FLOOR` (0x6B), which IS the constant the field replaced, so every figure
     /// quoted below is the one the image enforced when the floor was compiled in.
     const FLOOR: u16 = store::MOTOR_NOISE_FLOOR.default();
+
+    /// The pin levels the tone step drives over `n` periods at tone period `p`, from `t`.
+    fn tone_levels(t: &mut ToneStep, p: u32, n: usize) -> std::vec::Vec<bool> {
+        let mut level = t.high;
+        (0..n)
+            .map(|_| {
+                if let Some(l) = t.step(p) {
+                    level = l;
+                }
+                level
+            })
+            .collect()
+    }
+
+    /// `specs/tones.md` section 1: a 50% square wave of period `P`, high while `phase < P / 2`,
+    /// the pin written only on a change, and silence low.
+    #[test]
+    fn the_tone_step_is_a_square_wave_of_period_p() {
+        let mut t = ToneStep::new();
+        // P = 8 (2 kHz at 16 kHz): the phase runs 1..7, 0, so 3 high of the first 8, then 4 of 8.
+        let l = tone_levels(&mut t, 8, 16);
+        assert_eq!(
+            l,
+            [
+                true, true, true, false, false, false, false, true, //
+                true, true, true, false, false, false, false, true
+            ]
+        );
+        assert_eq!(
+            l.iter().filter(|x| **x).count(),
+            8,
+            "half of each period high"
+        );
+        // P = 2, the highest tone (8 kHz): one period high, one low.
+        let mut t = ToneStep::new();
+        assert_eq!(tone_levels(&mut t, 2, 4), [false, true, false, true]);
+        // Writes only on a change: 2 writes per tone period (the first rise at period 1, then a
+        // fall and a rise per 16 periods: 11 in 80), none in silence.
+        let mut t = ToneStep::new();
+        let writes = (0..80).filter(|_| t.step(16).is_some()).count();
+        assert_eq!(writes, 11);
+        let mut t = ToneStep::new();
+        assert_eq!((0..100).filter(|_| t.step(0).is_some()).count(), 0);
+        // Silence drives low at once, mid-tone.
+        let mut t = ToneStep::new();
+        tone_levels(&mut t, 8, 1);
+        assert!(t.high);
+        assert_eq!(t.step(0), Some(false));
+        // A shorter period below the current phase restarts it.
+        let mut t = ToneStep::new();
+        tone_levels(&mut t, 64, 40);
+        assert_eq!(tone_levels(&mut t, 8, 8).iter().filter(|x| **x).count(), 4);
+    }
 
     /// The injected group's rank list (bring-up step 5): the two-slot group where `board.battery.pin` is
     /// absent (the current-limit slice's expectation, unchanged), and the three-slot group where it
