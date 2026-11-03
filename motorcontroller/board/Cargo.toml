@@ -1,12 +1,13 @@
 # The board's pin vocabulary and its boot status record (specs/configured-links.md): the packed
-# port|pin type and its decode, the dead-time constants, and the status record the firmware fills
-# during bring-up and is served by `STATUS_READ`. HAL-free, no_std; the host tools decode the record
-# with the same type.
+# port|pin type and its decode, the dead-time constants, the current limit's arithmetic, and the
+# status record the firmware fills during bring-up and is served by `STATUS_READ`. HAL-free, no_std;
+# the host tools decode the record with the same type and run the limit check with the same
+# arithmetic.
 [package]
 name = "board"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
-description = "The packed port|pin type, the dead-time constants and the boot status record (STATUS_READ). no_std, HAL-free."
+description = "The packed port|pin type, the dead-time constants, the current limit's arithmetic and the boot status record (STATUS_READ). no_std, HAL-free."
 
 [dependencies]

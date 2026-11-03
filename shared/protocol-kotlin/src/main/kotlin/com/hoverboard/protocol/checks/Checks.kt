@@ -1,5 +1,6 @@
 package com.hoverboard.protocol.checks
 
+import com.hoverboard.protocol.board.CurrentLimit
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.pincap.Chip
@@ -81,6 +82,9 @@ enum class Check(val id: String) {
 
     /** An arm-row or calibration value is in its range. */
     RANGE("range"),
+
+    /** A motor's current limit converts above its noise floor. */
+    LIMIT_FLOOR("limit_floor"),
 
     /** The IMU axis signs and roles form a proper rotation. */
     FRAME("frame"),
@@ -475,7 +479,10 @@ object Checks {
         refusal(Check.AF_FORM, f.key, msg)
     }
 
-    /** Every check that needs no chip: the range table and the IMU frame (`checks::check_values`). */
+    /**
+     * Every check that needs no chip (`checks::check_values`): the range table, each motor's limit
+     * above its noise floor, and the IMU frame.
+     */
     fun checkValues(state: Map<Key, Value>): List<Refusal> {
         val out = mutableListOf<Refusal>()
         for (key in state.keys.sortedWith(compareBy({ it.fieldId }, { it.index }))) {
@@ -488,6 +495,16 @@ object Checks {
             val range = Fields.rangeOf(key) ?: continue
             val v = intOf(state.getValue(key)) ?: continue
             if (v !in range) out += refusal(Check.RANGE, key, "$v is outside ${range.first}..${range.last}")
+        }
+        // Each motor's limit above its floor, each of the three as the write leaves it or its
+        // registry default where it is not stored.
+        for (m in 0 until Fields.MOTORS) {
+            fun value(def: FieldDef): Long? = intOf(state[def.key(m)] ?: def.default)
+            val limit = Fields.MOTOR_CURRENT_LIMIT.key(m)
+            val ma = value(Fields.MOTOR_CURRENT_LIMIT) ?: continue
+            val cal = value(Fields.MOTOR_CURRENT_CAL) ?: continue
+            val floor = value(Fields.MOTOR_NOISE_FLOOR) ?: continue
+            limitFloor(ma, cal, floor)?.let { out += refusal(Check.LIMIT_FLOOR, limit, it) }
         }
         val signs = (0 until Fields.IMU_AXIS_SIGN.size).map { i ->
             (state[Key(Fields.IMU_AXIS_SIGN.id, i)] as? Value.I32)?.v ?: 0
@@ -507,6 +524,26 @@ object Checks {
             null -> Unit
         }
         return out
+    }
+
+    /**
+     * Why a motor's limit of [ma] milliamps fails the `limit_floor` check at [cal] counts per amp
+     * and a noise floor of [floor] counts, or null when it passes (`checks::limit_floor`): by the
+     * firmware's arithmetic ([CurrentLimit]), a limit passes when FOC's full scale is above zero. The
+     * lowest limit that passes is `floor * 1000 / cal + 1` rounded up to the next 100 mA, stepped up
+     * by 100 mA while the conversion's rounding still leaves it at the floor.
+     */
+    fun limitFloor(ma: Long, cal: Long, floor: Long): String? {
+        fun passes(ma: Long) = CurrentLimit.fullScaleCounts(CurrentLimit.limitCounts(ma, cal, floor), floor) > 0
+        if (passes(ma)) return null
+        val scale = cal.coerceIn(CurrentLimit.CURRENT_CAL)
+        val floorCounts = CurrentLimit.noiseFloorCounts(floor)
+        val start = (floorCounts * 1_000 / scale + 1 + 99) / 100 * 100
+        val lowest = (start..CurrentLimit.LIMIT_REQUEST_CAP_MA step 100).firstOrNull { passes(it) }
+        val fix = lowest?.let { "the lowest limit that passes is $it mA" }
+            ?: "no limit passes a floor at the top of the limit window"
+        return "$ma mA is ${CurrentLimit.requestCounts(ma, cal)} counts at a current.cal of $scale, at or below the " +
+            "noise floor of $floorCounts counts, so FOC's full scale is 0; $fix"
     }
 
     /**

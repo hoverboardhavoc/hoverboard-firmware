@@ -7,7 +7,8 @@
 //! Two kinds. The pin checks need the chip, which the CLI reads from `TARGET_ID` through the
 //! board's bridge, and test the pin, instance and remap keys against `hal::pincap`'s table of that
 //! chip. The value checks need no chip: the arm row and the calibration against the store's range
-//! table (`store::RANGES`), and the IMU frame against `imu::Config::frame_error`.
+//! table (`store::RANGES`), each motor's current limit against its noise floor by the firmware's
+//! own conversion (`board::limit`), and the IMU frame against `imu::Config::frame_error`.
 //!
 //! One check looks at the machine rather than at one board: [`check_leader`], the rigid frame's
 //! leader (`specs/rigid-leader.md` section 6.1), on every motor controller as the write would leave
@@ -60,6 +61,8 @@ pub enum Check {
     MotorTimer,
     /// An arm-row or calibration value is in its range.
     Range,
+    /// A motor's current limit converts above its noise floor.
+    LimitFloor,
     /// The IMU axis signs and roles form a proper rotation.
     Frame,
     /// A balance machine in the rigid frame has exactly one board set as leader.
@@ -68,7 +71,7 @@ pub enum Check {
 
 impl Check {
     /// Every check.
-    pub const ALL: [Check; 17] = [
+    pub const ALL: [Check; 18] = [
         Check::PinExists,
         Check::Swd,
         Check::PinTwice,
@@ -84,6 +87,7 @@ impl Check {
         Check::PhasePair,
         Check::MotorTimer,
         Check::Range,
+        Check::LimitFloor,
         Check::Frame,
         Check::Leader,
     ];
@@ -106,6 +110,7 @@ impl Check {
             Check::PhasePair => "phase_pair",
             Check::MotorTimer => "motor_timer",
             Check::Range => "range",
+            Check::LimitFloor => "limit_floor",
             Check::Frame => "frame",
             Check::Leader => "leader",
         }
@@ -633,8 +638,9 @@ pub fn check_forms(chip: Chip, entries: &[Entry]) -> Vec<Refusal> {
     out
 }
 
-/// Every check that needs no chip: the range table over the arm row and the calibration, and the
-/// IMU frame. Another field's range (`wifi.tx_power`) is the forceable one encoding makes.
+/// Every check that needs no chip: the range table over the arm row and the calibration, each
+/// motor's limit above its noise floor, and the IMU frame. Another field's range (`wifi.tx_power`)
+/// is the forceable one encoding makes.
 pub fn check_values(state: &State) -> Vec<Refusal> {
     let mut out = Vec::new();
     for (key, (t, b)) in state {
@@ -649,6 +655,31 @@ pub fn check_values(state: &State) -> Vec<Refusal> {
                 check: Check::Range,
                 key: *key,
                 msg: format!("{}: {v} is outside {lo}..{hi}", path_of(*key)),
+            });
+        }
+    }
+    // Each motor's limit above its floor, each of the three as the write leaves it or its registry
+    // default where it is not stored.
+    for m in 0..store::MOTORS {
+        let value = |k: Key, default: u32| match state.get(&k) {
+            Some((t, b)) => int_of(*t, b).and_then(|v| u32::try_from(v).ok()),
+            None => Some(default),
+        };
+        let limit = store::MOTOR_CURRENT_LIMIT.at(m);
+        let cal = store::MOTOR_CURRENT_CAL.at(m);
+        let floor = store::MOTOR_NOISE_FLOOR.at(m);
+        let (Some(ma), Some(cal), Some(floor)) = (
+            value(limit.key(), limit.default()),
+            value(cal.key(), cal.default().into()).and_then(|v| u16::try_from(v).ok()),
+            value(floor.key(), floor.default().into()).and_then(|v| u16::try_from(v).ok()),
+        ) else {
+            continue;
+        };
+        if let Some(why) = limit_floor(ma, cal, floor) {
+            out.push(Refusal {
+                check: Check::LimitFloor,
+                key: limit.key(),
+                msg: format!("{}: {why}", path_of(limit.key())),
             });
         }
     }
@@ -676,6 +707,38 @@ pub fn check_values(state: &State) -> Vec<Refusal> {
         });
     }
     out
+}
+
+/// Why a motor's limit of `ma` milliamps fails the `limit_floor` check at `cal` counts per amp and a
+/// noise floor of `floor` counts, or `None` when it passes (`specs/config-read-once.md` section 4).
+/// The arithmetic is the firmware's (`board::limit`): a limit passes when FOC's full scale
+/// (`full_scale_counts`, the converted limit less the floor) is above zero, which is a conversion
+/// above the floor. The lowest limit that passes is `floor * 1000 / cal + 1` rounded up to the next
+/// 100 mA, stepped up by 100 mA while the conversion's rounding still leaves it at the floor.
+fn limit_floor(ma: u32, cal: u16, floor: u16) -> Option<String> {
+    use board::limit::{
+        full_scale_counts, limit_counts, noise_floor_counts, request_counts, CURRENT_CAL_MAX,
+        CURRENT_CAL_MIN, LIMIT_REQUEST_CAP_MA,
+    };
+    let passes = |ma: u32| full_scale_counts(limit_counts(ma, cal, floor), floor) > 0;
+    if passes(ma) {
+        return None;
+    }
+    let scale = cal.clamp(CURRENT_CAL_MIN, CURRENT_CAL_MAX) as u32;
+    let floor_counts = noise_floor_counts(floor) as u32;
+    let start = (floor_counts * 1_000 / scale + 1).div_ceil(100) * 100;
+    let lowest = (start..=LIMIT_REQUEST_CAP_MA)
+        .step_by(100)
+        .find(|ma| passes(*ma));
+    let fix = match lowest {
+        Some(l) => format!("the lowest limit that passes is {l} mA"),
+        None => "no limit passes a floor at the top of the limit window".to_string(),
+    };
+    Some(format!(
+        "{ma} mA is {} counts at a current.cal of {scale}, at or below the noise floor of \
+         {floor_counts} counts, so FOC's full scale is 0; {fix}",
+        request_counts(ma, cal)
+    ))
 }
 
 /// The keys whose write can change [`check_leader`]'s verdict: `machine.mode`, `machine.frame` and

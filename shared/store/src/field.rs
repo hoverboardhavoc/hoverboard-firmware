@@ -656,7 +656,7 @@ pub const MOTOR_ALIGN_OFFSET: Field<u8> = Field::new(0x51, 0);
 /// (the store validates type only): the boot seam (`firmware::motor::limit_counts`) clamps it to
 /// 100..=819, a plausibility band that bounds how far a typoed scale can move the ENFORCED limit
 /// away from the labelled one (the converted COUNT is bounded separately, below by this board's
-/// [`MOTOR_NOISE_FLOOR`] and above by `firmware::motor::MAX_LIMIT_COUNTS`). Per-motor via
+/// [`MOTOR_NOISE_FLOOR`] and above by `board::limit::MAX_LIMIT_COUNTS`). Per-motor via
 /// `Key.index`.
 pub const MOTOR_CURRENT_CAL: Field<u16> = Field::new(0x4C, 455);
 
@@ -683,7 +683,7 @@ pub const MOTOR_CURRENT_CAL: Field<u16> = Field::new(0x4C, 455);
 /// (`firmware::motor::noise_floor_counts`) clamps it to `1_000..=16_383`, a plausibility band the
 /// [`MOTOR_CURRENT_CAL`] class uses too. Below 1,000 a chain would claim a floor under the quietest
 /// rest reading any bench board has produced (1,054 median, 1,444 worst of five); at the top of the
-/// band the limit has no range left, because that is `firmware::motor::MAX_LIMIT_COUNTS`.
+/// band the limit has no range left, because that is `board::limit::MAX_LIMIT_COUNTS`.
 ///
 /// Boot-read, into the bring-up's `BootFixed` and carried from there into every arm-time
 /// re-derivation, so one floor serves the whole boot (`specs/integration.md`, "When a stored value
@@ -1852,9 +1852,9 @@ pub mod names {
         // TURN_SLEW_MIN..=TURN_SLEW_MAX.
         at(CONTROL_DRIVE_TURN.id(), 0, 0, 28500),
         at(CONTROL_DRIVE_TURN.id(), 1, 1, 1000),
-        // `current.cal`: `firmware::motor`'s CURRENT_CAL_MIN..=CURRENT_CAL_MAX.
+        // `current.cal`: `board::limit`'s CURRENT_CAL_MIN..=CURRENT_CAL_MAX.
         every(MOTOR_CURRENT_CAL.id(), 100, 819),
-        // `current.limit`, milliamps: `firmware::motor::LIMIT_REQUEST_CAP_MA`, the most the
+        // `current.limit`, milliamps: `board::limit::LIMIT_REQUEST_CAP_MA`, the most the
         // conversion takes as written.
         every(MOTOR_CURRENT_LIMIT.id(), 0, 163_840),
         every(MOTOR_DIRECTION.id(), 0, 1),
@@ -1869,7 +1869,7 @@ pub mod names {
         // offset -500..=500.
         at(BOARD_BATTERY_CAL.id(), 0, 10_000, 32_000),
         at(BOARD_BATTERY_CAL.id(), 1, -500, 500),
-        // `current.noise_floor`: `firmware::motor`'s NOISE_FLOOR_MIN..=MAX_LIMIT_COUNTS.
+        // `current.noise_floor`: `board::limit`'s NOISE_FLOOR_MIN..=MAX_LIMIT_COUNTS.
         every(MOTOR_NOISE_FLOOR.id(), 1_000, 16_383),
         // `wifi.tx_power`: the radio's own range; not a check the app makes.
         every(
