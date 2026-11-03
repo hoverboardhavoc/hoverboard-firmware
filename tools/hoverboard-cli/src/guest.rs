@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use linkctl::{CyclicState, DriveCmd, DriveKind, Inputs, OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS};
+use linkctl::{
+    CyclicMotor, CyclicState, DriveCmd, DriveKind, Inputs, OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS,
+};
 use net::pdu::Pdu;
 use net::walk::{Controller, CFG_OK};
 
@@ -52,6 +54,9 @@ struct Source {
     last_at: Duration,
     longest_gap: Duration,
     last: CyclicState,
+    /// The last frame's motor-1 block: a two-motor board's motor 1 (`specs/link-control.md`, "The
+    /// motor-1 block"), `None` from a one-motor board.
+    last_motor1: Option<CyclicMotor>,
 }
 
 /// The `CYCLIC_STATE` frames heard, per `src`. Times are offsets from the start of the run.
@@ -85,7 +90,7 @@ impl Tally {
         if p.opcode != OP_CYCLIC_STATE || !(self.only.is_empty() || self.only.contains(&p.src)) {
             return false;
         }
-        let Ok(s) = CyclicState::decode(p.payload) else {
+        let Ok((s, motor1)) = CyclicState::decode_with_motor1(p.payload) else {
             return false;
         };
         match self.sources.get_mut(&p.src) {
@@ -94,6 +99,7 @@ impl Tally {
                 src.longest_gap = src.longest_gap.max(at.saturating_sub(src.last_at));
                 src.last_at = at;
                 src.last = s;
+                src.last_motor1 = motor1;
             }
             None => {
                 self.sources.insert(
@@ -103,6 +109,7 @@ impl Tally {
                         last_at: at,
                         longest_gap: Duration::ZERO,
                         last: s,
+                        last_motor1: motor1,
                     },
                 );
             }
@@ -113,6 +120,12 @@ impl Tally {
     /// The last frame heard from `src`.
     pub fn last(&self, src: u8) -> Option<&CyclicState> {
         self.sources.get(&src).map(|s| &s.last)
+    }
+
+    /// The motor-1 block of the last frame heard from `src`: `None` while nothing is heard or
+    /// from a one-motor board.
+    pub fn last_motor1(&self, src: u8) -> Option<&CyclicMotor> {
+        self.sources.get(&src).and_then(|s| s.last_motor1.as_ref())
     }
 
     /// Frames from `src` so far.
@@ -137,14 +150,22 @@ impl Tally {
         }
     }
 
-    /// The once-a-second line at `elapsed` into the run.
+    /// The once-a-second line at `elapsed` into the run. A two-motor board's part ends in motor
+    /// 1's window peak and mean (counts) and its rate (Q12 of a hall edge per window), from the
+    /// frame's motor-1 block (`specs/link-control.md`, "The motor-1 block").
     pub fn line(&self, elapsed: Duration) -> String {
         let per: Vec<String> = self
             .sources
             .iter()
             .map(|(&a, s)| {
+                let motor1 = s.last_motor1.map_or(String::new(), |m| {
+                    format!(
+                        " m1 peak {} mean {} rate {}",
+                        m.phase_peak, m.phase_mean, m.wheel_rate
+                    )
+                });
                 format!(
-                    "{a:#04x} {} frames {:.1}/s gap {:.2}s mode {} peer_demand {} battery {} fault {:#06x}",
+                    "{a:#04x} {} frames {:.1}/s gap {:.2}s mode {} peer_demand {} battery {} fault {:#06x}{motor1}",
                     s.frames,
                     self.rate(a, elapsed),
                     s.longest_gap.as_secs_f64(),
