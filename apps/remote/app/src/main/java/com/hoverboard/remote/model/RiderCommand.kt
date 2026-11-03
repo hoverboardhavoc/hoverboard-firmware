@@ -46,6 +46,7 @@ data class RiderCommand private constructor(
     val demand: Int,
     val rider: Boolean,
     val steer: Int = 0,
+    val horn: Boolean = false,
 ) {
 
     /**
@@ -71,7 +72,7 @@ data class RiderCommand private constructor(
      */
     val inputs: Inputs
         get() = Inputs(
-            buttons = if (armed) Inputs.BUTTON_POWER else 0,
+            buttons = (if (armed) Inputs.BUTTON_POWER else 0) or (if (horn) Inputs.BUTTON_HORN else 0),
             rider = if (rider) Inputs.RIDER_PRESENT else 0,
         )
 
@@ -105,7 +106,15 @@ data class RiderCommand private constructor(
      * also state one for the firmware to apply a second time.
      */
     fun withDemand(demand: Int): RiderCommand =
-        if (armed) armed(demand, simulatingRider = rider) else DISARMED
+        (if (armed) armed(demand, simulatingRider = rider) else DISARMED).withHorn(horn)
+
+    /**
+     * The same command with the horn held or not (`specs/tones.md` section 5): `INPUTS.buttons`
+     * bit1 ([Inputs.BUTTON_HORN]), a level the board plays its horn tune for while its mirror
+     * carries it. Armed or disarmed alike: the horn moves nothing, so the invariant above does not
+     * reach it, and [DISARMED] itself stays the silent all-stop.
+     */
+    fun withHorn(horn: Boolean): RiderCommand = copy(horn = horn)
 
     /**
      * The same command asking for a turn of [steer] as well, on the [DriveCmd.FULL_SCALE] scale.

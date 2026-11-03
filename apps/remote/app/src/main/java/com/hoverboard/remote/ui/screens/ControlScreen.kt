@@ -86,6 +86,7 @@ fun ControlScreen(
     onJoystickMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
     onThrottleRelease: () -> Unit,
     modifier: Modifier = Modifier,
+    onHorn: ((Boolean) -> Unit)? = null,
     showFrameStats: Boolean = false,
     onOpenSetup: (board: Int, row: Key) -> Unit = { _, _ -> },
 ) {
@@ -123,6 +124,7 @@ fun ControlScreen(
             onThrottleMove = onThrottleMove,
             onJoystickMove = onJoystickMove,
             onThrottleRelease = onThrottleRelease,
+            onHorn = onHorn,
             grid = grid,
             padShown = !state.boardsOff,
             statementsHeight = STATEMENTS_HEIGHT,

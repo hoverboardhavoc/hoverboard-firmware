@@ -260,6 +260,7 @@ private fun Connected(
                 onThrottleMove = viewModel::onThrottleMove,
                 onJoystickMove = viewModel::onJoystickMove,
                 onThrottleRelease = viewModel::onThrottleRelease,
+                onHorn = viewModel::onHorn,
                 // Debug builds only (`specs/remote-ui.md` 3.1): the per-source frame count and
                 // longest gap, a bench instrument with nothing to tell a rider.
                 showFrameStats = BuildConfig.DEBUG,
@@ -287,13 +288,7 @@ private fun Connected(
             )
         },
         setup = { Setup(state, setupState, viewModel.setup, viewModel::setSimulateRider, setupRow) },
-        layout = {
-            LayoutScreen(
-                state = layoutState,
-                armed = state.armed,
-                actions = viewModel.layout,
-            )
-        },
+        layout = { LayoutScreen(state = layoutState, armed = state.armed, actions = viewModel.layout) },
     )
 }
 

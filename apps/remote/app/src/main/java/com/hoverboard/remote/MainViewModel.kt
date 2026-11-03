@@ -1022,6 +1022,17 @@ class MainViewModel(
     fun onAppBackgrounded() = forceDisarm(selfDisarm = local.value.armed)
 
     /**
+     * Hold or release the horn (`specs/tones.md` section 5), armed or not, and hand the new command
+     * to the pump. A press or a release changes the `INPUTS` payload, so the pump sends it on its
+     * next tick (50 ms) with the change burst, not on the 500 ms keepalive. The horn is part of the
+     * all-stop's reset ([LocalState.disarmed]): an app sent to the background cannot hold it.
+     */
+    fun onHorn(held: Boolean) {
+        local.update { it.copy(horn = held) }
+        sendCurrent()
+    }
+
+    /**
      * Turn the bench rider simulation on or off, and hand the new command to the pump.
      *
      * On the wire on the next `INPUTS` tick, not instantly: [sendCurrent] updates the value
@@ -1066,7 +1077,7 @@ class MainViewModel(
             RiderCommand.armed(l.throttleSpeed, simulatingRider = l.simulateRider)
         } else {
             RiderCommand.DISARMED
-        }
+        }.withHorn(l.horn)
         // To the boards the mode in force addresses: SINGLE the selected motor controller, the
         // other three both. One value each in BOUND, which is also the pivoting balance mapping
         // (`specs/control.md` (h)); the mixed pair in DIFFERENTIAL, where the turn is spent on the
@@ -1140,6 +1151,7 @@ class MainViewModel(
         val armedTargets: DriveTargets? = null,
         val faultDisarm: FaultDisarm? = null,
         val latchHeld: Map<Int, Int> = emptyMap(),
+        val horn: Boolean = false,
     ) {
         /**
          * The all-stop state: no arm level, no demand, no touch. Operator settings and the fault

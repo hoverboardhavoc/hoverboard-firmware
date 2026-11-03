@@ -480,6 +480,37 @@ class CommandPumpTest {
         }
     }
 
+    /**
+     * The horn (`specs/tones.md` section 5): a press and a release each go out on the next tick with
+     * the change burst, disarmed as well as armed, and never wait for the 500 ms keepalive.
+     */
+    @Test
+    fun `a horn press and release go out at once, disarmed too`() = runTest {
+        val sent = mutableListOf<Pair<RiderCommand, TickFrames>>()
+        val pump = oneBoardPump(backgroundScope) { c, f -> sent.add(c to f) }
+        pump.start()
+        pump.set(single(RiderCommand.DISARMED))
+        advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+        runCurrent()
+        sent.clear()
+
+        // Within one tick of the press.
+        pump.set(single(RiderCommand.DISARMED.withHorn(true)))
+        advanceTimeBy(INTERVAL)
+        runCurrent()
+        val press = sent.single()
+        assertTrue(press.first.inputs.horn() && !press.first.inputs.powerRequest())
+        assertEquals(TickFrames.BOTH, press.second)
+
+        advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+        runCurrent()
+        sent.clear()
+        pump.set(single(RiderCommand.DISARMED))
+        advanceTimeBy(INTERVAL)
+        runCurrent()
+        assertTrue(sent.single().let { !it.first.inputs.horn() && it.second != TickFrames.DRIVE_ONLY })
+    }
+
     /** One board's frame: what every single-board test above streams. */
     private fun single(command: RiderCommand) = DriveFrame.of(DriveTargets(DriveMode.SINGLE, wheels(A)), command)
 
