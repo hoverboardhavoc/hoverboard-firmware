@@ -2326,8 +2326,9 @@ mod firmware {
 
         // 1b. Motor bring-up (`specs/motor-integration.md` slice 3, DISARMED): motor 0's stored
         //     configuration (`layout::read`), then the timer + injected ADC are configured and the
-        //     16 kHz period ISR starts stepping the commutator, with MOE never written (this crate
-        //     does not name the arming gate at all). A board with no motor stored is left exactly
+        //     16 kHz period ISR starts stepping the commutator. MOE is written only by the
+        //     calibration of a motor stored `low_sides_on`, through the arming layer's
+        //     `calibration_moe` and cleared before the period vector (`specs/twelve-fet.md` 5.5). A board with no motor stored is left exactly
         //     as before: the outcome rides in `CTRL_OBS`'s motor block, and a bring-up step that
         //     fails in the status record. Placed after the interrupt priorities are set and before
         //     the tick source, so the 250 Hz task never runs against a half-built motor. A
@@ -2343,6 +2344,7 @@ mod firmware {
             layout.battery,
             PERIOD_HZ,
             core::array::from_fn(|m| store.get(store::MOTOR_NOISE_FLOOR.at(m as u8))),
+            arm::hw::calibration_moe,
         );
         for (m, outcome) in outcomes.iter().enumerate() {
             match *outcome {

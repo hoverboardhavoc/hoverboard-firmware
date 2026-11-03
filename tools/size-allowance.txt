@@ -1,0 +1,8 @@
+# Growth the owner allowed past the size gate (tools/size-vs-base.sh, specs/twelve-fet.md section 4.3).
+# A row applies only when the gate's base is its commit (a prefix of the full hash), so it lapses
+# once main moves past that commit. Bytes over the base for each figure.
+#
+# base     image                  span  .hotcode  static-RAM  why
+8d07a9d    mainboard-gd32f103c8   84    0         0           current.cal_state (twelve-fet.md 5.5)
+8d07a9d    mainboard-gd32f130c8   336   0         0           current.cal_state (twelve-fet.md 5.5)
+8d07a9d    mainboard-mm32spin05   68    0         0           current.cal_state (twelve-fet.md 5.5)

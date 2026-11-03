@@ -18,6 +18,12 @@
 //! - a motor that was never brought up cannot be armed (there is no runtime to drive it), and
 //! - the motor-side fault LEVEL vetoes arming.
 //!
+//! The one other MOE this file sets is the boot calibration's ([`hw::calibration_moe`],
+//! `specs/twelve-fet.md` section 5.5): a motor stored `current.cal_state` = `low_sides_on` has its
+//! zeros measured with duties 0, its channels enabled and MOE set, so the low sides are on and
+//! the high sides off. It runs in the bring-up, before the period vector and before any gate is
+//! installed, and goes through the same single MOE call as the arm.
+//!
 //! **The level, never the raw `FAULT` word.** [`decide`] takes a `bool` and cannot express reading
 //! the word, deliberately: `motor::FAULT` carries bits that are not fault producers
 //! (`FAULT_DEMAND_STALE` is self-mitigating, the ISR has already floated every phase by the time it
@@ -686,7 +692,7 @@ pub mod hw {
                     let gates = unsafe { &*addr_of_mut!(GATE) };
                     for (g, allowed) in gates.iter().zip(moe_allowed) {
                         if let (Some(g), true) = (g, allowed) {
-                            g.arm();
+                            set_moe(g, true);
                             ARMED.store(true, Ordering::Relaxed);
                         }
                     }
@@ -703,7 +709,7 @@ pub mod hw {
                     // Every motor's MOE first, then (the next steps) every motor floated.
                     // SAFETY: as `run_arm`.
                     for g in unsafe { (*addr_of_mut!(GATE)).iter().flatten() } {
-                        g.disarm();
+                        set_moe(g, false);
                     }
                     ARMED.store(false, Ordering::Relaxed);
                 }
@@ -711,6 +717,28 @@ pub mod hw {
                 ShutdownStep::FloatChannels => motor::hw::float_all_channels(),
             }
         }
+    }
+
+    /// Set or clear one gate's MOE: the crate's one call of each, which the arm, the shutdown and
+    /// the calibration hold share.
+    #[inline(always)]
+    fn set_moe(g: &ArmGate, on: bool) {
+        if on {
+            g.arm();
+        } else {
+            g.disarm();
+        }
+    }
+
+    /// The calibration's MOE (`specs/twelve-fet.md` section 5.5): set for a motor whose zeros are
+    /// measured with its low sides on (`current.cal_state` = `low_sides_on`), cleared when its
+    /// blocks are done. Called by the bring-up's `CalibratePhaseOffsets` alone, on the boot thread,
+    /// before the period vector is unmasked and before [`install`], so the mode machine has no
+    /// gate yet and [`ARMED`] stays false: this is not an arm, and nothing on the arm path can
+    /// meet it. The bring-up writes duties 0 and enables the three channels first, so MOE puts
+    /// the low sides on and the high sides off.
+    pub fn calibration_moe(timer: &hal::PwmTimer, on: bool) {
+        set_moe(&timer.arm_gate(), on);
     }
 
     /// Zero the demand word and bump its sequence, so the ISR sees a FRESH write of zero rather

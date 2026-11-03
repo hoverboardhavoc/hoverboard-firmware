@@ -14,6 +14,11 @@
 //! where slice 3's test enforced ABSENCE. Everything below it stays a disarmed layer: it can stop
 //! the bridge, through the demand word and the channel enables, and it cannot start one.
 //!
+//! The one MOE the bring-up causes is the calibration's, for a motor stored `current.cal_state` =
+//! `low_sides_on` (`specs/twelve-fet.md` section 5.5): `main.rs` hands [`hw::bring_up`] the arming
+//! layer's `calibration_moe` as a function, and the calibration calls it with duties 0 and the
+//! channels enabled, so only the low sides turn on, and clears it before the period vector.
+//!
 //! Split, like the rest of this crate: everything that is pure arithmetic or ordering lives here on
 //! ALL targets (so the host test run reaches it), and the hardware half is `target_os = "none"`.
 //!
@@ -2306,9 +2311,9 @@ pub mod hw {
     /// that fails a per-motor step is not brought up and the other comes up alone, except that
     /// motor 0 failing takes motor 1 with it ([`MotorSkip::NoMotor0`]): TIMER0 is the ADC trigger
     /// and TIMER7's master. A board-wide step (the ADC, the counter start, the trigger confirm, the
-    /// calibration's conversions, the vector) failing fails every motor still up. Nothing here
-    /// writes MOE: the arming gate is not built, not held, and not reachable from this module. The
-    /// summary carries the configured timer so `crate::arm` can build its gate, which is the only
+    /// calibration's conversions, the vector) failing fails every motor still up. The arming gate
+    /// is not built, not held, and not named in this module; the only MOE is the calibration's,
+    /// through `cal_moe` for a motor calibrated with its low sides on. The summary carries the configured timer so `crate::arm` can build its gate, which is the only
     /// route by which a motor becomes armable at all.
     ///
     /// `period_hz` is the rate this bring-up's period ISR will run at ([`period_isr_hz`] of the
@@ -2316,6 +2321,9 @@ pub mod hw {
     /// `noise_floor` is the boot-read `MOTOR_NOISE_FLOOR` at each motor's index, the one input to
     /// the limit conversion that is BOOT-read: it rides [`BootFixed`] from here so every install
     /// converts against one floor.
+    /// `cal_moe` is the arming layer's calibration MOE (`crate::arm::hw::calibration_moe`), which
+    /// [`BringUpStep::CalibratePhaseOffsets`] calls for a motor stored `low_sides_on` alone
+    /// ([`Motor::cal_low_sides`], section 5.5).
     /// `vbatt` is the stored battery-sense input with its ADC channel. On a one-motor image `Some`
     /// adds the battery rank to the injected group (rank 2, after the two phase ranks); on the
     /// two-motor image the four phase ranks fill the group and the battery is ADC1's regular
@@ -2332,10 +2340,19 @@ pub mod hw {
         vbatt: Option<Pin3>,
         period_hz: u32,
         noise_floor: [u16; COUNT],
+        cal_moe: fn(&PwmTimer, bool),
     ) -> [Result<MotorRuntimeSummary, MotorSkip>; COUNT] {
         // Motor 1's outcome, which the bring-up writes as it goes (a two-motor image only).
         let mut second = Err(MotorSkip::Absent);
-        let first = bring_up_motors(chip, motors, vbatt, period_hz, noise_floor, &mut second);
+        let first = bring_up_motors(
+            chip,
+            motors,
+            vbatt,
+            period_hz,
+            noise_floor,
+            cal_moe,
+            &mut second,
+        );
         let mut out = [Err(MotorSkip::Absent); COUNT];
         if COUNT > 1 {
             // Motor 1 rides on motor 0 (section 5.2): a configured motor 1 is down with it.
@@ -2355,6 +2372,7 @@ pub mod hw {
         vbatt: Option<Pin3>,
         period_hz: u32,
         noise_floor: [u16; COUNT],
+        cal_moe: fn(&PwmTimer, bool),
         second: &mut Result<MotorRuntimeSummary, MotorSkip>,
     ) -> Result<MotorRuntimeSummary, MotorSkip> {
         // `MOTOR` lives in `.uninit` (see the static): give it the `None`s its initializer names
@@ -2561,7 +2579,26 @@ pub mod hw {
                     // accepted pair and OBS_CAL are per motor (section 5.5).
                     let inj = injected.ok_or(failed(step))?;
                     calibrated = true;
-                    if let Some(verdicts) = measure_offsets(&inj) {
+                    // The bridge state each motor's zeros are measured in (section 5.5): a motor
+                    // stored `low_sides_on` has its three channels enabled and MOE set before the
+                    // settle, at `PwmTimer::configure`'s zero duty, which nothing writes before
+                    // the period vector, so its low sides are on and its high sides off for the
+                    // whole measurement; after it, MOE is cleared and the channels disabled, the
+                    // posture `float_all_channels` leaves. Every exit of `measure_offsets` passes
+                    // the release.
+                    let low1 = COUNT > 1 && m1.is_some_and(|(m1m, _, _)| m1m.cal_low_sides);
+                    let hold = |on: bool| {
+                        if let (Some(t), true) = (&timer, m.cal_low_sides) {
+                            cal_hold(t, on, cal_moe);
+                        }
+                        if let (Some(t), true) = (&timer1, low1) {
+                            cal_hold(t, on, cal_moe);
+                        }
+                    };
+                    hold(true);
+                    let measured = measure_offsets(&inj);
+                    hold(false);
+                    if let Some(verdicts) = measured {
                         for (i, (c, verdict)) in cal.iter_mut().zip(verdicts).enumerate() {
                             // The pair published and the pair the ISR reads currents against:
                             // the agreed mean, or the last block of a refused run (so a refused
@@ -2635,6 +2672,20 @@ pub mod hw {
         Ok(MotorRuntimeSummary {
             timer: timer.ok_or(MotorSkip::StepFailed(BringUpStep::ConfigureTimer))?,
         })
+    }
+
+    /// One motor's calibration posture (section 5.5): `on` enables the three channels then sets
+    /// MOE through `cal_moe`; off clears MOE then disables the channels.
+    #[inline(never)]
+    fn cal_hold(t: &PwmTimer, on: bool, cal_moe: fn(&PwmTimer, bool)) {
+        let h = t.handle();
+        if on {
+            h.set_channel_outputs([true; 3]);
+        }
+        cal_moe(t, on);
+        if !on {
+            h.set_channel_outputs([false; 3]);
+        }
     }
 
     /// [`BringUpStep::SelectMethodAndInstall`] for motor `i`: build its records and install the
@@ -2804,8 +2855,8 @@ pub mod hw {
     /// other measures on. A motor that is not up reads ranks the group does not convert; its
     /// verdict is never used.
     ///
-    /// The bridge is quiet by construction, not by convention: MOE is never written in this crate,
-    /// so no phase can be driven while this runs.
+    /// The bridge is quiet or holds its low sides on, as the caller set it (`current.cal_state`,
+    /// section 5.5); no high side is on while this runs.
     fn measure_offsets(injected: &InjectedHandle) -> Option<[CalVerdict; COUNT]> {
         for _ in 0..CAL_SETTLE_CONVERSIONS {
             if !await_conversion(injected) {

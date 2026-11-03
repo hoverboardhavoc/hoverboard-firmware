@@ -284,6 +284,12 @@ object Fields {
     val MOTOR_PHASE_C = pin(0x57, Type.PinAdc)
 
     /**
+     * The bridge state a motor's phase-current zeros are measured in: 0 = floating (every FET
+     * off), 1 = low sides on (`specs/twelve-fet.md` section 5.5).
+     */
+    val MOTOR_CAL_STATE = FieldDef(0x58, Type.U8, Value.U8(0), Effect.BOOT)
+
+    /**
      * What the pack IS: the number of cells in series (`shared/store/src/field.rs`,
      * `BOARD_BATTERY_CELLS`). 0 = not stated, which is the default and is not a guess at eight.
      *
@@ -528,6 +534,7 @@ object Fields {
         "MOTOR_PHASE_A" to MOTOR_PHASE_A,
         "MOTOR_PHASE_B" to MOTOR_PHASE_B,
         "MOTOR_PHASE_C" to MOTOR_PHASE_C,
+        "MOTOR_CAL_STATE" to MOTOR_CAL_STATE,
         "IMU_I2C" to IMU_I2C,
         "IMU_MODEL" to IMU_MODEL,
         "IMU_REMAP" to IMU_REMAP,

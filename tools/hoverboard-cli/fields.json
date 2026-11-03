@@ -944,5 +944,20 @@
     "scope": "wheel",
     "effect": "boot",
     "board_owned": false
+  },
+  {
+    "id": 88,
+    "path": "current.cal_state",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "enum",
+    "labels": {
+      "floating": 0,
+      "low_sides_on": 1
+    },
+    "scope": "wheel",
+    "effect": "boot",
+    "board_owned": false
   }
 ]

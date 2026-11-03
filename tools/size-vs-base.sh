@@ -13,6 +13,10 @@
 # same invocation. It must be outside this checkout: cargo merges every `.cargo/config.toml` up the
 # directory tree, and a base nested in this one would run each alias twice over. CI passes the merge
 # base with origin/main, or the first parent on main itself.
+#
+# The exception (specs/twelve-fet.md section 4.3): `tools/size-allowance.txt` lists growth the owner
+# allowed against one base commit, per image and figure. A row applies only when the base being
+# compared is its commit, so it lapses by itself once main moves past that commit.
 set -euo pipefail
 
 base=${1:?usage: tools/size-vs-base.sh <base-commit> [image-alias...]}
@@ -54,6 +58,20 @@ done
 sec() { arm-none-eabi-size -A "$1" | awk -v n="$2" '$1==n {t+=$2} END{print t+0}'; }
 static_ram() { arm-none-eabi-size -A "$1" | awk '$1==".data" || $1==".bss" || $1==".uninit" {t+=$2} END{print t+0}'; }
 
+allowances=$root/tools/size-allowance.txt
+# The bytes `tools/size-allowance.txt` allows image $1's figure $2 to grow against this base.
+allowed() {
+	[ -f "$allowances" ] || {
+		echo 0
+		return
+	}
+	awk -v b="$base" -v n="$1" -v w="$2" '
+		!/^#/ && NF >= 5 && index(b, $1) == 1 && $2 == n {
+			print (w == "span" ? $3 : w == ".hotcode" ? $4 : $5); f = 1; exit
+		}
+		END { if (!f) print 0 }' "$allowances"
+}
+
 fail=0
 for a in "${aliases[@]}"; do
 	read -r chip triple < <(chip_of "$a")
@@ -77,9 +95,12 @@ for a in "${aliases[@]}"; do
 	fi
 	for f in "span $hs $bs" ".hotcode $hh $bh" "static-RAM $hr $br"; do
 		read -r what hv bv <<<"$f"
-		if [ "$hv" -gt "$bv" ]; then
-			echo "FAIL: $name $what grew from $bv B to $hv B against $(git -C "$root" rev-parse --short "$base")" >&2
+		allow=$(allowed "$name" "$what")
+		if [ "$hv" -gt $((bv + allow)) ]; then
+			echo "FAIL: $name $what grew from $bv B to $hv B against $(git -C "$root" rev-parse --short "$base") (allowed: $allow B)" >&2
 			fail=1
+		elif [ "$hv" -gt "$bv" ]; then
+			echo "allowed: $name $what grew from $bv B to $hv B, $allow B allowed by tools/size-allowance.txt"
 		fi
 	done
 done

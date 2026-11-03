@@ -15,14 +15,14 @@
           "gate": { "timer": 0, "remap": 0, "dead_time": 32,
             "hi_a": {"port":"A","pin":8},  "hi_b": {"port":"A","pin":9},  "hi_c": {"port":"A","pin":10},
             "lo_a": {"port":"B","pin":13}, "lo_b": {"port":"B","pin":14}, "lo_c": {"port":"B","pin":15} },
-          "current": { "limit": 3000,
+          "current": { "limit": 3000, "cal_state": "low_sides_on",
             "phase_b": {"port":"C","pin":4,"adc":14}, "phase_c": {"port":"C","pin":5,"adc":15} } },
         { "side": "left", "align_offset": 1, "pole_pairs": 15,
           "hall": { "a": {"port":"B","pin":5}, "b": {"port":"B","pin":6}, "c": {"port":"B","pin":7} },
           "gate": { "timer": 7, "dead_time": 32,
             "hi_a": {"port":"C","pin":6}, "hi_b": {"port":"C","pin":7}, "hi_c": {"port":"C","pin":8},
             "lo_a": {"port":"A","pin":7}, "lo_b": {"port":"B","pin":0}, "lo_c": {"port":"B","pin":1} },
-          "current": { "limit": 3000,
+          "current": { "limit": 3000, "cal_state": "low_sides_on",
             "phase_a": {"port":"A","pin":0,"adc":0}, "phase_b": {"port":"C","pin":3,"adc":13} } }
       ]
     }
