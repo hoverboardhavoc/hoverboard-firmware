@@ -406,6 +406,22 @@
     "board_owned": false
   },
   {
+    "id": 31,
+    "path": "tone",
+    "type": "blob",
+    "index": "named",
+    "names": [
+      "horn",
+      "battery_low",
+      "battery_critical"
+    ],
+    "count": 3,
+    "kind": "tune",
+    "scope": "node",
+    "effect": "live",
+    "board_owned": false
+  },
+  {
     "id": 32,
     "path": "machine.mode",
     "type": "u8",
@@ -636,39 +652,6 @@
     "kind": "int",
     "scope": "machine",
     "effect": "boot",
-    "board_owned": false
-  },
-  {
-    "id": 45,
-    "path": "machine.tone.horn",
-    "type": "blob",
-    "index": "single",
-    "count": 1,
-    "kind": "tune",
-    "scope": "machine",
-    "effect": "live",
-    "board_owned": false
-  },
-  {
-    "id": 46,
-    "path": "machine.tone.battery_low",
-    "type": "blob",
-    "index": "single",
-    "count": 1,
-    "kind": "tune",
-    "scope": "machine",
-    "effect": "live",
-    "board_owned": false
-  },
-  {
-    "id": 47,
-    "path": "machine.tone.battery_critical",
-    "type": "blob",
-    "index": "single",
-    "count": 1,
-    "kind": "tune",
-    "scope": "machine",
-    "effect": "live",
     "board_owned": false
   },
   {

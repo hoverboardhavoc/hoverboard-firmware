@@ -1457,12 +1457,16 @@ class RustSourceDriftTest {
     @Test
     fun theFieldEffectsAgreeWithTheRustRegistry() {
         val field = rust("shared/store/src/field.rs")
+        // A row rustfmt breaks before its `.entry(` (`TONE.at(TONE_BATTERY_LOW)\n        .entry(...)`)
+        // is joined back onto one line, so the per-line census sees one row per line.
         val registry = field.substringAfter("pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [")
             .substringBefore("\n];")
-        // `NODE_ADDRESS.entry(Boot),`, `LINK_TX.at(0).entry(Boot),`, `DEVICE_NAME.entry(BYTES_DEVICE_NAME, Boot),`
+            .replace(Regex("""\)\s*\n\s*\.entry\("""), ").entry(")
+        // `NODE_ADDRESS.entry(Boot),`, `LINK_TX.at(0).entry(Boot),`, `DEVICE_NAME.entry(BYTES_DEVICE_NAME, Boot),`,
+        // `TONE.at(TONE_HORN).entry(BYTES_TONE_HORN, Live),`
         val rows = findAllClaiming(
             registry,
-            """^\s*([A-Z0-9_]+)\s*(?:\.at\(\s*\d+\s*\))?\s*\.entry\(\s*(?:\w+\s*,\s*)?(Live|Arm|Boot|Client)\s*\)\s*,""",
+            """^\s*([A-Z0-9_]+)\s*(?:\.at\(\s*\w+\s*\))?\s*\.entry\(\s*(?:\w+\s*,\s*)?(Live|Arm|Boot|Client)\s*\)\s*,""",
             """\.entry\(""",
             "the REGISTRY rows",
         ).map { it.groupValues[1] to it.groupValues[2] }
@@ -1633,6 +1637,25 @@ class RustSourceDriftTest {
 
         // `pub const NAME: IndexedField<i16, 2> = IndexedField::new(0x18, [25200, -5]);`
         for ((name, def) in Fields.INDEXED) {
+            // `pub const NAME: IndexedBlobField<3> = IndexedBlobField::new(0x1F, [&[...], &[...]]);`,
+            // which rustfmt breaks across lines: the id and one byte literal per index.
+            val blob = Regex(
+                """^pub\s+const\s+$name\s*:\s*IndexedBlobField\s*<\s*(\d+)\s*>\s*=\s*IndexedBlobField::new\(\s*([^,]+?)\s*,\s*\[(.*?)\]\s*,?\s*\)\s*;""",
+                setOf(RegexOption.MULTILINE, RegexOption.DOT_MATCHES_ALL),
+            ).find(field)
+            if (blob != null) {
+                assertEquals(Type.Blob, def.type, "$name storage type drifted")
+                assertEquals(literal(name, blob.groupValues[2], "field id"), def.id, "$name id drifted")
+                val defaults = Regex("""&\[([^\]]*)\]""").findAll(blob.groupValues[3]).map { d ->
+                    Value.Bytes(
+                        d.groupValues[1].split(',').map { it.trim() }.filter { it.isNotEmpty() }
+                            .map { literal(name, it, "blob byte").toByte() }.toByteArray(),
+                    )
+                }.toList()
+                assertEquals(blob.groupValues[1].toInt(), defaults.size, "$name declares a count its defaults do not match")
+                assertEquals(defaults, def.defaults, "$name defaults drifted")
+                continue
+            }
             val m = findOne(
                 field,
                 """^pub\s+const\s+$name\s*:\s*IndexedField\s*<\s*(\w+)\s*,\s*(\d+)\s*>\s*=\s*IndexedField::new\(\s*([^,]+?)\s*,\s*\[([^\]]+)\]\s*\)\s*;""",
@@ -1657,6 +1680,16 @@ class RustSourceDriftTest {
             }
             assertEquals(m.groupValues[2].toInt(), defaults.size, "$name declares a count its defaults do not match")
             assertEquals(defaults, def.defaults, "$name defaults drifted")
+        }
+
+        // The tunes' event indices: `pub const TONE_HORN: u8 = 0;`.
+        for ((name, index) in listOf(
+            "TONE_HORN" to Fields.TONE_HORN,
+            "TONE_BATTERY_LOW" to Fields.TONE_BATTERY_LOW,
+            "TONE_BATTERY_CRITICAL" to Fields.TONE_BATTERY_CRITICAL,
+        )) {
+            val m = findOne(field, """^pub\s+const\s+$name\s*:\s*u8\s*=\s*([^;]+);""", "the index `$name`")
+            assertEquals(literal(name, m.groupValues[1], "tone index"), index, "$name drifted")
         }
     }
 
@@ -2297,7 +2330,7 @@ class RustSourceDriftTest {
             .lines().filterNot { it.trim().startsWith("//") }.joinToString("\n")
             .replace(Regex("""#\[cfg\(feature = "test-fields"\)\]\s*FieldName::\w+\([^)]*\),"""), "")
             .replace(Regex("""\s+"""), " ")
-        val rows = Regex("""FieldName::(\w+)\(\s*(\w+)\s*,\s*"([^"]+)"\s*(?:,\s*([\w:]+)\s*)?,?\s*\)""").findAll(table).toList()
+        val rows = Regex("""FieldName::(\w+)\(\s*(\w+)\s*,\s*"([^"]+)"\s*(?:,\s*(&?[\w:]+)\s*)?,?\s*\)""").findAll(table).toList()
         assertEquals(
             table.split("FieldName::").size - 1,
             rows.size,
@@ -2310,6 +2343,18 @@ class RustSourceDriftTest {
                 .map { it.groupValues[1].toInt() to it.groupValues[2] }.toList()
             return (if (m.groupValues[1] == "Enum") Names.Kind.ENUM else Names.Kind.BITS) to pairs
         }
+        // `pub const TONE_EVENTS: [&str; 3] = ["horn", "battery_low", "battery_critical"];`
+        fun indexNames(arg: String): List<String> {
+            val const = arg.removePrefix("&")
+            val m = findOne(
+                field,
+                """^\s*pub\s+const\s+$const\s*:\s*\[&str;\s*(\d+)\]\s*=\s*\[(.*?)\];""",
+                "the index names `$const`",
+            )
+            val names = Regex(""""([^"]+)"""").findAll(m.groupValues[2]).map { it.groupValues[1] }.toList()
+            assertEquals(m.groupValues[1].toInt(), names.size, "`$const` declares a count its names do not match")
+            return names
+        }
         fun kind(arg: String): Pair<Names.Kind, List<Pair<Int, String>>> = when (arg) {
             "Kind::Int" -> Names.Kind.INT to emptyList()
             "Kind::Bool" -> Names.Kind.BOOL to emptyList()
@@ -2318,19 +2363,22 @@ class RustSourceDriftTest {
         val rust = rows.map { r ->
             val (ctor, handle, path, arg) = r.destructured
             val id = checkNotNull(ids[handle]) { "NAMES names `$handle`, which Fields does not mirror" }
+            if (ctor == "tunes") {
+                return@map Names.Name(id, path, Names.IndexKind.NAMED, Names.Kind.TUNE, names = indexNames(arg))
+            }
             val (index, k) = when (ctor) {
                 "single" -> Names.IndexKind.SINGLE to kind(arg)
                 "motor" -> Names.IndexKind.MOTOR to kind(arg)
                 "array" -> Names.IndexKind.ARRAY to kind(arg)
                 "link" -> Names.IndexKind.LINK to kind(arg)
                 "text" -> Names.IndexKind.SINGLE to (Names.Kind.STR to emptyList())
-                "tune" -> Names.IndexKind.SINGLE to (Names.Kind.TUNE to emptyList())
                 "pin" -> Names.IndexKind.valueOf(arg.removePrefix("Index::").uppercase()) to (Names.Kind.PIN to emptyList())
                 else -> error("a `FieldName::$ctor` row, which this gate does not map yet")
             }
             Names.Name(id, path, index, k.first, k.second)
         }
         assertEquals(rust, Names.ALL, "the name table drifted from store::NAMES")
+        assertEquals(indexNames("TONE_EVENTS"), Names.TONE_EVENTS, "store::TONE_EVENTS drifted")
     }
 
     /**

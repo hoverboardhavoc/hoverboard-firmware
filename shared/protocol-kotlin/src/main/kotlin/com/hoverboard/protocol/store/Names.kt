@@ -7,15 +7,19 @@ package com.hoverboard.protocol.store
  * this path, as the CLI does. `RustSourceDriftTest` pins every row against the Rust, both ways.
  */
 object Names {
-    /** How a named field is indexed (`store::Index`): one value, an array, one per motor, or one per link. */
-    enum class IndexKind { SINGLE, ARRAY, MOTOR, LINK }
+    /**
+     * How a named field is indexed (`store::Index`): one value, an array, one per motor, one per
+     * link, or one per name ([Name.names]).
+     */
+    enum class IndexKind { SINGLE, ARRAY, MOTOR, LINK, NAMED }
 
     /** How a file writes a field's value (`store::Kind`). */
     enum class Kind { PIN, INT, BOOL, ENUM, BITS, STR, TUNE }
 
     /**
      * One row: field [id] at [path], indexed as [index], its value written as [kind]. [labels] are
-     * an [Kind.ENUM]'s labels by byte, or a [Kind.BITS]'s bit names by bit number.
+     * an [Kind.ENUM]'s labels by byte, or a [Kind.BITS]'s bit names by bit number. [names] are an
+     * [IndexKind.NAMED] field's index names, index `i` being `names[i]`.
      */
     data class Name(
         val id: Int,
@@ -23,13 +27,14 @@ object Names {
         val index: IndexKind,
         val kind: Kind,
         val labels: List<Pair<Int, String>> = emptyList(),
+        val names: List<String> = emptyList(),
     )
 
     /** The object arrays a file holds, by index kind (`store::Index::array`). */
     fun arrayOf(index: IndexKind): String? = when (index) {
         IndexKind.MOTOR -> "motors"
         IndexKind.LINK -> "links"
-        IndexKind.SINGLE, IndexKind.ARRAY -> null
+        IndexKind.SINGLE, IndexKind.ARRAY, IndexKind.NAMED -> null
     }
 
     private val METHOD = listOf(0 to "six_step", 1 to "sine", 2 to "foc")
@@ -48,6 +53,9 @@ object Names {
         4 to "motors[1].gate.break.pin",
     )
 
+    /** [Fields.TONE]'s events by index (`store::TONE_EVENTS`). */
+    val TONE_EVENTS = listOf("horn", "battery_low", "battery_critical")
+
     private fun single(f: FieldDef, path: String, kind: Kind = Kind.INT, labels: List<Pair<Int, String>> = emptyList()) =
         Name(f.id, path, IndexKind.SINGLE, kind, labels)
 
@@ -60,6 +68,11 @@ object Names {
     private fun link(id: Int, path: String, kind: Kind) = Name(id, path, IndexKind.LINK, kind)
 
     private fun pin(f: FieldDef, path: String, index: IndexKind = IndexKind.SINGLE) = Name(f.id, path, index, Kind.PIN)
+
+    private fun tunes(f: IndexedFieldDef, path: String, names: List<String>): Name {
+        require(names.size == f.size) { "$path names ${names.size} indices of ${f.size}" }
+        return Name(f.id, path, IndexKind.NAMED, Kind.TUNE, names = names)
+    }
 
     /** Every row, in the Rust table's order. */
     val ALL: List<Name> = listOf(
@@ -94,6 +107,7 @@ object Names {
         link(Fields.LINK_USART.id, "usart", Kind.INT),
         link(Fields.LINK_REMAP.id, "remap", Kind.INT),
         single(Fields.CONTROL_LEADER, "control.leader", Kind.BOOL),
+        tunes(Fields.TONE, "tone", TONE_EVENTS),
         // Machine.
         single(Fields.CONTROL_MODE, "machine.mode", Kind.ENUM, MODE),
         single(Fields.CONTROL_FRAME, "machine.frame", Kind.ENUM, FRAME),
@@ -108,9 +122,6 @@ object Names {
         single(Fields.CONTROL_POS_CLAMP, "machine.balance.pos_clamp"),
         array(Fields.CONTROL_DRIVE_TURN, "machine.turn"),
         single(Fields.BOARD_BATTERY_WARN, "machine.battery.warn"),
-        single(Fields.TONE_HORN, "machine.tone.horn", Kind.TUNE),
-        single(Fields.TONE_BATTERY_LOW, "machine.tone.battery_low", Kind.TUNE),
-        single(Fields.TONE_BATTERY_CRITICAL, "machine.tone.battery_critical", Kind.TUNE),
         // Wheel.
         pin(Fields.MOTOR_HALL_A, "hall.a", IndexKind.MOTOR),
         pin(Fields.MOTOR_HALL_B, "hall.b", IndexKind.MOTOR),
@@ -154,7 +165,8 @@ object Names {
 
     /**
      * The path [key] prints as, the CLI's `path_of`: `machine.mode`, `battery_sense.cal[1]`,
-     * `motors[0].hall.a`, `links[0].tx`, or the raw `0x99.0` for an id the table does not name.
+     * `motors[0].hall.a`, `links[0].tx`, `tone.horn`, or the raw `0x99.0` for an id the table does
+     * not name.
      */
     fun pathOf(key: Key): String {
         val r = byId(key.fieldId) ?: return "0x%02x.%d".format(key.fieldId, key.index)
@@ -162,6 +174,7 @@ object Names {
             IndexKind.MOTOR, IndexKind.LINK -> "${arrayOf(r.index)}[${key.index}].${r.path}"
             IndexKind.SINGLE -> if (key.index == 0) r.path else "${r.path}[${key.index}]"
             IndexKind.ARRAY -> "${r.path}[${key.index}]"
+            IndexKind.NAMED -> r.names.getOrNull(key.index)?.let { "${r.path}.$it" } ?: "${r.path}[${key.index}]"
         }
     }
 }

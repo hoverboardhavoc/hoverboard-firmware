@@ -229,6 +229,52 @@ impl BlobField {
     }
 }
 
+/// A `BLOB` index family whose default varies by index, the [`IndexedField`] of the byte fields:
+/// `defaults[i]` is index `i`'s default. The tunes ([`TONE`]) are the one family, one tune per
+/// event, each with its own compiled default.
+#[derive(Clone, Copy)]
+pub struct IndexedBlobField<const N: usize> {
+    field_id: u8,
+    defaults: [&'static [u8]; N],
+}
+
+impl<const N: usize> IndexedBlobField<N> {
+    /// Declare a `BLOB` index family with its permanent `id` and one default per index.
+    pub const fn new(id: u8, defaults: [&'static [u8]; N]) -> Self {
+        Self {
+            field_id: id,
+            defaults,
+        }
+    }
+
+    /// This family's permanent id (shared by every index).
+    pub const fn id(self) -> u8 {
+        self.field_id
+    }
+
+    /// How many indices the family declares.
+    pub const fn len(self) -> usize {
+        N
+    }
+
+    /// Whether the family declares no indices at all (never true for a declared field).
+    pub const fn is_empty(self) -> bool {
+        N == 0
+    }
+
+    /// One index as an ordinary [`BlobField`] handle carrying THAT index's default, the form
+    /// `get_bytes` takes. An index past the declared end resolves to index 0, as
+    /// [`IndexedField::at`] does.
+    pub const fn at(self, index: u8) -> BlobField {
+        let i = if (index as usize) < N { index } else { 0 };
+        BlobField {
+            field_id: self.field_id,
+            index: i,
+            default: self.defaults[i as usize],
+        }
+    }
+}
+
 /// A pin field (`specs/config-read-once.md` section 3): one key whose value is a [`Type::Pin`],
 /// [`Type::PinAf`] or [`Type::PinAdc`] record, the register model of one pin. Not a [`Scalar`]:
 /// the host tools read and write it as a [`Value`] and the firmware decodes the stored bytes in its
@@ -511,6 +557,36 @@ pub const IMU_I2C: Field<u8> = Field::new(0x1D, 0);
 /// engages. Node scope: the two boards of a rigid pair store different values by design. In the
 /// arm-time value row beside [`CONTROL_MODE`] and [`CONTROL_FRAME`]; NOT on the tune lane.
 pub const CONTROL_LEADER: Field<u8> = Field::new(0x1E, 0);
+
+/// The tunes (`specs/tones.md` sections 3 and 4), one per event, `Key.index` = the event
+/// ([`TONE_HORN`], [`TONE_BATTERY_LOW`], [`TONE_BATTERY_CRITICAL`]). A node field: the buzzer is
+/// on a board, so each board keeps its own tunes beside its `buzzer` pin. A tune is a sequence of
+/// 3-byte notes ([`crate::tune`]), at most 19 (what one `CONFIG_RESP` returns); empty mutes the
+/// event. Re-read at each note start. The defaults:
+///
+/// - horn, played while the `INPUTS` mirror carries `linkctl::Inputs::BUTTON_HORN`: one 4000 Hz
+///   note of 0.5 s, which loops, so it sounds continuous while held. 4 kHz is the buzzer's
+///   resonance (the offroad master's sweep, `specs/tones.md` section 4).
+/// - battery low, played while the battery word is below [`BOARD_BATTERY_WARN`]: one 150 ms beep
+///   at 2000 Hz every 5 s (`2000/15 0/255 0/230`).
+/// - battery critical, played while the battery word is below [`BOARD_BATTERY_FLOOR`]: two 150 ms
+///   beeps at 2000 Hz per 1.4 s (`2000/15 0/10 2000/15 0/100`).
+pub const TONE: IndexedBlobField<3> = IndexedBlobField::new(
+    0x1F,
+    [
+        &[0xA0, 0x0F, 50],
+        &[0xD0, 0x07, 15, 0x00, 0x00, 255, 0x00, 0x00, 230],
+        &[
+            0xD0, 0x07, 15, 0x00, 0x00, 10, 0xD0, 0x07, 15, 0x00, 0x00, 100,
+        ],
+    ],
+);
+/// [`TONE`]'s index for the horn.
+pub const TONE_HORN: u8 = 0;
+/// [`TONE`]'s index for the low-battery warning.
+pub const TONE_BATTERY_LOW: u8 = 1;
+/// [`TONE`]'s index for the battery-critical alarm.
+pub const TONE_BATTERY_CRITICAL: u8 = 2;
 /// The IMU bus's AFIO remap on the GD32F10x, `0` = the I2C's default pins; not part of the group.
 pub const IMU_REMAP: Field<u8> = Field::new(0x1A, 0);
 /// Hall inputs, per-motor via `Key.index` (motor groups are CONFIGURED, never defaulted).
@@ -908,34 +984,11 @@ pub const ATTITUDE_LEVEL_TRIM: IndexedField<i16, 2> = IndexedField::new(0x17, [0
 pub const CONTROL_DRIVE_TURN: IndexedField<i16, 2> = IndexedField::new(0x2B, [0, 24]);
 
 /// The low-battery warning threshold in centivolts (`specs/tones.md` section 4.4): the board plays
-/// [`TONE_BATTERY_LOW`] while the effective battery word is known and below it. **`<= 0` = no
+/// [`TONE`]`.at(`[`TONE_BATTERY_LOW`]`)` while the effective battery word is known and below it. **`<= 0` = no
 /// warning** (the default), so an unstaged board never beeps. An absolute threshold, the
 /// [`BOARD_BATTERY_FLOOR`] rule: the firmware reads neither the cell count nor the chemistry. Read
 /// once at boot.
 pub const BOARD_BATTERY_WARN: Field<i16> = Field::new(0x2C, 0);
-
-/// The horn's tune (`specs/tones.md` sections 3 and 4): played while the `INPUTS` mirror carries
-/// `linkctl::Inputs::BUTTON_HORN`. A tune is a sequence of 3-byte notes ([`crate::tune`]), at most
-/// 19 (what one `CONFIG_RESP` returns); empty mutes the horn. Default one 4000 Hz note of 0.5 s,
-/// which loops, so it sounds continuous while held: 4 kHz is the buzzer's resonance (the offroad
-/// master's sweep, `specs/tones.md` section 4). Re-read at each note start.
-pub const TONE_HORN: BlobField = BlobField::new(0x2D, &[0xA0, 0x0F, 50]);
-
-/// The low-battery warning's tune (`specs/tones.md` section 4), played while the battery word is
-/// below [`BOARD_BATTERY_WARN`]: default one 150 ms beep at 2000 Hz every 5 s (`2000/15 0/255
-/// 0/230`). Re-read at each note start.
-pub const TONE_BATTERY_LOW: BlobField =
-    BlobField::new(0x2E, &[0xD0, 0x07, 15, 0x00, 0x00, 255, 0x00, 0x00, 230]);
-
-/// The battery-critical alarm's tune (`specs/tones.md` section 4), played while the battery word
-/// is below [`BOARD_BATTERY_FLOOR`]: default two 150 ms beeps at 2000 Hz per 1.4 s (`2000/15 0/10
-/// 2000/15 0/100`). Re-read at each note start.
-pub const TONE_BATTERY_CRITICAL: BlobField = BlobField::new(
-    0x2F,
-    &[
-        0xD0, 0x07, 15, 0x00, 0x00, 10, 0xD0, 0x07, 15, 0x00, 0x00, 100,
-    ],
-);
 
 /// The state-feedback balance law's four gains (`specs/state-feedback.md` sections 2 and 6),
 /// indexed `0 = gp` (numerator counts per degree of pitch), `1 = gr` (per 0.1 rad/s of pitch
@@ -1121,6 +1174,7 @@ field_ids! {
     0x1C, // LINK_REMAP
     0x1D, // IMU_I2C
     0x1E, // CONTROL_LEADER
+    0x1F, // TONE
     0x20, // CONTROL_MODE
     0x21, // CONTROL_FRAME
     0x22, // CONTROL_RIDER_REQUIRED
@@ -1134,9 +1188,6 @@ field_ids! {
     0x2A, // CONTROL_POS_CLAMP
     0x2B, // CONTROL_DRIVE_TURN
     0x2C, // BOARD_BATTERY_WARN
-    0x2D, // TONE_HORN
-    0x2E, // TONE_BATTERY_LOW
-    0x2F, // TONE_BATTERY_CRITICAL
     0x40, // MOTOR_HALL_A
     0x41, // MOTOR_HALL_B
     0x42, // MOTOR_HALL_C
@@ -1203,6 +1254,7 @@ field_ids! {
     0x1C, // LINK_REMAP
     0x1D, // IMU_I2C
     0x1E, // CONTROL_LEADER
+    0x1F, // TONE
     0x20, // CONTROL_MODE
     0x21, // CONTROL_FRAME
     0x22, // CONTROL_RIDER_REQUIRED
@@ -1216,9 +1268,6 @@ field_ids! {
     0x2A, // CONTROL_POS_CLAMP
     0x2B, // CONTROL_DRIVE_TURN
     0x2C, // BOARD_BATTERY_WARN
-    0x2D, // TONE_HORN
-    0x2E, // TONE_BATTERY_LOW
-    0x2F, // TONE_BATTERY_CRITICAL
     0x40, // MOTOR_HALL_A
     0x41, // MOTOR_HALL_B
     0x42, // MOTOR_HALL_C
@@ -1335,13 +1384,13 @@ pub struct FieldDef {
 
 /// The number of ENTRIES in the registry: the declared field count plus the extra per-index
 /// entries the per-index families contribute (the link pins, USARTs and remaps, the IMU's bias,
-/// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
-/// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
+/// signs and roles, the level trim, the battery-sense calibration, the tunes, the gains and their
+/// maxima, the reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 78 + 19;
+pub const REGISTRY_LEN: usize = 76 + 21;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 80 + 19;
+pub const REGISTRY_LEN: usize = 78 + 21;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1381,20 +1430,20 @@ pub struct FieldEntry {
 static BYTES_DEFAULTS: [&[u8]; 5] = [
     DEVICE_NAME.default(),
     &[],
-    TONE_HORN.default(),
-    TONE_BATTERY_LOW.default(),
-    TONE_BATTERY_CRITICAL.default(),
+    TONE.at(TONE_HORN).default(),
+    TONE.at(TONE_BATTERY_LOW).default(),
+    TONE.at(TONE_BATTERY_CRITICAL).default(),
 ];
 
 /// [`DEVICE_NAME`]'s slot in [`BYTES_DEFAULTS`].
 const BYTES_DEVICE_NAME: u32 = 0;
 /// The empty default, shared by every `STR` and `BLOB` field that declares one.
 const BYTES_EMPTY: u32 = 1;
-/// [`TONE_HORN`]'s slot in [`BYTES_DEFAULTS`].
+/// [`TONE`]'s horn default's slot in [`BYTES_DEFAULTS`].
 const BYTES_TONE_HORN: u32 = 2;
-/// [`TONE_BATTERY_LOW`]'s slot in [`BYTES_DEFAULTS`].
+/// [`TONE`]'s low-battery default's slot in [`BYTES_DEFAULTS`].
 const BYTES_TONE_BATTERY_LOW: u32 = 3;
-/// [`TONE_BATTERY_CRITICAL`]'s slot in [`BYTES_DEFAULTS`].
+/// [`TONE`]'s battery-critical default's slot in [`BYTES_DEFAULTS`].
 const BYTES_TONE_BATTERY_CRITICAL: u32 = 4;
 
 impl FieldEntry {
@@ -1542,6 +1591,11 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     LINK_REMAP.at(1).entry(Boot),
     IMU_I2C.entry(Boot),
     CONTROL_LEADER.entry(Arm),
+    TONE.at(TONE_HORN).entry(BYTES_TONE_HORN, Live),
+    TONE.at(TONE_BATTERY_LOW)
+        .entry(BYTES_TONE_BATTERY_LOW, Live),
+    TONE.at(TONE_BATTERY_CRITICAL)
+        .entry(BYTES_TONE_BATTERY_CRITICAL, Live),
     // Machine (`0x20..=0x3F`).
     CONTROL_MODE.entry(Arm),
     CONTROL_FRAME.entry(Arm),
@@ -1564,9 +1618,6 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     CONTROL_DRIVE_TURN.at(0).entry(Arm),
     CONTROL_DRIVE_TURN.at(1).entry(Arm),
     BOARD_BATTERY_WARN.entry(Boot),
-    TONE_HORN.entry(BYTES_TONE_HORN, Live),
-    TONE_BATTERY_LOW.entry(BYTES_TONE_BATTERY_LOW, Live),
-    TONE_BATTERY_CRITICAL.entry(BYTES_TONE_BATTERY_CRITICAL, Live),
     // Wheel (`0x40..=0x7F`), one row per field at motor 0.
     MOTOR_HALL_A.entry(Boot),
     MOTOR_HALL_B.entry(Boot),
@@ -1668,6 +1719,10 @@ pub mod names {
         /// One value per inter-board link, the index being the link (`0..`[`LINKS`]), in a file
         /// under the top-level `links` array (`specs/machine-settings.md` section 3.1).
         Link,
+        /// One value per name, index `i` being `names[i]`: the path `<field>.<name>` on the command
+        /// line, and in a file an object of the names under the field's path (`"tone": {"horn":
+        /// ...}`, `specs/tones.md` section 4).
+        Named(&'static [&'static str]),
     }
 
     impl Index {
@@ -1678,6 +1733,7 @@ pub mod names {
                 Index::Array(n) => n,
                 Index::Motor => MOTORS,
                 Index::Link => LINKS,
+                Index::Named(names) => names.len() as u8,
             }
         }
 
@@ -1687,7 +1743,24 @@ pub mod names {
             match self {
                 Index::Motor => Some("motors"),
                 Index::Link => Some("links"),
-                Index::Single | Index::Array(_) => None,
+                Index::Single | Index::Array(_) | Index::Named(_) => None,
+            }
+        }
+
+        /// The name of index `index` of a [`Index::Named`] field, or `None` for any other kind or
+        /// an index past the names.
+        pub fn name(self, index: u8) -> Option<&'static str> {
+            match self {
+                Index::Named(names) => names.get(index as usize).copied(),
+                _ => None,
+            }
+        }
+
+        /// The index named `name` of a [`Index::Named`] field.
+        pub fn named(self, name: &str) -> Option<u8> {
+            match self {
+                Index::Named(names) => names.iter().position(|n| *n == name).map(|i| i as u8),
+                _ => None,
             }
         }
     }
@@ -1782,9 +1855,14 @@ pub mod names {
             Self::new(f.id(), Type::Str, path, Index::Single, Kind::Str)
         }
 
-        /// A tune: a `BLOB` field read and written as notes.
-        pub const fn tune(f: BlobField, path: &'static str) -> Self {
-            Self::new(f.id(), Type::Blob, path, Index::Single, Kind::Tune)
+        /// A family of tunes, one per name in `names` (index `i` = `names[i]`): a `BLOB` field
+        /// read and written as notes.
+        pub const fn tunes<const N: usize>(
+            f: IndexedBlobField<N>,
+            path: &'static str,
+            names: &'static [&'static str; N],
+        ) -> Self {
+            Self::new(f.id(), Type::Blob, path, Index::Named(names), Kind::Tune)
         }
 
         /// A `BLOB` field.
@@ -1836,6 +1914,8 @@ pub mod names {
         (3, "motors[0].gate.break.pin"),
         (4, "motors[1].gate.break.pin"),
     ]);
+    /// [`TONE`]'s events by index ([`TONE_HORN`], [`TONE_BATTERY_LOW`], [`TONE_BATTERY_CRITICAL`]).
+    pub const TONE_EVENTS: [&str; 3] = ["horn", "battery_low", "battery_critical"];
 
     /// Every registered field's name (`specs/machine-settings.md` section 3), in id order.
     pub static NAMES: &[FieldName] = &[
@@ -1870,6 +1950,7 @@ pub mod names {
         FieldName::link(LINK_USART, "usart", Kind::Int),
         FieldName::link(LINK_REMAP, "remap", Kind::Int),
         FieldName::single(CONTROL_LEADER, "control.leader", Kind::Bool),
+        FieldName::tunes(TONE, "tone", &TONE_EVENTS),
         // Machine.
         FieldName::single(CONTROL_MODE, "machine.mode", MODE),
         FieldName::single(CONTROL_FRAME, "machine.frame", FRAME),
@@ -1888,9 +1969,6 @@ pub mod names {
         FieldName::single(CONTROL_POS_CLAMP, "machine.balance.pos_clamp", Kind::Int),
         FieldName::array(CONTROL_DRIVE_TURN, "machine.turn", Kind::Int),
         FieldName::single(BOARD_BATTERY_WARN, "machine.battery.warn", Kind::Int),
-        FieldName::tune(TONE_HORN, "machine.tone.horn"),
-        FieldName::tune(TONE_BATTERY_LOW, "machine.tone.battery_low"),
-        FieldName::tune(TONE_BATTERY_CRITICAL, "machine.tone.battery_critical"),
         // Wheel.
         FieldName::pin(MOTOR_HALL_A, "hall.a", Index::Motor),
         FieldName::pin(MOTOR_HALL_B, "hall.b", Index::Motor),
@@ -2220,6 +2298,7 @@ pub mod names {
                 let want = match r.index {
                     Index::Array(n) => n as usize,
                     Index::Link => LINKS as usize,
+                    Index::Named(names) => names.len(),
                     Index::Single | Index::Motor => 1,
                 };
                 assert_eq!(rows, want, "{}", r.path);
@@ -2364,6 +2443,7 @@ mod registry_tests {
             (0x1C, LINK_REMAP.id()),
             (0x1D, IMU_I2C.id()),
             (0x1E, CONTROL_LEADER.id()),
+            (0x1F, TONE.id()),
             (0x20, CONTROL_MODE.id()),
             (0x21, CONTROL_FRAME.id()),
             (0x22, CONTROL_RIDER_REQUIRED.id()),
@@ -2376,6 +2456,7 @@ mod registry_tests {
             (0x29, CONTROL_REFERENCE.id()),
             (0x2A, CONTROL_POS_CLAMP.id()),
             (0x2B, CONTROL_DRIVE_TURN.id()),
+            (0x2C, BOARD_BATTERY_WARN.id()),
             (0x40, MOTOR_HALL_A.id()),
             (0x41, MOTOR_HALL_B.id()),
             (0x42, MOTOR_HALL_C.id()),
@@ -2479,15 +2560,15 @@ mod registry_tests {
         assert_eq!(
             with(Effect::Live),
             [
+                (0x1F, 0),
+                (0x1F, 1),
+                (0x1F, 2),
                 (0x27, 0),
                 (0x27, 1),
                 (0x27, 2),
                 (0x27, 3),
                 (0x29, 0),
-                (0x29, 1),
-                (0x2D, 0),
-                (0x2E, 0),
-                (0x2F, 0)
+                (0x29, 1)
             ]
         );
         assert_eq!(
@@ -2652,30 +2733,72 @@ mod registry_tests {
                 .map(|i| note_at(b, i).map(|Note { hz, dur }| (hz, dur)).unwrap())
                 .collect()
         };
-        assert_eq!(notes(TONE_HORN.default()), [(4000, 50)]);
+        assert_eq!(notes(TONE.at(TONE_HORN).default()), [(4000, 50)]);
         assert_eq!(
-            notes(TONE_BATTERY_LOW.default()),
+            notes(TONE.at(TONE_BATTERY_LOW).default()),
             [(2000, 15), (0, 255), (0, 230)]
         );
         assert_eq!(
-            notes(TONE_BATTERY_CRITICAL.default()),
+            notes(TONE.at(TONE_BATTERY_CRITICAL).default()),
             [(2000, 15), (0, 10), (2000, 15), (0, 100)]
         );
+    }
+
+    /// The tunes are one node field at `0x1F`, `Key.index` = the event, each index resolving its
+    /// own default on the dynamic path; the name table names the events in index order.
+    #[test]
+    fn the_tunes_are_one_indexed_node_field() {
+        assert_eq!(TONE.id(), 0x1F);
+        assert_eq!(Scope::of(TONE.id()), Some(Scope::Node));
+        for i in [TONE_HORN, TONE_BATTERY_LOW, TONE_BATTERY_CRITICAL] {
+            let d = lookup_key(TONE.at(i).key()).unwrap();
+            assert_eq!(d.index, i);
+            assert_eq!(d.kind, Type::Blob);
+            assert_eq!(d.effect, Effect::Live);
+            assert_eq!(d.default, Value::Bytes(TONE.at(i).default()));
+        }
+        // Past the declared end, the handle and the registry both fall back to index 0.
+        assert_eq!(TONE.at(3).key().index, 0);
+        let row = names::by_id(TONE.id()).unwrap();
+        assert_eq!(row.path, "tone");
+        assert_eq!(row.index.name(TONE_HORN), Some("horn"));
+        assert_eq!(row.index.name(TONE_BATTERY_LOW), Some("battery_low"));
+        assert_eq!(
+            row.index.name(TONE_BATTERY_CRITICAL),
+            Some("battery_critical")
+        );
+        assert_eq!(
+            row.index.named("battery_critical"),
+            Some(TONE_BATTERY_CRITICAL)
+        );
+        assert_eq!(row.index.count(), 3);
+        // The old machine ids are free.
+        for id in 0x2D..=0x2F {
+            assert!(lookup(id).is_none(), "{id:#04x}");
+        }
     }
 
     /// The pin on [`BYTES_DEFAULTS`]: every `Str`/`Blob` row is checked against the handle it
     /// belongs to, and the count is checked too.
     #[test]
     fn every_bytes_row_resolves_to_its_handles_default() {
-        let expected: &[(u8, &[u8])] = &[
-            (DEVICE_NAME.id(), DEVICE_NAME.default()),
-            (WIFI_SSID.id(), WIFI_SSID.default()),
-            (WIFI_PASS.id(), WIFI_PASS.default()),
-            (TONE_HORN.id(), TONE_HORN.default()),
-            (TONE_BATTERY_LOW.id(), TONE_BATTERY_LOW.default()),
-            (TONE_BATTERY_CRITICAL.id(), TONE_BATTERY_CRITICAL.default()),
+        let expected: &[(u8, u8, &[u8])] = &[
+            (DEVICE_NAME.id(), 0, DEVICE_NAME.default()),
+            (WIFI_SSID.id(), 0, WIFI_SSID.default()),
+            (WIFI_PASS.id(), 0, WIFI_PASS.default()),
+            (TONE.id(), TONE_HORN, TONE.at(TONE_HORN).default()),
+            (
+                TONE.id(),
+                TONE_BATTERY_LOW,
+                TONE.at(TONE_BATTERY_LOW).default(),
+            ),
+            (
+                TONE.id(),
+                TONE_BATTERY_CRITICAL,
+                TONE.at(TONE_BATTERY_CRITICAL).default(),
+            ),
             #[cfg(feature = "test-fields")]
-            (T_BLOB.id(), T_BLOB.default()),
+            (T_BLOB.id(), 0, T_BLOB.default()),
         ];
         let mut seen = 0usize;
         for row in REGISTRY.iter() {
@@ -2683,10 +2806,15 @@ mod registry_tests {
                 continue;
             }
             seen += 1;
-            let (_, want) = expected
+            let (_, _, want) = expected
                 .iter()
-                .find(|(id, _)| *id == row.field_id)
-                .unwrap_or_else(|| panic!("unlisted byte-defaulted field {:#04x}", row.field_id));
+                .find(|(id, index, _)| (*id, *index) == (row.field_id, row.index))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "unlisted byte-defaulted field {:#04x}.{}",
+                        row.field_id, row.index
+                    )
+                });
             let got = match row.def().default {
                 Value::Str(b) | Value::Bytes(b) => b,
                 other => panic!("{:#04x} is {:?}, not bytes", row.field_id, other),

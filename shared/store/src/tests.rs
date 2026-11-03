@@ -1846,13 +1846,13 @@ mod digest {
         {
             let d = r.def();
             crc.update(&[r.field_id, r.index, d.kind.tag()]);
-            // A machine row's default is a scalar or a default tune.
+            // A machine row's default is a scalar.
             let mut b = [0u8; 64];
             let n = d.default.encode(&mut b);
             crc.update(&b[..n]);
             rows += 1;
         }
-        assert_eq!(rows, 24, "the machine block's rows, every index");
+        assert_eq!(rows, 21, "the machine block's rows, every index");
         assert_eq!(machine(&mut MockFlash::erased(PS)), crc.finish());
     }
 

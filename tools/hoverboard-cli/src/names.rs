@@ -47,8 +47,9 @@ pub fn row_of(key: Key) -> Option<&'static FieldName> {
 }
 
 /// The path `key` prints as: `machine.mode`, `battery_sense.cal[1]`, `motors[0].hall.a`,
-/// `links[0].tx`, or the raw `0x99.0` for an id the table does not name. A single field at an
-/// index past its one prints with the index, so a forced write names what it wrote.
+/// `links[0].tx`, `tone.horn`, or the raw `0x99.0` for an id the table does not name. A single
+/// field at an index past its one, or a named field past its names, prints with the index, so a
+/// forced write names what it wrote.
 pub fn path_of(key: Key) -> String {
     match row_of(key) {
         Some(r) => match r.index {
@@ -59,7 +60,12 @@ pub fn path_of(key: Key) -> String {
                 r.path
             ),
             Index::Single if key.index == 0 => r.path.to_string(),
-            Index::Single | Index::Array(_) => format!("{}[{}]", r.path, key.index),
+            Index::Named(_) if r.index.name(key.index).is_some() => {
+                format!("{}.{}", r.path, r.index.name(key.index).unwrap_or_default())
+            }
+            Index::Single | Index::Array(_) | Index::Named(_) => {
+                format!("{}[{}]", r.path, key.index)
+            }
         },
         None => format!("{:#04x}.{}", key.field_id, key.index),
     }
@@ -94,7 +100,7 @@ pub fn element(index: Index) -> Option<(&'static str, &'static str)> {
     let what = match index {
         Index::Motor => "motor",
         Index::Link => "link",
-        Index::Single | Index::Array(_) => return None,
+        Index::Single | Index::Array(_) | Index::Named(_) => return None,
     };
     Some((index.array()?, what))
 }
@@ -117,6 +123,12 @@ fn index_check(row: &FieldName, index: u8) -> Option<Problem> {
         Index::Array(n) => format!(
             "{} has {n} indices (--force writes index {index} anyway)",
             row.path
+        ),
+        Index::Named(names) => format!(
+            "{} has {} values ({}) (--force writes index {index} anyway)",
+            row.path,
+            names.len(),
+            names.join(", ")
         ),
         Index::Motor | Index::Link => {
             let (array, what) = element(row.index).expect("an object array");
@@ -156,7 +168,7 @@ pub fn write_checks(key: Key) -> Vec<Problem> {
 }
 
 /// A command-line path (`specs/cli-config.md` section 2.1): `motors.1.hall.a`, `links.0.tx`,
-/// `battery_sense.cal.0`, `machine.mode`, or the raw `0x40.1` / `0x20`. The form a path prints as
+/// `battery_sense.cal.0`, `machine.mode`, `tone.horn`, or the raw `0x40.1` / `0x20`. The form a path prints as
 /// (`motors[1].hall.a`) is taken too. The key, with [`key_checks`]'s problems; `Err` when the path
 /// names no key.
 pub fn parse_path(s: &str) -> Result<(Key, Vec<Problem>), Problem> {
@@ -186,6 +198,12 @@ pub fn parse_path(s: &str) -> Result<(Key, Vec<Problem>), Problem> {
                 "{} has {n} indices ({}.<index>)",
                 row.path, row.path
             ))),
+            Index::Named(names) => Err(Problem::stop(format!(
+                "{} has one value per name ({}.<{}>)",
+                row.path,
+                row.path,
+                names.join("|")
+            ))),
             _ => Ok((key(row, 0), Vec::new())),
         };
     }
@@ -198,12 +216,22 @@ pub fn parse_path(s: &str) -> Result<(Key, Vec<Problem>), Problem> {
         }
     }
     if let Some((name, i)) = norm.rsplit_once('.') {
+        if let Some((row, i)) = find_named(name, i) {
+            return Ok((key(row, i), Vec::new()));
+        }
         if let (Some(row), Ok(i)) = (find(name, None), i.parse::<u8>()) {
             let k = key(row, i);
             return Ok((k, key_checks(k)));
         }
     }
     Err(unknown(s))
+}
+
+/// The top-level named field at `path` ([`Index::Named`]) and the index its name `name` stands
+/// for: `tone` and `horn` are `tone.horn`.
+pub fn find_named(path: &str, name: &str) -> Option<(&'static FieldName, u8)> {
+    let row = find(path, None)?;
+    Some((row, row.index.named(name)?))
 }
 
 /// "unknown field X", with the closest name when one is close.
@@ -222,12 +250,15 @@ fn suggest(s: &str) -> String {
     };
     let best = NAMES
         .iter()
-        .map(
-            |r| match r.index.array().and_then(|a| Some((a, element(a)?))) {
+        .flat_map(|r| -> Vec<String> {
+            if let Index::Named(names) = r.index {
+                return names.iter().map(|n| format!("{}.{n}", r.path)).collect();
+            }
+            vec![match r.index.array().and_then(|a| Some((a, element(a)?))) {
                 Some((a, i)) => format!("{a}.{i}.{}", r.path),
                 None => r.path.to_string(),
-            },
-        )
+            }]
+        })
         .min_by_key(|c| distance(s, c));
     match best {
         Some(b) if distance(s, &b) <= (s.len() / 3).max(2) => format!(" (did you mean {b}?)"),
@@ -659,9 +690,13 @@ pub fn table_json() -> Json {
         let index = match r.index {
             Index::Single => "single",
             Index::Array(_) => "array",
+            Index::Named(_) => "named",
             Index::Motor | Index::Link => element(r.index).expect("an object array").1,
         };
         o.insert("index".into(), index.into());
+        if let Index::Named(names) = r.index {
+            o.insert("names".into(), names.to_vec().into());
+        }
         o.insert("count".into(), r.index.count().into());
         let (kind, labels) = match r.kind {
             Kind::Pin => ("pin", None),
@@ -792,6 +827,53 @@ mod tests {
         // The old paths name nothing.
         for old in ["board.self_hold", "led.green", "control.mode", "link.tx.0"] {
             assert!(parse_path(old).is_err(), "{old}");
+        }
+    }
+
+    /// `specs/tones.md` section 4: the tunes are one node field, `tone.<event>`, the event naming
+    /// the index; the old machine paths name nothing.
+    #[test]
+    fn the_tunes_are_named_by_event() {
+        for (path, key) in [
+            ("tone.horn", k(0x1F, 0)),
+            ("tone.battery_low", k(0x1F, 1)),
+            ("tone.battery_critical", k(0x1F, 2)),
+            ("tone.1", k(0x1F, 1)),
+        ] {
+            assert_eq!(parse_path(path), Ok((key, Vec::new())), "{path}");
+        }
+        assert_eq!(path_of(k(0x1F, 0)), "tone.horn");
+        assert_eq!(path_of(k(0x1F, 2)), "tone.battery_critical");
+        assert_eq!(path_of(k(0x1F, 3)), "tone[3]");
+        assert_eq!(
+            parse_path("tone").unwrap_err().msg,
+            "tone has one value per name (tone.<horn|battery_low|battery_critical>)"
+        );
+        assert_eq!(
+            parse_path("tone.hron").unwrap_err().msg,
+            "unknown field tone.hron (did you mean tone.horn?)"
+        );
+        let (key, p) = parse_path("tone.3").unwrap();
+        assert_eq!(key, k(0x1F, 3));
+        assert_eq!(
+            p,
+            [Problem::forceable(
+                "tone has 3 values (horn, battery_low, battery_critical) (--force writes index 3 anyway)"
+            )]
+        );
+        assert_eq!(
+            row_of(k(0x1F, 0)).unwrap().scope(),
+            Some(store::Scope::Node)
+        );
+        for old in [
+            "machine.tone.horn",
+            "machine.tone.battery_low",
+            "machine.tone.battery_critical",
+        ] {
+            assert!(parse_path(old).is_err(), "{old}");
+        }
+        for id in 0x2D..=0x2F {
+            assert!(row_of(k(id, 0)).is_none(), "{id:#04x}");
         }
     }
 
@@ -980,28 +1062,24 @@ mod tests {
             (k(0x4E, 0), json!(4_000_000_000u32)),
             (k(0x02, 0), json!("rover-left")),
             (k(0x2C, 0), json!(3300)),
-            (k(0x2F, 0), json!("2000/15 0/10 2000/15 0/100")),
-            (k(0x2D, 0), json!("")),
+            (k(0x1F, 2), json!("2000/15 0/10 2000/15 0/100")),
+            (k(0x1F, 0), json!("")),
         ] {
             assert_eq!(round(key, v.clone()), v, "{}", path_of(key));
         }
         // A tune written as RTTTL reads back as its raw notes.
         assert_eq!(
-            round(k(0x2D, 0), json!("t:d=4,o=5,b=120:c6,8p")),
+            round(k(0x1F, 0), json!("t:d=4,o=5,b=120:c6,8p")),
             json!("1047/50 0/25")
         );
-        assert_eq!(path_of(k(0x2E, 0)), "machine.tone.battery_low");
+        assert_eq!(path_of(k(0x1F, 1)), "tone.battery_low");
         assert_eq!(
-            from_text(row_of(k(0x2D, 0)), Type::Blob, "2000/50"),
+            from_text(row_of(k(0x1F, 0)), Type::Blob, "2000/50"),
             json!("2000/50")
         );
         // A refusal names the field and the note.
-        let e = encode(k(0x2D, 0), Type::Blob, &json!("2000/0")).unwrap_err();
-        assert!(
-            e.msg.starts_with("machine.tone.horn: note 1 (2000/0)"),
-            "{}",
-            e.msg
-        );
+        let e = encode(k(0x1F, 0), Type::Blob, &json!("2000/0")).unwrap_err();
+        assert!(e.msg.starts_with("tone.horn: note 1 (2000/0)"), "{}", e.msg);
         assert!(e.stops(true));
         // A blob: no named field is one, so an id the table does not name with the board's type.
         let raw = k(0x99, 0);

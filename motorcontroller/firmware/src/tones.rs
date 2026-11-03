@@ -19,11 +19,11 @@ use store::tune::{count, note_at, Note};
 /// The events that sound a tune, highest priority first (`specs/tones.md` section 4.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// `INPUTS.buttons` bit1 held: `machine.tone.horn`.
+    /// `INPUTS.buttons` bit1 held: `tone.horn`.
     Horn,
-    /// The battery word below `machine.battery.floor`: `machine.tone.battery_critical`.
+    /// The battery word below `machine.battery.floor`: `tone.battery_critical`.
     BatteryCritical,
-    /// The battery word below `machine.battery.warn`: `machine.tone.battery_low`.
+    /// The battery word below `machine.battery.warn`: `tone.battery_low`.
     BatteryLow,
 }
 

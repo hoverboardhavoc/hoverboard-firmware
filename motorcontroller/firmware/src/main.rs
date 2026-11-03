@@ -645,15 +645,16 @@ mod firmware {
         battery_warn: i16,
     }
 
-    /// The three tunes as the player reads them: the store's current bytes of each tone field,
+    /// The three tunes as the player reads them: the store's current bytes of each index of the tone field,
     /// borrowed for the one call (`specs/tones.md` section 4.2).
     struct StoreTunes<'a>(&'a Store<'static, FmcFlash>);
 
-    /// Each event's tune field, by the event's discriminant: an indexed load rather than a match.
+    /// Each event's tune, the tone field at that event's index, by the event's discriminant: an
+    /// indexed load rather than a match.
     const TUNES: [store::BlobField; 3] = {
-        let mut t = [store::TONE_HORN; 3];
-        t[tones::Event::BatteryCritical as usize] = store::TONE_BATTERY_CRITICAL;
-        t[tones::Event::BatteryLow as usize] = store::TONE_BATTERY_LOW;
+        let mut t = [store::TONE.at(store::TONE_HORN); 3];
+        t[tones::Event::BatteryCritical as usize] = store::TONE.at(store::TONE_BATTERY_CRITICAL);
+        t[tones::Event::BatteryLow as usize] = store::TONE.at(store::TONE_BATTERY_LOW);
         t
     };
 

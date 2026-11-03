@@ -18,8 +18,8 @@ use serde_json::{Map, Value as Json};
 use store::{Effect, Index, Key, Type, ERASED_TAG};
 
 use crate::names::{
-    encode, find, object_arrays, path_of, row_of, show, table_keys, to_json, unknown, write_checks,
-    Problem,
+    encode, find, find_named, object_arrays, path_of, row_of, show, table_keys, to_json, unknown,
+    write_checks, Problem,
 };
 use crate::nodes::{self, parse_key, status_name, ConfigResp};
 use crate::wire::Wire;
@@ -170,9 +170,33 @@ impl FileReader<'_> {
                     }
                     _ => self.stop(format!("{path} takes a list of {n} values")),
                 },
+                Index::Named(names) => match v.as_object() {
+                    Some(obj) => {
+                        for (name, item) in obj {
+                            match row.index.named(name) {
+                                Some(i) => self.add(at(i), item),
+                                None => self.problem(unknown(&format!("{path}.{name}"))),
+                            }
+                        }
+                    }
+                    None => self.stop(format!("{path} takes an object of {}", names.join(", "))),
+                },
                 _ => self.add(at(elem.map_or(0, |(_, i)| i)), v),
             }
             return;
+        }
+        // A dotted member naming one value of a named field (`"tone.horn": ...`).
+        if elem.is_none() {
+            if let Some((row, i)) = path.rsplit_once('.').and_then(|(p, n)| find_named(p, n)) {
+                self.add(
+                    Key {
+                        field_id: row.id,
+                        index: i,
+                    },
+                    v,
+                );
+                return;
+            }
         }
         let inner = format!("{path}.");
         let nests = |array: Option<&str>| {
@@ -345,6 +369,14 @@ pub fn to_file(reads: &Reads, remaps: bool) -> Json {
                     *s = Json::Array(vec![Json::Null; n as usize]);
                 }
                 s[key.index as usize] = v;
+            }
+            Index::Named(_) => {
+                let s = slot(&mut top, row.path);
+                if !s.is_object() {
+                    *s = Json::Object(Map::new());
+                }
+                let name = row.index.name(key.index).expect("a table key's name");
+                s[name] = v;
             }
             Index::Single => *slot(&mut top, row.path) = v,
         }
@@ -1155,6 +1187,46 @@ mod tests {
         assert_eq!(
             to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false),
             link0
+        );
+    }
+
+    /// `specs/tones.md` section 4: a file names the tunes by event under the node's `tone`, from a
+    /// file to the board and back to the same file; a dotted member names one too, and an unknown
+    /// event is refused.
+    #[test]
+    fn the_tunes_round_trip_by_event_name() {
+        let layout = json!({
+            "tone": { "horn": "4000/30", "battery_critical": "" },
+        });
+        let mut lp = Loop::new();
+        let f = files(&[("tones.json", layout.clone())]);
+        let (plan, _) = run(&mut lp, &f, false).unwrap();
+        let keys: Vec<Key> = plan.steps.iter().map(|s| s.key).collect();
+        assert!(keys.contains(&k(0x1F, 0)) && keys.contains(&k(0x1F, 2)));
+        let r = nodes::read(lp.board_wire(), 0x80, 0x01, k(0x1F, 0)).unwrap();
+        assert_eq!(r.bytes, [0xA0, 0x0F, 30]);
+
+        let mut b = board(&mut lp);
+        let dumped = to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false);
+        assert_eq!(dumped, layout);
+        let (plan, _) = run(&mut lp, &files(&[("dump.json", dumped)]), false).unwrap();
+        assert!(!plan.changes(), "{:?}", plan.steps);
+
+        let f = files(&[("d.json", json!({ "tone.battery_low": "2000/10" }))]);
+        assert!(f.problems.is_empty(), "{:?}", f.problems);
+        assert_eq!(f.entries[0].key, k(0x1F, 1));
+
+        let f = files(&[(
+            "e.json",
+            json!({ "tone": { "hron": "2000/10" }, "machine": { "tone": { "horn": "2000/10" } } }),
+        )]);
+        let msgs: Vec<&str> = f.problems.iter().map(|p| p.msg.as_str()).collect();
+        assert_eq!(
+            msgs,
+            [
+                "e.json: unknown field tone.hron (did you mean tone.horn?)",
+                "e.json: unknown field machine.tone (did you mean machine.mode?)",
+            ]
         );
     }
 

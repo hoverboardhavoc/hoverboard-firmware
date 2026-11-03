@@ -68,8 +68,8 @@ data class FieldDef(val id: Int, val type: Type, val default: Value, val effect:
 }
 
 /**
- * One registered INDEXED store field: a mirror of one `IndexedField<T, N>` handle in
- * `shared/store/src/field.rs`, carrying the id, the storage [type], one default per index
+ * One registered INDEXED store field: a mirror of one `IndexedField<T, N>` (or, for [Type.Blob],
+ * `IndexedBlobField<N>`) handle in `shared/store/src/field.rs`, carrying the id, the storage [type], one default per index
  * ([defaults], so its size is the field's `N`) and the [effect] its registry rows state.
  * `RustSourceDriftTest` pins every entry of [Fields.INDEXED] against it.
  */
@@ -94,7 +94,7 @@ const val NO_PORT = 0xFF
 /**
  * The registered store fields (`shared/store/src/field.rs`, `REGISTRY`), plus the value vocabularies the
  * firmware gives the byte-valued ones. The ids sit in the blocks of `specs/machine-settings.md`
- * section 3: node `0x01..=0x1E`, machine `0x20..=0x2F`, wheel `0x40..=0x56`.
+ * section 3: node `0x01..=0x1F`, machine `0x20..=0x2C`, wheel `0x40..=0x56`.
  *
  * Every registered field is here but the store-test fields. The live tune lane's keys, ranges and
  * ramp are in [Gains].
@@ -189,20 +189,36 @@ object Fields {
 
     /**
      * The low-battery warning threshold, centivolts (`specs/tones.md` section 4.4): the board plays
-     * [TONE_BATTERY_LOW] while the effective battery word is known and below it. `<= 0` = no
+     * [TONE] at [TONE_BATTERY_LOW] while the effective battery word is known and below it. `<= 0` = no
      * warning (the default). Read once at boot.
      */
     val BOARD_BATTERY_WARN = FieldDef(0x2C, Type.I16, Value.I16(0), Effect.BOOT)
 
     /**
-     * The three tone tunes (`specs/tones.md` sections 3 and 4): a sequence of 3-byte notes (`hz`
-     * u16 LE, then `dur` in 10 ms units), at most 19; empty mutes the event. Mirrored for the drift
-     * gate; editing tunes in the app is out of scope.
+     * The tunes (`specs/tones.md` sections 3 and 4), one node field indexed by event ([TONE_HORN],
+     * [TONE_BATTERY_LOW], [TONE_BATTERY_CRITICAL]): each a sequence of 3-byte notes (`hz` u16 LE,
+     * then `dur` in 10 ms units), at most 19; empty mutes the event. Mirrored for the drift gate;
+     * editing tunes in the app is out of scope.
      */
-    val TONE_HORN = FieldDef(0x2D, Type.Blob, tune(4000 to 50), Effect.LIVE)
-    val TONE_BATTERY_LOW = FieldDef(0x2E, Type.Blob, tune(2000 to 15, 0 to 255, 0 to 230), Effect.LIVE)
-    val TONE_BATTERY_CRITICAL =
-        FieldDef(0x2F, Type.Blob, tune(2000 to 15, 0 to 10, 2000 to 15, 0 to 100), Effect.LIVE)
+    val TONE = IndexedFieldDef(
+        0x1F,
+        Type.Blob,
+        listOf(
+            tune(4000 to 50),
+            tune(2000 to 15, 0 to 255, 0 to 230),
+            tune(2000 to 15, 0 to 10, 2000 to 15, 0 to 100),
+        ),
+        Effect.LIVE,
+    )
+
+    /** [TONE]'s index for the horn (`store::TONE_HORN`). */
+    const val TONE_HORN = 0
+
+    /** [TONE]'s index for the low-battery warning (`store::TONE_BATTERY_LOW`). */
+    const val TONE_BATTERY_LOW = 1
+
+    /** [TONE]'s index for the battery-critical alarm (`store::TONE_BATTERY_CRITICAL`). */
+    const val TONE_BATTERY_CRITICAL = 2
 
     /**
      * The machine's frame ([ControlFrame]): pivoting platforms, or one rigid body balanced from the
@@ -581,9 +597,6 @@ object Fields {
         "CONTROL_RIDER_REQUIRED" to CONTROL_RIDER_REQUIRED,
         "BOARD_BATTERY_FLOOR" to BOARD_BATTERY_FLOOR,
         "BOARD_BATTERY_WARN" to BOARD_BATTERY_WARN,
-        "TONE_HORN" to TONE_HORN,
-        "TONE_BATTERY_LOW" to TONE_BATTERY_LOW,
-        "TONE_BATTERY_CRITICAL" to TONE_BATTERY_CRITICAL,
         "CONTROL_FRAME" to CONTROL_FRAME,
         "CONTROL_LEADER" to CONTROL_LEADER,
         "CONTROL_SIDE" to CONTROL_SIDE,
@@ -652,6 +665,7 @@ object Fields {
         "IMU_AXIS_SIGN" to IMU_AXIS_SIGN,
         "IMU_AXIS_ROLE" to IMU_AXIS_ROLE,
         "ATTITUDE_LEVEL_TRIM" to ATTITUDE_LEVEL_TRIM,
+        "TONE" to TONE,
     )
 
     /**
