@@ -293,8 +293,8 @@ fn file_state(files: &crate::config::Files) -> State {
 /// entry to the one motor controller on the bridge (or takes `--map`).
 #[test]
 fn the_twelve_fet_machine_file_passes_on_the_gd32f103rc() {
-    let text = std::fs::read_to_string(dir().join("machines/twelve-fet.json")).unwrap();
-    let file = crate::machine::read_machine_file("twelve-fet", &text).unwrap();
+    let text = std::fs::read_to_string(dir().join("machines/EFeru.json")).unwrap();
+    let file = crate::machine::read_machine_file("EFeru", &text).unwrap();
     assert_eq!(file.entries.len(), 1);
     let files = file.board_files(Some(0));
     assert!(files.problems.is_empty(), "{:?}", files.problems);

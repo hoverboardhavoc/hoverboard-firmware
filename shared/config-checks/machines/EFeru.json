@@ -1,6 +1,6 @@
 {
   "machine": { "mode": "throttle", "frame": "pivoting", "rider_required": false,
-    "method": "six_step", "battery": { "cells": 10 } },
+    "method": "foc", "battery": { "cells": 10 } },
   "boards": {
     "000000000000000000000000": {
       "device": { "name": "12-FET" },
