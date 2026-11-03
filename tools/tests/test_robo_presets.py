@@ -120,10 +120,10 @@ class GateColourOrder(unittest.TestCase):
         "gate.lo_c": "PB15",
     }
 
-    #: The benign fleet pins those two boards also share, which the same two files state
-    #: (`specs/board-model.md` section 1's registry defaults: self-hold PB12, buzzer PB9, LEDs
-    #: PB3/PA15/PB4). Checked alongside, because a mapping error in the singletons would be just as
-    #: wrong and just as invisible.
+    #: The board pins those two boards also share, which the same two files state (self-hold PB12,
+    #: buzzer PB9, LEDs PB3/PA15/PB4; no registry default carries them, `specs/no-fleet-pins.md`).
+    #: Checked alongside, because a mapping error in the singletons would be just as wrong and just
+    #: as invisible.
     BENCH_BOARD = {
         "power.self_hold": "PB12",
         "buzzer": "PB9",

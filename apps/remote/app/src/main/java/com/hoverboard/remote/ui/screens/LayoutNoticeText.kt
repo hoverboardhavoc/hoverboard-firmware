@@ -25,7 +25,7 @@ internal fun layoutNoticeText(n: LayoutNotice, chip: Chip?): String = when (n) {
     is LayoutNotice.Mismatch -> stringResource(
         R.string.layout_notice_mismatch,
         keyLabel(n.key),
-        valueOfKey(n.key, n.wrote, chip),
+        n.wrote?.let { valueOfKey(n.key, it, chip) } ?: stringResource(R.string.layout_absent),
         n.stored?.let { valueOfKey(n.key, it, chip) } ?: "?",
     )
     is LayoutNotice.Unanswered -> stringResource(R.string.layout_notice_unanswered, keyLabel(n.key))
@@ -40,4 +40,4 @@ private fun keyLabel(key: Key): String = Layout.forKey(key)?.let { layoutFieldLa
 
 @Composable
 private fun valueOfKey(key: Key, value: Value, chip: Chip?): String =
-    Layout.forKey(key)?.let { layoutValueText(it, value, chip) } ?: value.toString()
+    Layout.forKey(key)?.let { layoutValueText(value, chip) } ?: value.toString()

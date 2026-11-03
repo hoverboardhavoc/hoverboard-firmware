@@ -92,18 +92,6 @@ data class IndexedFieldDef(val id: Int, val type: Type, val defaults: List<Value
 const val NO_PORT = 0xFF
 
 /**
- * The fleet pin a pin field reads when nothing is stored, as (port, pin), or null for a field that
- * is absent until stored or not a pin at all (`store::PinField::default`).
- */
-val FieldDef.fleetPin: Pair<Int, Int>?
-    get() = when (val d = default) {
-        is Value.Pin -> d.port to d.pin
-        is Value.PinAf -> d.port to d.pin
-        is Value.PinAdc -> d.port to d.pin
-        else -> null
-    }?.takeIf { it.first != NO_PORT }
-
-/**
  * The registered store fields (`shared/store/src/field.rs`, `REGISTRY`), plus the value vocabularies the
  * firmware gives the byte-valued ones. The ids sit in the blocks of `specs/machine-settings.md`
  * section 3: node `0x01..=0x1E`, machine `0x20..=0x2B`, wheel `0x40..=0x56`.
@@ -113,16 +101,14 @@ val FieldDef.fleetPin: Pair<Int, Int>?
  */
 object Fields {
     /**
-     * A pin field of [type] (`store::PinField`): its default is the [fleet] pin's bytes, or the
-     * bytes `0xFF` when the function is absent until stored, which is what the registry row holds.
+     * A pin field of [type] (`store::PinField`): its default is the bytes `0xFF`, which is what the
+     * registry row holds. Every pin function is absent until stored.
      */
-    private fun pin(id: Int, type: Type, fleet: Pair<Int, Int>? = null, effect: Effect = Effect.BOOT): FieldDef {
-        val (port, n) = fleet ?: (NO_PORT to NO_PORT)
-        val third = if (fleet == null) NO_PORT else 0
+    private fun pin(id: Int, type: Type, effect: Effect = Effect.BOOT): FieldDef {
         val default = when (type) {
-            Type.Pin -> Value.Pin(port, n)
-            Type.PinAf -> Value.PinAf(port, n, third)
-            Type.PinAdc -> Value.PinAdc(port, n, third)
+            Type.Pin -> Value.Pin(NO_PORT, NO_PORT)
+            Type.PinAf -> Value.PinAf(NO_PORT, NO_PORT, NO_PORT)
+            Type.PinAdc -> Value.PinAdc(NO_PORT, NO_PORT, NO_PORT)
             else -> error("$type is not a pin type")
         }
         return FieldDef(id, type, default, effect)
@@ -228,20 +214,18 @@ object Fields {
      * function or ADC channel). A key that is not stored is an absent function, a valid state and
      * not an error.
      *
-     * The defaults split by stakes, and the split is the firmware's, mirrored here: the benign
-     * functions (the latch, the buzzer, the LEDs) default to the fleet pin, so a blank board
-     * behaves like the pre-layout firmware, while the motor groups, the IMU pair, the battery sense
-     * and the foot pads are absent until stored. A pin row with no fleet pin reads back as the bytes
-     * `0xFF` ([fleetPin] null).
+     * No pin field has a pin as its default (`specs/no-fleet-pins.md` section 2): the latch, the buzzer and
+     * the LEDs are absent until stored like every other pin, and a pin row reads back as the bytes
+     * `0xFF`.
      */
-    val BOARD_SELF_HOLD = pin(0x06, Type.Pin, fleet = 1 to 12)
+    val BOARD_SELF_HOLD = pin(0x06, Type.Pin)
 
     /** Battery sense. Absent by default: the pin is fleet-uniform but the SENSE is master-only. */
     val BOARD_BATTERY_PIN = pin(0x07, Type.PinAdc)
-    val BOARD_BUZZER = pin(0x08, Type.Pin, fleet = 1 to 9, effect = Effect.CLIENT)
-    val LED_GREEN = pin(0x09, Type.Pin, fleet = 1 to 3, effect = Effect.CLIENT)
-    val LED_ORANGE = pin(0x0A, Type.Pin, fleet = 0 to 15, effect = Effect.CLIENT)
-    val LED_RED = pin(0x0B, Type.Pin, fleet = 1 to 4, effect = Effect.CLIENT)
+    val BOARD_BUZZER = pin(0x08, Type.Pin, effect = Effect.CLIENT)
+    val LED_GREEN = pin(0x09, Type.Pin, effect = Effect.CLIENT)
+    val LED_ORANGE = pin(0x0A, Type.Pin, effect = Effect.CLIENT)
+    val LED_RED = pin(0x0B, Type.Pin, effect = Effect.CLIENT)
 
     /**
      * The foot pads. Absent by default, for [BOARD_BATTERY_PIN]'s reason one step further on: the pins are

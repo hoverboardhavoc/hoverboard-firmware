@@ -1702,6 +1702,28 @@ mod tests {
         );
     }
 
+    /// `specs/no-fleet-pins.md` section 2: an unstored latch, buzzer or LED reads unset like every
+    /// other pin, with no fleet pin shown, and a dump leaves it out.
+    #[test]
+    fn an_unstored_latch_buzzer_or_led_reads_unset_and_is_not_dumped() {
+        let mut lp = Loop::new();
+        let mut b = board(&mut lp);
+        for (key, path) in [
+            (k(0x06, 0), "power.self_hold"),
+            (k(0x08, 0), "buzzer"),
+            (k(0x09, 0), "leds.green"),
+            (k(0x0A, 0), "leds.orange"),
+            (k(0x0B, 0), "leds.red"),
+        ] {
+            assert_eq!(
+                config_read(&mut b, key).unwrap(),
+                format!("rover-left: {path} = none (default)")
+            );
+        }
+        let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
+        assert_eq!(to_file(&reads, false), json!({}));
+    }
+
     #[test]
     fn config_reads_and_writes_one_field_with_the_spec_lines() {
         let mut lp = Loop::new();

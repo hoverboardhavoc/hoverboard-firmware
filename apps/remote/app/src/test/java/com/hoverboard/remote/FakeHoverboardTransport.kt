@@ -256,6 +256,18 @@ class FakeHoverboardTransport(
         return WriteVerified(value)
     }
 
+    /** Every un-store sent, in order, as (target, key). */
+    val unstores: MutableList<Pair<Int, Key>> = mutableListOf()
+
+    override suspend fun unstoreConfig(key: Key, default: Value, target: Int): ConfigWriteResult? {
+        if (_attachedBoard.value == null) return null
+        check(takeDuplicate(target, key) == null) { "a duplicate answering an un-store is not modelled" }
+        unstores.add(target to key)
+        if (boardArmed) return Refused(CfgRefusal.ARMED)
+        store.remove(target to key)
+        return WriteVerified(default)
+    }
+
     /**
      * The fake board's RAM gain shadow (what `TUNE_READ` reports), by (target, key). A key it does not
      * hold answers its store default ([stagedDefault]), the way a fresh board's shadow is its

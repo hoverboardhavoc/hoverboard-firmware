@@ -34,12 +34,15 @@ class LayoutSlot internal constructor(
 
 /**
  * A board's layout: the stored value of each layout key. A key the board does not store is not in
- * [values]: a pin that is not stored is an absent function, or its fleet pin where the field has one
- * (`specs/config-read-once.md` section 3).
+ * [values]: a pin that is not stored is an absent function, the latch, the buzzer and the LEDs
+ * included (`specs/config-read-once.md` section 3, `specs/no-fleet-pins.md` section 2).
  */
 data class BoardFields(val values: Map<Key, Value> = emptyMap()) {
     /** These fields with [slot] set to [value]. */
     fun with(slot: LayoutSlot, value: Value): BoardFields = copy(values = values + (slot.key to value))
+
+    /** These fields with [slot] storing nothing: applied, a stored value there is un-stored. */
+    fun without(slot: LayoutSlot): BoardFields = copy(values = values - slot.key)
 }
 
 /**
@@ -114,8 +117,9 @@ object Layout {
         SLOTS.filter { it.of(from) != it.of(to) }
 
     /**
-     * The writes that turn [from] into [to]: one `CONFIG_WRITE` per changed slot, in slot order. A
-     * slot [to] stores nothing for is not written: a layout edit sets values and never un-stores one.
+     * The value writes that turn [from] into [to]: one `CONFIG_WRITE` per changed slot [to] stores
+     * a value for, in slot order. A changed slot [to] stores nothing for is an un-store
+     * ([BoardFields.without]), which is not a value write and is not listed here.
      */
     fun writes(from: BoardFields, to: BoardFields): List<Pair<Key, Value>> =
         delta(from, to).mapNotNull { s -> s.of(to)?.let { s.key to it } }

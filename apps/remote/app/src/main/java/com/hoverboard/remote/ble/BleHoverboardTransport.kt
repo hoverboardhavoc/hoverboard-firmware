@@ -671,6 +671,9 @@ class BleHoverboardTransport(
     override suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult? =
         clients?.config?.write(key, value, target)
 
+    override suspend fun unstoreConfig(key: Key, default: Value, target: Int): ConfigWriteResult? =
+        clients?.config?.unstore(key, default, target)
+
     override suspend fun identify(target: Int): IdentifyResult? = clients?.node?.identify(target)
 
     override suspend fun readStatus(target: Int): StatusReadResult? = clients?.node?.status(target)

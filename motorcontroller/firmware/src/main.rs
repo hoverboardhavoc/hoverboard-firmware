@@ -1897,9 +1897,9 @@ mod firmware {
         }
     }
 
-    /// Assert this board's power-latch (SELF_HOLD) high, on the stored `power.self_hold` pin (the
-    /// fleet's PB12 when none is stored), FIRST of every bring-up, and record the pin driven in the
-    /// status record.
+    /// Assert this board's power-latch (SELF_HOLD) high, on the stored `power.self_hold` pin, FIRST
+    /// of every bring-up, and record the pin driven in the status record. With none stored no pin
+    /// is touched (`specs/no-fleet-pins.md`).
     ///
     /// Role-agnostic on EVERY board: latch this board's own rail on so it stays up after the
     /// inter-board wake drops. A slave is woken over the cable and would otherwise fall back asleep

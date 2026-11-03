@@ -555,6 +555,7 @@ class ScreenshotTest {
         override fun refresh() = Unit
         override fun stage(slot: LayoutSlot, value: Value) = Unit
         override fun revert(slot: LayoutSlot) = Unit
+        override fun clear(slot: LayoutSlot) = Unit
         override fun revertAll() = Unit
         override fun apply() = Unit
         override fun dismissNotice() = Unit

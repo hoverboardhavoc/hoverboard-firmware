@@ -1,5 +1,6 @@
 package com.hoverboard.protocol.board
 
+import com.hoverboard.protocol.checks.Checks
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
@@ -25,7 +26,22 @@ class BoardLayoutTest {
         val fields = checkNotNull(Layout.fieldsFrom(read(gates)))
         assertEquals(gates, fields.values)
         assertEquals(emptyList<LayoutSlot>(), Layout.missing(read(gates)))
-        assertNull(Layout.LATCH.of(fields), "the latch is on its fleet pin, not stored")
+        assertNull(Layout.LATCH.of(fields), "the latch is not stored")
+    }
+
+    /** `specs/no-fleet-pins.md` section 2: an unstored latch, buzzer or LED reads as absent, not as a pin. */
+    @Test
+    fun anUnstoredLatchBuzzerOrLedReadsAsAbsent() {
+        val fields = checkNotNull(Layout.fieldsFrom(read()))
+        val unstored = listOf(
+            Fields.BOARD_SELF_HOLD, Fields.BOARD_BUZZER, Fields.LED_GREEN, Fields.LED_ORANGE, Fields.LED_RED,
+        )
+        for (def in unstored) {
+            val slot = checkNotNull(Layout.forField(def))
+            assertNull(slot.of(fields), "${def.id} is absent")
+            assertNull(Checks.pinAt(fields.values, slot.key), "${def.id} holds no pin")
+            assertEquals(Value.Pin(0xFF, 0xFF), def.default, "${def.id}'s default is the absent bytes")
+        }
     }
 
     @Test
@@ -54,6 +70,17 @@ class BoardLayoutTest {
             "one write per changed slot, in slot order",
         )
         assertEquals(emptyList<Pair<*, *>>(), Layout.writes(from, from), "nothing to write for no change")
+    }
+
+    /** `specs/no-fleet-pins.md` section 2: a cleared pin is in the delta and is no value write. */
+    @Test
+    fun aClearedPinIsADeltaThatWritesNoValue() {
+        val buzzer = checkNotNull(Layout.forField(Fields.BOARD_BUZZER))
+        val from = checkNotNull(Layout.fieldsFrom(read(mapOf(buzzer.key to Value.Pin(1, 9)))))
+        val to = from.without(buzzer)
+        assertNull(buzzer.of(to), "cleared, it reads absent")
+        assertEquals(listOf(buzzer), Layout.delta(from, to))
+        assertEquals(emptyList<Pair<*, *>>(), Layout.writes(from, to))
     }
 
     @Test

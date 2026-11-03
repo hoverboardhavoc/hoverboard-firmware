@@ -30,6 +30,30 @@
       "device": {
         "name": "Rover slave"
       },
+      "power": {
+        "self_hold": {
+          "port": "B",
+          "pin": 12
+        }
+      },
+      "buzzer": {
+        "port": "B",
+        "pin": 9
+      },
+      "leds": {
+        "green": {
+          "port": "B",
+          "pin": 3
+        },
+        "orange": {
+          "port": "A",
+          "pin": 15
+        },
+        "red": {
+          "port": "B",
+          "pin": 4
+        }
+      },
       "imu": {
         "scl": {
           "port": "B",
@@ -138,6 +162,12 @@
       "control": {
         "leader": true
       },
+      "power": {
+        "self_hold": {
+          "port": "B",
+          "pin": 12
+        }
+      },
       "battery_sense": {
         "pin": {
           "port": "A",
@@ -145,7 +175,19 @@
           "adc": 4
         }
       },
+      "buzzer": {
+        "port": "B",
+        "pin": 9
+      },
       "leds": {
+        "green": {
+          "port": "B",
+          "pin": 3
+        },
+        "orange": {
+          "port": "A",
+          "pin": 15
+        },
         "red": {
           "port": "B",
           "pin": 4

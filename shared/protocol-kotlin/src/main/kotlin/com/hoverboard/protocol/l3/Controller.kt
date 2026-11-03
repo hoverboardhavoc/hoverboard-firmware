@@ -1,5 +1,6 @@
 package com.hoverboard.protocol.l3
 
+import com.hoverboard.protocol.store.ERASED_TAG
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 
@@ -566,6 +567,16 @@ class Controller {
         payload[1] = key.index.toByte()
         payload[2] = value.kind().tag.toByte()
         System.arraycopy(vb, 0, payload, 3, vb.size)
+        return Pdu.of(Opcode.ConfigWrite, guestAddr, dst, payload).encode()
+    }
+
+    /**
+     * Build the `CONFIG_WRITE(dst, key)` that un-stores [key]: `[field_id, index, ERASED_TAG]`, the
+     * tombstone tag with no value bytes (`shared/net/src/walk.rs`, `apply_write`). It is the request
+     * `hoverboard-cli`'s `nodes::unstore` sends for `board set <board> <field> null`.
+     */
+    fun buildConfigUnstore(dst: Int, key: Key): ByteArray {
+        val payload = byteArrayOf(key.fieldId.toByte(), key.index.toByte(), ERASED_TAG.toByte())
         return Pdu.of(Opcode.ConfigWrite, guestAddr, dst, payload).encode()
     }
 

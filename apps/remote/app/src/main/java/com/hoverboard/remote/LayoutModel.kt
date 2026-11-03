@@ -43,7 +43,7 @@ sealed interface LayoutNotice {
     data class BoardRefused(val key: Key, val refusal: CfgRefusal) : LayoutNotice
 
     /** The board accepted the write to [key] but echoes a different stored value (or none). */
-    data class Mismatch(val key: Key, val wrote: Value, val stored: Value?) : LayoutNotice
+    data class Mismatch(val key: Key, val wrote: Value?, val stored: Value?) : LayoutNotice
 
     /** The write to [key] went unanswered through the whole retransmit budget. */
     data class Unanswered(val key: Key) : LayoutNotice
@@ -164,6 +164,12 @@ interface LayoutActions {
 
     /** Put one field back to what the board stores. */
     fun revert(slot: LayoutSlot)
+
+    /**
+     * Stage [slot] storing nothing: applied, the board's record for it is un-stored and the pin
+     * reads absent (`specs/no-fleet-pins.md` section 2).
+     */
+    fun clear(slot: LayoutSlot)
 
     /** Put the whole staged layout back to what the board stores. */
     fun revertAll()
@@ -357,6 +363,14 @@ class LayoutModel(
         }
     }
 
+    override fun clear(slot: LayoutSlot) {
+        if (refuseWhileArmed()) return
+        _state.update { s ->
+            val staged = s.staged ?: return@update s
+            s.copy(staged = staged.without(slot), notice = null)
+        }
+    }
+
     override fun revert(slot: LayoutSlot) = _state.update { s ->
         val stored = s.stored ?: return@update s
         val staged = s.staged ?: return@update s
@@ -403,7 +417,8 @@ class LayoutModel(
             if (s.delta.any { Checks.needsChip(it.key) }) return LayoutNotice.ChipUnknown
             Checks.checkValues(staged.values)
         } else {
-            val forms = s.delta.filter { it.def.type == Type.PinAf }.map {
+            // A cleared pin writes no value, so it has no af form to judge.
+            val forms = s.delta.filter { it.def.type == Type.PinAf && it.of(staged) != null }.map {
                 PinForm(it.key, afGiven = !part.remaps || (it.of(staged) as? Value.PinAf)?.af != 0)
             }
             Checks.run(part, staged.values, forms)
@@ -412,7 +427,8 @@ class LayoutModel(
     }
 
     /**
-     * Write the delta, field by field, in field order.
+     * Write the delta, field by field, in field order: a staged value is written, and a cleared
+     * field the board stores is un-stored.
      *
      * A field the board already holds is skipped rather than rewritten, which is also the resume
      * rule: an Apply cut short by a link drop is finished by applying again, since the delta is
@@ -423,9 +439,16 @@ class LayoutModel(
         for (slot in _state.value.delta) {
             // A field the board already holds is skipped, which is also what makes applying again
             // the way to finish an Apply a link drop cut short.
-            val want = slot.of(staged)?.takeIf { it != _state.value.stored?.let(slot::of) } ?: continue
+            val want = slot.of(staged)
+            if (want == _state.value.stored?.let(slot::of)) continue
             if (refuseWhileArmed()) return
-            val answer = awaitSlot { transport.writeConfig(slot.key, want, board) }
+            val answer = awaitSlot {
+                if (want == null) {
+                    transport.unstoreConfig(slot.key, slot.def.default, board)
+                } else {
+                    transport.writeConfig(slot.key, want, board)
+                }
+            }
             if (answer == null) {
                 _state.update { it.copy(notice = LayoutNotice.NotAttached) }
                 return
@@ -434,12 +457,16 @@ class LayoutModel(
         }
     }
 
-    /** Fold one write's result into the state; false when the Apply must stop here. */
-    private suspend fun settle(key: Key, want: Value, r: ConfigWriteResult, board: Int): Boolean {
+    /**
+     * Fold one write's result into the state; false when the Apply must stop here. [want] null is
+     * an un-store, which verified leaves the key storing nothing.
+     */
+    private suspend fun settle(key: Key, want: Value?, r: ConfigWriteResult, board: Int): Boolean {
         val notice = when (r) {
             is WriteVerified -> {
+                val now = if (want == null) null else r.stored
                 _state.update {
-                    it.copy(values = it.values + (key to r.stored), written = it.written + key)
+                    it.copy(values = it.values + (key to now), written = it.written + key)
                 }
                 return true
             }

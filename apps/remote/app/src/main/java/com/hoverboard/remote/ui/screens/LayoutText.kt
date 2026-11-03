@@ -4,8 +4,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.res.stringResource
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.pincap.Chip
+import com.hoverboard.protocol.store.NO_PORT
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.protocol.store.fleetPin
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.LayoutRows
 
@@ -27,15 +27,21 @@ internal fun valueText(value: Value, chip: Chip?): String? = when (value) {
 }
 
 /**
- * How one layout key's stored value reads: the value, or for a key the board stores nothing for, the
- * fleet pin it falls back to or "not set".
+ * How one layout key's stored value reads: the value, or "not set" for a key the board stores
+ * nothing for.
  */
 @Composable
-internal fun layoutValueText(slot: LayoutSlot, value: Value?, chip: Chip?): String {
-    if (value == null) {
-        return slot.def.fleetPin?.let { (port, pin) -> pinName(port, pin) } ?: stringResource(R.string.layout_absent)
-    }
+internal fun layoutValueText(value: Value?, chip: Chip?): String {
+    if (value == null || isAbsentPin(value)) return stringResource(R.string.layout_absent)
     return valueText(value, chip) ?: value.toString()
+}
+
+/** Whether [value] is a pin row's absent bytes (port [NO_PORT]), what an un-store echoes back. */
+private fun isAbsentPin(value: Value): Boolean = when (value) {
+    is Value.Pin -> value.port == NO_PORT
+    is Value.PinAf -> value.port == NO_PORT
+    is Value.PinAdc -> value.port == NO_PORT
+    else -> false
 }
 
 /** A field's label, by the slot it edits. */
@@ -48,6 +54,6 @@ internal fun layoutFieldLabel(slot: LayoutSlot): String =
 internal fun layoutDeltaLine(slot: LayoutSlot, from: Value?, to: Value?, chip: Chip?): String = stringResource(
     R.string.layout_delta_line,
     layoutFieldLabel(slot),
-    layoutValueText(slot, from, chip),
-    layoutValueText(slot, to, chip),
+    layoutValueText(from, chip),
+    layoutValueText(to, chip),
 )

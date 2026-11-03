@@ -6,6 +6,7 @@ import com.hoverboard.protocol.l3.BleWalkEngine
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.l3.Walk
+import com.hoverboard.protocol.store.ERASED_TAG
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Type
@@ -59,6 +60,34 @@ class ConfigClientTest {
 
         assertEquals(WriteVerified(Value.U32(21_000)), f.client.write(limit, Value.U32(21_000), slave))
         assertEquals(Value.U32(21_000), f.store[slave to limit])
+    }
+
+    /** `specs/no-fleet-pins.md` section 2: the un-store is the tombstone `CONFIG_WRITE`, as the CLI's. */
+    @Test
+    fun anUnstoreSendsTheTombstoneAndIsVerifiedAgainstTheDefaultItEchoes() = runTest {
+        val f = FakeConfigBoards(this)
+        val buzzer = com.hoverboard.protocol.store.Fields.BOARD_BUZZER.key()
+        val absent = Value.Pin(0xFF, 0xFF)
+        f.store[slave to buzzer] = Value.Pin(1, 9)
+        f.defaults[buzzer] = absent
+
+        assertEquals(WriteVerified(absent), f.client.unstore(buzzer, absent, slave))
+        val sent = f.requests.single()
+        assertEquals(Opcode.ConfigWrite.value, sent.opcode)
+        assertEquals(listOf(buzzer.fieldId, buzzer.index, ERASED_TAG), sent.payload.map { it.toInt() and 0xFF })
+        assertNull(f.store[slave to buzzer], "the record is gone")
+    }
+
+    @Test
+    fun anUnstoreWhoseEchoIsNotTheDefaultIsAMismatch() = runTest {
+        val f = FakeConfigBoards(this)
+        val absent = Value.Pin(0xFF, 0xFF)
+        f.echoOverride = Value.Pin(1, 9)
+
+        assertEquals(
+            WriteMismatch(wrote = absent, stored = Value.Pin(1, 9)),
+            f.client.unstore(com.hoverboard.protocol.store.Fields.BOARD_BUZZER.key(), absent, slave),
+        )
     }
 
     @Test
@@ -253,6 +282,9 @@ internal class FakeConfigBoards(scope: TestScope) {
     /** (board address, key) -> stored value. */
     val store = HashMap<Pair<Int, Key>, Value>()
 
+    /** key -> the default an un-store echoes (the registry default the key reads with no record). */
+    val defaults = HashMap<Key, Value>()
+
     /** Every CONFIG and TUNE request that reached the boards, re-sends included, in order. */
     val requests = mutableListOf<Pdu>()
 
@@ -354,6 +386,11 @@ internal class FakeConfigBoards(scope: TestScope) {
             }
             req.opcode == Walk.OP_TUNE_READ -> readBodyOverride ?: shadow[req.dst to key]?.let { tagged(Value.I16(it)) }
                 ?: return Pdu.of(Opcode.ConfigResp, req.dst, req.src, byteArrayOf(p[0], p[1], Walk.CFG_UNKNOWN_KEY.toByte(), 0))
+            req.known() == Opcode.ConfigWrite && p.size == 3 && (p[2].toInt() and 0xFF) == ERASED_TAG -> {
+                // An un-store: the board drops the record and echoes the value the key reads now.
+                store.remove(req.dst to key)
+                (echoOverride ?: defaults[key])?.let { tagged(it) } ?: ByteArray(0)
+            }
             req.known() == Opcode.ConfigWrite -> {
                 val type = Type.fromTag(p[2].toInt() and 0xFF)!!
                 store[req.dst to key] = Value.decode(type, p.copyOfRange(3, p.size))!!

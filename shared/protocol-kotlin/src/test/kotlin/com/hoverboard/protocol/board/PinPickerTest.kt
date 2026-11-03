@@ -21,12 +21,25 @@ class PinPickerTest {
 
     @Test
     fun aHeldPinIsOfferedToItsOwnSlotAndToNoOther() {
-        // The buzzer and the latch hold their fleet pins, PB9 and PB12, without storing them.
-        assertTrue(Value.Pin(1, 9) in offered(Fields.BOARD_BUZZER, Chip.GD32F103C8), "its own value")
-        assertFalse(Value.Pin(1, 9) in offered(Fields.LED_GREEN, Chip.GD32F103C8), "the buzzer holds it")
-        assertFalse(Value.Pin(1, 12) in offered(Fields.LED_GREEN, Chip.GD32F103C8), "the power latch holds it")
+        val held = blank.with(slot(Fields.BOARD_BUZZER), Value.Pin(1, 9))
+            .with(slot(Fields.BOARD_SELF_HOLD), Value.Pin(1, 12))
+        assertTrue(Value.Pin(1, 9) in offered(Fields.BOARD_BUZZER, Chip.GD32F103C8, fields = held), "its own value")
+        assertFalse(Value.Pin(1, 9) in offered(Fields.LED_GREEN, Chip.GD32F103C8, fields = held), "the buzzer holds it")
+        val latch = Value.Pin(1, 12)
+        assertFalse(latch in offered(Fields.LED_GREEN, Chip.GD32F103C8, fields = held), "the power latch holds it")
         val pads = blank.with(slot(Fields.PAD_A), Value.Pin(0, 11))
         assertFalse(Value.Pin(0, 11) in offered(Fields.PAD_B, Chip.GD32F103C8, fields = pads), "a stored pin is held")
+    }
+
+    /**
+     * `specs/no-fleet-pins.md` section 2: an unstored latch, buzzer or LED holds no pin, so the
+     * pin it used to default to is free.
+     */
+    @Test
+    fun anUnstoredLatchBuzzerOrLedHoldsNoPin() {
+        for (pin in listOf(Value.Pin(1, 12), Value.Pin(1, 9), Value.Pin(1, 3), Value.Pin(0, 15), Value.Pin(1, 4))) {
+            assertTrue(pin in offered(Fields.PAD_A, Chip.GD32F103C8), "$pin is free on a blank board")
+        }
     }
 
     @Test

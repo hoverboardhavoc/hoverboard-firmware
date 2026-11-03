@@ -34,7 +34,24 @@
     "refused": "pads.b"
   },
   {
-    "name": "the button on the latch's default pin",
+    "name": "the button on the latch's stored pin",
+    "chip": "gd32f130c8",
+    "board": {
+      "power": {
+        "self_hold": {
+          "port": "B",
+          "pin": 12
+        },
+        "button": {
+          "port": "B",
+          "pin": 12
+        }
+      }
+    },
+    "refused": "power.button"
+  },
+  {
+    "name": "the button on PB12 with no latch stored",
     "chip": "gd32f130c8",
     "board": {
       "power": {
@@ -44,7 +61,7 @@
         }
       }
     },
-    "refused": "power.button"
+    "refused": null
   },
   {
     "name": "a hall on a gate pin",

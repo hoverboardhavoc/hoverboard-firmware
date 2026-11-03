@@ -31,7 +31,9 @@ import com.hoverboard.protocol.pincap.Route
 import com.hoverboard.protocol.pincap.SWD
 import com.hoverboard.protocol.store.Names
 import com.hoverboard.protocol.imu.Orientation
+import com.hoverboard.protocol.store.ERASED_TAG
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.NO_PORT
 import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
@@ -781,6 +783,11 @@ class RustSourceDriftTest {
 
         val fromKotlin = Type.entries.associate { it.name to it.tag }
         assertEquals(fromRust, fromKotlin, "store type tags drifted from the Rust")
+
+        // The tombstone tag the un-store sends (`ERASED_TAG`), which is no type's tag.
+        val erased = findOne(key, """^pub\s+const\s+ERASED_TAG\s*:\s*u8\s*=\s*([^;]+);""", "ERASED_TAG")
+        assertEquals(literal("ERASED_TAG", erased.groupValues[1].trim(), "tombstone tag"), ERASED_TAG, "ERASED_TAG drifted")
+        assertTrue(Type.entries.none { it.tag == ERASED_TAG }, "ERASED_TAG is a type's tag")
     }
 
     // --- payload lengths and field order ---------------------------------------------------------
@@ -1509,23 +1516,19 @@ class RustSourceDriftTest {
     fun theSetupFieldsAgreeWithTheRustSource() {
         val field = rust("shared/store/src/field.rs")
         for ((name, def) in Fields.ALL) {
-            // `pub const NAME: PinField = PinField::new(0x06, Type::Pin).or(1, 12);`: a pin field,
-            // whose default is its fleet pin's bytes or the absent bytes 0xFF.
+            // `pub const NAME: PinField = PinField::new(0x06, Type::Pin);`: a pin field, whose
+            // default is the absent bytes 0xFF (`specs/no-fleet-pins.md` section 2). A handle with anything
+            // after the `new(...)` matches neither this nor the scalar form below, and fails there.
             val pin = Regex(
-                """^pub\s+const\s+$name\s*:\s*PinField\s*=\s*PinField::new\(\s*([^,]+?)\s*,\s*Type::(\w+)\s*\)""" +
-                    """\s*(?:\.or\(\s*(\d+)\s*,\s*(\d+)\s*\))?\s*;""",
+                """^pub\s+const\s+$name\s*:\s*PinField\s*=\s*PinField::new\(\s*([^,]+?)\s*,\s*Type::(\w+)\s*\)\s*;""",
                 RegexOption.MULTILINE,
             ).find(field)
             if (pin != null) {
                 assertEquals(literal(name, pin.groupValues[1], "field id"), def.id, "$name id drifted")
-                val fleet = pin.groupValues[3].takeIf { it.isNotEmpty() }
-                    ?.let { literal(name, it, "fleet port") to literal(name, pin.groupValues[4], "fleet pin") }
-                val (port, n) = fleet ?: (0xFF to 0xFF)
-                val third = if (fleet == null) 0xFF else 0
                 val default = when (pin.groupValues[2]) {
-                    "Pin" -> Value.Pin(port, n)
-                    "PinAf" -> Value.PinAf(port, n, third)
-                    "PinAdc" -> Value.PinAdc(port, n, third)
+                    "Pin" -> Value.Pin(NO_PORT, NO_PORT)
+                    "PinAf" -> Value.PinAf(NO_PORT, NO_PORT, NO_PORT)
+                    "PinAdc" -> Value.PinAdc(NO_PORT, NO_PORT, NO_PORT)
                     else -> error("$name is a PinField of Type::${pin.groupValues[2]}, which is no pin type")
                 }
                 assertEquals(default.kind(), def.type, "$name storage type drifted")

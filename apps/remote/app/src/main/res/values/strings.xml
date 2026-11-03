@@ -588,6 +588,7 @@
     <string name="layout_cancel">Cancel</string>
     <string name="layout_set">Set</string>
     <string name="layout_row_part_unknown">No pin can be picked: the board\'s part is not known.</string>
+    <string name="layout_clear">Clear (not set)</string>
     <string name="layout_no_candidates">No pin on this part is free.</string>
     <string name="layout_choice_imu_none">None fitted</string>
     <string name="layout_choice_imu_mpu6050">MPU-6050</string>

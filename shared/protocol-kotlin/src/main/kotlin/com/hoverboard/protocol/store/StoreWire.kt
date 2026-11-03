@@ -6,6 +6,13 @@ package com.hoverboard.protocol.store
  * payload.
  */
 
+/**
+ * The `type` byte of a tombstone (`shared/store/src/key.rs`, `ERASED_TAG`): a `CONFIG_WRITE` whose
+ * value is this byte alone un-stores the key, and the key then reads its default. It is no [Type]'s
+ * tag.
+ */
+const val ERASED_TAG = 0x00
+
 /** A store key: `field_id` names the field, `index` selects the instance (a singleton uses 0). */
 data class Key(val fieldId: Int, val index: Int)
 
