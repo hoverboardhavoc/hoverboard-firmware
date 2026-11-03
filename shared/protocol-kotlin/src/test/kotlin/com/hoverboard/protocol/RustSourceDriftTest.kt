@@ -31,6 +31,7 @@ import com.hoverboard.protocol.pincap.Route
 import com.hoverboard.protocol.pincap.SWD
 import com.hoverboard.protocol.store.Names
 import com.hoverboard.protocol.imu.Orientation
+import com.hoverboard.protocol.store.ERASED_TAG
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.NO_PORT
 import com.hoverboard.protocol.store.Gains
@@ -782,6 +783,11 @@ class RustSourceDriftTest {
 
         val fromKotlin = Type.entries.associate { it.name to it.tag }
         assertEquals(fromRust, fromKotlin, "store type tags drifted from the Rust")
+
+        // The tombstone tag the un-store sends (`ERASED_TAG`), which is no type's tag.
+        val erased = findOne(key, """^pub\s+const\s+ERASED_TAG\s*:\s*u8\s*=\s*([^;]+);""", "ERASED_TAG")
+        assertEquals(literal("ERASED_TAG", erased.groupValues[1].trim(), "tombstone tag"), ERASED_TAG, "ERASED_TAG drifted")
+        assertTrue(Type.entries.none { it.tag == ERASED_TAG }, "ERASED_TAG is a type's tag")
     }
 
     // --- payload lengths and field order ---------------------------------------------------------

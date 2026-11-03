@@ -347,6 +347,10 @@ class BleWalkEngine(
     fun sendConfigWrite(dst: Int, key: Key, value: Value) =
         sendRequest(controller.buildConfigWrite(dst, key, value))
 
+    /** Send the `CONFIG_WRITE` that un-stores [key] on [dst]; the reply arrives via [takeConfigResp]. */
+    fun sendConfigUnstore(dst: Int, key: Key) =
+        sendRequest(controller.buildConfigUnstore(dst, key))
+
     /** Send a `CONFIG_READ` to [dst]; the reply arrives via [takeConfigResp]. */
     fun sendConfigRead(dst: Int, key: Key) =
         sendRequest(controller.buildConfigRead(dst, key))

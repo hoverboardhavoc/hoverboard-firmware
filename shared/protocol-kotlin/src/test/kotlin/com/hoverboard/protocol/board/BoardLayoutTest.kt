@@ -72,6 +72,17 @@ class BoardLayoutTest {
         assertEquals(emptyList<Pair<*, *>>(), Layout.writes(from, from), "nothing to write for no change")
     }
 
+    /** `specs/no-fleet-pins.md` section 2: a cleared pin is in the delta and is no value write. */
+    @Test
+    fun aClearedPinIsADeltaThatWritesNoValue() {
+        val buzzer = checkNotNull(Layout.forField(Fields.BOARD_BUZZER))
+        val from = checkNotNull(Layout.fieldsFrom(read(mapOf(buzzer.key to Value.Pin(1, 9)))))
+        val to = from.without(buzzer)
+        assertNull(buzzer.of(to), "cleared, it reads absent")
+        assertEquals(listOf(buzzer), Layout.delta(from, to))
+        assertEquals(emptyList<Pair<*, *>>(), Layout.writes(from, to))
+    }
+
     @Test
     fun aSlotIsFoundByItsFieldAndIndex() {
         assertEquals(Fields.BOARD_BUZZER.key(), Layout.forField(Fields.BOARD_BUZZER)?.key)

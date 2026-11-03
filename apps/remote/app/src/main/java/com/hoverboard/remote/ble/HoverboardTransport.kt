@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
  * All sends are fire-and-forget (Write Without Response). Telemetry arrives as a hot
  * [StateFlow]; [connectionState] tracks the link lifecycle.
  */
+@Suppress("TooManyFunctions") // one method per request the link carries; the un-store made it 12
 interface HoverboardTransport {
 
     /** Current BLE link state. */
@@ -106,6 +107,13 @@ interface HoverboardTransport {
      * no session is attached, in which case nothing was sent.
      */
     suspend fun writeConfig(key: Key, value: Value, target: Int): ConfigWriteResult?
+
+    /**
+     * Un-store [key] on the board at [target] (the tombstone `board set <board> <field> null`
+     * sends) and verify that the board echoes [default], the value the key reads afterwards. Null
+     * when no session is attached, in which case nothing was sent.
+     */
+    suspend fun unstoreConfig(key: Key, default: Value, target: Int): ConfigWriteResult?
 
     /**
      * Ask the node at [target] what it is (`IDENTIFY`, `specs/machine-settings.md` section 6.1): its

@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.res.stringResource
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.pincap.Chip
+import com.hoverboard.protocol.store.NO_PORT
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.LayoutRows
@@ -31,8 +32,16 @@ internal fun valueText(value: Value, chip: Chip?): String? = when (value) {
  */
 @Composable
 internal fun layoutValueText(value: Value?, chip: Chip?): String {
-    if (value == null) return stringResource(R.string.layout_absent)
+    if (value == null || isAbsentPin(value)) return stringResource(R.string.layout_absent)
     return valueText(value, chip) ?: value.toString()
+}
+
+/** Whether [value] is a pin row's absent bytes (port [NO_PORT]), what an un-store echoes back. */
+private fun isAbsentPin(value: Value): Boolean = when (value) {
+    is Value.Pin -> value.port == NO_PORT
+    is Value.PinAf -> value.port == NO_PORT
+    is Value.PinAdc -> value.port == NO_PORT
+    else -> false
 }
 
 /** A field's label, by the slot it edits. */

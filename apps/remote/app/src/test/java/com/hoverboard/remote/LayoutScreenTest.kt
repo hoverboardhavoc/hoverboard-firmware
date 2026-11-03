@@ -35,6 +35,7 @@ import com.hoverboard.remote.ui.screens.LAYOUT_PART_UNKNOWN_TAG
 import com.hoverboard.remote.ui.screens.LAYOUT_POWER_CYCLE_TAG
 import com.hoverboard.remote.ui.screens.LayoutScreen
 import com.hoverboard.remote.ui.screens.layoutChangeTag
+import com.hoverboard.remote.ui.screens.layoutClearTag
 import com.hoverboard.remote.ui.screens.layoutDialogTag
 import com.hoverboard.remote.ui.screens.layoutOptionTag
 import com.hoverboard.remote.ui.screens.layoutRowTag
@@ -74,6 +75,7 @@ class LayoutScreenTest {
         override fun refresh() { calls += "refresh" }
         override fun stage(slot: LayoutSlot, value: Value) { staged += slot.key to value }
         override fun revert(slot: LayoutSlot) { calls += "revert:${slot.key}" }
+        override fun clear(slot: LayoutSlot) { calls += "clear:${slot.key}" }
         override fun revertAll() { calls += "revertAll" }
         override fun apply() { calls += "apply" }
         override fun dismissNotice() { calls += "dismiss" }
@@ -183,6 +185,29 @@ class LayoutScreenTest {
         assertEquals(listOf(key to pin("PB5")), actions.staged)
         // Tapping one stages it and closes, which is the simple-dialog pattern: no confirm step.
         compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
+    }
+
+    /** `specs/no-fleet-pins.md` section 2: a pin that holds a value can be cleared; one that holds none cannot. */
+    @Test
+    fun thePickerOffersClearOnlyForAPinThatHoldsOne() {
+        val key = slot(Fields.LED_GREEN).key
+        val actions = Recorder()
+        show(state(staged = blank.with(slot(Fields.LED_GREEN), pin("PB3"))), actions = actions)
+
+        compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutClearTag(key)).performClick()
+        assertEquals(listOf("shown", "clear:$key"), actions.calls)
+        compose.onNodeWithTag(layoutDialogTag(key)).assertDoesNotExist()
+    }
+
+    @Test
+    fun aPinThatHoldsNoneHasNoClear() {
+        val key = slot(Fields.LED_GREEN).key
+        show(state())
+
+        compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
+        compose.onNodeWithTag(layoutDialogTag(key)).assertExists()
+        compose.onNodeWithTag(layoutClearTag(key)).assertDoesNotExist()
     }
 
     @Test

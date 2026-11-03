@@ -435,6 +435,42 @@ class LayoutModelTest {
         assertTrue(rig.state.awaitingPowerCycle)
     }
 
+    /**
+     * `specs/no-fleet-pins.md` section 2: clearing a stored pin stages it storing nothing, and Apply
+     * sends that record's un-store (no value write); the pin then reads absent.
+     */
+    @Test
+    fun clearingAStoredPinUnstoresItsRecordAndItReadsAbsent() = runTest {
+        val buzzer = Fields.BOARD_BUZZER.key()
+        val rig = layoutRig(BOARD) { transport.store[BOARD to buzzer] = pin("PB9") }
+        assertEquals(pin("PB9"), rig.stored(Fields.BOARD_BUZZER))
+
+        rig.model.clear(rig.slot(Fields.BOARD_BUZZER))
+        assertNull("staged absent", rig.staged(Fields.BOARD_BUZZER))
+        assertEquals(listOf(buzzer), rig.state.delta.map { it.key })
+
+        rig.model.apply()
+        runCurrent()
+
+        assertNull(rig.state.notice)
+        assertEquals("the un-store, and only it", listOf(BOARD to buzzer), rig.transport.unstores)
+        assertEquals("no value is written", emptyList<Any>(), rig.written)
+        assertNull("the board stores nothing for it", rig.transport.store[BOARD to buzzer])
+        assertNull("it reads absent", rig.stored(Fields.BOARD_BUZZER))
+        assertEquals(emptyList<Any>(), rig.state.delta)
+        assertTrue(buzzer in rig.state.written)
+    }
+
+    @Test
+    fun clearingIsRefusedWhileArmed() = runTest {
+        val buzzer = Fields.BOARD_BUZZER.key()
+        val rig = layoutRig(BOARD) { transport.store[BOARD to buzzer] = pin("PB9") }
+        rig.armed = true
+        rig.model.clear(rig.slot(Fields.BOARD_BUZZER))
+        assertEquals(LayoutNotice.ReadOnlyWhileArmed, rig.state.notice)
+        assertEquals(pin("PB9"), rig.staged(Fields.BOARD_BUZZER))
+    }
+
     private companion object {
         const val BOARD = 0x01
         const val OTHER_BOARD = 0x02

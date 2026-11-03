@@ -346,4 +346,26 @@ class ConfigClient(private val exchange: ConfigExchange) {
                 }
             }
         }
+
+    /**
+     * Un-store [key] on the board at [target] (a tombstone, as `board set <board> <field> null`
+     * sends) and verify the echo, which is the value the key reads afterwards: [default], the
+     * field's registry default. [WriteVerified] carries that echo; an echo of anything else is a
+     * [WriteMismatch] whose `wrote` is [default].
+     */
+    suspend fun unstore(key: Key, default: Value, target: Int): ConfigWriteResult =
+        when (val o = exchange.request(key, target) { sendConfigUnstore(target, key) }) {
+            ConfigExchange.Outcome.Busy -> Busy
+            ConfigExchange.Outcome.TimedOut -> TimedOut
+            is ConfigExchange.Outcome.Answered -> {
+                val resp = o.resp
+                when (resp.status) {
+                    Walk.CFG_OK -> {
+                        val stored = resp.decodeValue()
+                        if (stored == default) WriteVerified(stored) else WriteMismatch(wrote = default, stored = stored)
+                    }
+                    else -> CfgRefusal.fromCode(resp.status)?.let { Refused(it) } ?: Malformed(resp)
+                }
+            }
+        }
 }

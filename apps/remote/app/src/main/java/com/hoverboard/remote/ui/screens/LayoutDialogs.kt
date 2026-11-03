@@ -50,14 +50,18 @@ private val DIALOG_WIDTH = DialogProperties(usePlatformDefaultWidth = false)
 /** Test tag on the dialog that stages one field. */
 fun layoutDialogTag(key: Key): String = "layout_dialog_${key.fieldId}_${key.index}"
 
+/** Test tag on the dialog's clear choice, which stages the slot storing nothing. */
+fun layoutClearTag(key: Key): String = "layout_clear_${key.fieldId}_${key.index}"
+
 /** Test tag on the dialog's offer of [option], a pin as [valueText] spells it (`PA8 AF2`). */
 fun layoutOptionTag(key: Key, option: String): String = "layout_option_${key.fieldId}_${key.index}_$option"
 
 /**
  * The pin picker: what the part's table offers for this slot, the pins no other field holds, less
  * SWD, each with the alternate function or ADC channel it carries there ([candidates]). It needs
- * the part, because which pins exist is a fact about silicon. A pin is changed here, not removed:
- * a layout edit writes values and never un-stores one.
+ * the part, because which pins exist is a fact about silicon. A slot that holds a pin also gets a
+ * clear choice first, which stages it storing nothing: applied, the record is un-stored and the pin
+ * reads "not set" (`specs/no-fleet-pins.md` section 2). No pin value means "none".
  */
 @Composable
 internal fun PinDialog(row: LayoutRow, state: LayoutState, onClose: () -> Unit, actions: LayoutActions) {
@@ -65,6 +69,12 @@ internal fun PinDialog(row: LayoutRow, state: LayoutState, onClose: () -> Unit, 
     val staged = state.staged ?: return
     val offers = candidates(row.slot, staged, part)
     OptionDialog(row, onClose) {
+        if (row.slot.of(staged) != null) {
+            Option(layoutClearTag(row.slot.key), stringResource(R.string.layout_clear)) {
+                actions.clear(row.slot)
+                onClose()
+            }
+        }
         for (value in offers) {
             val text = valueText(value, part) ?: value.toString()
             Option(layoutOptionTag(row.slot.key, text), text) {
