@@ -103,7 +103,10 @@ image_guards() {
       # 199 ms linked cold against 60 ms linked in the window, its 1 KiB page scan 108 ms against 0.4 ms
       # (specs/bench-evidence/2026-10-23/store-compact-window/). All four are placed by NAME anchors in
       # memory.x; `parse_header` and `is_committed` are on the 250 Hz arm-time row read as well.
-      IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,T ADC0_1$,T SysTick$,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed'
+      # `Store::digest` (FmcFlashE6digest) and the `Type::fixed_len` it calls per row are the walk a persisted config write runs three times: linked
+      # cold, its loop crossed a 512 B flash boundary on feat/tones and the three took about 1 s against
+      # the 500 ms watchdog (specs/bench-work/tones/digest-slow-report.md).
+      IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,T ADC0_1$,T SysTick$,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed,FmcFlashE6digest,4Type9fixed_len'
       ;;
     mainboard-gd32f130c8)
       # The mainboard image for the GD32F130C8: mainboard-gd32f103c8's lists, every reason there, with
@@ -111,7 +114,7 @@ image_guards() {
       # 54,232 B of code when healthy.
       IMAGE_GUARD_FLOOR=40000
       IMAGE_GUARD_REQ_SYMS='T main$,T SysTick$,T USART1$,T DMA_Channel3_4$,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
-      IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,T ADC_CMP$,T SysTick$,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed'
+      IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,T ADC_CMP$,T SysTick$,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed,FmcFlashE6digest,4Type9fixed_len'
       ;;
     *) return 1 ;;
   esac

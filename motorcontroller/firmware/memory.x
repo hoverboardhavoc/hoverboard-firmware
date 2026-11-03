@@ -117,6 +117,16 @@ SECTIONS
     *(.text.*5store5store13scan_frontier*)
     *(.text.*5store6record12parse_header*)
     *(.text.*5store6record12is_committed*)
+    /* The three digests a persisted config write recomputes (`Store::digest`, with the log walk
+     * `latest_unchecked` inlined into it, and the per-row `Type::fixed_len` it calls). Linked cold,
+     * its hop loop's speed depended on link order: above 32 KiB a loop inside one 512-byte-aligned
+     * block runs near hot speed, and one that crosses a 512 B boundary costs about 14,000 cycles per
+     * iteration. feat/tones moved `digest` 0x148 B up, its loop crossed 0x0800_8200, and the three
+     * digests took about 1 s, past the 500 ms watchdog, on every config write. Linked here they
+     * take 8.2 ms on the offroad slave's store
+     * (`specs/bench-work/tones/digest-slow-report.md`). */
+    *(.text.*5store5store*6digest*)
+    *(.text.*5store3key*9fixed_len*)
     . = ALIGN(4);
     *(.rodata .rodata.*)
     . = ALIGN(4);
