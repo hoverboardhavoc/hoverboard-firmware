@@ -199,7 +199,7 @@ object Fields {
      * u16 LE, then `dur` in 10 ms units), at most 19; empty mutes the event. Mirrored for the drift
      * gate; editing tunes in the app is out of scope.
      */
-    val TONE_HORN = FieldDef(0x2D, Type.Blob, tune(2000 to 50), Effect.LIVE)
+    val TONE_HORN = FieldDef(0x2D, Type.Blob, tune(4000 to 50), Effect.LIVE)
     val TONE_BATTERY_LOW = FieldDef(0x2E, Type.Blob, tune(2000 to 15, 0 to 255, 0 to 230), Effect.LIVE)
     val TONE_BATTERY_CRITICAL =
         FieldDef(0x2F, Type.Blob, tune(2000 to 15, 0 to 10, 2000 to 15, 0 to 100), Effect.LIVE)

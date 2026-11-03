@@ -1577,7 +1577,7 @@ class RustSourceDriftTest {
                 assertEquals(default, def.default, "$name default drifted")
                 continue
             }
-            // `pub const NAME: BlobField = BlobField::new(0x2D, &[0xD0, 0x07, 50]);`, which rustfmt
+            // `pub const NAME: BlobField = BlobField::new(0x2D, &[0xA0, 0x0F, 50]);`, which rustfmt
             // may break across lines: the id and the byte literal.
             val blob = Regex(
                 """^pub\s+const\s+$name\s*:\s*BlobField\s*=\s*BlobField::new\(\s*([^,]+?)\s*,\s*&\[([^\]]*)\]\s*,?\s*\)\s*;""",

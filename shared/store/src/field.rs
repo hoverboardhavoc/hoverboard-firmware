@@ -916,9 +916,10 @@ pub const BOARD_BATTERY_WARN: Field<i16> = Field::new(0x2C, 0);
 
 /// The horn's tune (`specs/tones.md` sections 3 and 4): played while the `INPUTS` mirror carries
 /// `linkctl::Inputs::BUTTON_HORN`. A tune is a sequence of 3-byte notes ([`crate::tune`]), at most
-/// 19 (what one `CONFIG_RESP` returns); empty mutes the horn. Default one 2000 Hz note of 0.5 s,
-/// which loops, so it sounds continuous while held. Re-read at each note start.
-pub const TONE_HORN: BlobField = BlobField::new(0x2D, &[0xD0, 0x07, 50]);
+/// 19 (what one `CONFIG_RESP` returns); empty mutes the horn. Default one 4000 Hz note of 0.5 s,
+/// which loops, so it sounds continuous while held: 4 kHz is the buzzer's resonance (the offroad
+/// master's sweep, `specs/tones.md` section 4). Re-read at each note start.
+pub const TONE_HORN: BlobField = BlobField::new(0x2D, &[0xA0, 0x0F, 50]);
 
 /// The low-battery warning's tune (`specs/tones.md` section 4), played while the battery word is
 /// below [`BOARD_BATTERY_WARN`]: default one 150 ms beep at 2000 Hz every 5 s (`2000/15 0/255
@@ -2651,7 +2652,7 @@ mod registry_tests {
                 .map(|i| note_at(b, i).map(|Note { hz, dur }| (hz, dur)).unwrap())
                 .collect()
         };
-        assert_eq!(notes(TONE_HORN.default()), [(2000, 50)]);
+        assert_eq!(notes(TONE_HORN.default()), [(4000, 50)]);
         assert_eq!(
             notes(TONE_BATTERY_LOW.default()),
             [(2000, 15), (0, 255), (0, 230)]
