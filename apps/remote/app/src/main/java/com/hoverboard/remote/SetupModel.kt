@@ -31,6 +31,7 @@ import com.hoverboard.remote.model.SetupField
 import com.hoverboard.remote.model.SetupFields
 import com.hoverboard.remote.model.SpeedFacts
 import com.hoverboard.remote.model.TelemetryUi
+import com.hoverboard.remote.model.Wheel
 import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.floorOutsidePack
@@ -208,6 +209,23 @@ enum class RiderWaiver {
 data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckResult? = null)
 
 /**
+ * One motor's ride facts, read on attach (`specs/remote-ui.md` 3.1 and 3.1a; `specs/twelve-fet.md`
+ * section 6.2), each null while this session has not got it and 0 for a field a board has never
+ * been told.
+ *
+ * @param countsPerAmp the motor's `current.cal`: what turns its current counts into amps
+ *   ([com.hoverboard.remote.model.currentReading]).
+ * @param polePairs the motor's pole-pair count, and @param diameterMm its wheel's rolling diameter
+ *   in millimetres: together what turns its hall edges into a distance
+ *   ([com.hoverboard.remote.model.WheelGeometry]) and its rate into a speed.
+ */
+data class MotorFacts(
+    val countsPerAmp: Int? = null,
+    val polePairs: Int? = null,
+    val diameterMm: Int? = null,
+)
+
+/**
  * One board's Setup state: its store as this app last read it, and what this app has written to it
  * (`specs/remote-ui.md` sections 3.4 and 3.6a). The screen shows one of these at a time
  * ([SetupState.current]); the model keeps one per node address, because a write record made against
@@ -226,16 +244,10 @@ data class RotationCheck(val level: CheckResult? = null, val forwardLean: CheckR
  *   have. A key is in exactly one of the two sets, never both.
  * @param writes what the app wrote to this board this session, per field, and what came of each
  *   ([FieldWrite]).
- * @param countsPerAmp this board's `motor.current_cal`, read on attach as a ride fact, or null
- *   while this session has not got it. Kept out of [values] because no screen edits it: it is read
- *   so the Ride screen can turn this board's current counts into amps
- *   ([com.hoverboard.remote.model.currentReading]), and a field with no row must not show up in
- *   the Setup screen's read bookkeeping.
- * @param polePairs this board's motor pole-pair count, and @param diameterMm its wheel's rolling
- *   diameter in millimetres, read on attach as ride facts the same way and kept out of [values]
- *   for the same reason; null for a field this session has not got, and 0 for a board that has
- *   never been told it. Together they are what turns the odometer's hall edges into a distance
- *   ([com.hoverboard.remote.model.WheelGeometry]).
+ * @param motorFacts each motor's ride facts read on attach ([MotorFacts]), by motor index: motor
+ *   0's on every motor controller, motor 1's on a board with two motors. Kept out of [values]
+ *   because no screen edits them, and a field with no row must not show up in the Setup screen's
+ *   read bookkeeping.
  * @param status what this board's boot status record listed when it was read on attach with
  *   `STATUS_READ` (`specs/machine-settings.md` section 6.1): the functions its last boot configured
  *   and could not bring up (`specs/configured-links.md` section 5), empty when they all came up,
@@ -253,9 +265,7 @@ data class BoardSetup(
     val reading: Boolean = false,
     val writes: Map<Key, FieldWrite> = emptyMap(),
     val rotationCheck: RotationCheck = RotationCheck(),
-    val countsPerAmp: Int? = null,
-    val polePairs: Int? = null,
-    val diameterMm: Int? = null,
+    val motorFacts: Map<Int, MotorFacts> = emptyMap(),
     val status: List<BoardStatus.Entry>? = null,
     val identity: Identity? = null,
     val rearm: Boolean? = null,
@@ -275,6 +285,13 @@ data class BoardSetup(
 ) {
     /** Whether any field's write is queued or in flight. */
     val writing: Boolean get() = writes.values.any { it.sending }
+
+    /** Motor [motor]'s ride facts, every one null while unread. */
+    fun factsOf(motor: Int): MotorFacts = motorFacts[motor] ?: MotorFacts()
+
+    /** This board with motor [motor]'s facts changed by [change]. */
+    fun withFacts(motor: Int, change: (MotorFacts) -> MotorFacts): BoardSetup =
+        copy(motorFacts = motorFacts + (motor to change(factsOf(motor))))
 
     val busy: Boolean get() = reading || writing
 
@@ -382,9 +399,7 @@ data class BoardSetup(
         unread = emptySet(),
         garbled = emptySet(),
         rotationCheck = RotationCheck(),
-        countsPerAmp = null,
-        polePairs = null,
-        diameterMm = null,
+        motorFacts = emptyMap(),
         identity = null,
         rearm = null,
         reboot = null,
@@ -475,7 +490,7 @@ data class SetupState(
      * not read it. The Ride screen's current display needs it per board, because the scale belongs
      * to the board's own sense chain rather than to the firmware.
      */
-    fun countsPerAmpOf(address: Int): Int? = setupOf(address).countsPerAmp
+    fun countsPerAmpOf(address: Int, motor: Int = 0): Int? = setupOf(address).factsOf(motor).countsPerAmp
 
     /**
      * The board at [address]'s stored pack cell count (`board.battery.cells`), or null while this
@@ -521,22 +536,24 @@ data class SetupState(
      * against ANOTHER board's hub would be wrong with nothing to show it.
      */
     fun wheelGeometryOf(address: Int): WheelGeometry? =
-        setupOf(address).let { WheelGeometry.of(it.polePairs, it.diameterMm) }
+        setupOf(address).factsOf(0).let { WheelGeometry.of(it.polePairs, it.diameterMm) }
 
     /**
-     * What the board at [address] brings to the Ride panel's speed beside its [wheelRateQ12]
-     * (`specs/remote-ui.md` 3.1a): its pole pairs, wheel diameter and motor 0's `side`, each null
+     * What [wheel] brings to the Ride panel's speed beside its [wheelRateQ12]
+     * (`specs/remote-ui.md` 3.1a): its motor's pole pairs, wheel diameter and `side`, each null
      * while this session has not read it.
      */
-    fun speedFactsOf(address: Int, wheelRateQ12: Int): SpeedFacts = setupOf(address).let {
-        SpeedFacts(
-            address,
-            wheelRateQ12,
-            it.polePairs,
-            it.diameterMm,
-            storedByte(address, SetupFields.CONTROL_SIDE.key),
-        )
-    }
+    fun speedFactsOf(wheel: Wheel, wheelRateQ12: Int): SpeedFacts =
+        setupOf(wheel.node).factsOf(wheel.motor).let {
+            SpeedFacts(
+                wheel.node,
+                wheelRateQ12,
+                it.polePairs,
+                it.diameterMm,
+                storedByte(wheel.node, Fields.CONTROL_SIDE.key(wheel.motor)),
+                wheel.motor,
+            )
+        }
 
     val values: Map<Key, Value> get() = current.values
     val unread: Set<Key> get() = current.unread
@@ -1003,20 +1020,27 @@ class SetupModel(
      * Read how many motors [node] drives into [BoardSetup.motors], from `motors.1.gate.hi_a`: a
      * board that answers it with its default stores no motor 1 (`specs/twelve-fet.md` section 6.2).
      * A board with motor 1 then has motor 1's `control.side` read, which places that wheel in
-     * DIFFERENTIAL. Not [readOne], for [readCountsPerAmp]'s reason: neither key has a row on the
-     * Setup screen. A read that fails leaves the count unknown, which refuses the drive
-     * ([com.hoverboard.remote.model.DriveRefusal.UNREAD]).
+     * DIFFERENTIAL and in a Ride slot, and its `motors.1.current.limit`, which that wheel's phase
+     * bar is full at (`specs/remote-ui.md` 3.1). Not [readOne], for [readCountsPerAmp]'s reason:
+     * neither key has a row on the Setup screen. A read that fails leaves the count unknown, which
+     * refuses the drive ([com.hoverboard.remote.model.DriveRefusal.UNREAD]).
      */
     private suspend fun readMotors(node: Int) {
         val board = node.takeIf { it in _state.value.addresses } ?: return
         val r = awaitSlot { transport.readConfig(MOTOR_ONE, board) } as? ReadValue ?: return
         if (r.isDefault) return update(node) { it.copy(motors = 1) }
-        val side = awaitSlot { transport.readConfig(SIDE_ONE, board) } as? ReadValue
-        update(node) { b -> b.copy(motors = 2, values = side?.let { b.values + (SIDE_ONE to it.value) } ?: b.values) }
+        update(node) { it.copy(motors = 2) }
+        for (key in listOf(SIDE_ONE, LIMIT_ONE)) {
+            val v = awaitSlot { transport.readConfig(key, board) } as? ReadValue ?: continue
+            update(node) { b -> b.copy(values = b.values + (key to v.value)) }
+        }
     }
 
+    /** The motors [node]'s ride facts are read for: motor 0, and motor 1 on a board with two. */
+    private fun motorsOf(node: Int): IntRange = 0 until (_state.value.setupOf(node).motors ?: 1)
+
     /**
-     * Read [node]'s `motor.current_cal` into [BoardSetup.countsPerAmp].
+     * Read each of [node]'s motors' `current.cal` into [MotorFacts.countsPerAmp].
      *
      * Not [readOne]: the field has no row on any screen, so recording it as a read value would put
      * a key the Setup screen cannot show into that screen's values, and a failed read would put
@@ -1026,13 +1050,18 @@ class SetupModel(
      */
     private suspend fun readCountsPerAmp(node: Int) {
         val board = node.takeIf { it in _state.value.addresses } ?: return
-        val r = awaitSlot { transport.readConfig(Fields.MOTOR_CURRENT_CAL.key(), board) } ?: return
-        if (r is ReadValue) update(node) { it.copy(countsPerAmp = r.value.asLong()?.toInt()) }
+        for (m in motorsOf(node)) {
+            val r = awaitSlot { transport.readConfig(Fields.MOTOR_CURRENT_CAL.key(m), board) } ?: return
+            if (r is ReadValue) {
+                update(node) { b -> b.withFacts(m) { it.copy(countsPerAmp = r.value.asLong()?.toInt()) } }
+            }
+        }
     }
 
     /**
-     * Read [node]'s pole-pair count and wheel diameter into [BoardSetup.polePairs] and
-     * [BoardSetup.diameterMm], which is what lets the Travel section show a distance for it.
+     * Read each of [node]'s motors' pole-pair count and wheel diameter into [MotorFacts.polePairs]
+     * and [MotorFacts.diameterMm]: motor 0's are what lets the Travel section show a distance for
+     * it, and each motor's what turns that wheel's rate into the Ride speed.
      *
      * Not [readOne], for [readCountsPerAmp]'s reason: neither field has a row on any screen, so
      * recording them as read values would put keys the Setup screen cannot show into that screen's
@@ -1047,10 +1076,16 @@ class SetupModel(
      */
     private suspend fun readWheelGeometry(node: Int) {
         val board = node.takeIf { it in _state.value.addresses } ?: return
-        val pp = awaitSlot { transport.readConfig(Fields.MOTOR_POLE_PAIRS.key(), board) }
-        if (pp is ReadValue) update(node) { it.copy(polePairs = pp.value.asLong()?.toInt()) }
-        val wd = awaitSlot { transport.readConfig(Fields.WHEEL_DIAMETER_MM.key(), board) }
-        if (wd is ReadValue) update(node) { it.copy(diameterMm = wd.value.asLong()?.toInt()) }
+        for (m in motorsOf(node)) {
+            val pp = awaitSlot { transport.readConfig(Fields.MOTOR_POLE_PAIRS.key(m), board) }
+            if (pp is ReadValue) {
+                update(node) { b -> b.withFacts(m) { it.copy(polePairs = pp.value.asLong()?.toInt()) } }
+            }
+            val wd = awaitSlot { transport.readConfig(Fields.WHEEL_DIAMETER_MM.key(m), board) }
+            if (wd is ReadValue) {
+                update(node) { b -> b.withFacts(m) { it.copy(diameterMm = wd.value.asLong()?.toInt()) } }
+            }
+        }
     }
 
     /**
@@ -1610,6 +1645,9 @@ class SetupModel(
 
         /** Motor 1's `control.side`, the second wheel's place in DIFFERENTIAL. */
         val SIDE_ONE: Key = Fields.CONTROL_SIDE.key(1)
+
+        /** Motor 1's `current.limit`, read with [SIDE_ONE] on a board with two motors. */
+        val LIMIT_ONE: Key = Fields.MOTOR_CURRENT_LIMIT.key(1)
 
         /** The bus `imu.model` switches on: its group's pins and instance key ([Checks.GROUPS]). */
         val IMU_BUS: List<Key> = Checks.GROUPS.first { it.switch == SetupFields.IMU_MODEL.key }

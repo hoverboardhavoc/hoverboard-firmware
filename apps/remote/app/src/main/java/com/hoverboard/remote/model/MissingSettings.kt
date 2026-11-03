@@ -42,23 +42,24 @@ data class Missing(val setting: MissingSetting, val board: Int?)
  * Every missing setting the Ride figures show, in the order the statements list them
  * (`specs/remote-ui.md` 3.1):
  *
- * - the speed: [speed] lacking a fact; an unset one wins over one not read yet, and names the first
- *   of [speedFacts]' boards (address order) holding pole pairs or diameter as 0;
+ * - the speed: [speed] lacking a fact; an unset one wins over one not read yet, and names the board
+ *   of the first of [speedFacts]' wheels (address then motor order) holding pole pairs or diameter
+ *   as 0;
  * - the battery: the ring's [battery] reading, unjudged, on [ringBoard];
- * - the phase current: the first of [slotBoards] whose reading is [CurrentReading.Unscaled], by its
- *   [countsPerAmp] (absent while unread, 0 when unset).
+ * - the phase current: the board of the first of [slotWheels] (left then right) whose reading is
+ *   [CurrentReading.Unscaled], by its [countsPerAmp] (absent while unread, 0 when unset).
  */
 fun missingSettings(
     speed: SpeedReading,
     speedFacts: List<SpeedFacts>,
     ringBoard: Int?,
     battery: BatteryReading,
-    slotBoards: List<Pair<Int, CurrentReading>>,
-    countsPerAmp: Map<Int, Int>,
+    slotWheels: List<Pair<Wheel, CurrentReading>>,
+    countsPerAmp: Map<Wheel, Int>,
 ): List<Missing> = buildList {
     if (speed is SpeedReading.NoSpeed) {
         if (speed.unset.isNotEmpty()) {
-            val board = speedFacts.sortedBy { it.address }.firstOrNull { f ->
+            val board = speedFacts.sortedWith(compareBy({ it.address }, { it.motor })).firstOrNull { f ->
                 (f.polePairs ?: 1) <= 0 || (f.diameterMm ?: 1) <= 0
             }?.address
             add(Missing(MissingSetting.WHEEL_SIZE, board))
@@ -74,11 +75,11 @@ fun missingSettings(
         }
         add(Missing(setting, ringBoard))
     }
-    slotBoards.firstOrNull { it.second == CurrentReading.Unscaled }?.let { (board, _) ->
-        val setting = when (countsPerAmp[board]) {
+    slotWheels.firstOrNull { it.second == CurrentReading.Unscaled }?.let { (wheel, _) ->
+        val setting = when (countsPerAmp[wheel]) {
             null -> MissingSetting.CURRENT_CAL_READING
             else -> MissingSetting.CURRENT_CAL
         }
-        add(Missing(setting, board))
+        add(Missing(setting, wheel.node))
     }
 }

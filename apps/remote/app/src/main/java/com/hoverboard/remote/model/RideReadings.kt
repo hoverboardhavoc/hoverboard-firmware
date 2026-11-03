@@ -9,26 +9,36 @@ import kotlin.math.roundToInt
  * boards sent and what they store, so every rule the screen draws by is tested off the screen.
  */
 
-/** Which side of the screen a board slot is on. */
+/** Which side of the screen a wheel slot is on. */
 enum class SlotSide { LEFT, RIGHT }
 
 /**
- * One board slot on the Ride screen: the board at [address], labelled by its side ("L", "R") when
- * [bySide], else by its address.
+ * One wheel slot on the Ride screen (`specs/remote-ui.md` 3.1, "Wheel slots"): the wheel [wheel],
+ * labelled by its side ("L", "R") when [bySide], else by its board's address and, on a board with
+ * two motors ([twoMotor]), the motor ("0x02:1").
+ *
+ * Its wheel figures (the phase bar, the speed's share) are [wheel]'s motor's; its board figures
+ * (the link dot, the attitude corner, the lamp marks) are its board's, [address], so both slots of
+ * a 12-FET show the same board's.
  */
-data class RideSlot(val address: Int, val side: SlotSide, val bySide: Boolean)
+data class RideSlot(val wheel: Wheel, val side: SlotSide, val bySide: Boolean, val twoMotor: Boolean = false) {
+    /** The slot's board: whose board figures it shows. */
+    val address: Int get() = wheel.node
+}
 
 /**
- * The Ride screen's two board slots (`specs/remote-ui.md` 3.1, "Board slots"): wherever a per-board
- * figure appears, at most two boards are drawn, one left and one right. An empty slot is null and
- * draws nothing.
+ * The Ride screen's two wheel slots (`specs/remote-ui.md` 3.1, "Wheel slots"): at most two wheels
+ * are drawn, one left and one right. An empty slot is null and draws nothing.
  */
 data class RideSlots(val left: RideSlot?, val right: RideSlot?) {
     /** The filled slots, left then right. */
     val all: List<RideSlot> get() = listOfNotNull(left, right)
 
-    /** The slot the board at [address] is drawn in, or null when it is in neither. */
+    /** The first slot the board at [address] is drawn in, or null when it is in neither. */
     fun of(address: Int): RideSlot? = all.firstOrNull { it.address == address }
+
+    /** Whether the board at [address] fills both slots, as one 12-FET does. */
+    fun both(address: Int): Boolean = all.size == 2 && all.all { it.address == address }
 
     companion object {
         /** No motor controller: nothing drawn. */
@@ -37,32 +47,37 @@ data class RideSlots(val left: RideSlot?, val right: RideSlot?) {
 }
 
 /**
- * The slots for [motorControllers] (ascending addresses), each board's stored motor 0 `side` from
- * [side] (null while unread; [Fields.ControlSide.RIGHT] is the right wheel and every other byte the
- * left, as the firmware reads it):
+ * The slots for [wheels] (any order), each wheel's stored `side` at its motor index from [side]
+ * (null while unread; [Fields.ControlSide.RIGHT] is the right wheel and every other byte the left,
+ * as the firmware reads it):
  *
- * - two boards whose sides read one left and one right: by side, labelled "L" and "R";
- * - one board: on the side its motor's `side` names and labelled by it, or while that is unread
- *   the left slot, labelled with its address;
- * - anything else (a side unread, both sides the same, more than two boards): the two lowest
- *   addresses, left then right, labelled with their addresses.
+ * - two wheels whose sides read one left and one right: by side, labelled "L" and "R";
+ * - one wheel: on the side it names and labelled by it, or while that is unread the left slot,
+ *   labelled with its board's address;
+ * - anything else (a side unread, both sides the same, more than two wheels): the first two wheels
+ *   by address then motor index, left then right, labelled with the board's address and, on a board
+ *   with two motors, the motor.
+ *
+ * A machine of two one-motor boards draws as it did when the slots were boards.
  */
-fun rideSlots(motorControllers: List<Int>, side: (Int) -> Int?): RideSlots {
+fun rideSlots(wheels: List<Wheel>, side: (Wheel) -> Int?): RideSlots {
     fun sideOf(byte: Int): SlotSide = if (byte == Fields.ControlSide.RIGHT) SlotSide.RIGHT else SlotSide.LEFT
-    val mcs = motorControllers.sorted()
-    val sides = mcs.map { side(it)?.let(::sideOf) }
+    val ws = wheels.sorted()
+    val sides = ws.map { side(it)?.let(::sideOf) }
+    fun twoMotor(w: Wheel): Boolean = ws.count { it.node == w.node } > 1
+    fun slot(w: Wheel, at: SlotSide, bySide: Boolean) = RideSlot(w, at, bySide, twoMotor(w))
     return when {
-        mcs.isEmpty() -> RideSlots.NONE
-        mcs.size == 1 -> {
-            val slot = sides.single()?.let { RideSlot(mcs.single(), it, bySide = true) }
-                ?: RideSlot(mcs.single(), SlotSide.LEFT, bySide = false)
-            if (slot.side == SlotSide.LEFT) RideSlots(slot, null) else RideSlots(null, slot)
+        ws.isEmpty() -> RideSlots.NONE
+        ws.size == 1 -> {
+            val one = sides.single()?.let { slot(ws.single(), it, bySide = true) }
+                ?: slot(ws.single(), SlotSide.LEFT, bySide = false)
+            if (one.side == SlotSide.LEFT) RideSlots(one, null) else RideSlots(null, one)
         }
-        mcs.size == 2 && null !in sides && sides.toSet().size == 2 -> RideSlots(
-            RideSlot(mcs[sides.indexOf(SlotSide.LEFT)], SlotSide.LEFT, bySide = true),
-            RideSlot(mcs[sides.indexOf(SlotSide.RIGHT)], SlotSide.RIGHT, bySide = true),
+        ws.size == 2 && null !in sides && sides.toSet().size == 2 -> RideSlots(
+            slot(ws[sides.indexOf(SlotSide.LEFT)], SlotSide.LEFT, bySide = true),
+            slot(ws[sides.indexOf(SlotSide.RIGHT)], SlotSide.RIGHT, bySide = true),
         )
-        else -> RideSlots(RideSlot(mcs[0], SlotSide.LEFT, false), RideSlot(mcs[1], SlotSide.RIGHT, false))
+        else -> RideSlots(slot(ws[0], SlotSide.LEFT, false), slot(ws[1], SlotSide.RIGHT, false))
     }
 }
 
@@ -111,8 +126,8 @@ fun batteryLow(reading: BatteryReading, floorCentivolts: Int?): Boolean {
 }
 
 /**
- * A phase bar's fill (`specs/remote-ui.md` 3.1): the figure's magnitude over the board's own
- * `motors.0.current.limit` [limitMa], clamped to [Fields.CURRENT_LIMIT_MA] as the firmware clamps it
+ * A phase bar's fill (`specs/remote-ui.md` 3.1): the figure's magnitude over the wheel's own
+ * `motors.<motor>.current.limit` [limitMa], clamped to [Fields.CURRENT_LIMIT_MA] as the firmware clamps it
  * at boot, so a full bar is that board at its limit. Clamped to full. Null (no fill) without a
  * figure or while the limit is unread.
  */

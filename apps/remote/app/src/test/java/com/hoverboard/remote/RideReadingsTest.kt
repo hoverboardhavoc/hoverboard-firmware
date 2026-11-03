@@ -17,6 +17,7 @@ import com.hoverboard.remote.model.RideSlot
 import com.hoverboard.remote.model.RideSlots
 import com.hoverboard.remote.model.SlotSide
 import com.hoverboard.remote.model.TripBaseline
+import com.hoverboard.remote.model.Wheel
 import com.hoverboard.remote.model.angleText
 import com.hoverboard.remote.model.batteryLow
 import com.hoverboard.remote.model.litSegments
@@ -109,27 +110,59 @@ class RideReadingsTest {
         assertEquals("-12.3", angleText(-1_234))
     }
 
-    /** The three slot cases. */
+    /** The three slot cases, for a machine of one-motor boards: as when the slots were boards. */
     @Test
     fun `boards are slotted by side, alone, or by address`() {
         val left = Fields.ControlSide.LEFT
         val right = Fields.ControlSide.RIGHT
+        fun w(a: Int) = Wheel(a, 0)
+        fun sides(vararg s: Pair<Int, Int>): (Wheel) -> Int? = s.associate { (a, b) -> w(a) to b }::get
         assertEquals(
-            RideSlots(RideSlot(0x02, SlotSide.LEFT, true), RideSlot(0x01, SlotSide.RIGHT, true)),
-            rideSlots(listOf(0x01, 0x02), mapOf(0x01 to right, 0x02 to left)::get),
+            RideSlots(RideSlot(w(0x02), SlotSide.LEFT, true), RideSlot(w(0x01), SlotSide.RIGHT, true)),
+            rideSlots(listOf(w(0x01), w(0x02)), sides(0x01 to right, 0x02 to left)),
         )
         // One board: on its side, or the left slot labelled by address while the side is unread.
-        val alone = listOf(0x01)
-        assertEquals(RideSlots(null, RideSlot(0x01, SlotSide.RIGHT, true)), rideSlots(alone, mapOf(0x01 to right)::get))
-        assertEquals(RideSlots(RideSlot(0x01, SlotSide.LEFT, true), null), rideSlots(alone, mapOf(0x01 to left)::get))
-        assertEquals(RideSlots(RideSlot(0x01, SlotSide.LEFT, false), null), rideSlots(listOf(0x01)) { null })
+        val alone = listOf(w(0x01))
+        assertEquals(RideSlots(null, RideSlot(w(0x01), SlotSide.RIGHT, true)), rideSlots(alone, sides(0x01 to right)))
+        assertEquals(RideSlots(RideSlot(w(0x01), SlotSide.LEFT, true), null), rideSlots(alone, sides(0x01 to left)))
+        assertEquals(RideSlots(RideSlot(w(0x01), SlotSide.LEFT, false), null), rideSlots(alone) { null })
         // Anything else: the two lowest addresses, left then right, by address.
-        val byAddress = RideSlots(RideSlot(0x01, SlotSide.LEFT, false), RideSlot(0x02, SlotSide.RIGHT, false))
-        assertEquals(byAddress, rideSlots(listOf(0x02, 0x01), mapOf(0x01 to left, 0x02 to left)::get), "both the same")
-        assertEquals(byAddress, rideSlots(listOf(0x01, 0x02), mapOf(0x01 to right)::get), "a side unread")
-        val three = listOf(0x03, 0x02, 0x01)
-        assertEquals(byAddress, rideSlots(three, mapOf(0x01 to left, 0x02 to right)::get), "three boards")
+        val byAddress = RideSlots(RideSlot(w(0x01), SlotSide.LEFT, false), RideSlot(w(0x02), SlotSide.RIGHT, false))
+        assertEquals(byAddress, rideSlots(listOf(w(0x02), w(0x01)), sides(0x01 to left, 0x02 to left)), "both the same")
+        assertEquals(byAddress, rideSlots(listOf(w(0x01), w(0x02)), sides(0x01 to right)), "a side unread")
+        val three = listOf(w(0x03), w(0x02), w(0x01))
+        assertEquals(byAddress, rideSlots(three, sides(0x01 to left, 0x02 to right)), "three boards")
         assertEquals(RideSlots.NONE, rideSlots(emptyList()) { null })
+    }
+
+    /**
+     * A 12-FET fills both slots, each wheel placed by its own motor's side, and both slots are its
+     * board's; with a side unread, by motor index, labelled with the motor (`specs/remote-ui.md` 3.1,
+     * "Wheel slots").
+     */
+    @Test
+    fun `a 12-FET fills both slots by each motor's side`() {
+        val m0 = Wheel(0x02, 0)
+        val m1 = Wheel(0x02, 1)
+        val sides = mapOf(m0 to Fields.ControlSide.RIGHT, m1 to Fields.ControlSide.LEFT)
+        val bySide = rideSlots(listOf(m0, m1), sides::get)
+        assertEquals(
+            RideSlots(
+                RideSlot(m1, SlotSide.LEFT, true, twoMotor = true),
+                RideSlot(m0, SlotSide.RIGHT, true, twoMotor = true),
+            ),
+            bySide,
+        )
+        assertEquals(listOf(0x02, 0x02), bySide.all.map { it.address }, "both slots are the board's")
+        assertTrue(bySide.both(0x02))
+        val unread = rideSlots(listOf(m1, m0), mapOf(m0 to Fields.ControlSide.LEFT)::get)
+        assertEquals(
+            RideSlots(
+                RideSlot(m0, SlotSide.LEFT, false, twoMotor = true),
+                RideSlot(m1, SlotSide.RIGHT, false, twoMotor = true),
+            ),
+            unread,
+        )
     }
 
     /**
@@ -177,14 +210,14 @@ class RideReadingsTest {
         fun missing(
             speed: List<SpeedFacts>,
             battery: BatteryReading = charge(50),
-            phase: List<Pair<Int, CurrentReading>> = emptyList(),
-            cal: Map<Int, Int> = emptyMap(),
+            phase: List<Pair<Wheel, CurrentReading>> = emptyList(),
+            cal: Map<Wheel, Int> = emptyMap(),
         ) = missingSettings(
             machineSpeed(speed),
             speed,
             ringBoard = 0x01,
             battery = battery,
-            slotBoards = phase,
+            slotWheels = phase,
             countsPerAmp = cal,
         )
 
@@ -217,11 +250,11 @@ class RideReadingsTest {
         assertEquals(SetupFields.BATTERY_CHEMISTRY, MissingSetting.CHEMISTRY_UNKNOWN.row)
         assertNull(MissingSetting.CHEMISTRY_READING.row)
 
-        val phase = listOf(0x01 to CurrentReading.MotorsOff, 0x02 to CurrentReading.Unscaled)
+        val phase = listOf(Wheel(0x01, 0) to CurrentReading.MotorsOff, Wheel(0x02, 0) to CurrentReading.Unscaled)
         assertEquals(listOf(Missing(MissingSetting.CURRENT_CAL_READING, 0x02)), missing(whole, phase = phase))
         assertEquals(
             listOf(Missing(MissingSetting.CURRENT_CAL, 0x02)),
-            missing(whole, phase = phase, cal = mapOf(0x02 to 0)),
+            missing(whole, phase = phase, cal = mapOf(Wheel(0x02, 0) to 0)),
         )
         assertNull(MissingSetting.CURRENT_CAL.row, "no screen edits the calibration")
 

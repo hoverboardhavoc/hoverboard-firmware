@@ -696,6 +696,10 @@
     <string name="ride_side_both_right">Both boards are set as the right wheel.</string>
     <string name="ride_side_unknown">Right wheel not read from both boards yet.</string>
     <string name="ride_not_turning">%1$s is not turning.</string>
+    <!-- A wheel of a board with two motors, named in the not-turning statement (`specs/remote-ui.md` 3.1, "Wheel slots"). -->
+    <string name="ride_wheel_left">%1$s left wheel</string>
+    <string name="ride_wheel_right">%1$s right wheel</string>
+    <string name="ride_wheel_motor">%1$s motor %2$d</string>
     <string name="ride_lamp_lit_armed">%1$s on %2$s.</string>
     <!-- The missing-settings statements (`specs/remote-ui.md` 3.1, "Missing settings, in plain words"). -->
     <string name="ride_need_wheel_size">Speed needs the wheel size.</string>

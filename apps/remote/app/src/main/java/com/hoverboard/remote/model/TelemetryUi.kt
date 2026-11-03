@@ -10,8 +10,9 @@ import com.hoverboard.protocol.linkctl.CyclicState
  * 0x40..0x6F block is reserved and unimplemented (`shared/net/src/pdu.rs`, `Opcode`). This app
  * used to decode a TELEMETRY 0x20 frame, per motor, that nothing ever sent.
  *
- * That swap changes what the panel can show. CYCLIC_STATE is one board-level state record, not a
- * per-motor one, so there is no per-wheel current in it. What it does carry
+ * That swap changes what the panel can show. CYCLIC_STATE is one board-level state record whose
+ * wheel words are motor 0's, and a two-motor board appends motor 1's (`CyclicState.motor1`, read
+ * per motor by [phaseMeanOf], [dutyOnOf] and [wheelRateOf]). What it carries
  * (`shared/linkctl/src/lib.rs`, `CyclicState`), with the units the firmware puts on the wire:
  *  - `battery` is CENTIVOLTS (`orchestrator::dispatch`, `BlockWords::battery`), so
  *    volts = cV / 100. The retired code read millivolts here, which would have shown a 36 V pack
@@ -65,6 +66,19 @@ data class TelemetryUi(
      * Ride panel's speed is converted from ([machineSpeed], `specs/remote-ui.md` 3.1a).
      */
     val wheelRateQ12: Int? get() = cyclic?.wheelRate
+
+    /**
+     * Motor [motor]'s `wheel_rate`: motor 0's [wheelRateQ12], motor 1's from the frame's motor-1
+     * block (`specs/link-control.md`, "The motor-1 block"); null before the first frame, and for
+     * motor 1 from a one-motor board's frame, which has no motor 1.
+     */
+    fun wheelRateOf(motor: Int): Int? = if (motor == 0) wheelRateQ12 else cyclic?.motor1?.wheelRate
+
+    /** Motor [motor]'s window mean, counts, as [phaseMeanCounts] is motor 0's; null as [wheelRateOf]. */
+    fun phaseMeanOf(motor: Int): Int? = if (motor == 0) phaseMeanCounts else cyclic?.motor1?.phaseMean
+
+    /** Motor [motor]'s last applied on-duty, as [dutyOn] is motor 0's; null as [wheelRateOf]. */
+    fun dutyOnOf(motor: Int): Int? = if (motor == 0) dutyOn else cyclic?.motor1?.dutyOn
 
     /** Pitch in degrees (centidegrees / 100). */
     val pitchDegrees: Float get() = (cyclic?.pitch ?: 0) / CENTIDEGREES_PER_DEGREE

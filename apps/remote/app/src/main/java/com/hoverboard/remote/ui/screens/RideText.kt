@@ -16,9 +16,13 @@ import com.hoverboard.remote.ui.theme.TABULAR_FIGURES
  * app's one family and feature (3.10), and the slot labels every per-board figure carries.
  */
 
-/** A slot's label: "L" or "R" for a board placed by its side, its address otherwise. */
+/**
+ * A slot's label: "L" or "R" for a wheel placed by its side, otherwise its board's address and, on a
+ * board with two motors, the motor ("0x02:1").
+ */
 @Composable
 internal fun slotLabel(slot: RideSlot): String = when {
+    !slot.bySide && slot.twoMotor -> "${boardHex(slot.address)}:${slot.wheel.motor}"
     !slot.bySide -> boardHex(slot.address)
     slot.side == SlotSide.LEFT -> stringResource(R.string.ride_slot_left)
     else -> stringResource(R.string.ride_slot_right)

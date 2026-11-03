@@ -1,9 +1,12 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.linkctl.CyclicMotor
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.RiderCommand
 import com.hoverboard.remote.model.Throttle
+import com.hoverboard.remote.model.Wheel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
@@ -178,7 +181,7 @@ class RideSessionTest : RiderVmTest() {
         assertTrue(now().notTurning.isEmpty())
         advanceTimeBy(2)
         val state = now()
-        assertEquals(setOf(ONE_BOARD), state.notTurning)
+        assertEquals(setOf(Wheel(ONE_BOARD, 0)), state.notTurning)
         assertTrue(state.armed, "the app does not disarm for it")
     }
 
@@ -193,7 +196,7 @@ class RideSessionTest : RiderVmTest() {
     fun `a turning wheel, a dropped demand, a silent board and the disarm each clear it`() = vmTest {
         armedAt(MainViewModel.NOT_TURNING_DEMAND * 2)
         advanceTimeBy(MainViewModel.NOT_TURNING_MS + 1)
-        assertEquals(setOf(ONE_BOARD), now().notTurning)
+        assertEquals(setOf(Wheel(ONE_BOARD, 0)), now().notTurning)
 
         // The wheel reports a rate: cleared, and the second it stays at a rate judges nothing.
         transport.emitCyclicState(QUIET_STATE.copy(wheelRate = 4_096))
@@ -204,14 +207,14 @@ class RideSessionTest : RiderVmTest() {
         // Back to no rate: judged again after its own second; the demand dropping clears it.
         transport.emitCyclicState(QUIET_STATE)
         advanceTimeBy(MainViewModel.NOT_TURNING_MS + 1)
-        assertEquals(setOf(ONE_BOARD), now().notTurning)
+        assertEquals(setOf(Wheel(ONE_BOARD, 0)), now().notTurning)
         viewModel.onThrottleRelease()
         assertTrue(now().notTurning.isEmpty())
 
         // Judged again, then the disarm clears it.
         viewModel.onThrottleMove(y = 0f, height = h)
         advanceTimeBy(MainViewModel.NOT_TURNING_MS + 1)
-        assertEquals(setOf(ONE_BOARD), now().notTurning)
+        assertEquals(setOf(Wheel(ONE_BOARD, 0)), now().notTurning)
         viewModel.onArmToggle()
         assertTrue(now().notTurning.isEmpty())
     }
@@ -228,6 +231,48 @@ class RideSessionTest : RiderVmTest() {
         viewModel.onArmToggle()
         viewModel.onThrottleMove(y = 0f, height = h)
         advanceTimeBy(MainViewModel.NOT_TURNING_MS + 1)
-        assertEquals(setOf(0x01, 0x02), now().notTurning, "BOUND gives both the demand")
+        assertEquals(setOf(Wheel(0x01, 0), Wheel(0x02, 0)), now().notTurning, "BOUND gives both the demand")
+    }
+
+    /**
+     * A 12-FET alone (`specs/twelve-fet.md` section 6.2): each wheel is judged by its own motor's
+     * rate, motor 1's from the frame's motor-1 block (`specs/link-control.md`, "The motor-1
+     * block"), so the wheel that stands still is the one said and the turning one is not. Its
+     * figures come from motor 1's own facts, read on attach.
+     */
+    @Test
+    fun `a two-motor board's wheels are judged and figured each by its own motor`() = vmTest {
+        collecting()
+        transport.store[0x01 to Fields.MOTOR_GATE_HI_A.key(1)] = Value.PinAf(2, 6, 0)
+        transport.store[0x01 to Fields.CONTROL_SIDE.key(0)] = Value.U8(Fields.ControlSide.LEFT)
+        transport.store[0x01 to Fields.CONTROL_SIDE.key(1)] = Value.U8(Fields.ControlSide.RIGHT)
+        transport.store[0x01 to Fields.MOTOR_CURRENT_CAL.key(1)] = Value.U16(410)
+        transport.store[0x01 to Fields.MOTOR_CURRENT_LIMIT.key(1)] = Value.U32(12_000)
+        transport.store[0x01 to Fields.MOTOR_POLE_PAIRS.key(1)] = Value.U8(15)
+        transport.store[0x01 to Fields.WHEEL_DIAMETER_MM.key(1)] = Value.U16(165)
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        transport.setAttachedBoard(0x01)
+        val stalled = CyclicMotor(wheelSpeed = 0, phasePeak = 0, phaseMean = 0, dutyOn = 0, wheelRate = 0)
+        transport.emitCyclicState(QUIET_STATE.copy(wheelRate = 4_096, motor1 = stalled), from = 0x01)
+        runCurrent()
+
+        val facts = now()
+        val m0 = Wheel(0x01, 0)
+        val m1 = Wheel(0x01, 1)
+        assertEquals(listOf(m0, m1), facts.wheels)
+        assertEquals(listOf(m0, m1), facts.slots.all.map { it.wheel }, "motor 0 left, motor 1 right")
+        assertEquals(410, facts.countsPerAmp[m1])
+        assertEquals(12_000, facts.currentLimit[m1])
+        assertEquals(listOf(4_096 to 0, 0 to 1), facts.speedFacts.map { it.wheelRateQ12 to it.motor })
+        assertEquals(15, facts.speedFacts[1].polePairs)
+
+        viewModel.onArmToggle()
+        viewModel.onThrottleMove(y = 0f, height = h)
+        advanceTimeBy(MainViewModel.NOT_TURNING_MS + 1)
+        assertEquals(setOf(m1), now().notTurning, "motor 0 reports a rate, motor 1 none")
+
+        val turning = QUIET_STATE.copy(wheelRate = 4_096, motor1 = stalled.copy(wheelRate = 4_096))
+        transport.emitCyclicState(turning, from = 0x01)
+        assertTrue(now().notTurning.isEmpty(), "motor 1 reports a rate")
     }
 }
