@@ -12,6 +12,7 @@ import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Walk
 import com.hoverboard.protocol.linkctl.CYCLIC_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicMotor
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS
@@ -828,6 +829,22 @@ class RustSourceDriftTest {
         )
         assertEquals(CyclicState.WHEEL_RATE_OFF + 4, CyclicState.MACHINE_OFF)
 
+        // The motor-1 block (`specs/link-control.md`, "The motor-1 block"): its own length, and
+        // the two-motor length as the expression the Rust writes, the base's end plus the block.
+        assertEquals(len("CyclicMotor"), CyclicMotor.LEN, "CyclicMotor::LEN drifted")
+        findOne(
+            implBlock(linkctl, "CyclicState"),
+            """pub const MOTOR1_OFF: usize = Self::ENCODED_LEN;""",
+            "CyclicState::MOTOR1_OFF",
+        )
+        findOne(
+            implBlock(linkctl, "CyclicState"),
+            """pub const TWO_MOTOR_LEN: usize = Self::MOTOR1_OFF \+ CyclicMotor::LEN;""",
+            "CyclicState::TWO_MOTOR_LEN",
+        )
+        assertEquals(CyclicState.ENCODED_LEN, CyclicState.MOTOR1_OFF)
+        assertEquals(CyclicState.MOTOR1_OFF + CyclicMotor.LEN, CyclicState.TWO_MOTOR_LEN)
+
         // `motor`'s offset, which the encode and decode on both sides index by.
         val motorOff = num(
             findOne(
@@ -892,6 +909,10 @@ class RustSourceDriftTest {
                 "phasePeak" to "i16", "phaseMean" to "i16", "dutyOn" to "u16",
                 "bootTag" to "u8", "chip" to "ChipTag", "odometer" to "u32",
             ),
+            "CyclicMotor" to listOf(
+                "wheelSpeed" to "i16", "phasePeak" to "i16", "phaseMean" to "i16",
+                "dutyOn" to "u16", "wheelRate" to "i32",
+            ),
             "DriveCmd" to listOf(
                 "kind" to "DriveKind", "value" to "i16", "steer" to "i16", "motor" to "u8",
             ),
@@ -903,6 +924,7 @@ class RustSourceDriftTest {
         val lens = mapOf(
             "CyclicState" to CyclicState.ENCODED_LEN,
             "CyclicObs" to CyclicObs.LEN,
+            "CyclicMotor" to CyclicMotor.LEN,
             "DriveCmd" to DriveCmd.LEN,
             "Inputs" to Inputs.LEN,
         )

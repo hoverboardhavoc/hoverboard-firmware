@@ -18,9 +18,10 @@
 //!   payload shorter than the committed prefix is rejected; the delivery class is best-effort /
 //!   latest-wins, so the caller drops the PDU and no error propagates ([`decode`] returns
 //!   `None`).
-//! - **[`CyclicState`] is decoded by EXACT LENGTH** ([`CyclicState::ENCODED_LEN`], 34 bytes: the
+//! - **[`CyclicState`] is decoded by EXACT LENGTH**: [`CyclicState::ENCODED_LEN`], 34 bytes (the
 //!   sixteen committed bytes, the appended [`CyclicObs`] block, the `wheel_rate` and the `machine`
-//!   digest). Any other length is a
+//!   digest) from a one-motor board, or [`CyclicState::TWO_MOTOR_LEN`], 46 bytes, from a two-motor
+//!   board, which appends motor 1's words ([`CyclicMotor`]). Any other length is a
 //!   protocol error. It once accepted eleven bytes with the block absent, for a peer on an image
 //!   from before the block; nothing in this project owes an older image compatibility until a
 //!   version is released, and boards and phones are updated together (owner policy, 2026-10-10).
@@ -139,8 +140,9 @@ const _: () = assert!(INPUTS_TIMEOUT_TICKS > DRIVE_TIMEOUT_TICKS);
 pub enum DecodeError {
     /// Fewer bytes than the committed prefix requires ([`DriveCmd`], [`Inputs`]).
     TooShort,
-    /// Not the one length the payload has: [`CyclicState`] is decoded by exact length, so a
-    /// payload of anything but [`CyclicState::ENCODED_LEN`] lands here, short or long.
+    /// Not a length the payload has: [`CyclicState`] is decoded by exact length, so a payload of
+    /// anything but [`CyclicState::ENCODED_LEN`] or [`CyclicState::TWO_MOTOR_LEN`] lands here,
+    /// short or long.
     WrongLen,
 }
 
@@ -165,7 +167,7 @@ fn rd_i32(b: &[u8], off: usize) -> i32 {
 }
 
 // --- CYCLIC_STATE (34 B: 16 B committed + a 12 B appended block + the i32 wheel_rate + the u16
-// machine digest) --------------------------------------------------------------------------------
+// machine digest; + the 12 B motor-1 block = 46 B from a two-motor board) -------------------------
 
 /// The part a board reports in [`CyclicObs::chip`]: the chip its image is built for
 /// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offset 23). A controller needs it to
@@ -370,11 +372,19 @@ impl CyclicState {
     /// The offset of [`Self::machine`], after [`Self::wheel_rate`].
     pub const MACHINE_OFF: usize = Self::WHEEL_RATE_OFF + 4;
 
-    /// The ONE on-wire length of a `CYCLIC_STATE` payload: the committed words, the appended
-    /// [`CyclicObs`] block, the `i32` [`Self::wheel_rate`] and the `u16` [`Self::machine`].
-    /// [`Self::encode`] writes exactly this, [`Self::decode`] accepts exactly this, and a buffer
-    /// handed to either has to be this long.
+    /// The on-wire length of a ONE-motor board's `CYCLIC_STATE` payload, and of every board's
+    /// base: the committed words, the appended [`CyclicObs`] block, the `i32`
+    /// [`Self::wheel_rate`] and the `u16` [`Self::machine`]. [`Self::encode`] writes exactly
+    /// this, and a buffer handed to it has to be this long.
     pub const ENCODED_LEN: usize = 34;
+
+    /// The offset of the motor-1 block ([`CyclicMotor`]) a two-motor board appends: the end of
+    /// the base (`specs/link-control.md`, "The motor-1 block").
+    pub const MOTOR1_OFF: usize = Self::ENCODED_LEN;
+
+    /// The on-wire length of a TWO-motor board's payload: the base and motor 1's block.
+    /// [`Self::decode`] accepts this and [`Self::ENCODED_LEN`], and nothing else.
+    pub const TWO_MOTOR_LEN: usize = Self::MOTOR1_OFF + CyclicMotor::LEN;
 
     /// `flags` bit0: rider present. Peer consumer: rider mirror (profile select).
     pub const FLAG_RIDER: u8 = 1 << 0;
@@ -477,18 +487,38 @@ impl CyclicState {
         Self::ENCODED_LEN
     }
 
-    /// Decode a payload of exactly [`Self::ENCODED_LEN`]; **any other length is
-    /// [`DecodeError::WrongLen`]**, short or long.
+    /// Decode the base of a payload of exactly [`Self::ENCODED_LEN`] or [`Self::TWO_MOTOR_LEN`];
+    /// **any other length is [`DecodeError::WrongLen`]**, short or long. A two-motor payload's
+    /// motor-1 block is not read: [`Self::decode_with_motor1`] reads it.
     ///
     /// The exception to the crate's committed-prefix rule, and the module doc carries the whole
-    /// argument: a sender in this tree writes thirty-four bytes, L2 never delivers a truncated
-    /// frame, and no older image is owed compatibility, so every other length is a peer that is
-    /// not speaking this protocol.
+    /// argument: a sender in this tree writes thirty-four bytes or forty-six, L2 never delivers a
+    /// truncated frame, and no older image is owed compatibility, so every other length is a peer
+    /// that is not speaking this protocol.
+    ///
+    /// A board decodes its peer with this and keeps the base: nothing on a board reads a peer's
+    /// motor 1, and the forward re-encodes the base, so a forwarded two-motor frame leaves as 34 B
+    /// (`specs/link-control.md`, "The motor-1 block").
     pub fn decode(b: &[u8]) -> Result<CyclicState, DecodeError> {
-        if b.len() != Self::ENCODED_LEN {
+        if b.len() != Self::ENCODED_LEN && b.len() != Self::TWO_MOTOR_LEN {
             return Err(DecodeError::WrongLen);
         }
-        Ok(CyclicState {
+        Ok(Self::decode_base(b))
+    }
+
+    /// Decode a payload as [`Self::decode`] does, and its motor-1 block with it: `Some` for a
+    /// [`Self::TWO_MOTOR_LEN`] payload, `None` for a one-motor board's [`Self::ENCODED_LEN`]. A
+    /// controller's decode: the app's and the CLI's per-wheel figures read motor 1 from it.
+    pub fn decode_with_motor1(b: &[u8]) -> Result<(CyclicState, Option<CyclicMotor>), DecodeError> {
+        let base = Self::decode(b)?;
+        let motor1 =
+            (b.len() == Self::TWO_MOTOR_LEN).then(|| CyclicMotor::decode(&b[Self::MOTOR1_OFF..]));
+        Ok((base, motor1))
+    }
+
+    /// The base words from `b`, which holds at least [`Self::ENCODED_LEN`] bytes.
+    fn decode_base(b: &[u8]) -> CyclicState {
+        CyclicState {
             pitch: rd_i16(b, 0),
             roll: rd_i16(b, 2),
             wheel_speed: rd_i16(b, 4),
@@ -501,13 +531,76 @@ impl CyclicState {
             obs: CyclicObs::decode(&b[Self::LEN..]),
             wheel_rate: rd_i32(b, Self::WHEEL_RATE_OFF),
             machine: rd_u16(b, Self::MACHINE_OFF),
-        })
+        }
     }
 }
 
 // The emitted length is the prefix plus the block plus the i32 rate plus the u16 digest, held by
 // the compiler rather than by whoever edits either number next.
 const _: () = assert!(CyclicState::ENCODED_LEN == CyclicState::LEN + CyclicObs::LEN + 4 + 2);
+
+/// The MOTOR-1 BLOCK a two-motor board appends to its `CYCLIC_STATE` at
+/// [`CyclicState::MOTOR1_OFF`] (`specs/link-control.md`, "The motor-1 block"): motor 1's wheel
+/// words, each defined as its motor-0 counterpart in the base is. The base's words stay motor 0's
+/// and the board's.
+///
+/// No odometer: the firmware keeps one, motor 0's (`specs/odometer.md`, "No second motor").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CyclicMotor {
+    /// Motor 1's window edge count, as [`CyclicState::wheel_speed`] (offset 34).
+    pub wheel_speed: i16,
+    /// Motor 1's window peak phase-current magnitude, counts, as [`CyclicObs::phase_peak`]
+    /// (offset 36).
+    pub phase_peak: i16,
+    /// Motor 1's window mean magnitude, counts, as [`CyclicObs::phase_mean`] (offset 38).
+    pub phase_mean: i16,
+    /// Motor 1's last applied on-duty, as [`CyclicObs::duty_on`] (offset 40).
+    pub duty_on: u16,
+    /// Motor 1's period-measured rate, Q12 of `wheel_speed`'s unit, as
+    /// [`CyclicState::wheel_rate`] (offset 42).
+    pub wheel_rate: i32,
+}
+
+impl CyclicMotor {
+    /// On-wire length of the block: `i16 + i16 + i16 + u16 + i32`, offsets 34 to 45.
+    pub const LEN: usize = 12;
+
+    /// Every word zero: a stopped wheel carrying no current. What an emitter's slot holds before
+    /// its first pass.
+    pub const ZERO: CyclicMotor = CyclicMotor {
+        wheel_speed: 0,
+        phase_peak: 0,
+        phase_mean: 0,
+        duty_on: 0,
+        wheel_rate: 0,
+    };
+
+    /// Encode the block alone into `out`, as it sits after the base, returning the byte count
+    /// ([`Self::LEN`]). The emitter writes it at [`CyclicState::MOTOR1_OFF`].
+    pub fn encode(&self, out: &mut [u8]) -> usize {
+        debug_assert!(out.len() >= Self::LEN);
+        out[0..2].copy_from_slice(&self.wheel_speed.to_le_bytes());
+        out[2..4].copy_from_slice(&self.phase_peak.to_le_bytes());
+        out[4..6].copy_from_slice(&self.phase_mean.to_le_bytes());
+        out[6..8].copy_from_slice(&self.duty_on.to_le_bytes());
+        out[8..12].copy_from_slice(&self.wheel_rate.to_le_bytes());
+        Self::LEN
+    }
+
+    /// Decode the block from `b`, which must hold at least [`Self::LEN`] bytes.
+    fn decode(b: &[u8]) -> CyclicMotor {
+        CyclicMotor {
+            wheel_speed: rd_i16(b, 0),
+            phase_peak: rd_i16(b, 2),
+            phase_mean: rd_i16(b, 4),
+            duty_on: rd_u16(b, 6),
+            wheel_rate: rd_i32(b, 8),
+        }
+    }
+}
+
+// The block's length against its fields' widths: i16 + i16 + i16 + u16 + i32.
+const _: () = assert!(CyclicMotor::LEN == 2 + 2 + 2 + 2 + 4);
 
 // --- DRIVE_CMD (6 B): a controller's drive reference -------------------------------------------
 
@@ -656,8 +749,9 @@ pub enum Payload {
 /// Decode a delivered control-block PDU payload by opcode (the firmware's routing entry for the
 /// `0x10..0x2F` hand-back, `specs/integration.md`). Returns `None` for an opcode this crate does
 /// not allocate, a payload shorter than an append-tolerant family's committed prefix, or a
-/// `CYCLIC_STATE` payload that is not exactly [`CyclicState::ENCODED_LEN`]: the delivery class is
-/// best-effort, so the PDU is simply dropped and no error propagates.
+/// `CYCLIC_STATE` payload that is neither [`CyclicState::ENCODED_LEN`] nor
+/// [`CyclicState::TWO_MOTOR_LEN`]: the delivery class is best-effort, so the PDU is simply
+/// dropped and no error propagates. A `CYCLIC_STATE` decodes to its base ([`CyclicState::decode`]).
 pub fn decode(opcode: u8, payload: &[u8]) -> Option<Payload> {
     match opcode {
         OP_CYCLIC_STATE => CyclicState::decode(payload).ok().map(Payload::CyclicState),
@@ -850,6 +944,99 @@ mod tests {
                 Err(DecodeError::WrongLen),
                 "{len} bytes"
             );
+        }
+    }
+
+    // -- The motor-1 block (a two-motor board's 46 B payload) ------------------------------------
+
+    fn motor1_sample() -> CyclicMotor {
+        CyclicMotor {
+            wheel_speed: -5,         // 0xFFFB
+            phase_peak: 0x0506,      // LE 06 05
+            phase_mean: 0x0102,      // LE 02 01
+            duty_on: 0x0A0B,         // LE 0B 0A
+            wheel_rate: 0x1122_3344, // LE 44 33 22 11
+        }
+    }
+
+    /// A two-motor payload's encoding: the base exactly as a one-motor board writes it, then motor
+    /// 1's block from offset 34.
+    fn two_motor_wire() -> [u8; CyclicState::TWO_MOTOR_LEN] {
+        let mut buf = [0u8; CyclicState::TWO_MOTOR_LEN];
+        let n = cyclic_sample().encode(&mut buf);
+        assert_eq!(n, CyclicState::MOTOR1_OFF);
+        assert_eq!(motor1_sample().encode(&mut buf[n..]), CyclicMotor::LEN);
+        buf
+    }
+
+    /// The block's offsets and the two-motor length (`specs/link-control.md`, "The motor-1 block":
+    /// 12 B at offset 34, a 46 B payload).
+    #[test]
+    fn motor1_block_lengths_pinned() {
+        assert_eq!(CyclicMotor::LEN, 12, "i16 + i16 + i16 + u16 + i32");
+        assert_eq!(CyclicState::MOTOR1_OFF, 34);
+        assert_eq!(CyclicState::TWO_MOTOR_LEN, 46);
+    }
+
+    #[test]
+    fn motor1_block_wire_layout_is_little_endian() {
+        let buf = two_motor_wire();
+        let mut base = [0u8; CyclicState::ENCODED_LEN];
+        cyclic_sample().encode(&mut base);
+        assert_eq!(
+            buf[..CyclicState::MOTOR1_OFF],
+            base,
+            "the base is unchanged"
+        );
+        assert_eq!(
+            buf[CyclicState::MOTOR1_OFF..],
+            [
+                0xFB, 0xFF, // wheel_speed -5, offset 34
+                0x06, 0x05, // phase_peak 0x0506, offset 36
+                0x02, 0x01, // phase_mean 0x0102, offset 38
+                0x0B, 0x0A, // duty_on 0x0A0B, offset 40
+                0x44, 0x33, 0x22, 0x11, // wheel_rate 0x11223344, offset 42
+            ]
+        );
+    }
+
+    /// A 46 B payload decodes the base as a 34 B one would and the block as motor 1's; a 34 B
+    /// payload has no motor 1.
+    #[test]
+    fn two_motor_round_trip_and_one_motor_has_no_motor1() {
+        let buf = two_motor_wire();
+        assert_eq!(
+            CyclicState::decode_with_motor1(&buf),
+            Ok((cyclic_sample(), Some(motor1_sample())))
+        );
+        assert_eq!(
+            CyclicState::decode(&buf),
+            Ok(cyclic_sample()),
+            "the base alone"
+        );
+        assert_eq!(
+            CyclicState::decode_with_motor1(&buf[..CyclicState::ENCODED_LEN]),
+            Ok((cyclic_sample(), None))
+        );
+    }
+
+    /// Every length but 34 and 46 is refused by both decoders, a truncated two-motor frame
+    /// included (`specs/link-control.md`, "The motor-1 block": it fails as any short frame does).
+    #[test]
+    fn only_the_two_lengths_decode() {
+        let mut buf = [0xEEu8; CyclicState::TWO_MOTOR_LEN + 4];
+        buf[..CyclicState::TWO_MOTOR_LEN].copy_from_slice(&two_motor_wire());
+        for len in 0..=buf.len() {
+            let ok = len == CyclicState::ENCODED_LEN || len == CyclicState::TWO_MOTOR_LEN;
+            assert_eq!(CyclicState::decode(&buf[..len]).is_ok(), ok, "{len} bytes");
+            assert_eq!(
+                CyclicState::decode_with_motor1(&buf[..len]).is_ok(),
+                ok,
+                "{len} bytes"
+            );
+            if !ok {
+                assert_eq!(CyclicState::decode(&buf[..len]), Err(DecodeError::WrongLen));
+            }
         }
     }
 
@@ -1063,6 +1250,11 @@ mod tests {
             decode(OP_CYCLIC_STATE, &buf[..CyclicState::ENCODED_LEN]),
             Some(Payload::CyclicState(cyc))
         );
+        // A two-motor board's payload routes to its base.
+        assert_eq!(
+            decode(OP_CYCLIC_STATE, &two_motor_wire()),
+            Some(Payload::CyclicState(cyc))
+        );
 
         let mut buf = [0u8; 16];
         let cmd = DriveCmd {
@@ -1097,12 +1289,16 @@ mod tests {
             assert_eq!(decode(op, &buf), None, "opcode {op:#04x}");
         }
         // Short payloads drop (no error propagates), per the best-effort class. For
-        // `CYCLIC_STATE` that is every length but its own, so the sixteen committed bytes and a
-        // thirty-third byte drop here as well.
+        // `CYCLIC_STATE` that is every length but its two, so the sixteen committed bytes, a
+        // thirty-fifth byte and a truncated two-motor frame drop here as well.
         assert_eq!(decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN]), None);
         assert_eq!(decode(OP_CYCLIC_STATE, &buf[..CyclicState::LEN - 1]), None);
         assert_eq!(
             decode(OP_CYCLIC_STATE, &[0u8; CyclicState::ENCODED_LEN + 1]),
+            None
+        );
+        assert_eq!(
+            decode(OP_CYCLIC_STATE, &[0u8; CyclicState::TWO_MOTOR_LEN - 1]),
             None
         );
         assert_eq!(decode(OP_DRIVE_CMD, &buf[..DriveCmd::LEN - 1]), None);

@@ -9,6 +9,7 @@ import com.hoverboard.protocol.l3.HEADER_LEN
 import com.hoverboard.protocol.l3.Opcode
 import com.hoverboard.protocol.l3.Pdu
 import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicMotor
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DriveCmd
@@ -172,6 +173,50 @@ class WireDriftTest {
         assertEquals(28, CyclicState.WHEEL_RATE_OFF, "shared/linkctl/src/lib.rs, CyclicState::WHEEL_RATE_OFF")
         assertEquals(32, CyclicState.MACHINE_OFF, "shared/linkctl/src/lib.rs, CyclicState::MACHINE_OFF")
         assertEquals(34, CyclicState.ENCODED_LEN, "shared/linkctl/src/lib.rs, CyclicState::ENCODED_LEN")
+        assertEquals(12, CyclicMotor.LEN, "shared/linkctl/src/lib.rs, CyclicMotor::LEN")
+        assertEquals(34, CyclicState.MOTOR1_OFF, "shared/linkctl/src/lib.rs, CyclicState::MOTOR1_OFF")
+        assertEquals(46, CyclicState.TWO_MOTOR_LEN, "shared/linkctl/src/lib.rs, CyclicState::TWO_MOTOR_LEN")
+    }
+
+    /**
+     * A two-motor board's payload: the base exactly as a one-motor board writes it, then motor 1's
+     * block from offset 34. From `motor1_block_wire_layout_is_little_endian` and
+     * `only_the_two_lengths_decode` in `shared/linkctl/src/lib.rs`.
+     */
+    @Test
+    fun theMotor1BlockMatchesTheRustGoldenVector() {
+        val base = CyclicState(
+            pitch = 1, roll = 2, wheelSpeed = 3, battery = 3_600, mode = 2, fault = 0, flags = 0,
+            peerDemand = 0, wheelPos = 0, wheelRate = 4096, machine = 0x1234,
+            obs = CyclicObs(
+                phasePeak = 10, phaseMean = 5, dutyOn = 700, bootTag = 1, chip = ChipTag.F103RC,
+                odometer = 99L,
+            ),
+        )
+        val motor1 = CyclicMotor(
+            wheelSpeed = -5, phasePeak = 0x0506, phaseMean = 0x0102, dutyOn = 0x0A0B, wheelRate = 0x1122_3344,
+        )
+        val two = base.copy(motor1 = motor1)
+        val wire = two.encode()
+        assertEquals(CyclicState.TWO_MOTOR_LEN, wire.size)
+        assertArrayEquals(base.encode(), wire.copyOf(CyclicState.ENCODED_LEN), "the base is unchanged")
+        assertArrayEquals(
+            byteArrayOf(
+                0xFB.toByte(), 0xFF.toByte(), // wheelSpeed -5, offset 34
+                0x06, 0x05, // phasePeak 0x0506, offset 36
+                0x02, 0x01, // phaseMean 0x0102, offset 38
+                0x0B, 0x0A, // dutyOn 0x0A0B, offset 40
+                0x44, 0x33, 0x22, 0x11, // wheelRate 0x11223344, offset 42
+            ),
+            wire.copyOfRange(CyclicState.MOTOR1_OFF, CyclicState.TWO_MOTOR_LEN),
+        )
+        assertEquals(two, CyclicState.decode(wire))
+        assertNull(CyclicState.decode(base.encode())!!.motor1, "a one-motor frame has no motor 1")
+        // Every length but the two is refused, a truncated two-motor frame included.
+        for (size in 0..CyclicState.TWO_MOTOR_LEN + 4) {
+            val ok = size == CyclicState.ENCODED_LEN || size == CyclicState.TWO_MOTOR_LEN
+            assertEquals(ok, CyclicState.decode(wire.copyOf(size)) != null, "$size bytes")
+        }
     }
 
     /**
@@ -278,7 +323,9 @@ class WireDriftTest {
     }
 
     /**
-     * A payload of any length but [CyclicState.ENCODED_LEN] is REFUSED, short or long, from
+     * A payload of any length but [CyclicState.ENCODED_LEN] (or the two-motor
+     * [CyclicState.TWO_MOTOR_LEN], [theMotor1BlockMatchesTheRustGoldenVector]) is REFUSED, short
+     * or long, from
      * `a_cyclic_payload_short_of_the_whole_is_refused` and
      * `an_over_long_cyclic_payload_is_refused` in `shared/linkctl/src/lib.rs`.
      *
@@ -308,7 +355,7 @@ class WireDriftTest {
         }
         // And every longer one: this family reads no prefix out of a payload it does not agree
         // with about the length.
-        for (size in CyclicState.ENCODED_LEN + 1..CyclicState.ENCODED_LEN + 4) {
+        for (size in CyclicState.ENCODED_LEN + 1 until CyclicState.TWO_MOTOR_LEN) {
             assertNull(CyclicState.decode(whole.copyOf(size)), "$size bytes is refused")
         }
     }

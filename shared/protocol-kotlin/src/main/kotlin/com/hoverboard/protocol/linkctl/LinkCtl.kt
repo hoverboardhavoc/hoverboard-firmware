@@ -14,8 +14,10 @@ package com.hoverboard.protocol.linkctl
  * - **Committed-prefix decode** for [DriveCmd] and [Inputs]: a decoder reads its
  *   committed prefix and ignores trailing bytes, so a firmware build that appends a field still
  *   decodes here. A payload shorter than the prefix is rejected.
- * - **[CyclicState] is decoded by EXACT LENGTH** ([CyclicState.ENCODED_LEN]): the committed words
- *   plus the appended [CyclicObs] block, and any other length is a protocol error. It is the one
+ * - **[CyclicState] is decoded by EXACT LENGTH**: [CyclicState.ENCODED_LEN] (the committed words
+ *   plus the appended [CyclicObs] block, a one-motor board's) or [CyclicState.TWO_MOTOR_LEN] (a
+ *   two-motor board's, with motor 1's [CyclicMotor] block after it), and any other length is a
+ *   protocol error. It is the one
  *   family that does not tolerate a short or a long payload, and the firmware's decoder is the
  *   same (`shared/linkctl/src/lib.rs`, `CyclicState::decode`).
  * - All four families are best-effort / latest-wins: no seq, no ack, no retransmit. A rejected
@@ -246,11 +248,59 @@ data class CyclicObs(
 }
 
 /**
+ * The motor-1 block a two-motor board appends at [CyclicState.MOTOR1_OFF]. Mirror of
+ * `shared/linkctl/src/lib.rs`, `CyclicMotor` (`specs/link-control.md`, "The motor-1 block"): motor
+ * 1's wheel words, each defined as its motor-0 counterpart in the base is ([CyclicState.wheelSpeed],
+ * [CyclicObs.phasePeak], [CyclicObs.phaseMean], [CyclicObs.dutyOn], [CyclicState.wheelRate]).
+ * No odometer: the firmware keeps motor 0's only.
+ * ```
+ * off 34..36 i16 LE  wheelSpeed
+ * off 36..38 i16 LE  phasePeak
+ * off 38..40 i16 LE  phaseMean
+ * off 40..42 u16 LE  dutyOn
+ * off 42..46 i32 LE  wheelRate
+ * ```
+ */
+data class CyclicMotor(
+    val wheelSpeed: Int,
+    val phasePeak: Int,
+    val phaseMean: Int,
+    val dutyOn: Int,
+    val wheelRate: Int,
+) {
+    /** Encode the block alone, as it sits after the base. `shared/linkctl/src/lib.rs`, `CyclicMotor::encode`. */
+    fun encode(): ByteArray {
+        val out = ByteArray(LEN)
+        wrU16(out, 0, wheelSpeed)
+        wrU16(out, 2, phasePeak)
+        wrU16(out, 4, phaseMean)
+        wrU16(out, 6, dutyOn)
+        wrU32(out, 8, wheelRate.toLong())
+        return out
+    }
+
+    companion object {
+        /** On-wire length of the block. `shared/linkctl/src/lib.rs`, `CyclicMotor::LEN`. */
+        const val LEN = 12
+
+        /** Decode the block from [b] at [at], which must hold [LEN] bytes from there. */
+        fun decode(b: ByteArray, at: Int): CyclicMotor = CyclicMotor(
+            wheelSpeed = rdI16(b, at),
+            phasePeak = rdI16(b, at + 2),
+            phaseMean = rdI16(b, at + 4),
+            dutyOn = rdU16(b, at + 6),
+            wheelRate = rdI32(b, at + 8),
+        )
+    }
+}
+
+/**
  * Board state, emitted cyclically. Mirror of `shared/linkctl/src/lib.rs`, `CyclicState`.
  *
- * Wire layout, 34 bytes and only 34 (`shared/linkctl/src/lib.rs`, `CyclicState::encode`): the 16
- * committed words, the 12-byte appended [CyclicObs] block, the `i32` [wheelRate] and the `u16`
- * [machine] digest:
+ * Wire layout, 34 bytes from a one-motor board (`shared/linkctl/src/lib.rs`, `CyclicState::encode`):
+ * the 16 committed words, the 12-byte appended [CyclicObs] block, the `i32` [wheelRate] and the
+ * `u16` [machine] digest; 46 bytes from a two-motor board, which appends motor 1's [CyclicMotor]
+ * block ([motor1]):
  * ```
  * off 0..2   i16 LE  pitch        centidegrees
  * off 2..4   i16 LE  roll         centidegrees
@@ -265,7 +315,12 @@ data class CyclicObs(
  * off 16..28         the CyclicObs block
  * off 28..32 i32 LE  wheelRate    the period-measured wheel rate, Q12 of wheelSpeed's unit
  * off 32..34 u16 LE  machine      the board's machine digest
+ * off 34..46         the CyclicMotor block, two-motor boards only
  * ```
+ *
+ * Every word before offset 34 is motor 0's or the board's. [motor1] is motor 1's words from a
+ * two-motor board and null from a one-motor board, whose frame has no block; null is the default,
+ * so a caller building a one-motor board's frame leaves it out.
  *
  * [machine] is the board's machine digest (`shared/linkctl/src/lib.rs`, `CyclicState::machine`;
  * `specs/machine-settings.md` section 4.1): a CRC-16 over the effective value of every machine
@@ -326,6 +381,7 @@ data class CyclicState(
     val obs: CyclicObs,
     val wheelRate: Int,
     val machine: Int,
+    val motor1: CyclicMotor? = null,
 ) {
     /** Rider-present flag, bit0. `shared/linkctl/src/lib.rs`, `CyclicState::FLAG_RIDER`. */
     fun riderPresent(): Boolean = flags and FLAG_RIDER != 0
@@ -355,11 +411,12 @@ data class CyclicState(
     fun lockdown(): Boolean = flags and FLAG_LOCKDOWN != 0
 
     /**
-     * Encode: the committed words, then the appended block, [ENCODED_LEN] bytes.
-     * `shared/linkctl/src/lib.rs`, `CyclicState::encode`.
+     * Encode: the committed words, then the appended block, [ENCODED_LEN] bytes; with [motor1],
+     * its block after them, [TWO_MOTOR_LEN] bytes. `shared/linkctl/src/lib.rs`,
+     * `CyclicState::encode` and `CyclicMotor::encode`.
      */
     fun encode(): ByteArray {
-        val out = ByteArray(ENCODED_LEN)
+        val out = ByteArray(if (motor1 == null) ENCODED_LEN else TWO_MOTOR_LEN)
         wrU16(out, 0, pitch)
         wrU16(out, 2, roll)
         wrU16(out, 4, wheelSpeed)
@@ -372,6 +429,7 @@ data class CyclicState(
         obs.encode().copyInto(out, LEN)
         wrU32(out, WHEEL_RATE_OFF, wheelRate.toLong())
         wrU16(out, MACHINE_OFF, machine)
+        motor1?.encode()?.copyInto(out, MOTOR1_OFF)
         return out
     }
 
@@ -383,10 +441,19 @@ data class CyclicState(
         const val LEN = 16
 
         /**
-         * The ONE on-wire length of a `CYCLIC_STATE` payload: what the firmware emits and the only
-         * length [decode] accepts. `shared/linkctl/src/lib.rs`, `CyclicState::ENCODED_LEN`.
+         * The on-wire length of a one-motor board's `CYCLIC_STATE` payload, and of every board's
+         * base. `shared/linkctl/src/lib.rs`, `CyclicState::ENCODED_LEN`.
          */
         const val ENCODED_LEN = LEN + CyclicObs.LEN + Int.SIZE_BYTES + Short.SIZE_BYTES
+
+        /** The offset of the motor-1 block. `shared/linkctl/src/lib.rs`, `CyclicState::MOTOR1_OFF`. */
+        const val MOTOR1_OFF = ENCODED_LEN
+
+        /**
+         * The on-wire length of a two-motor board's payload, the base and [CyclicMotor]'s block.
+         * `shared/linkctl/src/lib.rs`, `CyclicState::TWO_MOTOR_LEN`.
+         */
+        const val TWO_MOTOR_LEN = MOTOR1_OFF + CyclicMotor.LEN
 
         /** The offset of [wheelRate]. `shared/linkctl/src/lib.rs`, `CyclicState::WHEEL_RATE_OFF`. */
         const val WHEEL_RATE_OFF = LEN + CyclicObs.LEN
@@ -495,8 +562,9 @@ data class CyclicState(
         const val FLAG_LOCKDOWN = 1 shl 7
 
         /**
-         * Decode a payload of exactly [ENCODED_LEN]; null for ANY other length, short or long.
-         * `shared/linkctl/src/lib.rs`, `CyclicState::decode`.
+         * Decode a payload of exactly [ENCODED_LEN] or [TWO_MOTOR_LEN], the latter with [motor1];
+         * null for ANY other length, short or long. `shared/linkctl/src/lib.rs`,
+         * `CyclicState::decode_with_motor1`.
          *
          * The exception to this file's committed-prefix rule, and the firmware's decoder makes the
          * same one. The committed prefix alone decoded here until 2026-10-10, for a board on an image from
@@ -507,7 +575,7 @@ data class CyclicState(
          * protocol, and the delivery class makes dropping it the whole response.
          */
         fun decode(b: ByteArray): CyclicState? {
-            if (b.size != ENCODED_LEN) return null
+            if (b.size != ENCODED_LEN && b.size != TWO_MOTOR_LEN) return null
             return CyclicState(
                 pitch = rdI16(b, 0),
                 roll = rdI16(b, 2),
@@ -521,6 +589,7 @@ data class CyclicState(
                 obs = CyclicObs.decode(b, LEN),
                 wheelRate = rdI32(b, WHEEL_RATE_OFF),
                 machine = rdU16(b, MACHINE_OFF),
+                motor1 = if (b.size == TWO_MOTOR_LEN) CyclicMotor.decode(b, MOTOR1_OFF) else null,
             )
         }
     }
