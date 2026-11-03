@@ -84,7 +84,10 @@ mod test_flash;
 mod firmware {
 
     use crate::arm;
-    use crate::guest_tx::{emit_mailbox_samples, GuestSlots, GuestStaged};
+    use crate::guest_tx::{
+        emit_mailbox_samples, encode_cyclic, more_motors, GuestSlots, GuestStaged, MoreMotors,
+        OWN_LEN,
+    };
     use crate::imu_attempts;
     use crate::layout;
     use crate::link_drain::bounded_drain;
@@ -105,7 +108,7 @@ mod firmware {
         RingBufferedRx, SplitSerial, Usart, WdgTimeout,
     };
     use link::{Link, SerialTransport};
-    use linkctl::{ChipTag, CyclicState};
+    use linkctl::{ChipTag, CyclicMotor, CyclicState};
     use net::walk::{Emits, Identity, Responder, CLASS_MOTOR, PORT_SWD, PORT_UART};
     use orchestrator::{
         ble_cyclic_tx, ble_peer_tx, control_task, cyclic_tx, input_task, BoardIdentity,
@@ -590,6 +593,9 @@ mod firmware {
         /// Step 8's pending cyclic payload: the 250 Hz callback builds it (addressed boards
         /// only); the loop empties it port-directed onto the inter-board UART.
         cyclic_out: Option<CyclicState>,
+        /// [`Self::cyclic_out`]'s motor-1 blocks ([`MoreMotors`]), written with it: on a two-motor
+        /// image motor 1's words, on a one-motor image nothing.
+        cyclic_more: MoreMotors,
         /// The guest port's samples ([`GuestSlots`]): the board's own decimated cyclic payload
         /// (5 Hz, `dispatch::ble_cyclic_tx`) and the PEER's forward (2.5 Hz,
         /// `dispatch::ble_peer_tx`), each a latest-wins slot separate from `cyclic_out` because
@@ -1465,7 +1471,17 @@ mod firmware {
         // The period-based rate beside it (`specs/control.md` (o)): the state-feedback law's speed
         // measurement, already in the law's own 1/4096-count unit, so there is nothing to narrow
         // and nothing to convert. One load, like the count's.
-        shell.orch.block.wheel_rate_q12 = motor::WHEEL_RATE_Q12[0].load(Ordering::Relaxed);
+        //
+        // One row per motor: motor 1's rides the cyclic's motor-1 block (`specs/link-control.md`).
+        for (row, word) in shell
+            .orch
+            .block
+            .wheel_rate_q12
+            .iter_mut()
+            .zip(motor::WHEEL_RATE_Q12.iter())
+        {
+            *row = word.load(Ordering::Relaxed);
+        }
         // The signed position beside it (`specs/state-feedback.md` section 3): the law folds it,
         // the cyclic carries its low half to the peer and the observation publishes it mirrored.
         // One load.
@@ -1493,24 +1509,35 @@ mod firmware {
         // the fault word are read the same way), and it is bounded by being a window apart: the
         // alternative, publishing the peak a second time beside the mean, would put one
         // measurement in two cells.
-        let mean_duty = motor::OBS_MEAN_DUTY[0].load(Ordering::Relaxed);
-        shell.orch.phase = orchestrator::PhaseWindow {
-            peak: motor::unpack_peak(motor::OBS_CURRENT[0].load(Ordering::Relaxed)),
-            mean: motor::unpack_mean(mean_duty),
-            duty_on: motor::unpack_duty_on(mean_duty),
-        };
+        //
+        // One window per motor, each from its own motor's two cells: motor 0's rides the base's
+        // block, motor 1's the motor-1 block (`specs/link-control.md`, "The motor-1 block").
+        for (i, window) in shell.orch.phase.iter_mut().enumerate() {
+            let mean_duty = motor::OBS_MEAN_DUTY[i].load(Ordering::Relaxed);
+            *window = orchestrator::PhaseWindow {
+                peak: motor::unpack_peak(motor::OBS_CURRENT[i].load(Ordering::Relaxed)),
+                mean: motor::unpack_mean(mean_duty),
+                duty_on: motor::unpack_duty_on(mean_duty),
+            };
+        }
         // The odometer the cyclic payload carries (`specs/odometer.md`): the LIVE total, folded
         // by the service loop, which is the context that owns it and the only one that may write
         // it to flash. Copied here beside the current window for the same reason, that the
         // payload is built inside the pass below.
         shell.orch.odometer = ODOMETER_TOTAL.load(Ordering::Relaxed);
         let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
+        // The base, and on a two-motor image motor 1's block from this same pass's rows.
+        let more = more_motors(&shell.orch);
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
+        if shell.cyclic_out.is_some() {
+            shell.cyclic_more = more;
+        }
         // The guest ports' own decimation (5 Hz) and the peer's state at its own 2.5 Hz, only
         // while fresh. Latest-wins: a payload the loop has not picked up yet is simply
         // overwritten, never queued, so a slow module cannot build a backlog.
         shell.guest.fill(
             ble_cyclic_tx(&shell.orch, shell.addressed),
+            more,
             ble_peer_tx(&shell.orch, shell.addressed),
         );
         let obs = shell.orch.obs();
@@ -1714,6 +1741,7 @@ mod firmware {
                 imu: imu_dev,
                 inputs,
                 cyclic_out: None,
+                cyclic_more: [CyclicMotor::ZERO; motor::COUNT - 1],
                 guest: GuestSlots::new(),
                 guest_staged: GuestStaged::default(),
                 addressed: false,
@@ -2871,11 +2899,12 @@ mod firmware {
             //    the mailbox port (link-control.md, "Addressing and emission").
             let pending = {
                 // SAFETY: main-thread context, after dispatch returned; scoped as above.
-                unsafe { (*addr_of_mut!(SHELL)).as_mut() }.and_then(|s| s.cyclic_out.take())
+                unsafe { (*addr_of_mut!(SHELL)).as_mut() }
+                    .and_then(|s| s.cyclic_out.take().map(|c| (c, s.cyclic_more)))
             };
-            if let Some(c) = pending {
-                let mut payload = [0u8; CyclicState::ENCODED_LEN];
-                let n = c.encode(&mut payload);
+            if let Some((c, more)) = pending {
+                let mut payload = [0u8; OWN_LEN];
+                let n = encode_cyclic(&c, &more, &mut payload);
                 // The PDU scratch is free here (the drains are done this pass): reuse it as the
                 // frame buffer instead of a second 64 B local. The same frame goes out every link
                 // that came up: each is point-to-point to its own neighbour.
@@ -3409,16 +3438,58 @@ mod link_drain {
 /// target-only service loop.
 #[allow(dead_code)]
 mod guest_tx {
+    use crate::motor;
     use link::{Link, SerialTransport};
-    use linkctl::CyclicState;
+    use linkctl::{CyclicMotor, CyclicState};
     use orchestrator::dispatch::PeerCyclic;
+    use orchestrator::OrchestratorState;
     use swd_mailbox::MailboxSerial;
+
+    /// The motor-1 blocks of this board's own `CYCLIC_STATE` emission (`specs/link-control.md`,
+    /// "The motor-1 block"): one per motor past the first, `motor::COUNT - 1`. Every slot that holds
+    /// an own emission holds its base (`CyclicState`, motor 0's words and the board's) beside these,
+    /// written together. On a one-motor image this is an array of none, so the slots, the builder
+    /// and the encoder carry nothing of the block.
+    pub type MoreMotors = [CyclicMotor; motor::COUNT - 1];
+
+    /// The own emission's payload length: 34 B on a one-motor image, 46 B on a two-motor one.
+    pub const OWN_LEN: usize = CyclicState::ENCODED_LEN + (motor::COUNT - 1) * CyclicMotor::LEN;
+    const _: () = assert!(
+        OWN_LEN
+            == if motor::COUNT == 1 {
+                CyclicState::ENCODED_LEN
+            } else {
+                CyclicState::TWO_MOTOR_LEN
+            }
+    );
+
+    /// Each further motor's block from the state the pass built the base from
+    /// (`orchestrator::cyclic_motor`), so the blocks are the same pass's as the base.
+    pub fn more_motors(orch: &OrchestratorState<{ motor::COUNT }>) -> MoreMotors {
+        core::array::from_fn(|i| orchestrator::cyclic_motor(orch, i + 1))
+    }
+
+    /// Encode a base and the `K` blocks after it into `out`, returning the byte count: the own
+    /// emission with [`MoreMotors`], a peer's forwarded base with none.
+    pub fn encode_cyclic<const K: usize>(
+        base: &CyclicState,
+        more: &[CyclicMotor; K],
+        out: &mut [u8; OWN_LEN],
+    ) -> usize {
+        let mut n = base.encode(out);
+        for m in more {
+            n += m.encode(&mut out[n..]);
+        }
+        n
+    }
 
     /// The two samples the control pass built since the loop last emitted, latest-wins: a catch-up
     /// burst that builds one twice before the loop runs leaves the later one. The loop empties both
     /// every pass, so a sample goes into the ring at most once, in the pass after it was built.
     pub struct GuestSlots {
         own: Option<CyclicState>,
+        /// The own sample's motor-1 blocks, written with [`Self::own`].
+        own_more: MoreMotors,
         peer: Option<PeerCyclic>,
     }
 
@@ -3426,15 +3497,23 @@ mod guest_tx {
         pub const fn new() -> Self {
             GuestSlots {
                 own: None,
+                own_more: [CyclicMotor::ZERO; motor::COUNT - 1],
                 peer: None,
             }
         }
 
         /// The control pass's hand-off: whatever the two cadences built this run
         /// (`orchestrator::ble_cyclic_tx`, `orchestrator::ble_peer_tx`) overwrites its slot.
-        pub fn fill(&mut self, own: Option<CyclicState>, peer: Option<PeerCyclic>) {
+        /// `more` is the own sample's blocks ([`more_motors`] of the same pass).
+        pub fn fill(
+            &mut self,
+            own: Option<CyclicState>,
+            more: MoreMotors,
+            peer: Option<PeerCyclic>,
+        ) {
             if own.is_some() {
                 self.own = own;
+                self.own_more = more;
             }
             if peer.is_some() {
                 self.peer = peer;
@@ -3458,12 +3537,18 @@ mod guest_tx {
         (word & !(0xFFFF << shift)) | (half << shift)
     }
 
-    /// The `CYCLIC_STATE` PDU the mailbox port carries, `[0x10][src][dst 0x00][32 B]`, encoded into
-    /// `pdu`; the encoded length, or `None` if `pdu` is too small. dst 0x00 by the point-to-point
-    /// rule: the port carries exactly one peer (`specs/link-control.md`, "Addressing and emission").
-    pub fn sample_pdu(src: u8, state: &CyclicState, pdu: &mut [u8]) -> Option<usize> {
-        let mut payload = [0u8; CyclicState::ENCODED_LEN];
-        let n = state.encode(&mut payload);
+    /// The `CYCLIC_STATE` PDU the mailbox port carries, `[0x10][src][dst 0x00][payload]`, encoded
+    /// into `pdu`; the encoded length, or `None` if `pdu` is too small. dst 0x00 by the
+    /// point-to-point rule: the port carries exactly one peer (`specs/link-control.md`,
+    /// "Addressing and emission").
+    pub fn sample_pdu<const K: usize>(
+        src: u8,
+        state: &CyclicState,
+        more: &[CyclicMotor; K],
+        pdu: &mut [u8],
+    ) -> Option<usize> {
+        let mut payload = [0u8; OWN_LEN];
+        let n = encode_cyclic(state, more, &mut payload);
         net::Pdu::new(
             linkctl::OP_CYCLIC_STATE,
             src,
@@ -3478,13 +3563,14 @@ mod guest_tx {
     /// Put one sample into the mailbox ring; `true` if the ring took it whole. A full ring refuses
     /// it (all-or-nothing, `specs/swd-mailbox.md`, "Backpressure") and the serial counts the
     /// refusal in word 34; the sample is dropped, latest-wins.
-    fn mailbox_sample<const MP: usize, const MN: usize>(
+    fn mailbox_sample<const MP: usize, const MN: usize, const K: usize>(
         mailbox: &mut Link<SerialTransport<MailboxSerial, MN>, MP, MN>,
         src: u8,
         state: &CyclicState,
+        more: &[CyclicMotor; K],
         pdu: &mut [u8],
     ) -> bool {
-        match sample_pdu(src, state, pdu) {
+        match sample_pdu(src, state, more, pdu) {
             Some(len) => mailbox.send(&pdu[..len]).is_ok(),
             None => false,
         }
@@ -3508,12 +3594,14 @@ mod guest_tx {
             return;
         }
         if let Some(c) = own {
-            if mailbox_sample(mailbox, own_src, &c, pdu) {
+            if mailbox_sample(mailbox, own_src, &c, &slots.own_more, pdu) {
                 staged.mailbox = bump(staged.mailbox, false);
             }
         }
+        // The peer's base alone: the inbox keeps a peer's base, so a forward is 34 B whatever the
+        // peer sent (`specs/link-control.md`, "The motor-1 block").
         if let Some(p) = peer {
-            if mailbox_sample(mailbox, p.src, &p.state, pdu) {
+            if mailbox_sample(mailbox, p.src, &p.state, &[], pdu) {
                 staged.mailbox = bump(staged.mailbox, true);
             }
         }
@@ -3521,9 +3609,10 @@ mod guest_tx {
 
     #[cfg(test)]
     mod tests {
-        use super::{bump, emit_mailbox_samples, GuestSlots, GuestStaged};
+        use super::{bump, emit_mailbox_samples, GuestSlots, GuestStaged, MoreMotors, OWN_LEN};
+        use crate::motor;
         use link::{Link, SerialTransport};
-        use linkctl::CyclicState;
+        use linkctl::{CyclicMotor, CyclicState};
         use orchestrator::dispatch::PeerCyclic;
         use swd_mailbox::{layout, Bridge, Mailbox, MailboxSerial, FRAME_CAPACITY, REGION_LEN};
 
@@ -3609,6 +3698,18 @@ mod guest_tx {
             CyclicState::decode(&b).unwrap()
         }
 
+        /// Motor 1's words, distinguishable from anything a base carries.
+        const MOTOR1: CyclicMotor = CyclicMotor {
+            wheel_speed: -7,
+            phase_peak: 0x0506,
+            phase_mean: 0x0102,
+            duty_on: 0x0A0B,
+            wheel_rate: 0x1122_3344,
+        };
+
+        /// The board's own sample's blocks: motor 1's on the host's two-motor count.
+        const MORE: MoreMotors = [MOTOR1; motor::COUNT - 1];
+
         fn forward(tag: u8) -> PeerCyclic {
             PeerCyclic {
                 src: PEER_SRC,
@@ -3625,7 +3726,7 @@ mod guest_tx {
         #[test]
         fn both_samples_reach_the_mailbox_port_own_first() {
             let mut r = Rig::new(true);
-            r.slots.fill(Some(state(7)), Some(forward(9)));
+            r.slots.fill(Some(state(7)), MORE, Some(forward(9)));
             r.pass();
             let mb = r.mailbox_pdus();
             assert_eq!(mb.len(), 2, "the mailbox port carried own + forward");
@@ -3637,9 +3738,30 @@ mod guest_tx {
                 net::pdu::NO_ADDRESS,
                 "dst 0x00 on the mailbox port"
             );
-            assert_eq!(mb[0].len(), 3 + CyclicState::ENCODED_LEN);
+            assert_eq!(mb[0].len(), 3 + OWN_LEN);
             assert_eq!(mb[0][3], 7);
             assert_eq!(mb[1][3], 9);
+        }
+
+        /// The own sample of a two-motor image (the host's count) is the 46 B payload with motor
+        /// 1's block at offset 34, decoding to the base and that block; the forward is the peer's
+        /// 34 B base, whatever the peer sent (`specs/link-control.md`, "The motor-1 block").
+        #[test]
+        fn the_own_sample_carries_motor_1_and_the_forward_is_the_base() {
+            assert_eq!(motor::COUNT, 2, "the host build runs the two-motor paths");
+            assert_eq!(OWN_LEN, CyclicState::TWO_MOTOR_LEN);
+            let mut r = Rig::new(true);
+            r.slots.fill(Some(state(7)), MORE, Some(forward(9)));
+            r.pass();
+            let mb = r.mailbox_pdus();
+            let payload = net::Pdu::decode(&mb[0]).unwrap().payload.to_vec();
+            assert_eq!(
+                CyclicState::decode_with_motor1(&payload),
+                Ok((state(7), Some(MOTOR1)))
+            );
+            let fwd = net::Pdu::decode(&mb[1]).unwrap().payload.to_vec();
+            assert_eq!(fwd.len(), CyclicState::ENCODED_LEN);
+            assert_eq!(CyclicState::decode_with_motor1(&fwd), Ok((state(9), None)));
         }
 
         /// A sample goes into the ring once: the passes after the one that emitted it put nothing
@@ -3647,8 +3769,8 @@ mod guest_tx {
         #[test]
         fn each_sample_goes_into_the_ring_once_latest_wins() {
             let mut r = Rig::new(true);
-            r.slots.fill(Some(state(1)), Some(forward(2)));
-            r.slots.fill(Some(state(3)), None);
+            r.slots.fill(Some(state(1)), MORE, Some(forward(2)));
+            r.slots.fill(Some(state(3)), MORE, None);
             for _ in 0..5 {
                 r.pass();
             }
@@ -3664,7 +3786,7 @@ mod guest_tx {
         fn with_no_consumer_the_mailbox_is_not_written_and_nothing_is_refused() {
             let mut r = Rig::new(false);
             for _ in 0..10 {
-                r.slots.fill(Some(state(3)), Some(forward(4)));
+                r.slots.fill(Some(state(3)), MORE, Some(forward(4)));
                 r.pass();
             }
             assert_eq!(r.ring_used(), 0, "the outbound ring stayed empty");
@@ -3674,28 +3796,34 @@ mod guest_tx {
         }
 
         /// Ports and Counters: a full ring drops the sample, counts exactly one refused write, and
-        /// leaves the mailbox word where it was. A 34 B PDU is 39 B on the ring, so six fit in
-        /// the 256 B ring with nothing draining it and the seventh is refused.
+        /// leaves the mailbox word where it was. The host's own sample is the two-motor 46 B
+        /// payload, 54 B on the ring, so four fit in the 256 B ring with nothing draining it and
+        /// the fifth is refused (`specs/link-control.md`, "The motor-1 block", the fit).
         #[test]
         fn a_full_ring_drops_the_sample_and_counts_one_refused_write() {
+            const FIT: u8 = 4;
             let mut r = Rig::new(true);
-            for k in 0..6 {
-                r.slots.fill(Some(state(k)), None);
+            for k in 0..FIT {
+                r.slots.fill(Some(state(k)), MORE, None);
                 r.pass();
             }
             assert_eq!(r.refused(), 0);
-            assert_eq!(r.staged.mailbox, 6);
+            assert_eq!(r.staged.mailbox, FIT as u32);
             let used = r.ring_used();
-            r.slots.fill(Some(state(8)), None);
+            r.slots.fill(Some(state(8)), MORE, None);
             r.pass();
             assert_eq!(r.refused(), 1, "one refused write for the dropped sample");
             assert_eq!(
-                r.staged.mailbox, 6,
+                r.staged.mailbox, FIT as u32,
                 "a refused sample is not counted as staged"
             );
             assert_eq!(r.ring_used(), used, "nothing of it entered the ring");
             let tags: Vec<u8> = r.mailbox_pdus().iter().map(|p| p[3]).collect();
-            assert_eq!(tags, (0..6).collect::<Vec<u8>>(), "the queued six, intact");
+            assert_eq!(
+                tags,
+                (0..FIT).collect::<Vec<u8>>(),
+                "the queued four, intact"
+            );
         }
 
         /// Counters: each staged sample advances the word by one, own in the low half and forwards
@@ -3703,10 +3831,10 @@ mod guest_tx {
         #[test]
         fn the_staged_word_counts_own_and_forwards_in_their_own_halves() {
             let mut r = Rig::new(true);
-            r.slots.fill(Some(state(1)), None);
+            r.slots.fill(Some(state(1)), MORE, None);
             r.pass();
             assert_eq!(r.staged.mailbox, 1);
-            r.slots.fill(None, Some(forward(2)));
+            r.slots.fill(None, MORE, Some(forward(2)));
             r.pass();
             assert_eq!(r.staged.mailbox, 1 | 1 << 16);
         }

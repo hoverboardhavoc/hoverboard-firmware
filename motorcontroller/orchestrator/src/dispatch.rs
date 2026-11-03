@@ -29,7 +29,7 @@ use control::{
     GainProfile, GainShadow, GatingFilter, Producer, SfConfig, SfInputs, SfState, SubState,
     ThrottleConfig, STANDBY_SET,
 };
-use linkctl::{CyclicObs, CyclicState, DriveKind};
+use linkctl::{CyclicMotor, CyclicObs, CyclicState, DriveKind};
 
 /// The pitch-RATE axis of the calibrated rad/s gyro vector (`imu::Sample::gyro`, sign map
 /// applied) feeding the block's rate word (@0x9c, `specs/control.md` (j)): body Y (pitch is rotation about Y in the x-forward reference mount; the archive orchestrator's
@@ -191,17 +191,18 @@ pub struct BlockWords<const M: usize> {
     /// Readers: the engagement blend's `ref_34`, the step-off latch's `b_motion`
     /// ([`crate::control_task`]) and the cyclic payload (`cyclic_state`).
     pub wheel_speed: [i16; M],
-    /// This board's period-based wheel rate (`specs/control.md` (o)): the period ISR's
+    /// Per-motor period-based wheel rate (`specs/control.md` (o)): the period ISR's
     /// `Commutation::rate_q`, the reciprocal of the periods between two same-direction hall
     /// edges in 1/4096 of a count (one count = one edge per 320-period window, `wheel_speed`'s
     /// unit), decaying as `1/t` between edges and 0 across a reversal. Same sign sense as
-    /// `wheel_speed`, the counter's own. Sent unscaled as `CyclicState::wheel_rate`.
+    /// `wheel_speed`, the counter's own. Sent unscaled as `CyclicState::wheel_rate` (motor 0) and
+    /// `CyclicMotor::wheel_rate` (motor 1).
     ///
-    /// Writer: the firmware's 250 Hz shell, from `motor::WHEEL_RATE_Q12`, beside `wheel_speed`. Reader:
-    /// the state-feedback law's speed term ([`control::sf_step`]), through the side mirror
-    /// (`control::wheel_forward`), and the cyclic builder, for the remote app's speed readout. The
-    /// recovered paths keep the count.
-    pub wheel_rate_q12: i32,
+    /// Writer: the firmware's 250 Hz shell, from `motor::WHEEL_RATE_Q12`, beside `wheel_speed`, one
+    /// row per motor the image drives (`M`). Readers: the state-feedback law's speed term
+    /// ([`control::sf_step`], motor 0's), through the side mirror (`control::wheel_forward`), and
+    /// the cyclic builders, for the remote app's speed readout. The recovered paths keep the count.
+    pub wheel_rate_q12: [i32; M],
     /// This board's SIGNED wheel position (`specs/state-feedback.md` section 3): the period ISR's
     /// `Commutation::pos_edges`, hall edges in the counter's own sense (the side mirror,
     /// `control::wheel_forward`, is the reader's), never cleared, wrapping, so a reader folds
@@ -259,7 +260,7 @@ impl<const M: usize> BlockWords<M> {
             roll_word: 0,
             pitch_rate: 0,
             wheel_speed: [0; M],
-            wheel_rate_q12: 0,
+            wheel_rate_q12: [0; M],
             wheel_pos: 0,
             battery: 0,
             gating_field: 0,
@@ -538,7 +539,7 @@ fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> 
     let inp = SfInputs {
         pitch_word: state.block.pitch_word,
         pitch_rate: state.block.pitch_rate,
-        wheel_rate_q12: state.block.wheel_rate_q12,
+        wheel_rate_q12: state.block.wheel_rate_q12[0],
         wheel_pos: state.block.wheel_pos,
         peer_pos: state.inbox.peer_wheel_pos().unwrap_or(0),
         role_right: state.block.role_right,
@@ -899,16 +900,36 @@ fn cyclic_state<const M: usize>(state: &OrchestratorState<M>) -> CyclicState {
         // sender's side (`LinkInbox::peer_wheel_pos`).
         wheel_pos: state.block.wheel_pos as i16,
         obs: CyclicObs {
-            phase_peak: state.phase.peak,
-            phase_mean: state.phase.mean,
-            duty_on: state.phase.duty_on,
+            phase_peak: state.phase[0].peak,
+            phase_mean: state.phase[0].mean,
+            duty_on: state.phase[0].duty_on,
             boot_tag: state.identity.boot_tag,
             chip: state.identity.chip,
             odometer: state.odometer,
         },
         // Unscaled, in the block's own Q12 (`specs/link-control.md`, `CYCLIC_STATE`).
-        wheel_rate: state.block.wheel_rate_q12,
+        wheel_rate: state.block.wheel_rate_q12[0],
         machine: state.machine.digest(),
+    }
+}
+
+/// Motor `motor`'s wheel words for the `CYCLIC_STATE` motor-1 block (`specs/link-control.md`, "The
+/// motor-1 block"): the same rows, read in the same pass, that [`cyclic_tx`] and
+/// [`ble_cyclic_tx`] put on the base for motor 0. A two-motor image appends `cyclic_motor(state,
+/// 1)` to each emission it builds; a one-motor image never calls it (the emitter is generic over
+/// `motor::COUNT`), so the block costs it nothing.
+///
+/// # Panics
+///
+/// If `motor >= M`.
+pub fn cyclic_motor<const M: usize>(state: &OrchestratorState<M>, motor: usize) -> CyclicMotor {
+    let phase = state.phase[motor];
+    CyclicMotor {
+        wheel_speed: state.block.wheel_speed[motor],
+        phase_peak: phase.peak,
+        phase_mean: phase.mean,
+        duty_on: phase.duty_on,
+        wheel_rate: state.block.wheel_rate_q12[motor],
     }
 }
 
