@@ -711,6 +711,27 @@ class ControlScreenTest {
         assertTrue("on the phase row", b.center.y > left.top && b.center.y < barBottom)
     }
 
+    /**
+     * With one board found only one phase readout is drawn, and the horn stays at the row's
+     * horizontal centre whichever side is empty, clear of the readout that is there.
+     */
+    @Test
+    fun theHornStaysCentredWithOnePhaseReadout() {
+        fun one(side: Int) = ride(armed = false, mode = DriveMode.SINGLE).copy(sides = mapOf(Wheel(0x01, 0) to side))
+        show(one(Fields.ControlSide.RIGHT), onHorn = {})
+        for ((side, present, absent) in listOf(
+            Triple(Fields.ControlSide.RIGHT, SlotSide.RIGHT, SlotSide.LEFT),
+            Triple(Fields.ControlSide.LEFT, SlotSide.LEFT, SlotSide.RIGHT),
+        )) {
+            update(one(side))
+            compose.onNodeWithTag(ridePhaseTag(absent)).assertDoesNotExist()
+            val b = bounds(HORN_TAG)
+            assertEquals("centred with $absent absent", bounds(RIDE_INSTRUMENTS_TAG).center.x, b.center.x, 1f)
+            val readout = bounds(ridePhaseTag(present))
+            assertTrue("clear of the $present readout", b.center.x < readout.left || b.center.x > readout.right)
+        }
+    }
+
     /** Held, the horn reports `true`; let go, `false`; and a horn that leaves under a finger lets go. */
     @Test
     fun theHornIsHeldWhilePressedAndReleasedOnLiftOrWhenItGoes() {

@@ -107,7 +107,7 @@ private fun DrawScope.hornGlyph(color: Color) {
     )
 }
 
-/** The drawn circle: it fits the 32 dp gap between the phase readouts. */
+/** The drawn circle: it sits in the 64 dp gap between the phase readouts with room on each side. */
 private val HORN_DIAMETER = 30.dp
 
 /** The touch target, at least 48 dp square. */

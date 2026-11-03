@@ -311,9 +311,11 @@ private fun MiniHorizon(attitude: Pair<Float, Float>?, size: Dp) {
 }
 
 /**
- * One phase bar per slot, the row inset 40 dp from each edge, the two 32 dp apart, and the horn
- * button centred in that gap when [onHorn] is given. The row alone sets the height and the bars'
- * widths: the horn is drawn over the row's bounds, so it takes nothing from them.
+ * One phase bar per slot, the row inset [PHASE_INSET] from each edge so the bars' outer ends meet
+ * the pad's, the two [PHASE_GAP] apart, and the horn button centred in that gap when [onHorn] is
+ * given. An empty slot keeps its half, so the gap and the horn stay at the row's centre with one
+ * board. The row alone sets the height and the bars' widths: the horn is drawn over the row's
+ * bounds, so it takes nothing from them.
  */
 @Composable
 private fun BoxScope.PhaseBars(state: UiState, top: Dp, onHorn: ((Boolean) -> Unit)?) {
@@ -429,6 +431,10 @@ private const val SYMBOL_INNER = 0.15f
 private const val CENTI = 100f
 /** The phase row's top, above the slot's bottom. */
 private val PHASE_FROM_BOTTOM = 32.dp
-private val PHASE_INSET = 40.dp
-private val PHASE_GAP = 32.dp
+
+/** The pad's side gutter, so the bars' outer ends line up with the pad's edges. */
+private val PHASE_INSET = 24.dp
+
+/** Room for the 30 dp horn circle with 17 dp clear on each side; each bar is as wide as before. */
+private val PHASE_GAP = 64.dp
 
