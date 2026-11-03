@@ -232,9 +232,15 @@ pub fn lead_table(leak_shift: u32) -> [u16; BINS] {
     // 6 edges a revolution times the window, over 2 pi, scaled by 1000.
     const Y: i32 = (6 * SPEED_WINDOW as i64 * 1_000_000_000 / 6_283_185) as i32;
     let mut t = [0u16; BINS];
-    for (k, e) in t.iter_mut().enumerate().skip(1) {
-        let x = (1000 * k as u32) << leak_shift.min(LEAK_SHIFT_MAX as u32);
-        *e = atan2_u16(Y, x as i32);
+    // A trip count the optimiser cannot see, so the fifteen `atan2` calls stay one loop rather
+    // than unrolling into the two-motor image's last few hundred bytes of flash; `get_mut` keeps
+    // the loop free of a bounds panic all the same. Cold: run on a parameter change only.
+    let n = core::hint::black_box(BINS);
+    let shift = leak_shift.min(LEAK_SHIFT_MAX as u32);
+    for k in 1..n {
+        if let Some(e) = t.get_mut(k) {
+            *e = atan2_u16(Y, ((1000 * k as u32) << shift) as i32);
+        }
     }
     t
 }

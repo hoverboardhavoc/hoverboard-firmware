@@ -1,5 +1,9 @@
 package com.hoverboard.protocol
 
+import com.hoverboard.protocol.board.BoardStatus
+import com.hoverboard.protocol.board.CurrentLimit
+import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
+import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.l2.FragHdr
 import com.hoverboard.protocol.l2.StreamFrame
 import com.hoverboard.protocol.l3.BROADCAST
@@ -17,14 +21,19 @@ import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.DriveCmd
+import com.hoverboard.protocol.linkctl.FocTrace
 import com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
+import com.hoverboard.protocol.linkctl.OP_FOC_TRACE
 import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.board.CurrentLimit
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
+import com.hoverboard.protocol.linkctl.OP_TRACE_SET
+import com.hoverboard.protocol.linkctl.TRACE_TIMEOUT_TICKS
+import com.hoverboard.protocol.linkctl.TraceSet
 import com.hoverboard.protocol.pincap.ADC0
 import com.hoverboard.protocol.pincap.ADC1
 import com.hoverboard.protocol.pincap.ADC2
@@ -36,20 +45,19 @@ import com.hoverboard.protocol.pincap.Inputs as PinInputs
 import com.hoverboard.protocol.pincap.Phase
 import com.hoverboard.protocol.pincap.Route
 import com.hoverboard.protocol.pincap.SWD
-import com.hoverboard.protocol.store.Names
-import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.store.ERASED_TAG
 import com.hoverboard.protocol.store.Fields
-import com.hoverboard.protocol.store.NO_PORT
 import com.hoverboard.protocol.store.Gains
+import com.hoverboard.protocol.store.NO_PORT
+import com.hoverboard.protocol.store.Names
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
+import java.io.File
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import java.io.File
 
 /**
  * The drift gate that actually reads the Rust.
@@ -658,6 +666,8 @@ class RustSourceDriftTest {
             "CYCLIC_STATE" to OP_CYCLIC_STATE,
             "DRIVE_CMD" to OP_DRIVE_CMD,
             "INPUTS" to OP_INPUTS,
+            "FOC_TRACE" to OP_FOC_TRACE,
+            "TRACE_SET" to OP_TRACE_SET,
         )
         assertEquals(fromRust, fromKotlin, "linkctl opcode allocation drifted from the Rust")
     }
@@ -810,6 +820,8 @@ class RustSourceDriftTest {
         assertEquals(len("CyclicState"), CyclicState.LEN, "CyclicState::LEN drifted")
         assertEquals(len("DriveCmd"), DriveCmd.LEN, "DriveCmd::LEN drifted")
         assertEquals(len("Inputs"), Inputs.LEN, "Inputs::LEN drifted")
+        assertEquals(len("FocTrace"), FocTrace.LEN, "FocTrace::LEN drifted")
+        assertEquals(len("TraceSet"), TraceSet.LEN, "TraceSet::LEN drifted")
 
         // The appended block's own length, and the payload's one on-wire length: the number above
         // is where the block starts, this one is what the wire carries.
@@ -901,6 +913,8 @@ class RustSourceDriftTest {
             // `Option` any more, and the type string is the gate: were the Rust to make it one
             // again, this map would not know the type and the comparison fails by name.
             "CyclicObs" to CyclicObs.LEN,
+            // `FocTrace::track`, one byte per speed bin.
+            "[u8; 16]" to 16,
         )
 
         val expected = mapOf(
@@ -921,6 +935,14 @@ class RustSourceDriftTest {
                 "kind" to "DriveKind", "value" to "i16", "steer" to "i16", "motor" to "u8",
             ),
             "Inputs" to listOf("buttons" to "u8", "rider" to "u8"),
+            "FocTrace" to listOf(
+                "window" to "u16", "id" to "i16", "iq" to "i16", "iqRef" to "i16", "vq" to "i16",
+                "hallAngle" to "u16", "obsAngle" to "u16", "errMean" to "i16", "errSpread" to "i16",
+                "fluxMag" to "u16", "speed" to "i16", "heldA" to "u8", "heldB" to "u8",
+                "coasted" to "u8", "cause" to "u8", "flags" to "u8", "method" to "u8",
+                "lockBin" to "u8", "motor" to "u8", "track" to "[u8; 16]",
+            ),
+            "TraceSet" to listOf("divisor" to "u8", "motor" to "u8"),
         )
         // The ENCODED length for the payload that has an appended block, because that is what its
         // fields add up to; the block's offset is checked by
@@ -931,6 +953,8 @@ class RustSourceDriftTest {
             "CyclicMotor" to CyclicMotor.LEN,
             "DriveCmd" to DriveCmd.LEN,
             "Inputs" to Inputs.LEN,
+            "FocTrace" to FocTrace.LEN,
+            "TraceSet" to TraceSet.LEN,
         )
 
         for ((name, want) in expected) {
@@ -1008,6 +1032,13 @@ class RustSourceDriftTest {
             "Inputs::BUTTON_POWER" to Inputs.BUTTON_POWER,
             "Inputs::BUTTON_HORN" to Inputs.BUTTON_HORN,
             "Inputs::RIDER_PRESENT" to Inputs.RIDER_PRESENT,
+            "FocTrace::FLAG_HALL_FAULT" to FocTrace.FLAG_HALL_FAULT,
+            "FocTrace::FLAG_TRACKED" to FocTrace.FLAG_TRACKED,
+            "FocTrace::FLAG_OBSERVER_SOURCE" to FocTrace.FLAG_OBSERVER_SOURCE,
+            "FocTrace::FLAG_IN_WINDOW" to FocTrace.FLAG_IN_WINDOW,
+            "TraceSet::RESET" to TraceSet.RESET,
+            "TraceSet::DIVISOR_MASK" to TraceSet.DIVISOR_MASK,
+            "TraceSet::DIVISOR_MIN" to TraceSet.DIVISOR_MIN,
         )
         assertEquals(rustPayloadBits(linkctl), fromKotlin, "the payload bit constants drifted from the Rust")
     }
@@ -1079,6 +1110,7 @@ class RustSourceDriftTest {
             "CYCLIC_TIMEOUT_TICKS" to CYCLIC_TIMEOUT_TICKS,
             "DRIVE_TIMEOUT_TICKS" to DRIVE_TIMEOUT_TICKS,
             "INPUTS_TIMEOUT_TICKS" to INPUTS_TIMEOUT_TICKS,
+            "TRACE_TIMEOUT_TICKS" to TRACE_TIMEOUT_TICKS,
         )
         assertEquals(fromRust, fromKotlin, "the supervision timeouts drifted from the Rust")
     }
@@ -2717,7 +2749,7 @@ class RustSourceDriftTest {
         const val MODULE_CONST_LINE = """^pub(?:\([^)]*\))?\s+const\s+\w+\s*:\s*+(?!usize\b)"""
 
         /** The payload types whose impl blocks carry the wire bits; see [rustPayloadBits]. */
-        val PAYLOADS = listOf("CyclicState", "CyclicObs", "DriveCmd", "Inputs")
+        val PAYLOADS = listOf("CyclicState", "CyclicObs", "DriveCmd", "Inputs", "FocTrace", "TraceSet")
 
         /** A module-level public constant, by name; see [moduleConstNames]. */
         const val MODULE_CONST = """^pub(?:\([^)]*\))?\s+const\s+(\w+)\s*:"""

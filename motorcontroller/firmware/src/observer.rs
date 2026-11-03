@@ -10,8 +10,11 @@
 #![cfg_attr(not(target_os = "none"), allow(dead_code))]
 
 use crate::motor;
-use commutation::observer::{BusScale, ObserverParams, LEAK_SHIFT_MAX, LEAK_SHIFT_MIN, RATIO_ONE};
+use commutation::observer::{
+    self as obs, BusScale, ObserverParams, BINS, LEAK_SHIFT_MAX, LEAK_SHIFT_MIN, RATIO_ONE,
+};
 use control::TuneError;
+use linkctl::FocTrace;
 use store::{OBSERVER_MODEL, OBSERVER_SHADOW};
 
 /// `motors.<i>.observer.model`'s words per motor.
@@ -70,6 +73,15 @@ fn slot(field_id: u8, index: u8) -> Option<(usize, usize)> {
     };
     let m = index as usize / n;
     (m < motor::COUNT).then_some((m, base + index as usize % n))
+}
+
+/// `m` as an index into the per-motor arrays: itself when this image has the motor, else motor 0.
+fn motor_index(m: usize) -> usize {
+    if m < motor::COUNT {
+        m
+    } else {
+        0
+    }
 }
 
 /// Read every motor's two fields from the store, unclamped (the shadow clamps). Out of line: the
@@ -191,6 +203,11 @@ impl ObserverLoop {
         }
     }
 
+    /// Motor `m`'s `min_windows`, the bin-measured threshold the `FOC_TRACE` bytes are taken at.
+    pub fn min_windows(&self, m: usize) -> u16 {
+        self.live[motor_index(m)][MODEL_WORDS + obs::SHADOW_MIN_WINDOWS].max(1) as u16
+    }
+
     /// The ISR's parameters for every motor, from the live words.
     pub fn params(&self) -> [ObserverParams; motor::COUNT] {
         core::array::from_fn(|m| {
@@ -202,6 +219,99 @@ impl ObserverLoop {
             ObserverParams::derive(model, shadow, self.current_cal[m], self.dead_ticks[m])
         })
     }
+}
+
+/// The words of one motor a `FOC_TRACE` frame is packed from, as the period ISR published them
+/// (`specs/link-control.md`, "`FOC_TRACE` (0x15, 46 B)"): `CTRL_OBS` words 48 to 50 and 52 to 54
+/// of that motor, its speed, fault and state words, and the period counter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TraceWords {
+    /// [`motor::OBS_FOC_DQ`]: `id` low, `iq` high.
+    pub dq: u32,
+    /// [`motor::OBS_FOC_REF`]: `iq_ref` low, `vq` high.
+    pub ref_vq: u32,
+    /// [`motor::OBS_FOC_HOLD`].
+    pub hold: u32,
+    /// [`motor::OBS_FOC_ANGLES`].
+    pub angles: u32,
+    /// [`motor::OBS_FOC_TRACK`].
+    pub track: u32,
+    /// [`motor::OBS_FOC_FLUX`].
+    pub flux: u32,
+    /// [`motor::SPEED`].
+    pub speed: i32,
+    /// [`motor::FAULT`].
+    pub fault: u32,
+    /// [`motor::OBS_STATE`].
+    pub state: u32,
+    /// [`motor::PERIODS`].
+    pub periods: u32,
+}
+
+/// Motor `m`'s words, loaded.
+pub fn trace_words(m: usize) -> TraceWords {
+    use core::sync::atomic::Ordering::Relaxed;
+    let m = motor_index(m);
+    TraceWords {
+        dq: motor::OBS_FOC_DQ[m].load(Relaxed),
+        ref_vq: motor::OBS_FOC_REF[m].load(Relaxed),
+        hold: motor::OBS_FOC_HOLD[m].load(Relaxed),
+        angles: motor::OBS_FOC_ANGLES[m].load(Relaxed),
+        track: motor::OBS_FOC_TRACK[m].load(Relaxed),
+        flux: motor::OBS_FOC_FLUX[m].load(Relaxed),
+        speed: motor::SPEED[m].load(Relaxed),
+        fault: motor::FAULT[m].load(Relaxed),
+        state: motor::OBS_STATE[m].load(Relaxed),
+        periods: motor::PERIODS[m].load(Relaxed),
+    }
+}
+
+/// The window counter the trace's cadence runs on: the 64-period closes so far.
+pub fn trace_window(periods: u32) -> u16 {
+    (periods >> motor::PERIODS_PER_TICK_SHIFT) as u16
+}
+
+/// One `FOC_TRACE` frame for `motor` from its words and its tracking table's bins (`bins[k]`,
+/// seen low and tracked high), the bytes taken at `min_windows`.
+pub fn pack_trace(w: &TraceWords, bins: &[u32; BINS], min_windows: u16, motor: u8) -> FocTrace {
+    let pair = |x: u32| (x as u16 as i16, (x >> 16) as u16 as i16);
+    let (id, iq) = pair(w.dq);
+    let (iq_ref, vq) = pair(w.ref_vq);
+    let (err_mean, err_spread) = pair(w.track);
+    let hi = (w.flux >> 16) as u16;
+    let flag = |on: bool, bit: u8| if on { bit } else { 0 };
+    FocTrace {
+        window: trace_window(w.periods),
+        id,
+        iq,
+        iq_ref,
+        vq,
+        hall_angle: w.angles as u16,
+        obs_angle: (w.angles >> 16) as u16,
+        err_mean,
+        err_spread,
+        flux_mag: w.flux as u16,
+        speed: motor::wheel_speed_word(w.speed),
+        held_a: w.hold as u8,
+        held_b: (w.hold >> 8) as u8,
+        coasted: (w.hold >> 16) as u8,
+        cause: (w.hold >> 24) as u8,
+        flags: flag(w.fault & motor::FAULT_HALL != 0, FocTrace::FLAG_HALL_FAULT)
+            | flag(hi & obs::TRACK_TRACKED != 0, FocTrace::FLAG_TRACKED)
+            | flag(hi & obs::TRACK_SOURCE != 0, FocTrace::FLAG_OBSERVER_SOURCE)
+            | flag(hi & obs::TRACK_IN_WINDOW != 0, FocTrace::FLAG_IN_WINDOW),
+        method: (w.state >> 16) as u8,
+        lock_bin: hi as u8,
+        motor,
+        track: bins.map(|b| obs::track_byte(b, min_windows)),
+    }
+}
+
+/// Motor `m`'s frame, from what the period ISR published.
+pub fn trace_frame(m: usize, min_windows: u16) -> FocTrace {
+    let table = &motor::OBS_TRACK_TABLE[motor_index(m)];
+    let bins = core::array::from_fn(|k| table.word(k));
+    pack_trace(&trace_words(m), &bins, min_windows, m as u8)
 }
 
 #[cfg(test)]
@@ -306,6 +416,7 @@ mod tests {
         );
         assert_eq!(p, want);
         assert_eq!(motor::dead_time_ticks(28), 56);
+        assert_eq!(o.min_windows(0), 64);
     }
 
     /// The store read: an empty store reads the registered defaults for every motor, and a motor's
@@ -349,5 +460,64 @@ mod tests {
         let borrowing = ObserverLoop::of_stored([defaults(); motor::COUNT], None);
         assert_eq!(borrowing.bus_scale(0, 3100), BusScale::word(3100));
         assert_eq!(borrowing.bus_scale(0, 0), BusScale::NONE);
+    }
+
+    /// A frame packs the published words field for field (`specs/link-control.md`, "`FOC_TRACE`"),
+    /// the flags from the fault word and word 54's high half, and the bins at `min_windows`.
+    #[test]
+    fn a_trace_frame_packs_the_published_words() {
+        let w = TraceWords {
+            dq: motor::pack_i16_pair(-2, 300),
+            ref_vq: motor::pack_i16_pair(0x0102, -31_999),
+            hold: motor::pack_foc_hold([18, 27], 5, 0x2A << 24),
+            angles: 0xA0B0_ABCD,
+            track: motor::pack_i16_pair(-273, 182),
+            flux: (((4 | obs::TRACK_TRACKED | obs::TRACK_IN_WINDOW) as u32) << 16) | 21_000,
+            speed: -7,
+            fault: motor::FAULT_HALL,
+            state: motor::pack_obs_state(3, [true; 3], 2, 0),
+            periods: 0x1234 << 6 | 17,
+        };
+        let mut bins = [0u32; BINS];
+        bins[4] = 100 | 50 << 16;
+        bins[5] = 63 | 63 << 16;
+        let f = pack_trace(&w, &bins, 64, 1);
+        assert_eq!(
+            (f.window, f.id, f.iq, f.iq_ref, f.vq),
+            (0x1234, -2, 300, 0x0102, -31_999)
+        );
+        assert_eq!(
+            (
+                f.hall_angle,
+                f.obs_angle,
+                f.err_mean,
+                f.err_spread,
+                f.flux_mag
+            ),
+            (0xABCD, 0xA0B0, -273, 182, 21_000)
+        );
+        assert_eq!(
+            (f.speed, f.held_a, f.held_b, f.coasted, f.cause),
+            (-7, 18, 27, 5, 0x2A)
+        );
+        assert_eq!(
+            f.flags,
+            FocTrace::FLAG_HALL_FAULT | FocTrace::FLAG_TRACKED | FocTrace::FLAG_IN_WINDOW
+        );
+        assert_eq!((f.method, f.lock_bin, f.motor), (2, 4, 1));
+        assert_eq!(f.track[4], 125);
+        assert_eq!(f.track[5], 255, "63 windows is not measured at 64");
+        assert_eq!(f.track[0], 255);
+        // A speed past i16 saturates, the word 24 narrowing.
+        let f = pack_trace(
+            &TraceWords {
+                speed: 1 << 20,
+                ..w
+            },
+            &bins,
+            64,
+            0,
+        );
+        assert_eq!(f.speed, i16::MAX);
     }
 }

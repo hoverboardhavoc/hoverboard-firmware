@@ -14,10 +14,14 @@ import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.linkctl.DriveCmd
 import com.hoverboard.protocol.linkctl.DriveKind
+import com.hoverboard.protocol.linkctl.FocTrace
 import com.hoverboard.protocol.linkctl.Inputs
 import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
+import com.hoverboard.protocol.linkctl.OP_FOC_TRACE
 import com.hoverboard.protocol.linkctl.OP_INPUTS
+import com.hoverboard.protocol.linkctl.OP_TRACE_SET
+import com.hoverboard.protocol.linkctl.TraceSet
 import com.hoverboard.protocol.linkctl.decodeControl
 import com.hoverboard.protocol.store.Type
 import org.junit.jupiter.api.Assertions.assertArrayEquals
@@ -87,6 +91,8 @@ class WireDriftTest {
         assertEquals(0x10, OP_CYCLIC_STATE, "shared/linkctl/src/lib.rs, OP_CYCLIC_STATE")
         assertEquals(0x11, OP_DRIVE_CMD, "shared/linkctl/src/lib.rs, OP_DRIVE_CMD")
         assertEquals(0x12, OP_INPUTS, "shared/linkctl/src/lib.rs, OP_INPUTS")
+        assertEquals(0x15, OP_FOC_TRACE, "shared/linkctl/src/lib.rs, OP_FOC_TRACE")
+        assertEquals(0x16, OP_TRACE_SET, "shared/linkctl/src/lib.rs, OP_TRACE_SET")
     }
 
     /**
@@ -159,6 +165,8 @@ class WireDriftTest {
         assertEquals(16, CyclicState.LEN, "shared/linkctl/src/lib.rs, CyclicState::LEN")
         assertEquals(6, DriveCmd.LEN, "shared/linkctl/src/lib.rs, DriveCmd::LEN")
         assertEquals(2, Inputs.LEN, "shared/linkctl/src/lib.rs, Inputs::LEN")
+        assertEquals(46, FocTrace.LEN, "shared/linkctl/src/lib.rs, FocTrace::LEN")
+        assertEquals(2, TraceSet.LEN, "shared/linkctl/src/lib.rs, TraceSet::LEN")
     }
 
     /**
@@ -478,6 +486,11 @@ class WireDriftTest {
             com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS,
             "shared/linkctl/src/lib.rs, INPUTS_TIMEOUT_TICKS",
         )
+        assertEquals(
+            375,
+            com.hoverboard.protocol.linkctl.TRACE_TIMEOUT_TICKS,
+            "shared/linkctl/src/lib.rs, TRACE_TIMEOUT_TICKS",
+        )
         assertTrue(
             com.hoverboard.protocol.linkctl.INPUTS_TIMEOUT_TICKS >
                 com.hoverboard.protocol.linkctl.DRIVE_TIMEOUT_TICKS,
@@ -783,5 +796,46 @@ class WireDriftTest {
 
         /** The bridge's largest notification, `NOTIFY_MAX` in `bridge/core/src/router.rs`. */
         const val NOTIFY_MAX = 20
+    }
+
+    /**
+     * `FOC_TRACE`'s golden vector (`shared/linkctl/src/lib.rs`,
+     * `foc_trace_encodes_to_the_pinned_bytes_and_back`), decoded field for field; a short payload
+     * is refused and a trailing byte ignored.
+     */
+    @Test
+    fun focTraceWireLayoutMatchesTheRustGoldenVector() {
+        val bytes = intArrayOf(
+            0x34, 0x12, 0xFE, 0xFF, 0x2C, 0x01, 0x02, 0x01, 0x01, 0x83, 0xCD, 0xAB, 0xB0, 0xA0,
+            0xEF, 0xFE, 0xB6, 0x00, 0x08, 0x52, 0xF9, 0xFF, 18, 27, 5, 0x2A, 0x0A, 2, 4, 1,
+            255, 255, 255, 255, 250, 249, 0, 125, 1, 2, 3, 4, 5, 6, 7, 255,
+        ).map { it.toByte() }.toByteArray()
+        val want = FocTrace(
+            window = 0x1234, id = -2, iq = 300, iqRef = 0x0102, vq = -31_999, hallAngle = 0xABCD,
+            obsAngle = 0xA0B0, errMean = -273, errSpread = 182, fluxMag = 21_000, speed = -7,
+            heldA = 18, heldB = 27, coasted = 5, cause = 0x2A,
+            flags = FocTrace.FLAG_TRACKED or FocTrace.FLAG_IN_WINDOW, method = 2, lockBin = 4, motor = 1,
+            track = listOf(255, 255, 255, 255, 250, 249, 0, 125, 1, 2, 3, 4, 5, 6, 7, 255),
+        )
+        assertEquals(want, FocTrace.decode(bytes))
+        assertNull(FocTrace.decode(bytes.copyOf(FocTrace.LEN - 1)))
+        assertEquals(want, FocTrace.decode(bytes + byteArrayOf(0x55)))
+        assertEquals(0x02, FocTrace.FLAG_TRACKED, "shared/linkctl/src/lib.rs, FocTrace::FLAG_TRACKED")
+    }
+
+    /**
+     * `TRACE_SET`'s golden vector (`trace_set_encodes_to_the_pinned_bytes_and_back` in
+     * `shared/linkctl/src/lib.rs`): divisor 25 with the reset bit, motor 1.
+     */
+    @Test
+    fun traceSetWireLayoutMatchesTheRustGoldenVector() {
+        val s = TraceSet(divisor = TraceSet.RESET or 25, motor = 1)
+        assertArrayEquals(byteArrayOf(0x99.toByte(), 0x01), s.encode())
+        assertEquals(s, TraceSet.decode(s.encode()))
+        assertEquals(
+            com.hoverboard.protocol.linkctl.ControlPayload.Trace(s),
+            decodeControl(OP_TRACE_SET, s.encode()),
+        )
+        assertNull(decodeControl(OP_FOC_TRACE, ByteArray(FocTrace.LEN)), "a board's to send")
     }
 }

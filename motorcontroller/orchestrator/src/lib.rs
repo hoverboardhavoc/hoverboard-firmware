@@ -367,6 +367,9 @@ impl<const M: usize> LinkInbox<M> {
                 self.remote_src = Some(src);
                 self.remote_age = 0;
             }
+            // Not the control block's: the firmware's loop takes `TRACE_SET` before the inbox
+            // (`specs/link-control.md`, "`TRACE_SET`").
+            Payload::TraceSet(_) => {}
         }
     }
 

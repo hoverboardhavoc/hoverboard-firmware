@@ -94,6 +94,7 @@ use hoverboard_cli::names;
 use hoverboard_cli::nodes::{self, class_name, Found, Walked, CLASS_MOTOR};
 use hoverboard_cli::route::{self, Purpose, Route, Via};
 use hoverboard_cli::target::{self, check_class, class_of, label, node_name, Target};
+use hoverboard_cli::trace;
 use hoverboard_cli::transport::{Serial, Tcp};
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 
@@ -2115,6 +2116,80 @@ fn session(
     }
 }
 
+/// `board trace` (`specs/flux-observer.md`, "Two instruments read it"): subscribe `target` to its
+/// `FOC_TRACE` stream for `motor`, renew at 2 Hz, print a line a frame and write each to `csv`, for
+/// `secs` or until Ctrl-C; then `TRACE_SET` 0 three times, the `drive` command's stop pattern.
+fn board_trace(
+    link: &Link,
+    target: &str,
+    motor: u8,
+    secs: Option<u64>,
+    csv: Option<&str>,
+    reset: bool,
+) -> Result<(), String> {
+    use std::io::Write as _;
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed)).map_err(|e| e.to_string())?;
+    let mut out = match csv {
+        Some(path) => {
+            let mut f = std::fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
+            writeln!(f, "{}", trace::csv_header()).map_err(|e| format!("{path}: {e}"))?;
+            Some((path, f))
+        }
+        None => None,
+    };
+    let mut wire = wire_on(link)?;
+    let (src, boards) = guest_boards(&mut wire, &[target.to_string()])?;
+    let board = *boards.first().ok_or("no board")?;
+    eprintln!(
+        "tracing {board:#04x} motor {motor} every {} windows; Ctrl-C to stop",
+        trace::CONSOLE_DIVISOR
+    );
+    let mut tr = trace::Trace::new(src, board, motor, reset);
+    let end = secs.map(Duration::from_secs);
+    let (mut frames, mut last_window): (u32, Option<u16>) = (0, None);
+    let mut gaps = 0u32;
+    let t0 = Instant::now();
+    loop {
+        let at = t0.elapsed();
+        if stop.load(Ordering::Relaxed) || end.is_some_and(|e| at >= e) {
+            break;
+        }
+        if let Some(f) = tr.due(at) {
+            wire.send(&f);
+        }
+        let wait = tr.next_due().saturating_sub(t0.elapsed()).min(POLL);
+        let Some(pkt) = wire.recv(wait) else { continue };
+        let Some(f) = tr.frame(&pkt) else { continue };
+        let at = t0.elapsed();
+        // A step of more than the divisor is a window the stream skipped (a refused frame).
+        if let Some(w) = last_window {
+            if f.window.wrapping_sub(w) > trace::CONSOLE_DIVISOR as u16 {
+                gaps += 1;
+            }
+        }
+        last_window = Some(f.window);
+        frames += 1;
+        println!("{}", trace::line(at, &f));
+        if let Some((path, file)) = out.as_mut() {
+            writeln!(file, "{}", trace::csv_row(at, &f)).map_err(|e| format!("{path}: {e}"))?;
+        }
+    }
+    for _ in 0..STOP_REPEATS {
+        wire.send(&tr.stop());
+        std::thread::sleep(STOP_GAP);
+    }
+    if stop.load(Ordering::Relaxed) {
+        eprintln!("interrupted");
+    }
+    println!(
+        "{frames} frames, {gaps} gaps, in {:.1} s; TRACE_SET 0 sent",
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 /// A `CONFIG_RESP` status as the exit outcome: anything but ok fails the command.
 fn config_outcome(status: u8) -> Result<(), String> {
     if status == net::walk::CFG_OK {
@@ -2352,6 +2427,13 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             println!("neutral sent, power 0 sent");
             print_summary(&tally, elapsed);
         }
+        Command::Trace {
+            target,
+            motor,
+            secs,
+            csv,
+            reset,
+        } => board_trace(link, &target, motor, secs, csv.as_deref(), reset)?,
         Command::BridgeInfo { target } => {
             let mut c = bridge_client(link, &target, true)?;
             print_info(&c.info().map_err(|e| e.to_string())?);

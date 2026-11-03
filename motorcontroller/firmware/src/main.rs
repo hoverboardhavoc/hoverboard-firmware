@@ -635,6 +635,9 @@ mod firmware {
         /// arm row gives them the calibration, and every change installs the derived parameters
         /// into the period ISR (`motor::hw::install_observer`).
         observer: crate::observer::ObserverLoop,
+        /// The `FOC_TRACE` subscription (`specs/link-control.md`, "`TRACE_SET`"): set by the
+        /// hand-back's `TRACE_SET`, read by the service loop's emitter ([`emit_trace`]).
+        trace: linkctl::TraceSubscription,
         /// The period ISR's over-current trip count as of the previous control run: a change
         /// raises the motor-0 fault latch (`specs/motor-integration.md`, "The hard trip").
         last_trips: [u32; motor::COUNT],
@@ -1916,6 +1919,7 @@ mod firmware {
                 alarm: tones::BatteryAlarm::new(),
                 battery_warn,
                 observer,
+                trace: linkctl::TraceSubscription::new(),
             });
         }
     }
@@ -2027,6 +2031,10 @@ mod firmware {
         };
         // SAFETY: main-thread context (the loop's drain), same discipline as the callbacks.
         if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
+            if let linkctl::Payload::TraceSet(t) = payload {
+                trace_set(shell, t);
+                return;
+            }
             if let (linkctl::Payload::CyclicState(c), Some(link)) =
                 (&payload, ingress.checked_sub(PORT_IDX_LINK0))
             {
@@ -2036,6 +2044,59 @@ mod firmware {
             // to the node that armed the board, so a second controller's traffic cannot hold a
             // rider's arm alive (`LinkInbox::refreshes_mirror`).
             shell.orch.inbox.accept(d.src, payload);
+        }
+    }
+
+    /// A `TRACE_SET` (`specs/link-control.md`, "`TRACE_SET` (0x16, 2 B)"): the subscription at
+    /// this tick, refused for a motor this board did not bring up, and the reset bit handed to the
+    /// period ISR as a clear of that motor's tracking table at its next window close. Out of line:
+    /// it runs on a subscriber's 2 Hz keepalive, not in the loop's steady pass.
+    #[inline(never)]
+    fn trace_set(shell: &mut Shell, t: linkctl::TraceSet) {
+        let up = motor::OBS_STATE
+            .get(t.motor as usize)
+            .is_some_and(|s| motor::obs_configured(s.load(Ordering::Relaxed)));
+        let now = TICK_COUNT.load(Ordering::Relaxed);
+        if let Some(m) = shell.trace.apply(t, now, up) {
+            if let Some(r) = motor::OBS_TRACK_RESET.get(m as usize) {
+                r.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The `FOC_TRACE` emitter (`specs/link-control.md`, "Emission"): on the first pass after a
+    /// window close whose counter is the divisor past the last emission, one frame of the
+    /// subscribed motor to the attached host (`dst` 0x00) on the mailbox port, all-or-nothing into
+    /// the ring (a refused frame counts in word 34 and is dropped). Gated on a host draining the
+    /// ring AND a live subscription: with either missing, nothing is packed and nothing written.
+    /// Out of line, off the service loop's zero-wait placement.
+    #[inline(never)]
+    fn emit_trace(mailbox: &mut MailboxLink, src: u8, pdu: &mut [u8]) {
+        if !mailbox.transport().serial().outbound_has_consumer() {
+            return;
+        }
+        // SAFETY: main-thread context, after dispatch returned; the borrow ends with this function,
+        // and nothing it calls touches the shell.
+        let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
+            return;
+        };
+        let window = crate::observer::trace_window(motor::PERIODS[0].load(Ordering::Relaxed));
+        let Some(m) = shell.trace.due(window, TICK_COUNT.load(Ordering::Relaxed)) else {
+            return;
+        };
+        let m = m as usize;
+        let frame = crate::observer::trace_frame(m, shell.observer.min_windows(m));
+        let mut payload = [0u8; linkctl::FocTrace::LEN];
+        let n = frame.encode(&mut payload);
+        if let Ok(p) = net::Pdu::new(
+            linkctl::OP_FOC_TRACE,
+            src,
+            net::pdu::NO_ADDRESS,
+            &payload[..n],
+        ) {
+            if let Ok(len) = p.encode(pdu) {
+                let _ = mailbox.send(&pdu[..len]);
+            }
         }
     }
 
@@ -2064,40 +2125,42 @@ mod firmware {
         let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
             return;
         };
-        if crate::observer::ObserverLoop::owns(key.field_id) {
-            // The flux observer's words (`specs/flux-observer.md`, "Fields"): live in RAM, the
-            // parameters re-derived and installed on a write, no flash touched.
-            let o = &mut shell.observer;
-            let (status, value) = match op {
-                net::TuneOp::Refuse(status) => (status, None),
-                net::TuneOp::Read => match o.get(key.field_id, key.index) {
+        // The flux observer owns its two fields' keys (`specs/flux-observer.md`, "Fields"): live in
+        // RAM, the parameters re-derived and installed on a write, no flash touched. The gain
+        // shadow owns the rest.
+        let observer = crate::observer::ObserverLoop::owns(key.field_id);
+        let o = &mut shell.observer;
+        let gains = &mut shell.orch.ctl.gains;
+        let (status, value) = match op {
+            net::TuneOp::Refuse(status) => (status, None),
+            net::TuneOp::Read => {
+                let v = if observer {
+                    o.get(key.field_id, key.index)
+                } else {
+                    gains.get(key.field_id, key.index)
+                };
+                match v {
                     Some(v) => (net::walk::CFG_OK, Some(v)),
                     None => (net::walk::CFG_UNKNOWN_KEY, None),
-                },
-                net::TuneOp::Write(v) => match o.set(key.field_id, key.index, v) {
+                }
+            }
+            net::TuneOp::Write(v) => {
+                let r = if observer {
+                    o.set(key.field_id, key.index, v)
+                } else {
+                    gains.set(key.field_id, key.index, v)
+                };
+                match r {
                     Ok(()) => {
-                        motor::hw::install_observer(&o.params());
+                        if observer {
+                            motor::hw::install_observer(&o.params());
+                        }
                         (net::walk::CFG_OK, Some(v))
                     }
                     Err(control::TuneError::UnknownKey) => (net::walk::CFG_UNKNOWN_KEY, None),
                     Err(control::TuneError::OutOfRange) => (net::walk::CFG_BAD, None),
-                },
-            };
-            responder.reply_tune(d.src, key, status, value, out);
-            return;
-        }
-        let gains = &mut shell.orch.ctl.gains;
-        let (status, value) = match op {
-            net::TuneOp::Refuse(status) => (status, None),
-            net::TuneOp::Read => match gains.get(key.field_id, key.index) {
-                Some(v) => (net::walk::CFG_OK, Some(v)),
-                None => (net::walk::CFG_UNKNOWN_KEY, None),
-            },
-            net::TuneOp::Write(v) => match gains.set(key.field_id, key.index, v) {
-                Ok(()) => (net::walk::CFG_OK, Some(v)),
-                Err(control::TuneError::UnknownKey) => (net::walk::CFG_UNKNOWN_KEY, None),
-                Err(control::TuneError::OutOfRange) => (net::walk::CFG_BAD, None),
-            },
+                }
+            }
         };
         responder.reply_tune(d.src, key, status, value, out);
     }
@@ -3186,6 +3249,10 @@ mod firmware {
                     );
                 }
             }
+
+            // 8c. The FOC trace, on a subscription (`specs/link-control.md`, "`FOC_TRACE`"): one
+            //     frame on the first pass after the window that falls due, into the same ring.
+            emit_trace(mailbox_link, responder.addr(), &mut pdu);
 
             // Sample the mailbox port's dropped-frame count into its OBS crossing, the same
             // read-through-the-link the inter-board port gets above. Sampled HERE, after the last

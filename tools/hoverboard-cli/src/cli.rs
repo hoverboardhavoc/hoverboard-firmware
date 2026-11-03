@@ -237,6 +237,20 @@ pub enum Command {
         /// every motor controller when empty.
         targets: Vec<String>,
     },
+    /// `board trace` (`specs/flux-observer.md`, "Two instruments read it"): the `FOC_TRACE`
+    /// subscription, a line a frame, and the CSV.
+    Trace {
+        /// The board.
+        target: String,
+        /// `--motor`: the motor traced, 0 by default.
+        motor: u8,
+        /// `--secs`: how long; until Ctrl-C when not given.
+        secs: Option<u64>,
+        /// `--csv`: the file the frames are written to.
+        csv: Option<String>,
+        /// `--reset`: clear the board's tracking table with the first `TRACE_SET`.
+        reset: bool,
+    },
     /// `bridge info`: `ESP_INFO`.
     BridgeInfo {
         /// The bridge.
@@ -305,6 +319,7 @@ pub const USAGE: &str =
   board update <board> <bundle> [--image NAME] [--yes] | flash <board> <elf>
   board disarm|halt|resume|reset|reset-halt <board> | target-id <board> | recover
   board read <board> <addr> <len> [--hz N] | write <board> <addr> <hex>
+  board trace <board> [--motor N] [--secs N] [--csv FILE] [--reset]
   machine nodes | get <path> | set <path> <value> [--force] | dump <file> [--from <board>]
   machine apply <file> [--map <uid>=<board>]... [--force]
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
@@ -325,9 +340,12 @@ const FLAGS: &[&str] = &[
     "--json",
     "--no-confirm",
     "--dirty",
+    "--reset",
 ];
 /// The command options that take a value.
-const VALUED: &[&str] = &["--secs", "--from", "--map", "--hz", "--image"];
+const VALUED: &[&str] = &[
+    "--secs", "--from", "--map", "--hz", "--image", "--motor", "--csv",
+];
 
 /// The command's own options, as given.
 #[derive(Default)]
@@ -338,6 +356,8 @@ struct Opts<'a> {
     from: Option<&'a str>,
     image: Option<&'a str>,
     maps: Vec<&'a str>,
+    motor: Option<&'a str>,
+    csv: Option<&'a str>,
 }
 
 impl Opts<'_> {
@@ -355,7 +375,9 @@ impl Opts<'_> {
             .chain(self.hz.map(|_| "--hz"))
             .chain(self.from.map(|_| "--from"))
             .chain(self.image.map(|_| "--image"))
-            .chain(self.maps.iter().map(|_| "--map"));
+            .chain(self.maps.iter().map(|_| "--map"))
+            .chain(self.motor.map(|_| "--motor"))
+            .chain(self.csv.map(|_| "--csv"));
         given.into_iter().all(|o| allowed.contains(&o))
     }
 }
@@ -398,6 +420,8 @@ pub fn parse(args: &[String]) -> (bool, Result<Invocation, String>) {
                     "--hz" => opts.hz = Some(v),
                     "--from" => opts.from = Some(v),
                     "--image" => opts.image = Some(v),
+                    "--motor" => opts.motor = Some(v),
+                    "--csv" => opts.csv = Some(v),
                     _ => opts.maps.push(v),
                 },
                 None => {
@@ -712,6 +736,19 @@ fn node_command(
                 },
             })
         }
+        ("trace", [t]) if board => {
+            ok(&["--motor", "--secs", "--csv", "--reset"])?;
+            Ok(Command::Trace {
+                target: target(t),
+                motor: match o.motor {
+                    Some(m) => m.parse().map_err(|_| format!("not a motor: {m}"))?,
+                    None => 0,
+                },
+                secs: o.secs.map(parse_secs).transpose()?,
+                csv: o.csv.map(str::to_string),
+                reset: o.has("--reset"),
+            })
+        }
         ("write", [t, addr, hex]) if board => {
             let (addr, data) = (parse_u32(addr)?, parse_hex(hex)?);
             if addr % 4 != 0 || data.len() % 4 != 0 {
@@ -924,6 +961,28 @@ mod tests {
             ),
             ("id", "board target-id rover-left", swd(Swd::TargetId)),
             ("recover", "board recover", Command::Recover),
+            (
+                "trace",
+                "board trace rover-left --motor 1 --csv run.csv --reset",
+                Command::Trace {
+                    target: s("rover-left"),
+                    motor: 1,
+                    secs: None,
+                    csv: Some(s("run.csv")),
+                    reset: true,
+                },
+            ),
+            (
+                "trace (defaults, timed)",
+                "board trace 0x01 --secs 30",
+                Command::Trace {
+                    target: s("0x01"),
+                    motor: 0,
+                    secs: Some(30),
+                    csv: None,
+                    reset: false,
+                },
+            ),
             (
                 "watch",
                 "machine watch 2 0x01 rover-right",
