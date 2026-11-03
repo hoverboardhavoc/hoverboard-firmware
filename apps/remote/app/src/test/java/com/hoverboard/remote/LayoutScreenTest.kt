@@ -127,7 +127,7 @@ class LayoutScreenTest {
         show(state(staged = staged), actions = actions)
 
         compose.onNodeWithText(
-            s(R.string.layout_delta_line, s(R.string.layout_field_buzzer), "PB9", "PB5"),
+            s(R.string.layout_delta_line, s(R.string.layout_field_buzzer), s(R.string.layout_absent), "PB5"),
         ).assertExists()
         compose.onNodeWithTag(LAYOUT_APPLY_TAG).performScrollTo().assertIsEnabled().performClick()
         assertEquals(listOf("shown", "apply"), actions.calls)
@@ -165,7 +165,7 @@ class LayoutScreenTest {
     @Test
     fun thePickerOffersThePartsFreePins() {
         val actions = Recorder()
-        show(state(), actions = actions)
+        show(state(staged = blank.with(slot(Fields.BOARD_BUZZER), pin("PB9"))), actions = actions)
         val key = slot(Fields.LED_GREEN).key
 
         compose.onNodeWithTag(layoutChangeTag(key)).performScrollTo().performClick()
@@ -206,7 +206,10 @@ class LayoutScreenTest {
         val key = slot(Fields.BOARD_SELF_HOLD).key
 
         compose.onNodeWithTag(layoutRowTag(key)).performScrollTo().assertIsDisplayed()
-        compose.onNode(hasText("PB12") and hasAnyAncestor(hasTestTag(layoutRowTag(key)))).assertExists()
+        // Not stored, it reads as not set: no fleet pin stands in for it (`specs/no-fleet-pins.md` section 2).
+        val inRow = hasAnyAncestor(hasTestTag(layoutRowTag(key)))
+        compose.onNode(hasText(s(R.string.layout_absent)) and inRow).assertExists()
+        compose.onNode(hasText("PB12") and inRow).assertDoesNotExist()
         compose.onNodeWithTag(layoutChangeTag(key)).assertDoesNotExist()
         compose.onNodeWithText(s(R.string.layout_note_self_hold)).assertExists()
     }

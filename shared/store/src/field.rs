@@ -234,36 +234,20 @@ impl BlobField {
 /// the host tools read and write it as a [`Value`] and the firmware decodes the stored bytes in its
 /// one boot pass.
 ///
-/// **A key that is not stored is an absent function**, unless the field names a fleet pin as its
-/// default ([`PinField::or`]): the power latch, the buzzer and the LEDs, the pins every board in the
-/// fleet shares. A row's default with no pin is the bytes `0xFF` (port `0xFF`, no port), which no
-/// check lets a write store.
+/// **A key that is not stored is an absent function**, for every pin field. A pin row's default is
+/// the bytes `0xFF` (port `0xFF`, no port), which no check lets a write store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PinField {
     id: u8,
     index: u8,
     kind: Type,
-    default: Option<(u8, u8)>,
 }
 
 impl PinField {
     /// A field of storage type `kind` (one of the three pin types), absent when not stored.
     pub const fn new(id: u8, kind: Type) -> Self {
         assert!(matches!(kind, Type::Pin | Type::PinAf | Type::PinAdc));
-        Self {
-            id,
-            index: 0,
-            kind,
-            default: None,
-        }
-    }
-
-    /// This field with the fleet pin `port`, `pin` as its default.
-    pub const fn or(self, port: u8, pin: u8) -> Self {
-        Self {
-            default: Some((port, pin)),
-            ..self
-        }
+        Self { id, index: 0, kind }
     }
 
     /// The same field at `index` (motor or link).
@@ -289,19 +273,9 @@ impl PinField {
         self.kind
     }
 
-    /// The fleet pin read when nothing is stored, as (port, pin); `None` = the function is absent.
-    pub const fn default(self) -> Option<(u8, u8)> {
-        self.default
-    }
-
-    /// This field's [`REGISTRY`] row. The default rides in `bits` as its bytes, little-endian
-    /// (port, pin, then 0 for the third byte), and `0xFFFF_FFFF` for no default.
+    /// This field's [`REGISTRY`] row, whose default is the absent bytes: `bits` is `0xFFFF_FFFF`.
     pub const fn entry(self, effect: Effect) -> FieldEntry {
-        let bits = match self.default {
-            Some((port, pin)) => port as u32 | (pin as u32) << 8,
-            None => u32::MAX,
-        };
-        FieldEntry::new(self.id, self.index, self.kind, bits, effect)
+        FieldEntry::new(self.id, self.index, self.kind, u32::MAX, effect)
     }
 }
 
@@ -488,28 +462,26 @@ const _: () = assert!(LINK_USART.len() == LINKS as usize && LINK_REMAP.len() == 
 // ---------------------------------------------------------------------------
 // The board-layout fields (`specs/board-model.md`, `specs/config-read-once.md` section 3): one
 // pin-typed key per pin, the instance and remap keys of each peripheral group, and the non-pin
-// board facts. Read once at boot, in one pass; a config write never re-pins before reboot. The
-// BENIGN functions carry the fleet-uniform pins as defaults; the motor groups and dead-time are
-// ABSENT until stored (drive is an explicit configuration act), and so are the three fields whose
-// PIN is fleet-uniform but whose FUNCTION is not fitted on every board: the battery sense and the
-// two foot pads, each of which would otherwise read a fiction off a line nothing drives.
+// board facts. Read once at boot, in one pass; a config write never re-pins before reboot. Every
+// pin field is ABSENT until stored (`specs/no-fleet-pins.md`): no default names a pin, so an
+// unconfigured board drives none of them.
 // motor.pole_pairs and wheel.diameter_mm default to UNSET and have no firmware consumer.
 // ---------------------------------------------------------------------------
 
-/// The power-latch pin (fleet default PB12).
-pub const BOARD_SELF_HOLD: PinField = PinField::new(0x06, Type::Pin).or(1, 12);
+/// The power-latch pin. Asserted at boot only when stored.
+pub const BOARD_SELF_HOLD: PinField = PinField::new(0x06, Type::Pin);
 /// Battery-sense pin. Default ABSENT (`specs/sensing-and-safety.md`, "The battery word"): the pin
 /// is fleet-uniform (PA4) but the SENSE is master-only, and a slave's PA4 reads stuck near 2.0 V,
 /// which through the divider is a fictitious 62 V. The firmware has no role fact to tell the two
 /// apart, so a defaulted pin would make every slave sense garbage; the master is CONFIGURED to
 /// sense (stage `0x04`), a non-sensing board relays its peer's word.
 pub const BOARD_BATTERY_PIN: PinField = PinField::new(0x07, Type::PinAdc);
-/// Buzzer pin (fleet default PB9).
-pub const BOARD_BUZZER: PinField = PinField::new(0x08, Type::Pin).or(1, 9);
-/// Indicator LEDs (fleet defaults PB3 / PA15 / PB4).
-pub const LED_GREEN: PinField = PinField::new(0x09, Type::Pin).or(1, 3);
-pub const LED_ORANGE: PinField = PinField::new(0x0A, Type::Pin).or(0, 15);
-pub const LED_RED: PinField = PinField::new(0x0B, Type::Pin).or(1, 4);
+/// Buzzer pin.
+pub const BOARD_BUZZER: PinField = PinField::new(0x08, Type::Pin);
+/// Indicator LEDs.
+pub const LED_GREEN: PinField = PinField::new(0x09, Type::Pin);
+pub const LED_ORANGE: PinField = PinField::new(0x0A, Type::Pin);
+pub const LED_RED: PinField = PinField::new(0x0B, Type::Pin);
 /// Foot-pad rider-detection inputs. Default ABSENT, for [`BOARD_BATTERY_PIN`]'s reason one step further
 /// on: the pins are fleet-uniform (PA11 / PC15) but the PADS are not, and no board in this fleet
 /// has pad hardware fitted. A defaulted pin leaves the line a floating input (the `InputGroup`
@@ -2428,19 +2400,32 @@ mod registry_tests {
         }
     }
 
-    /// A pin row's default: the fleet pin as its bytes, or the absent bytes.
+    /// Every pin row's default is the absent bytes (`specs/no-fleet-pins.md`): no field names a
+    /// pin, so an unconfigured board drives none, the latch, the buzzer and the LEDs included.
     #[test]
-    fn pin_rows_default_to_the_fleet_pin_or_to_absent() {
-        let d = |f: PinField| lookup_key(f.key()).unwrap().default;
-        assert_eq!(d(BOARD_SELF_HOLD), Value::Pin([1, 12]));
-        assert_eq!(d(LED_ORANGE), Value::Pin([0, 15]));
-        assert_eq!(d(MOTOR_HALL_A), Value::Pin([0xFF; 2]));
-        assert_eq!(d(MOTOR_PHASE_A), Value::PinAdc([0xFF; 3]));
-        assert_eq!(d(MOTOR_GATE_HI_A), Value::PinAf([0xFF; 3]));
-        assert_eq!(
-            (BOARD_SELF_HOLD.default(), PAD_A.default()),
-            (Some((1, 12)), None)
-        );
+    fn every_pin_rows_default_is_the_absent_bytes() {
+        let mut pins = 0usize;
+        for row in REGISTRY.iter() {
+            let def = row.def();
+            let absent = match def.kind {
+                Type::Pin => Value::Pin([0xFF; 2]),
+                Type::PinAf => Value::PinAf([0xFF; 3]),
+                Type::PinAdc => Value::PinAdc([0xFF; 3]),
+                _ => continue,
+            };
+            pins += 1;
+            assert_eq!(def.default, absent, "field {:#04x}", def.field_id);
+        }
+        assert!(pins > 0);
+        for f in [
+            BOARD_SELF_HOLD,
+            BOARD_BUZZER,
+            LED_GREEN,
+            LED_ORANGE,
+            LED_RED,
+        ] {
+            assert_eq!(lookup_key(f.key()).unwrap().default, Value::Pin([0xFF; 2]));
+        }
     }
 
     /// The pin on [`BYTES_DEFAULTS`]: every `Str`/`Blob` row is checked against the handle it

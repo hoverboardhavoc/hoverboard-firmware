@@ -10,6 +10,26 @@
   },
   "boards": {
     "51ce39393333370134313739": {
+      "power": {
+        "self_hold": {
+          "port": "B",
+          "pin": 12
+        }
+      },
+      "leds": {
+        "green": {
+          "port": "B",
+          "pin": 3
+        },
+        "orange": {
+          "port": "A",
+          "pin": 15
+        },
+        "red": {
+          "port": "B",
+          "pin": 4
+        }
+      },
       "imu": {
         "scl": {
           "port": "B",
@@ -119,11 +139,35 @@
       "device": {
         "name": "Offroad"
       },
+      "power": {
+        "self_hold": {
+          "port": "B",
+          "pin": 12
+        }
+      },
       "battery_sense": {
         "pin": {
           "port": "A",
           "pin": 4,
           "adc": 4
+        }
+      },
+      "buzzer": {
+        "port": "B",
+        "pin": 9
+      },
+      "leds": {
+        "green": {
+          "port": "B",
+          "pin": 3
+        },
+        "orange": {
+          "port": "A",
+          "pin": 15
+        },
+        "red": {
+          "port": "B",
+          "pin": 4
         }
       },
       "imu": {

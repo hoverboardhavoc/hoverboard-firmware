@@ -5,7 +5,6 @@ import androidx.compose.ui.res.stringResource
 import com.hoverboard.protocol.board.LayoutSlot
 import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.protocol.store.fleetPin
 import com.hoverboard.remote.R
 import com.hoverboard.remote.model.LayoutRows
 
@@ -27,14 +26,12 @@ internal fun valueText(value: Value, chip: Chip?): String? = when (value) {
 }
 
 /**
- * How one layout key's stored value reads: the value, or for a key the board stores nothing for, the
- * fleet pin it falls back to or "not set".
+ * How one layout key's stored value reads: the value, or "not set" for a key the board stores
+ * nothing for.
  */
 @Composable
-internal fun layoutValueText(slot: LayoutSlot, value: Value?, chip: Chip?): String {
-    if (value == null) {
-        return slot.def.fleetPin?.let { (port, pin) -> pinName(port, pin) } ?: stringResource(R.string.layout_absent)
-    }
+internal fun layoutValueText(value: Value?, chip: Chip?): String {
+    if (value == null) return stringResource(R.string.layout_absent)
     return valueText(value, chip) ?: value.toString()
 }
 
@@ -48,6 +45,6 @@ internal fun layoutFieldLabel(slot: LayoutSlot): String =
 internal fun layoutDeltaLine(slot: LayoutSlot, from: Value?, to: Value?, chip: Chip?): String = stringResource(
     R.string.layout_delta_line,
     layoutFieldLabel(slot),
-    layoutValueText(slot, from, chip),
-    layoutValueText(slot, to, chip),
+    layoutValueText(from, chip),
+    layoutValueText(to, chip),
 )

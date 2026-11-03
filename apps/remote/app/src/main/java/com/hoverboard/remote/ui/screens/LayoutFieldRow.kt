@@ -111,7 +111,7 @@ internal fun FieldRow(row: LayoutRow, state: LayoutState, editable: Boolean, act
         Text(stringResource(row.label), style = MaterialTheme.typography.titleSmall, color = Fg)
         Text(
             text = when {
-                state.staged != null -> layoutValueText(slot, staged, state.part)
+                state.staged != null -> layoutValueText(staged, state.part)
                 slot.key in state.unread -> stringResource(R.string.layout_field_unread)
                 else -> stringResource(R.string.layout_not_read)
             },

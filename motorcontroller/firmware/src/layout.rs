@@ -72,7 +72,7 @@ pub struct ImuBus {
 /// Everything the boot brings up from the store's pin, instance and remap keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
-    /// The power latch: stored, or the fleet's PB12.
+    /// The power latch, when stored: an unstored latch pin is not touched.
     pub self_hold: Option<Pin>,
     /// The battery-sense input and its ADC channel.
     pub battery: Option<Pin3>,
@@ -233,9 +233,7 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
         })
     })();
     Layout {
-        self_hold: p(SELF_HOLD).or(store::BOARD_SELF_HOLD
-            .default()
-            .map(|(port, pin)| [port, pin])),
+        self_hold: p(SELF_HOLD),
         battery: p3(BATTERY),
         inputs: [p(BUTTON), p(PAD_A), p(PAD_B)],
         motor,
@@ -284,14 +282,36 @@ mod tests {
         s.set(store::MOTOR_DEAD_TIME, 28).unwrap();
     }
 
+    /// `specs/no-fleet-pins.md`: with nothing stored there is no latch pin either, so the boot
+    /// leaves PB12 (and every other pin) unconfigured.
     #[test]
-    fn nothing_stored_is_the_latch_on_pb12_and_nothing_else() {
+    fn nothing_stored_is_nothing_at_all() {
         let l = with(|_| {});
-        assert_eq!(l.self_hold, Some([1, 12]));
         assert_eq!(
-            (l.battery, l.inputs, l.motor, l.links, l.imu, l.imu_model),
-            (None, [None; 3], None, [None; 2], None, 0)
+            (
+                l.self_hold,
+                l.battery,
+                l.inputs,
+                l.motor,
+                l.links,
+                l.imu,
+                l.imu_model
+            ),
+            (None, None, [None; 3], None, [None; 2], None, 0)
         );
+    }
+
+    /// A stored latch is the one handed on, and an un-stored one (a tombstone) reads as none, not
+    /// as some fallback pin.
+    #[test]
+    fn the_latch_is_the_stored_pin_or_none() {
+        let l = with(|s| set(s, store::BOARD_SELF_HOLD.key(), Value::Pin([1, 12])));
+        assert_eq!(l.self_hold, Some([1, 12]));
+        let l = with(|s| {
+            set(s, store::BOARD_SELF_HOLD.key(), Value::Pin([1, 2]));
+            s.erase_value(store::BOARD_SELF_HOLD.key()).unwrap();
+        });
+        assert_eq!(l.self_hold, None);
     }
 
     #[test]

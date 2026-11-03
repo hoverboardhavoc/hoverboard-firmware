@@ -34,8 +34,8 @@ class LayoutSlot internal constructor(
 
 /**
  * A board's layout: the stored value of each layout key. A key the board does not store is not in
- * [values]: a pin that is not stored is an absent function, or its fleet pin where the field has one
- * (`specs/config-read-once.md` section 3).
+ * [values]: a pin that is not stored is an absent function, the latch, the buzzer and the LEDs
+ * included (`specs/config-read-once.md` section 3, `specs/no-fleet-pins.md` section 2).
  */
 data class BoardFields(val values: Map<Key, Value> = emptyMap()) {
     /** These fields with [slot] set to [value]. */

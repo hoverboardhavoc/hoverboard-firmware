@@ -271,14 +271,13 @@ fn groups() -> Vec<Group> {
     g
 }
 
-/// The stored bytes of a pin field, or its fleet default.
+/// The stored bytes of a pin field, or `None` when it is not stored (an absent function).
 fn pin_of(state: &State, f: PinField) -> Option<Vec<u8>> {
     match state.get(&f.key()) {
         Some((t, b)) if *t == f.kind() && b.len() == f.kind().fixed_len().unwrap_or(0) => {
             Some(b.clone())
         }
-        Some(_) => None,
-        None => f.default().map(|(port, pin)| vec![port, pin, 0]),
+        _ => None,
     }
 }
 
@@ -314,7 +313,7 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
             msg: format!("{}: {msg}", path_of(key)),
         })
     };
-    // Every pin that is set, stored or by its fleet default.
+    // Every pin that is stored.
     let mut used: HashMap<(u8, u8), Key> = HashMap::new();
     for g in groups() {
         for (f, _) in &g.pins {
@@ -356,7 +355,7 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
         let set: Vec<bool> = g
             .pins
             .iter()
-            .map(|(f, _)| state.contains_key(&f.key()) || f.default().is_some())
+            .map(|(f, _)| state.contains_key(&f.key()))
             .collect();
         let instance = g.instance.map(|(k, p)| (k, p, byte_of(state, k)));
         let all = set.iter().all(|s| *s) && instance.is_none_or(|(_, _, n)| n.is_some());

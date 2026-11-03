@@ -40,4 +40,4 @@ private fun keyLabel(key: Key): String = Layout.forKey(key)?.let { layoutFieldLa
 
 @Composable
 private fun valueOfKey(key: Key, value: Value, chip: Chip?): String =
-    Layout.forKey(key)?.let { layoutValueText(it, value, chip) } ?: value.toString()
+    Layout.forKey(key)?.let { layoutValueText(value, chip) } ?: value.toString()

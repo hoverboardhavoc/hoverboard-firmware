@@ -66,7 +66,7 @@ attitude = { path = "../attitude" }
 # The device-driver seam for the inter-board UART adapter (embedded-io over hal's SplitSerial and
 # RingBufferedRx), which link's SerialTransport drives.
 embedded-io = "0.6"
-# `OutputPin` for the SELF_HOLD (PB12) power-latch assertion at boot; matches hal's version.
+# `OutputPin` for the SELF_HOLD power-latch assertion at boot; matches hal's version.
 embedded-hal = "1.0"
 # The bounded Vec hal's InjectedAdcConfig carries (same version, so the channel list the motor
 # bring-up builds IS the type the HAL consumes).

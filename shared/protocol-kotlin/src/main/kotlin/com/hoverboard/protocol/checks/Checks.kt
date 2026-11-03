@@ -14,7 +14,6 @@ import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Names
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
-import com.hoverboard.protocol.store.fleetPin
 
 /**
  * The checks a board's configuration passes before it is written (`specs/config-read-once.md`
@@ -207,7 +206,7 @@ object Checks {
     fun roleOf(key: Key): Role? =
         GROUPS.firstNotNullOfOrNull { g -> g.pins.firstOrNull { it.first.key == key }?.second }
 
-    /** The pin [key] names as (port, pin), stored or by its fleet default, or null when unset. */
+    /** The pin [key] stores as (port, pin), or null when it stores none. */
     fun pinAt(state: Map<Key, Value>, key: Key): Pair<Int, Int>? {
         val slot = GROUPS.firstNotNullOfOrNull { g -> g.pins.firstOrNull { it.first.key == key }?.first }
             ?: return null
@@ -221,9 +220,9 @@ object Checks {
     fun run(chip: Chip, state: Map<Key, Value>, forms: List<PinForm>): List<Refusal> =
         checkValues(state) + checkForms(chip, forms) + checkPins(chip, state)
 
-    /** The stored bytes of a pin field, or its fleet default (`checks::pin_of`). */
+    /** The stored bytes of a pin field, or null when it is not stored (`checks::pin_of`). */
     private fun pinOf(state: Map<Key, Value>, slot: PinSlot): List<Int>? {
-        val v = state[slot.key] ?: return slot.def.fleetPin?.let { (port, pin) -> listOf(port, pin, 0) }
+        val v = state[slot.key] ?: return null
         if (v.kind() != slot.def.type) return null
         return when (v) {
             is Value.Pin -> listOf(v.port, v.pin)
@@ -250,9 +249,9 @@ object Checks {
 
     private fun refusal(check: Check, key: Key, msg: String) = Refusal(check, key, "${Names.pathOf(key)}: $msg")
 
-    /** Whether every pin of [g] is set (stored or by its fleet default) and its instance stored. */
+    /** Whether every pin of [g] and its instance are stored. */
     private fun complete(g: Group, state: Map<Key, Value>): Boolean =
-        g.pins.all { (slot, _) -> slot.key in state || slot.def.fleetPin != null } &&
+        g.pins.all { (slot, _) -> slot.key in state } &&
             (g.instance == null || byteOf(state, g.instance.first) != null)
 
     /**
@@ -261,7 +260,7 @@ object Checks {
      * switch: on, it needs every key; off (0 or not stored), its keys may be stored or not.
      */
     private fun groupRefusal(g: Group, state: Map<Key, Value>): Refusal? {
-        val set = g.pins.map { (slot, _) -> slot.key in state || slot.def.fleetPin != null }
+        val set = g.pins.map { (slot, _) -> slot.key in state }
         val instance = g.instance?.let { (k, _) -> k to byteOf(state, k) }
         val none = set.none { it } && (instance == null || instance.second == null)
         val on = g.switch?.let { (byteOf(state, it) ?: 0) != 0 }
@@ -284,7 +283,7 @@ object Checks {
         val t = chip.table
         val out = mutableListOf<Refusal>()
         val name = chip.id
-        // Every pin that is set, stored or by its fleet default.
+        // Every pin that is stored.
         val used = mutableMapOf<Pair<Int, Int>, Key>()
         for (g in GROUPS) {
             for ((slot, _) in g.pins) {
