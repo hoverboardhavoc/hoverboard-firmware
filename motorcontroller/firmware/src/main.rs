@@ -1824,9 +1824,11 @@ mod firmware {
         motor::hw::install_rederived(&r.motor);
         // The flux observer's parameters at the calibration just read and the bring-up's dead
         // time (`specs/flux-observer.md`, "Units": `R` and `L` are pre-scaled at arm time).
-        shell
-            .observer
-            .set_motor_facts(values.current_cal, boot.map(|b| b.map(|b| b.dead_time)));
+        shell.observer.set_motor_facts(
+            values.current_cal,
+            boot.map(|b| b.map(|b| b.dead_time)),
+            values.direction_byte.map(motor::requested_direction),
+        );
         motor::hw::install_observer(&shell.observer.params());
         if let (Some(dev), Some(cfg)) = (shell.imu.as_mut(), r.imu) {
             // Reinstalls the axis permutation; touches no bus.

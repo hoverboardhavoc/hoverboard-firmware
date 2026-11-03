@@ -2163,9 +2163,12 @@ fn board_trace(
         let Some(pkt) = wire.recv(wait) else { continue };
         let Some(f) = tr.frame(&pkt) else { continue };
         let at = t0.elapsed();
-        // A step of more than the divisor is a window the stream skipped (a refused frame).
+        // A step of more than the divisor plus one is a window the stream skipped (a refused
+        // frame): the board emits from its 4 ms loop pass against 4 ms windows, so a step of one
+        // over the divisor is the emitter's own jitter (one frame in three on the bench), not a
+        // loss.
         if let Some(w) = last_window {
-            if f.window.wrapping_sub(w) > trace::CONSOLE_DIVISOR as u16 {
+            if f.window.wrapping_sub(w) > trace::CONSOLE_DIVISOR as u16 + 1 {
                 gaps += 1;
             }
         }

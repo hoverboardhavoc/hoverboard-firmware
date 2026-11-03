@@ -7,7 +7,7 @@ use std::vec::Vec;
 
 use super::*;
 use crate::foc::{foc_step, svpwm, DutyOrder, FocState, PhaseOffsets};
-use crate::{MotorOutput, PhaseCmd};
+use crate::{Direction, MotorOutput, PhaseCmd};
 
 // ---------------------------------------------------------------------------------------------
 // atan2
@@ -242,7 +242,8 @@ fn plant_kv() -> i32 {
 }
 
 /// The default parameters on the plant's calibration and dead time, with the lead table zeroed so
-/// the window's mean is the raw error.
+/// the window's mean is the raw error. The plant's q axis leads its flux by a quarter turn
+/// (`Plant::theta_q`), which is the `Reverse` motor's convention on the bench (the frame note).
 fn plant_params(dt_comp: bool) -> ObserverParams {
     ObserverParams {
         lead: [0; BINS],
@@ -251,6 +252,7 @@ fn plant_params(dt_comp: bool) -> ObserverParams {
             [2730, 1820, 64, 243, 0, 10, dt_comp as i16],
             PLANT_CAL_A as u16,
             56,
+            Direction::Reverse,
         )
     }
 }
@@ -416,6 +418,7 @@ fn a_wrong_l_reads_as_an_angle_error_that_grows_with_current() {
             [2730, 1820, 64, 243, 0, 10, 1],
             PLANT_CAL_A as u16,
             56,
+            Direction::Reverse,
         )
     };
     let hz = 50.0;
@@ -546,7 +549,13 @@ fn window_of(p: &ObserverParams, errs: &[i16], hall_fault_at: Option<usize>) -> 
 }
 
 fn verdict_params() -> ObserverParams {
-    ObserverParams::derive([240, 500, 0, 0], [2730, 1820, 64, 243, 0, 10, 0], 455, 56)
+    ObserverParams::derive(
+        [240, 500, 0, 0],
+        [2730, 1820, 64, 243, 0, 10, 0],
+        455,
+        56,
+        Direction::Reverse,
+    )
 }
 
 /// The mean of errors either side of the half-turn wraps: errors at +179 and -179 degrees average
@@ -647,7 +656,13 @@ fn the_lead_table_is_the_leaks_phase_lead_at_each_bins_speed() {
         t[1] as f64 * DEG
     );
     // The parameters carry the table of their own shift.
-    let p = ObserverParams::derive([240, 500, 0, 0], [2730, 1820, 64, 243, 0, 12, 1], 455, 56);
+    let p = ObserverParams::derive(
+        [240, 500, 0, 0],
+        [2730, 1820, 64, 243, 0, 12, 1],
+        455,
+        56,
+        Direction::Reverse,
+    );
     assert_eq!(p.lead, lead_table(12));
     // Subtracted by the sign of the speed: an error equal to the lead at +3 edges reads 0, and
     // the mirror at -3.
@@ -675,7 +690,16 @@ fn the_lead_table_is_the_leaks_phase_lead_at_each_bins_speed() {
 /// The parameters' clamps and scales.
 #[test]
 fn the_parameters_are_clamped_and_pre_scaled() {
-    let p = ObserverParams::derive([240, 500, 0, 0], [2730, 1820, 64, 243, 0, 10, 1], 160, 56);
+    let p = ObserverParams::derive(
+        [240, 500, 0, 0],
+        [2730, 1820, 64, 243, 0, 10, 1],
+        160,
+        56,
+        Direction::Forward,
+    );
+    // The quarter turn by direction (the frame note): back on a Forward motor, forward on a
+    // Reverse one.
+    assert_eq!(p.quarter, 0u16.wrapping_sub(crate::foc::ANGLE_90));
     assert_eq!(p.r_q, 240 * 65_536 / 160);
     assert_eq!(p.l_q, 16 * 500 * 65_536 / 160);
     // 56 ticks of the 4,500-tick period against the voltage scale: 706, so a 36 V bus's kv of
@@ -693,7 +717,14 @@ fn the_parameters_are_clamped_and_pre_scaled() {
         ),
         (10, true, 2730, 1820, 64, 243)
     );
-    let q = ObserverParams::derive([-5, -5, 0, 0], [-1, -1, 0, 300, -4, 2, 0], 0, 0);
+    let q = ObserverParams::derive(
+        [-5, -5, 0, 0],
+        [-1, -1, 0, 300, -4, 2, 0],
+        0,
+        0,
+        Direction::Reverse,
+    );
+    assert_eq!(q.quarter, crate::foc::ANGLE_90);
     assert_eq!((q.r_q, q.l_q, q.dt_q), (0, 0, 0));
     assert_eq!(
         (
@@ -708,7 +739,8 @@ fn the_parameters_are_clamped_and_pre_scaled() {
     );
     assert_eq!(q.offset, (-4i16) as u16);
     assert_eq!(
-        ObserverParams::derive([0; 4], [0, 0, 0, 0, 0, 40, 0], 455, 0).leak_shift,
+        ObserverParams::derive([0; 4], [0, 0, 0, 0, 0, 40, 0], 455, 0, Direction::Reverse)
+            .leak_shift,
         14
     );
 }

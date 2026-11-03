@@ -3218,6 +3218,8 @@ pub mod hw {
                     store::OBSERVER_SHADOW.defaults(),
                     store::MOTOR_CURRENT_CAL.default(),
                     dead_time_ticks(m.dead_time),
+                    // The arm's install carries the stored direction; nothing drives before it.
+                    commutation::Direction::Forward,
                 ),
             });
         }

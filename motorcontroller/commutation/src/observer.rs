@@ -24,12 +24,16 @@
 //! The crate's Clarke and Park work in the stock frame, whose beta is the negative of the textbook
 //! beta (`foc.rs`, the frame note), and `theta` is the textbook angle of the q axis: a `vq` alone
 //! drives the stator vector at `theta`. The observer integrates in the stock frame, reads the flux
-//! angle in the textbook frame (`atan2(-beta, alpha)`), and adds a quarter turn, because the
-//! permanent-magnet flux lies on the d axis, 90 degrees behind q. So with the halls and the
-//! alignment right, the observer's angle equals `theta` less the leak's phase lead.
+//! angle in the textbook frame (`atan2(-beta, alpha)`), and moves a quarter turn to the q axis,
+//! because the permanent-magnet flux lies on d. Which way is the motor's direction
+//! ([`ObserverParams::quarter`], the bench finding of 2026-11-03, `specs/flux-observer.md`, "The
+//! frame"): on a `Reverse` motor the flux is a quarter turn behind `theta`, on a `Forward` one a
+//! quarter turn ahead, because the reverse sequence mirrors the front end's angle against the
+//! stator frame. So with the halls and the alignment right, the observer's angle equals `theta`
+//! plus the leak's phase lead.
 
 use crate::foc::{atan2_u16, clarke, isqrt_u64, ANGLE_90, SPEED_WINDOW};
-use crate::ARR;
+use crate::{Direction, ARR};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// The tracking table's speed bins: one per edge of the front end's latched speed (edges per
@@ -166,6 +170,9 @@ pub struct ObserverParams {
     pub ratio: u16,
     /// The leak's phase lead at each bin's speed, angle units (bin 0 none).
     pub lead: [u16; BINS],
+    /// From the flux angle to `theta`: a quarter turn forward on a `Reverse` motor (the flux is
+    /// behind q), a quarter turn back on a `Forward` one (the flux is ahead), the frame note.
+    pub quarter: u16,
 }
 
 /// `motors.<i>.observer.model`'s indices.
@@ -190,7 +197,9 @@ pub const SHADOW_DT_COMP: usize = 6;
 impl ObserverParams {
     /// Pre-scale the stored words for the ISR: `model` and `shadow` are the two fields' words for
     /// one motor (`motors.<i>.observer.model`, `.shadow`), `current_cal` the motor's counts per amp
-    /// (`motors.<i>.current.cal`), `dead_ticks` its dead time in timer ticks.
+    /// (`motors.<i>.current.cal`), `dead_ticks` its dead time in timer ticks, `direction` the
+    /// motor's drive direction (`motors.<i>.direction`, the arm's decode), which sets
+    /// [`ObserverParams::quarter`].
     ///
     /// Every word is clamped into its range here, so a hand-poked flash value cannot reach the
     /// ISR: negative `R` and `L` read as 0, the leak shift as 6..=14, the ratio as 0..=256, a
@@ -200,6 +209,7 @@ impl ObserverParams {
         shadow: [i16; 7],
         current_cal: u16,
         dead_ticks: u32,
+        direction: Direction,
     ) -> ObserverParams {
         // 32-bit arithmetic throughout: an `i16` times 65,536 fits a `u32`, and so does the
         // voltage scale times the longest dead time a DTG code encodes.
@@ -220,6 +230,10 @@ impl ObserverParams {
             min_windows: shadow[SHADOW_MIN_WINDOWS].max(1) as u16,
             ratio: shadow[SHADOW_RATIO].clamp(0, RATIO_ONE) as u16,
             lead: lead_table(leak),
+            quarter: match direction {
+                Direction::Reverse => ANGLE_90,
+                Direction::Forward => 0u16.wrapping_sub(ANGLE_90),
+            },
         }
     }
 }
@@ -393,8 +407,9 @@ impl FluxObserver {
         let lb = ((i.beta as i64 * p.l_q as i64) >> 16) as i32;
         let pm_a = self.psi_a.wrapping_sub(la) >> 4;
         let pm_b = self.psi_b.wrapping_sub(lb) >> 4;
-        // Textbook beta is the stock one negated; q leads the flux (d) by a quarter turn.
-        let angle = atan2_u16(pm_b.wrapping_neg(), pm_a).wrapping_add(ANGLE_90);
+        // Textbook beta is the stock one negated; from the flux (d) to q is the motor's quarter
+        // turn (the frame note).
+        let angle = atan2_u16(pm_b.wrapping_neg(), pm_a).wrapping_add(p.quarter);
         self.mag2 = self
             .mag2
             .wrapping_add((pm_a as i64 * pm_a as i64) as u64)

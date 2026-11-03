@@ -13,6 +13,7 @@ use crate::motor;
 use commutation::observer::{
     self as obs, BusScale, ObserverParams, BINS, LEAK_SHIFT_MAX, LEAK_SHIFT_MIN, RATIO_ONE,
 };
+use commutation::Direction;
 use control::TuneError;
 use linkctl::FocTrace;
 use store::{OBSERVER_MODEL, OBSERVER_SHADOW};
@@ -114,6 +115,9 @@ pub struct ObserverLoop {
     /// Each motor's dead time in gate-timer ticks (`motor::dead_time_ticks` of its boot-read
     /// `motors.<i>.gate.dead_time`).
     dead_ticks: [u32; motor::COUNT],
+    /// Each motor's drive direction (`motors.<i>.direction`, from the last arm-row read): the
+    /// observer's quarter turn (`commutation::observer::ObserverParams::quarter`).
+    direction: [Direction; motor::COUNT],
     /// The bus scale of this board's own battery sense (`battery_sense.cal`, boot-read), `None`
     /// on a board that does not sense ([`ObserverLoop::bus_scale`]).
     local: Option<BusScale>,
@@ -131,6 +135,7 @@ impl ObserverLoop {
             stored: c,
             current_cal: [store::MOTOR_CURRENT_CAL.default(); motor::COUNT],
             dead_ticks: [0; motor::COUNT],
+            direction: [Direction::Forward; motor::COUNT],
             local: local.map(|(s, o)| BusScale::local(s, o)),
         }
     }
@@ -188,14 +193,16 @@ impl ObserverLoop {
         changed
     }
 
-    /// The arm row's calibrations and the bring-up's dead-time codes (`None` for a motor with no
-    /// runtime, which keeps what it had).
+    /// The arm row's calibrations and directions, and the bring-up's dead-time codes (`None` for
+    /// a motor with no runtime, which keeps what it had).
     pub fn set_motor_facts(
         &mut self,
         current_cal: [u16; motor::COUNT],
         dead_time: [Option<u8>; motor::COUNT],
+        direction: [Direction; motor::COUNT],
     ) {
         self.current_cal = current_cal;
+        self.direction = direction;
         for (t, d) in self.dead_ticks.iter_mut().zip(dead_time) {
             if let Some(d) = d {
                 *t = motor::dead_time_ticks(d);
@@ -216,7 +223,13 @@ impl ObserverLoop {
             model.copy_from_slice(&w[..MODEL_WORDS]);
             let mut shadow = [0i16; SHADOW_WORDS];
             shadow.copy_from_slice(&w[MODEL_WORDS..]);
-            ObserverParams::derive(model, shadow, self.current_cal[m], self.dead_ticks[m])
+            ObserverParams::derive(
+                model,
+                shadow,
+                self.current_cal[m],
+                self.dead_ticks[m],
+                self.direction[m],
+            )
         })
     }
 }
@@ -405,7 +418,11 @@ mod tests {
     #[test]
     fn the_parameters_are_the_live_words_derived() {
         let mut o = ObserverLoop::of_stored([defaults(); motor::COUNT], None);
-        o.set_motor_facts([160; motor::COUNT], [Some(28); motor::COUNT]);
+        o.set_motor_facts(
+            [160; motor::COUNT],
+            [Some(28); motor::COUNT],
+            [Direction::Reverse; motor::COUNT],
+        );
         o.set(OBSERVER_SHADOW.id(), 5, 12).unwrap();
         let p = o.params()[0];
         let want = ObserverParams::derive(
@@ -413,8 +430,19 @@ mod tests {
             [2730, 1820, 64, 243, 0, 12, 1],
             160,
             motor::dead_time_ticks(28),
+            Direction::Reverse,
         );
         assert_eq!(p, want);
+        assert_eq!(p.quarter, commutation::foc::ANGLE_90);
+        o.set_motor_facts(
+            [160; motor::COUNT],
+            [None; motor::COUNT],
+            [Direction::Forward; motor::COUNT],
+        );
+        assert_eq!(
+            o.params()[0].quarter,
+            0u16.wrapping_sub(commutation::foc::ANGLE_90)
+        );
         assert_eq!(motor::dead_time_ticks(28), 56);
         assert_eq!(o.min_windows(0), 64);
     }
