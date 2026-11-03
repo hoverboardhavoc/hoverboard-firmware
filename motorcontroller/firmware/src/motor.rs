@@ -14,8 +14,8 @@
 //! where slice 3's test enforced ABSENCE. Everything below it stays a disarmed layer: it can stop
 //! the bridge, through the demand word and the channel enables, and it cannot start one.
 //!
-//! The one MOE the bring-up causes is the calibration's, for a motor stored `current.cal_state` =
-//! `low_sides_on` (`specs/twelve-fet.md` section 5.5): `main.rs` hands [`hw::bring_up`] the arming
+//! The one MOE the bring-up causes is the calibration's, for a motor stored `current.sense` =
+//! `low_side_on` (`specs/twelve-fet.md` section 5.5): `main.rs` hands [`hw::bring_up`] the arming
 //! layer's `calibration_moe` as a function, and the calibration calls it with duties 0 and the
 //! channels enabled, so only the low sides turn on, and clears it before the period vector.
 //!
@@ -668,6 +668,20 @@ pub fn clarke_pair(sensed: (i16, i16), bc: bool) -> (i16, i16) {
     }
 }
 
+/// Which of a motor's two sensed phases are readings this period (`specs/twelve-fet.md` section
+/// 5.6). On a `current.sense` = `low_side_on` motor (`low_side`) a sensed phase reads its current
+/// only while its leg's low side conducts, so it is a reading when its own leg was enabled for the
+/// sample (`enables`, what the ISR applied the period before) and the bridge is armed. The sensed
+/// legs are B and C on a `bc` motor, A and B otherwise. An `any_state` motor reads both always.
+#[inline(always)]
+pub fn sensed_readings(low_side: bool, armed: bool, enables: [bool; 3], bc: bool) -> [bool; 2] {
+    if !low_side {
+        return [true; 2];
+    }
+    let (l0, l1) = if bc { (1, 2) } else { (0, 1) };
+    [armed && enables[l0], armed && enables[l1]]
+}
+
 /// The highest phase compare at which motor 1's sensed phases are taken as fresh: the end of rank
 /// 3's aperture less a 3-tick margin (`specs/twelve-fet.md` section 5.2, the sampling instants
 /// table). Motor 0's ranks open first and keep [`hold_compare_max`]; motor 1's open 240 ticks
@@ -990,6 +1004,20 @@ impl CurrentLimit {
             self.trips = self.trips.wrapping_add(1);
         }
         CurrentVerdict { chop: true, trip }
+    }
+
+    /// A period with no reading (`specs/twelve-fet.md` section 5.6: both sensed legs off, or the
+    /// bridge disarmed, on a `low_side_on` motor): no chop, no trip, and nothing else moves. The
+    /// over-limit run and the episode's tripped state stay as they were, so a sustained
+    /// over-current whose chops float every other period still reaches
+    /// [`OVER_CURRENT_TRIP_PERIODS`] over the driven ones; the window adds nothing to its sums or
+    /// its peak, so its mean still divides by the 64 periods with this one at 0.
+    #[inline(always)]
+    pub fn pass(&self) -> CurrentVerdict {
+        CurrentVerdict {
+            chop: false,
+            trip: false,
+        }
     }
 
     /// Trips so far this boot.
@@ -2045,6 +2073,12 @@ pub mod hw {
         /// on channels 1 and 2 and the pair is mapped to Clarke's `(ia, ib)` ([`clarke_pair`]).
         /// Never set on a one-motor image, which reads no `phase_c`.
         bc: bool,
+        /// `current.sense` = `low_side_on` ([`crate::layout::Motor::sense_low_side`]): the sample
+        /// rule of [`sensed_readings`] applies.
+        low_side: bool,
+        /// The channel enables this ISR applied last period: the posture the coming sample is
+        /// converted under ([`sensed_readings`]).
+        sample_enables: [bool; 3],
         /// Free-running period count (the ISR's own copy; published into [`PERIODS`]).
         periods: u32,
         /// Periods since the demand word was last freshly written.
@@ -2322,8 +2356,8 @@ pub mod hw {
     /// the limit conversion that is BOOT-read: it rides [`BootFixed`] from here so every install
     /// converts against one floor.
     /// `cal_moe` is the arming layer's calibration MOE (`crate::arm::hw::calibration_moe`), which
-    /// [`BringUpStep::CalibratePhaseOffsets`] calls for a motor stored `low_sides_on` alone
-    /// ([`Motor::cal_low_sides`], section 5.5).
+    /// [`BringUpStep::CalibratePhaseOffsets`] calls for a motor stored `low_side_on` alone
+    /// ([`Motor::sense_low_side`], section 5.5).
     /// `vbatt` is the stored battery-sense input with its ADC channel. On a one-motor image `Some`
     /// adds the battery rank to the injected group (rank 2, after the two phase ranks); on the
     /// two-motor image the four phase ranks fill the group and the battery is ADC1's regular
@@ -2580,15 +2614,15 @@ pub mod hw {
                     let inj = injected.ok_or(failed(step))?;
                     calibrated = true;
                     // The bridge state each motor's zeros are measured in (section 5.5): a motor
-                    // stored `low_sides_on` has its three channels enabled and MOE set before the
+                    // stored `low_side_on` has its three channels enabled and MOE set before the
                     // settle, at `PwmTimer::configure`'s zero duty, which nothing writes before
                     // the period vector, so its low sides are on and its high sides off for the
                     // whole measurement; after it, MOE is cleared and the channels disabled, the
                     // posture `float_all_channels` leaves. Every exit of `measure_offsets` passes
                     // the release.
-                    let low1 = COUNT > 1 && m1.is_some_and(|(m1m, _, _)| m1m.cal_low_sides);
+                    let low1 = COUNT > 1 && m1.is_some_and(|(m1m, _, _)| m1m.sense_low_side);
                     let hold = |on: bool| {
-                        if let (Some(t), true) = (&timer, m.cal_low_sides) {
+                        if let (Some(t), true) = (&timer, m.sense_low_side) {
                             cal_hold(t, on, cal_moe);
                         }
                         if let (Some(t), true) = (&timer1, low1) {
@@ -2752,6 +2786,8 @@ pub mod hw {
                 base_flags,
                 method: method.to_u8(),
                 bc: COUNT > 1 && sense.pair == Pair::Bc,
+                low_side: m.sense_low_side,
+                sample_enables: [false; 3],
                 periods: 0,
                 since_demand: 0,
                 last_seq: DEMAND_SEQ.load(Ordering::Relaxed),
@@ -2855,7 +2891,7 @@ pub mod hw {
     /// other measures on. A motor that is not up reads ranks the group does not convert; its
     /// verdict is never used.
     ///
-    /// The bridge is quiet or holds its low sides on, as the caller set it (`current.cal_state`,
+    /// The bridge is quiet or holds its low sides on, as the caller set it (`current.sense`,
     /// section 5.5); no high side is on while this runs.
     fn measure_offsets(injected: &InjectedHandle) -> Option<[CalVerdict; COUNT]> {
         for _ in 0..CAL_SETTLE_CONVERSIONS {
@@ -3072,6 +3108,13 @@ pub mod hw {
         // measured zeros ARE the accepted pair (the calibration gates the pair it measured).
         let ia = commutation::foc::current_from_adc(m.offsets.0, raw[0]);
         let ib = commutation::foc::current_from_adc(m.offsets.1, raw[1]);
+        // The sample rule (`specs/twelve-fet.md` section 5.6): on a `low_side_on` motor a sensed
+        // phase whose leg was off for this sample, or any while disarmed, reads the phase voltage,
+        // so it is taken as 0, its true current; with neither a reading the limit is passed.
+        let armed = crate::arm::hw::armed();
+        let read = sensed_readings(m.low_side, armed, m.sample_enables, m.bc);
+        let ia = if read[0] { ia } else { 0 };
+        let ib = if read[1] { ib } else { 0 };
         // The sample hold (`specs/foc-torque.md` section 14): a phase flagged from the duties this
         // ISR wrote last period keeps its last fresh value, so neither the limit below nor the
         // arm sees the transient a shunt reads when its leg's low side is barely on.
@@ -3081,7 +3124,11 @@ pub mod hw {
         let (ia, ib) = clarke_pair(sensed, COUNT > 1 && m.bc);
         // The current limit's verdict on this period's phase-current magnitude (folded inside, with
         // the window's sums).
-        let current = m.current.step(ia, ib);
+        let current = if read[0] || read[1] {
+            m.current.step(ia, ib)
+        } else {
+            m.current.pass()
+        };
         if current.trip {
             OVER_CURRENT_TRIPS[i].store(m.current.trips(), Ordering::Relaxed);
         }
@@ -3103,7 +3150,6 @@ pub mod hw {
         // accumulators instead of integrating measurement noise into a voltage it would apply on
         // the first armed period (`specs/foc-torque.md` section 2). A code motion only: the bridge
         // writes below keep their order (duties, then enables).
-        let armed = crate::arm::hw::armed();
         let coast = coast_posture(armed, stale, current.chop);
         // Word 50's count of floated periods (at most 64 a window, a plain add) and which of the
         // three conditions floated them (zero bits on a driven period), branch-free.
@@ -3145,6 +3191,7 @@ pub mod hw {
             m.faults |= FAULT_DUTY_RANGE;
             enables
         };
+        m.sample_enables = applied_enables;
         // Re-arm the ADC trigger compare so the next period samples at the same instant: motor 0's
         // timer, TIMER0, carries the trigger for the board.
         if i == 0 {
@@ -4978,6 +5025,90 @@ mod tests {
         c.step(0, 0);
         assert!(c.step(hard, 0).trip, "a clean period re-arms it");
         assert_eq!(c.trips(), 2);
+    }
+
+    /// The sample rule's predicate (`specs/twelve-fet.md` section 5.6): an `any_state` motor
+    /// reads both phases in every posture; a `low_side_on` motor reads a sensed phase only when
+    /// its own leg was enabled and the bridge is armed, on both pair mappings.
+    #[test]
+    fn a_sensed_phase_is_a_reading_only_with_its_leg_on_and_the_bridge_armed() {
+        for e in 0..8u8 {
+            let en = [e & 1 != 0, e & 2 != 0, e & 4 != 0];
+            for armed in [false, true] {
+                for bc in [false, true] {
+                    assert_eq!(sensed_readings(false, armed, en, bc), [true; 2]);
+                    let (l0, l1) = if bc { (1, 2) } else { (0, 1) };
+                    assert_eq!(
+                        sensed_readings(true, armed, en, bc),
+                        [armed && en[l0], armed && en[l1]],
+                        "enables {en:?} armed {armed} bc {bc}"
+                    );
+                }
+            }
+        }
+        // Six-step's sectors: one leg floats, and on the A-B pair only C's float leaves both.
+        assert_eq!(
+            sensed_readings(true, true, [true, true, false], false),
+            [true; 2]
+        );
+        assert_eq!(
+            sensed_readings(true, true, [false, true, true], false),
+            [false, true]
+        );
+        assert_eq!(
+            sensed_readings(true, true, [true, false, true], true),
+            [false, true]
+        );
+        assert_eq!(
+            sensed_readings(true, true, [true, true, false], true),
+            [true, false]
+        );
+    }
+
+    /// `pass` decides nothing and moves nothing: no chop, no trip, and the run, the episode, the
+    /// trip count, the peak, the sums and the chop count are as before it.
+    #[test]
+    fn a_passed_period_moves_nothing() {
+        let lim = limit_counts(2_000, CAL, FLOOR);
+        let mut c = CurrentLimit::new(lim);
+        for mag in [lim + 1, 30, lim + 9] {
+            c.step(mag, 0);
+        }
+        let before = c;
+        let v = c.pass();
+        assert!(!v.chop && !v.trip);
+        assert_eq!(c, before);
+    }
+
+    /// Passed periods mixed into a driven sequence leave the driven periods' verdicts as they are
+    /// without them: a sustained over-current whose chops float every other period still trips
+    /// at the `OVER_CURRENT_TRIP_PERIODS`th driven over-limit period, where zeros in their place
+    /// would reset the run and never trip.
+    #[test]
+    fn passed_periods_leave_the_driven_verdicts_and_the_run_trip() {
+        let lim = limit_counts(2_000, CAL, FLOOR);
+        let over = lim + 1;
+        let mut alone = CurrentLimit::new(lim);
+        let mut mixed = CurrentLimit::new(lim);
+        let mut tripped_at = None;
+        for k in 0..OVER_CURRENT_TRIP_PERIODS {
+            let a = alone.step(over, 0);
+            assert!(!mixed.pass().chop);
+            let m = mixed.step(over, 0);
+            assert_eq!(a, m, "driven period {k}");
+            if m.trip {
+                tripped_at = Some(k + 1);
+            }
+        }
+        assert_eq!(tripped_at, Some(OVER_CURRENT_TRIP_PERIODS));
+        assert_eq!(alone, mixed);
+
+        let mut zeroed = CurrentLimit::new(lim);
+        for _ in 0..4 * OVER_CURRENT_TRIP_PERIODS {
+            zeroed.step(over, 0);
+            zeroed.step(0, 0);
+        }
+        assert_eq!(zeroed.trips(), 0, "zeros in place of passes never trip");
     }
 
     /// The observation window: the peak is the window's maximum magnitude, `chopped` its count of

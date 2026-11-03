@@ -549,11 +549,12 @@ pub const MOTOR_PHASE_B: PinField = PinField::new(0x4A, Type::PinAdc);
 /// refuses it on every other chip (`phase_pair`, from `hal::pincap`'s sense pairs), so the one-motor
 /// images' A-and-B ranks never meet a pair they would read wrongly.
 pub const MOTOR_PHASE_C: PinField = PinField::new(0x57, Type::PinAdc);
-/// The bridge state a motor's phase-current zeros are measured in, per motor
-/// (`specs/twelve-fet.md` section 5.5): `0` = `floating`, every FET off (the default, what the
-/// rover and offroad boards calibrate in); `1` = `low_sides_on`, the three low sides on and the
-/// high sides off (the 12-FET's amplifiers read 0.23 V higher floating than with the low sides on).
-pub const MOTOR_CAL_STATE: Field<u8> = Field::new(0x58, 0);
+/// What a motor's phase sensors read, per motor (`specs/twelve-fet.md` sections 5.5 and 5.6):
+/// `0` = `any_state`, a sensed phase reads its current whatever its leg is doing (the default, the
+/// rover and offroad boards); `1` = `low_side_on`, it reads its current only while its leg's low
+/// side conducts (the 12-FET), so the zeros are measured with the low sides on and a sample whose
+/// leg was off is not a reading.
+pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x58, 0);
 /// The power-button sense pin (`specs/board-model.md` `power.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
@@ -1085,7 +1086,7 @@ field_ids! {
     0x55, // MOTOR_GATE_TIMER
     0x56, // MOTOR_GATE_REMAP
     0x57, // MOTOR_PHASE_C
-    0x58, // MOTOR_CAL_STATE
+    0x58, // MOTOR_CURRENT_SENSE
 }
 
 #[cfg(feature = "test-fields")]
@@ -1156,7 +1157,7 @@ field_ids! {
     0x55, // MOTOR_GATE_TIMER
     0x56, // MOTOR_GATE_REMAP
     0x57, // MOTOR_PHASE_C
-    0x58, // MOTOR_CAL_STATE
+    0x58, // MOTOR_CURRENT_SENSE
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1479,7 +1480,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_GATE_TIMER.entry(Boot),
     MOTOR_GATE_REMAP.entry(Boot),
     MOTOR_PHASE_C.entry(Boot),
-    MOTOR_CAL_STATE.entry(Boot),
+    MOTOR_CURRENT_SENSE.entry(Boot),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY, Client),
     #[cfg(feature = "test-fields")]
@@ -1698,7 +1699,7 @@ pub mod names {
     const DIRECTION: Kind = Kind::Enum(&[(0, "forward"), (1, "reverse")]);
     const AXIS: Kind = Kind::Enum(&[(1, "x"), (2, "y"), (3, "z")]);
     const CHEMISTRY: Kind = Kind::Enum(&[(0, "li_ion"), (1, "lev50"), (2, "lto")]);
-    const CAL_STATE: Kind = Kind::Enum(&[(0, "floating"), (1, "low_sides_on")]);
+    const SENSE: Kind = Kind::Enum(&[(0, "any_state"), (1, "low_side_on")]);
     /// `active_high`'s bits name the input pins they describe, by path
     /// (`specs/machine-settings.md` section 3.1).
     const ACTIVE_HIGH: Kind = Kind::Bits(&[(0, "power.button"), (1, "pads.a"), (2, "pads.b")]);
@@ -1778,7 +1779,7 @@ pub mod names {
         FieldName::motor(MOTOR_GATE_TIMER, "gate.timer", Kind::Int),
         FieldName::motor(MOTOR_GATE_REMAP, "gate.remap", Kind::Int),
         FieldName::pin(MOTOR_PHASE_C, "current.phase_c", Index::Motor),
-        FieldName::motor(MOTOR_CAL_STATE, "current.cal_state", CAL_STATE),
+        FieldName::motor(MOTOR_CURRENT_SENSE, "current.sense", SENSE),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -2219,7 +2220,7 @@ mod registry_tests {
             (0x55, MOTOR_GATE_TIMER.id()),
             (0x56, MOTOR_GATE_REMAP.id()),
             (0x57, MOTOR_PHASE_C.id()),
-            (0x58, MOTOR_CAL_STATE.id()),
+            (0x58, MOTOR_CURRENT_SENSE.id()),
         ];
         for (want, got) in map {
             assert_eq!(want, got);

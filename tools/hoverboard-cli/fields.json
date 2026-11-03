@@ -947,14 +947,14 @@
   },
   {
     "id": 88,
-    "path": "current.cal_state",
+    "path": "current.sense",
     "type": "u8",
     "index": "motor",
     "count": 2,
     "kind": "enum",
     "labels": {
-      "floating": 0,
-      "low_sides_on": 1
+      "any_state": 0,
+      "low_side_on": 1
     },
     "scope": "wheel",
     "effect": "boot",

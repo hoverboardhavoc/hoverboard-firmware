@@ -37,9 +37,11 @@ pub struct Motor {
     pub remap: u8,
     /// The dead time, DTG ticks.
     pub dead_time: u8,
-    /// `current.cal_state` = `low_sides_on`: the zeros are measured with the low sides on
-    /// (`specs/twelve-fet.md` section 5.5); `false` (`floating`, the default) with every FET off.
-    pub cal_low_sides: bool,
+    /// `current.sense` = `low_side_on`: the phase sensors read current only while their leg's
+    /// low side conducts (`specs/twelve-fet.md` sections 5.5, 5.6), so the zeros are measured with
+    /// the low sides on and a sample whose leg was off is not a reading; `false` (`any_state`, the
+    /// default) reads every sample, calibrated with every FET off.
+    pub sense_low_side: bool,
     /// The sensed phase pair with their ADC channels, `None` when the motor has no current sense.
     pub phase: Option<Sense>,
 }
@@ -151,13 +153,13 @@ const IMU_MODEL: usize = LINK + 4 * store::LINKS as usize;
 const BOARD_N: usize = IMU_MODEL + 1 - BOARD;
 
 /// Within a motor's group: the halls, the gates, the gate timer, its remap, the dead time, the
-/// calibration state, the phase pins.
+/// phase-sense kind, the phase pins.
 const HALLS: usize = 0;
 const GATES: usize = 3;
 const GATE_TIMER: usize = 9;
 const GATE_REMAP: usize = 10;
 const DEAD_TIME: usize = 11;
-const CAL_STATE: usize = 12;
+const SENSE: usize = 12;
 const PHASE: usize = 13;
 /// A motor's group: every wheel key, with `phase_c` only where the image reads it, which is where
 /// it drives two motors (`specs/twelve-fet.md` section 5.3: the one-motor images do not carry it).
@@ -201,7 +203,7 @@ const WHEEL_KEYS: [(Key, Type); 16] = [
     (store::MOTOR_GATE_TIMER.key(), Type::U8),
     (store::MOTOR_GATE_REMAP.key(), Type::U8),
     (store::MOTOR_DEAD_TIME.key(), Type::U8),
-    (store::MOTOR_CAL_STATE.key(), Type::U8),
+    (store::MOTOR_CURRENT_SENSE.key(), Type::U8),
     pin(store::MOTOR_PHASE_A),
     pin(store::MOTOR_PHASE_B),
     pin(store::MOTOR_PHASE_C),
@@ -306,7 +308,7 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
             timer: byte(at + GATE_TIMER)?,
             remap: byte(at + GATE_REMAP).unwrap_or(0),
             dead_time: byte(at + DEAD_TIME).unwrap_or(0),
-            cal_low_sides: byte(at + CAL_STATE) == Some(1),
+            sense_low_side: byte(at + SENSE) == Some(1),
             phase: sense(
                 p3(at + PHASE),
                 p3(at + PHASE + 1),
@@ -431,12 +433,12 @@ mod tests {
         assert_eq!(m.gates[0], [0, 8, 2]);
         assert_eq!(m.gates[5], [1, 15, 2]);
         assert_eq!((m.timer, m.remap, m.dead_time), (0, 0, 28));
-        assert!(!m.cal_low_sides, "floating when not stored");
+        assert!(!m.sense_low_side, "any_state when not stored");
         let l = with(|s| {
             stage_motor(s);
-            s.set(store::MOTOR_CAL_STATE, 1).unwrap();
+            s.set(store::MOTOR_CURRENT_SENSE, 1).unwrap();
         });
-        assert!(l.motors[0].unwrap().cal_low_sides);
+        assert!(l.motors[0].unwrap().sense_low_side);
         assert_eq!(
             m.phase,
             Some(Sense {
@@ -651,11 +653,11 @@ mod tests {
         assert_eq!(
             KEY_LIST.len(),
             want.len() + 2 * COUNT,
-            "only these, the dead time and the calibration state"
+            "only these, the dead time and the phase-sense kind"
         );
         for m in 0..COUNT as u8 {
             assert!(KEY_LIST.contains(&store::MOTOR_DEAD_TIME.at(m).key()));
-            assert!(KEY_LIST.contains(&store::MOTOR_CAL_STATE.at(m).key()));
+            assert!(KEY_LIST.contains(&store::MOTOR_CURRENT_SENSE.at(m).key()));
         }
         for (k, t) in KEYS {
             let d = store::lookup_key(k).unwrap();

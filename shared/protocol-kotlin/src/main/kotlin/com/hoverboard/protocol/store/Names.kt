@@ -37,7 +37,7 @@ object Names {
     private val FRAME = listOf(0 to "pivoting", 1 to "rigid")
     private val SIDE = listOf(0 to "left", 1 to "right")
     private val DIRECTION = listOf(0 to "forward", 1 to "reverse")
-    private val CAL_STATE = listOf(0 to "floating", 1 to "low_sides_on")
+    private val SENSE = listOf(0 to "any_state", 1 to "low_side_on")
     private val AXIS = listOf(1 to "x", 2 to "y", 3 to "z")
     private val CHEMISTRY = listOf(0 to "li_ion", 1 to "lev50", 2 to "lto")
     private val ACTIVE_HIGH = listOf(0 to "power.button", 1 to "pads.a", 2 to "pads.b")
@@ -126,7 +126,7 @@ object Names {
         motor(Fields.MOTOR_GATE_TIMER, "gate.timer"),
         motor(Fields.MOTOR_GATE_REMAP, "gate.remap"),
         pin(Fields.MOTOR_PHASE_C, "current.phase_c", IndexKind.MOTOR),
-        motor(Fields.MOTOR_CAL_STATE, "current.cal_state", Kind.ENUM, CAL_STATE),
+        motor(Fields.MOTOR_CURRENT_SENSE, "current.sense", Kind.ENUM, SENSE),
     )
 
     /** The row for field [id], or null when the table names none. */

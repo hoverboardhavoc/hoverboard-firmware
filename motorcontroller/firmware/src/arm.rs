@@ -19,7 +19,7 @@
 //! - the motor-side fault LEVEL vetoes arming.
 //!
 //! The one other MOE this file sets is the boot calibration's ([`hw::calibration_moe`],
-//! `specs/twelve-fet.md` section 5.5): a motor stored `current.cal_state` = `low_sides_on` has its
+//! `specs/twelve-fet.md` section 5.5): a motor stored `current.sense` = `low_side_on` has its
 //! zeros measured with duties 0, its channels enabled and MOE set, so the low sides are on and
 //! the high sides off. It runs in the bring-up, before the period vector and before any gate is
 //! installed, and goes through the same single MOE call as the arm.
@@ -706,12 +706,15 @@ pub mod hw {
         for step in SHUTDOWN_STEPS {
             match step {
                 ShutdownStep::Disarm => {
-                    // Every motor's MOE first, then (the next steps) every motor floated.
+                    // `ARMED` false BEFORE MOE clears: the period ISR reads it to judge its
+                    // sample (`specs/twelve-fet.md` section 5.6), so an ISR between the two
+                    // distrusts a sample that was still a reading, never the reverse. Then every
+                    // motor's MOE, then (the next steps) every motor floated.
+                    ARMED.store(false, Ordering::Relaxed);
                     // SAFETY: as `run_arm`.
                     for g in unsafe { (*addr_of_mut!(GATE)).iter().flatten() } {
                         set_moe(g, false);
                     }
-                    ARMED.store(false, Ordering::Relaxed);
                 }
                 ShutdownStep::ZeroDemand => zero_demand(),
                 ShutdownStep::FloatChannels => motor::hw::float_all_channels(),
@@ -731,7 +734,7 @@ pub mod hw {
     }
 
     /// The calibration's MOE (`specs/twelve-fet.md` section 5.5): set for a motor whose zeros are
-    /// measured with its low sides on (`current.cal_state` = `low_sides_on`), cleared when its
+    /// measured with its low sides on (`current.sense` = `low_side_on`), cleared when its
     /// blocks are done. Called by the bring-up's `CalibratePhaseOffsets` alone, on the boot thread,
     /// before the period vector is unmasked and before [`install`], so the mode machine has no
     /// gate yet and [`ARMED`] stays false: this is not an arm, and nothing on the arm path can
@@ -1815,6 +1818,18 @@ mod tests {
     ///
     /// Comment lines are stripped first, so prose may discuss arming while code may not. The tokens
     /// are assembled from pieces so this test's own source does not contain them (it scans itself).
+    /// The shutdown stores `ARMED` false before it clears MOE (`specs/twelve-fet.md` section 5.6):
+    /// the period ISR judges its sample by `armed()`, so the window between the two may only
+    /// distrust a reading, never trust a sample converted with MOE clear.
+    #[test]
+    fn the_shutdown_clears_armed_before_moe() {
+        let src = include_str!("arm.rs");
+        let body = &src[src.find(concat!("ShutdownStep::", "Disarm => {")).unwrap()..];
+        let armed = body.find(concat!("ARMED.store(", "false")).unwrap();
+        let moe = body.find(concat!("set_moe(g, ", "false)")).unwrap();
+        assert!(armed < moe, "ARMED must go false before MOE clears");
+    }
+
     #[test]
     fn the_arming_surface_is_confined_to_this_file() {
         let strip = |src: &str| -> std::string::String {
