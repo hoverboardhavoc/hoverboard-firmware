@@ -18,6 +18,12 @@
 //! - a motor that was never brought up cannot be armed (there is no runtime to drive it), and
 //! - the motor-side fault LEVEL vetoes arming.
 //!
+//! The one other MOE this file sets is the boot calibration's ([`hw::calibration_moe`],
+//! `specs/twelve-fet.md` section 5.5): a motor stored `current.sense` = `low_side_on` has its
+//! zeros measured with duties 0, its channels enabled and MOE set, so the low sides are on and
+//! the high sides off. It runs in the bring-up, before the period vector and before any gate is
+//! installed, and goes through the same single MOE call as the arm.
+//!
 //! **The level, never the raw `FAULT` word.** [`decide`] takes a `bool` and cannot express reading
 //! the word, deliberately: `motor::FAULT` carries bits that are not fault producers
 //! (`FAULT_DEMAND_STALE` is self-mitigating, the ISR has already floated every phase by the time it
@@ -234,16 +240,17 @@ pub fn off_inhibit(motor_running: bool, period_live: bool, speed: i32) -> bool {
 pub struct ArmValues {
     /// `store::MOTOR_METHOD` (0x23, `machine.method`).
     pub method_byte: u8,
-    /// `store::MOTOR_DIRECTION` (0x4F) at motor 0, raw: `motor::requested_direction` decodes it.
+    /// `store::MOTOR_DIRECTION` (0x4F) per motor (`motor::COUNT`), raw: `motor::requested_direction`
+    /// decodes it.
     /// In the row since 2026-10-20, when the bench showed the boot-read it replaced: writing the
     /// field and arming changed nothing, writing it and resetting reversed the wheel
     /// (`specs/bench-evidence/2026-10-20/sine-phase/RECORD.md`, the direction gate).
-    pub direction_byte: u8,
-    /// `store::MOTOR_ALIGN_OFFSET` (0x51) at motor 0, raw: `commutation::sixstep::SixStep::new`
+    pub direction_byte: [u8; motor::COUNT],
+    /// `store::MOTOR_ALIGN_OFFSET` (0x51) per motor, raw: `commutation::sixstep::SixStep::new`
     /// takes it mod 6. In the row with the direction (the row's test is whether a field touches a
     /// peripheral register, and the offset enters one argument along from the direction in the
     /// same decode); as a boot-read, sweeping it cost a reboot per value.
-    pub align_offset_byte: u8,
+    pub align_offset_byte: [u8; motor::COUNT],
     /// `store::CONTROL_MODE` (0x20, `machine.mode`) raw: the owning type decodes it and judges it against the
     /// board's IMU fact, which this layer does not hold.
     pub control_mode_byte: u8,
@@ -261,10 +268,10 @@ pub struct ArmValues {
     /// the row beside the frame, and for the same reason: it is a machine-type setting a phone
     /// stages, and staging it should cost a re-arm rather than a power cycle.
     pub side_byte: u8,
-    /// `store::MOTOR_CURRENT_LIMIT` (0x4E) at motor 0, milliamps.
-    pub current_limit_ma: u32,
-    /// `store::MOTOR_CURRENT_CAL` (0x4C) at motor 0, stock current counts per amp.
-    pub current_cal: u16,
+    /// `store::MOTOR_CURRENT_LIMIT` (0x4E) per motor, milliamps.
+    pub current_limit_ma: [u32; motor::COUNT],
+    /// `store::MOTOR_CURRENT_CAL` (0x4C) per motor, stock current counts per amp.
+    pub current_cal: [u16; motor::COUNT],
     /// `store::IMU_AXIS_SIGN` (0x15), indices 0..2 = `[x, y, z]`, applied to the accelerometer
     /// and the gyro alike (`imu::Config::staged`).
     pub imu_sign: [i32; 3],
@@ -290,12 +297,13 @@ pub struct ArmValues {
 /// read is infallible (`Store::get` returns the registered default for a missing record), so this
 /// cannot fail and a virgin board re-derives exactly the defaults the boot path used.
 ///
-/// The firmware brings up motor 0, so `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET` and
-/// `MOTOR_CURRENT_CAL` are read at index 0, matching `layout::read_motor`'s own per-motor `.at(m)`
-/// fill.
+/// The four wheel keys a motor's install consumes (`MOTOR_CURRENT_CAL`, `MOTOR_CURRENT_LIMIT`,
+/// `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET`) are read at every motor index below `motor::COUNT`;
+/// `CONTROL_SIDE` stays at index 0, its one consumer being the balance law's
+/// (`specs/twelve-fet.md` section 5.7).
 /// Every key [`read_arm_values`] resolves, as ONE row: exactly the registered keys whose effect is
 /// arm (`store::Effect::Arm`, `specs/machine-settings.md` section 5), which a test holds to the
-/// registry, in registry order. A per-motor field is read at motor 0, the one motor a board drives.
+/// registry, in registry order, then the per-motor install keys at each further motor's index.
 ///
 /// The row exists because of what a per-field read costs. `Store::get` walks the whole active
 /// page for each field (append-only, newest wins, so it cannot stop at the first match), and read
@@ -307,7 +315,44 @@ pub struct ArmValues {
 /// **Adding a field here costs one key and one match arm, not one page walk.** That is the point
 /// of the row, and it is why the list is written out rather than assembled somewhere clever: the
 /// next person moving a value into the arm-time read should see exactly what it contains.
-pub const ARM_ROW: [store::Key; 23] = [
+pub const ARM_ROW: [store::Key; ARM_ROW_LEN] = {
+    let mut row = [store::Key {
+        field_id: 0,
+        index: 0,
+    }; ARM_ROW_LEN];
+    let mut i = 0;
+    while i < ARM_ROW_BASE.len() {
+        row[i] = ARM_ROW_BASE[i];
+        i += 1;
+    }
+    let mut m = 1;
+    while m < motor::COUNT {
+        let mut j = 0;
+        while j < MOTOR_ARM_IDS.len() {
+            row[i] = store::Key {
+                field_id: MOTOR_ARM_IDS[j],
+                index: m as u8,
+            };
+            i += 1;
+            j += 1;
+        }
+        m += 1;
+    }
+    row
+};
+
+/// The four wheel fields a motor's arm-time install consumes, read at every motor's index.
+const MOTOR_ARM_IDS: [u8; 4] = [
+    store::MOTOR_CURRENT_CAL.id(),
+    store::MOTOR_CURRENT_LIMIT.id(),
+    store::MOTOR_DIRECTION.id(),
+    store::MOTOR_ALIGN_OFFSET.id(),
+];
+
+const ARM_ROW_LEN: usize = ARM_ROW_BASE.len() + MOTOR_ARM_IDS.len() * (motor::COUNT - 1);
+
+/// The registry's arm-effect keys, in registry order (motor 0's at index 0).
+const ARM_ROW_BASE: [store::Key; 23] = [
     store::IMU_AXIS_SIGN.at(0).key(),
     store::IMU_AXIS_SIGN.at(1).key(),
     store::IMU_AXIS_SIGN.at(2).key(),
@@ -338,14 +383,18 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
     // field with no record then reads exactly what `Store::get` would have returned for it.
     let mut v = ArmValues {
         method_byte: store::MOTOR_METHOD.default(),
-        direction_byte: store::MOTOR_DIRECTION.at(0).default(),
-        align_offset_byte: store::MOTOR_ALIGN_OFFSET.at(0).default(),
+        direction_byte: core::array::from_fn(|m| store::MOTOR_DIRECTION.at(m as u8).default()),
+        align_offset_byte: core::array::from_fn(|m| {
+            store::MOTOR_ALIGN_OFFSET.at(m as u8).default()
+        }),
         control_mode_byte: store::CONTROL_MODE.default(),
         frame_byte: store::CONTROL_FRAME.default(),
         leader_byte: store::CONTROL_LEADER.default(),
         side_byte: store::CONTROL_SIDE.at(0).default(),
-        current_limit_ma: store::MOTOR_CURRENT_LIMIT.at(0).default(),
-        current_cal: store::MOTOR_CURRENT_CAL.at(0).default(),
+        current_limit_ma: core::array::from_fn(|m| {
+            store::MOTOR_CURRENT_LIMIT.at(m as u8).default()
+        }),
+        current_cal: core::array::from_fn(|m| store::MOTOR_CURRENT_CAL.at(m as u8).default()),
         imu_sign: [
             store::IMU_AXIS_SIGN.at(0).default(),
             store::IMU_AXIS_SIGN.at(1).default(),
@@ -375,10 +424,14 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
     s.for_each_in(&ARM_ROW, |k, tag, b| {
         if k == store::MOTOR_METHOD.key() {
             v.method_byte = store::scalar_or_default(store::MOTOR_METHOD, tag, b);
-        } else if k == store::MOTOR_DIRECTION.at(0).key() {
-            v.direction_byte = store::scalar_or_default(store::MOTOR_DIRECTION.at(0), tag, b);
-        } else if k == store::MOTOR_ALIGN_OFFSET.at(0).key() {
-            v.align_offset_byte = store::scalar_or_default(store::MOTOR_ALIGN_OFFSET.at(0), tag, b);
+        } else if k.field_id == store::MOTOR_DIRECTION.id() {
+            if let Some(slot) = v.direction_byte.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::MOTOR_DIRECTION.at(k.index), tag, b);
+            }
+        } else if k.field_id == store::MOTOR_ALIGN_OFFSET.id() {
+            if let Some(slot) = v.align_offset_byte.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::MOTOR_ALIGN_OFFSET.at(k.index), tag, b);
+            }
         } else if k == store::CONTROL_MODE.key() {
             v.control_mode_byte = store::scalar_or_default(store::CONTROL_MODE, tag, b);
         } else if k == store::CONTROL_FRAME.key() {
@@ -387,10 +440,14 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             v.leader_byte = store::scalar_or_default(store::CONTROL_LEADER, tag, b);
         } else if k == store::CONTROL_SIDE.at(0).key() {
             v.side_byte = store::scalar_or_default(store::CONTROL_SIDE.at(0), tag, b);
-        } else if k == store::MOTOR_CURRENT_LIMIT.at(0).key() {
-            v.current_limit_ma = store::scalar_or_default(store::MOTOR_CURRENT_LIMIT.at(0), tag, b);
-        } else if k == store::MOTOR_CURRENT_CAL.at(0).key() {
-            v.current_cal = store::scalar_or_default(store::MOTOR_CURRENT_CAL.at(0), tag, b);
+        } else if k.field_id == store::MOTOR_CURRENT_LIMIT.id() {
+            if let Some(slot) = v.current_limit_ma.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::MOTOR_CURRENT_LIMIT.at(k.index), tag, b);
+            }
+        } else if k.field_id == store::MOTOR_CURRENT_CAL.id() {
+            if let Some(slot) = v.current_cal.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::MOTOR_CURRENT_CAL.at(k.index), tag, b);
+            }
         } else if k == store::CONTROL_RIDER_REQUIRED.key() {
             v.rider_required_byte = store::scalar_or_default(store::CONTROL_RIDER_REQUIRED, tag, b);
         } else if k == store::BOARD_BATTERY_FLOOR.key() {
@@ -421,8 +478,9 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
 /// Everything the arm row installs, converted and ready to apply.
 #[derive(Clone, Copy, Debug)]
 pub struct Rederived {
-    /// The period ISR's value set (method, current limit, fresh records, the method fault).
-    pub motor: motor::Rederived,
+    /// The period ISR's value set per motor (method, current limit, fresh records, the method
+    /// fault).
+    pub motor: [motor::Rederived; motor::COUNT],
     /// The IMU's axis frame, or `None` on a board with no IMU (nothing to install).
     pub imu: Option<imu::Config>,
     /// `CONTROL_MODE` raw, for the orchestrator's control section to decode, judge against the
@@ -455,21 +513,24 @@ pub struct Rederived {
 ///
 /// `imu_bias` is the IMU's INSTALLED gyro bias, carried through because `IMU_GYRO_BIAS` is a boot
 /// calibration and not in the row: `Some(bias)` on a board whose IMU was brought up, `None` on a
-/// board with no IMU, whose `imu` is then `None`.
+/// board with no IMU, whose `imu` is then `None`. `boot` is each motor's boot-fixed facts; the
+/// machine's one method byte runs on every motor (`machine.method` is per board).
 pub fn rederive(
     values: &ArmValues,
-    boot: motor::BootFixed,
+    boot: [motor::BootFixed; motor::COUNT],
     imu_bias: Option<[i32; 3]>,
 ) -> Rederived {
     Rederived {
-        motor: motor::rederive(
-            values.method_byte,
-            values.direction_byte,
-            values.align_offset_byte,
-            values.current_limit_ma,
-            values.current_cal,
-            boot,
-        ),
+        motor: core::array::from_fn(|m| {
+            motor::rederive(
+                values.method_byte,
+                values.direction_byte[m],
+                values.align_offset_byte[m],
+                values.current_limit_ma[m],
+                values.current_cal[m],
+                boot[m],
+            )
+        }),
         imu: imu_bias.map(|bias| imu::Config::staged(values.imu_sign, bias, values.imu_roles)),
         control_mode_byte: values.control_mode_byte,
         frame_byte: values.frame_byte,
@@ -525,14 +586,15 @@ pub mod hw {
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use hal::ArmGate;
 
-    /// The configured motor's arming gate, installed once at boot from the bring-up's timer and
-    /// read only by the 250 Hz control task afterwards. `None` on a board whose motor was not
-    /// brought up, which is what makes such a board unarmable rather than merely unarmed.
+    /// Each configured motor's arming gate, by index, installed once at boot from the bring-up's
+    /// timer and read only by the 250 Hz control task afterwards. `None` for a motor that was not
+    /// brought up, which is what makes such a board unarmable rather than merely unarmed. Two on
+    /// the 12-FET, one per bridge (`specs/twelve-fet.md` section 5.7).
     ///
     /// It is the ONLY handle in this crate that can write `CCHP`: the HAL builds it as a
     /// deliberately separate object from the per-cycle `PwmHandle` the period ISR drives, and this
     /// module is the only holder of it.
-    static mut GATE: Option<ArmGate> = None;
+    static mut GATE: [Option<ArmGate>; motor::COUNT] = [None; motor::COUNT];
 
     /// Whether this layer has set MOE. Its own record, so [`decide`] sees an EDGE rather than
     /// re-running a sequence every tick. Written only on the 250 Hz thread.
@@ -555,10 +617,12 @@ pub mod hw {
     /// Install the arming gate for a brought-up motor. Called once, on the boot thread, from the
     /// bring-up's summary. Installing it does not arm anything: MOE is untouched here, and the
     /// mode machine is in OFF for the whole of boot.
-    pub fn install(timer: &hal::PwmTimer) {
-        // SAFETY: the one write, on the boot thread, before the scheduler exists and therefore
-        // before any control task can read it.
-        unsafe { *addr_of_mut!(GATE) = Some(timer.arm_gate()) };
+    pub fn install(motor: usize, timer: &hal::PwmTimer) {
+        // SAFETY: the one write per motor, on the boot thread, before the scheduler exists and
+        // therefore before any control task can read it.
+        if let Some(g) = unsafe { (*addr_of_mut!(GATE)).get_mut(motor) } {
+            *g = Some(timer.arm_gate());
+        }
     }
 
     /// Whether MOE is currently set by this layer.
@@ -585,15 +649,19 @@ pub mod hw {
     ///
     /// `re_read` is the arm-row function ([`ArmStep::ReReadValues`]), called only on the ARM path:
     /// a closure because it reaches the caller's shell and the store static.
+    ///
+    /// `moe_allowed` is the mode machine's decision per motor. The board arms and shuts down as one
+    /// (one mode machine, which grants and withdraws every motor's allowance together): motor 0's
+    /// decides the edge, and the arm sets each installed gate whose motor is allowed.
     pub fn enact(
-        moe_allowed: bool,
+        moe_allowed: [bool; motor::COUNT],
         brought_up: bool,
         fault_level: bool,
         mut re_read: impl FnMut(),
     ) {
-        match decide(moe_allowed, armed(), brought_up, fault_level) {
+        match decide(moe_allowed[0], armed(), brought_up, fault_level) {
             ArmDecision::Idle => {}
-            ArmDecision::Arm => run_arm(&mut re_read),
+            ArmDecision::Arm => run_arm(moe_allowed, &mut re_read),
             ArmDecision::Shutdown => run_shutdown(),
         }
     }
@@ -602,7 +670,7 @@ pub mod hw {
     /// sequence instead, so the failure path leaves the bridge in the disarmed, all-float posture
     /// rather than half-way through an arm. It is held as the level [`motor::motor_fault_level`]
     /// folds, sticky for the boot, and steps its count in `REFUSAL_OBS`.
-    fn run_arm(re_read: &mut impl FnMut()) {
+    fn run_arm(moe_allowed: [bool; motor::COUNT], re_read: &mut impl FnMut()) {
         for step in ARM_STEPS {
             match step {
                 ArmStep::ReReadValues => re_read(),
@@ -621,9 +689,12 @@ pub mod hw {
                 ArmStep::SetMoe => {
                     // SAFETY: read-only access to a static written once on the boot thread; the
                     // 250 Hz control task is the only reader.
-                    if let Some(g) = unsafe { (*addr_of_mut!(GATE)).as_ref() } {
-                        g.arm();
-                        ARMED.store(true, Ordering::Relaxed);
+                    let gates = unsafe { &*addr_of_mut!(GATE) };
+                    for (g, allowed) in gates.iter().zip(moe_allowed) {
+                        if let (Some(g), true) = (g, allowed) {
+                            set_moe(g, true);
+                            ARMED.store(true, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -635,11 +706,15 @@ pub mod hw {
         for step in SHUTDOWN_STEPS {
             match step {
                 ShutdownStep::Disarm => {
-                    // SAFETY: as `run_arm`.
-                    if let Some(g) = unsafe { (*addr_of_mut!(GATE)).as_ref() } {
-                        g.disarm();
-                    }
+                    // `ARMED` false BEFORE MOE clears: the period ISR reads it to judge its
+                    // sample (`specs/twelve-fet.md` section 5.6), so an ISR between the two
+                    // distrusts a sample that was still a reading, never the reverse. Then every
+                    // motor's MOE, then (the next steps) every motor floated.
                     ARMED.store(false, Ordering::Relaxed);
+                    // SAFETY: as `run_arm`.
+                    for g in unsafe { (*addr_of_mut!(GATE)).iter().flatten() } {
+                        set_moe(g, false);
+                    }
                 }
                 ShutdownStep::ZeroDemand => zero_demand(),
                 ShutdownStep::FloatChannels => motor::hw::float_all_channels(),
@@ -647,10 +722,34 @@ pub mod hw {
         }
     }
 
+    /// Set or clear one gate's MOE: the crate's one call of each, which the arm, the shutdown and
+    /// the calibration hold share.
+    #[inline(always)]
+    fn set_moe(g: &ArmGate, on: bool) {
+        if on {
+            g.arm();
+        } else {
+            g.disarm();
+        }
+    }
+
+    /// The calibration's MOE (`specs/twelve-fet.md` section 5.5): set for a motor whose zeros are
+    /// measured with its low sides on (`current.sense` = `low_side_on`), cleared when its
+    /// blocks are done. Called by the bring-up's `CalibratePhaseOffsets` alone, on the boot thread,
+    /// before the period vector is unmasked and before [`install`], so the mode machine has no
+    /// gate yet and [`ARMED`] stays false: this is not an arm, and nothing on the arm path can
+    /// meet it. The bring-up writes duties 0 and enables the three channels first, so MOE puts
+    /// the low sides on and the high sides off.
+    pub fn calibration_moe(timer: &hal::PwmTimer, on: bool) {
+        set_moe(&timer.arm_gate(), on);
+    }
+
     /// Zero the demand word and bump its sequence, so the ISR sees a FRESH write of zero rather
     /// than an unchanged word its freshness guard would keep ageing.
     fn zero_demand() {
-        motor::DEMAND.store(0, Ordering::Relaxed);
+        for word in &motor::DEMAND {
+            word.store(0, Ordering::Relaxed);
+        }
         // One context writes the sequence (the main thread, with the control task's publish), so
         // a load and a store are the whole update on the Cortex-M0, which has no fetch_add.
         #[cfg(target_has_atomic = "32")]
@@ -664,10 +763,10 @@ pub mod hw {
 
     /// Watch [`motor::PERIODS`] advance, bounded by [`ARM_CONFIRM_SPINS`].
     fn confirm_periods_live() -> bool {
-        let start = motor::PERIODS.load(Ordering::Relaxed);
+        let start = motor::PERIODS[0].load(Ordering::Relaxed);
         let mut spins = ARM_CONFIRM_SPINS;
         while spins > 0 {
-            if motor::PERIODS.load(Ordering::Relaxed) != start {
+            if motor::PERIODS[0].load(Ordering::Relaxed) != start {
                 return true;
             }
             spins -= 1;
@@ -1167,18 +1266,28 @@ mod tests {
             s.set(store::CONTROL_DRIVE_TURN.at(1), 33).unwrap();
             s.set(store::CONTROL_POS_CLAMP, 60).unwrap();
         });
+        // Motor 0's keys were written; every further motor's read its defaults.
+        let d = with_store(|_| {});
+        let at0 = |mut row: [u8; motor::COUNT], v: u8| {
+            row[0] = v;
+            row
+        };
+        let mut limit = d.current_limit_ma;
+        limit[0] = 7_500;
+        let mut cal = d.current_cal;
+        cal[0] = 300;
         assert_eq!(
             v,
             ArmValues {
                 method_byte: 2,
-                direction_byte: 1,
-                align_offset_byte: 4,
+                direction_byte: at0(d.direction_byte, 1),
+                align_offset_byte: at0(d.align_offset_byte, 4),
                 control_mode_byte: 1,
                 frame_byte: 1,
                 leader_byte: 1,
                 side_byte: 1,
-                current_limit_ma: 7_500,
-                current_cal: 300,
+                current_limit_ma: limit,
+                current_cal: cal,
                 imu_sign: [1, -1, 1],
                 imu_roles: [1, 3],
                 rider_required_byte: 0,
@@ -1278,16 +1387,27 @@ mod tests {
 
     /// `specs/machine-settings.md` section 9, test 1: [`ARM_ROW`] is exactly the registered keys
     /// whose effect is arm, so the row cannot drift from the registry's attribute, and [`ROW_IDS`]
-    /// is its ids.
+    /// is its ids; then, on a two-motor image, the four install keys at each further motor's index
+    /// (`specs/twelve-fet.md` section 5.7).
     #[test]
     fn the_arm_row_is_the_registrys_arm_effect_keys() {
-        let arm: std::vec::Vec<store::Key> = store::REGISTRY
+        let mut arm: std::vec::Vec<store::Key> = store::REGISTRY
             .iter()
             .filter(|r| r.effect == store::Effect::Arm)
             .map(|r| r.key())
             .collect();
+        for m in 1..motor::COUNT as u8 {
+            for f in [
+                store::MOTOR_CURRENT_CAL.at(m).key(),
+                store::MOTOR_CURRENT_LIMIT.at(m).key(),
+                store::MOTOR_DIRECTION.at(m).key(),
+                store::MOTOR_ALIGN_OFFSET.at(m).key(),
+            ] {
+                arm.push(f);
+            }
+        }
         assert_eq!(ARM_ROW.as_slice(), arm.as_slice());
-        let mut ids: std::vec::Vec<u8> = ARM_ROW.iter().map(|k| k.field_id).collect();
+        let mut ids: std::vec::Vec<u8> = ARM_ROW_BASE.iter().map(|k| k.field_id).collect();
         ids.dedup();
         assert_eq!(ids, ROW_IDS);
     }
@@ -1344,14 +1464,14 @@ mod tests {
     fn the_stored_imu_frame_is_installed_as_stored() {
         let values = |sign: [i32; 3], roles: [u8; 2]| ArmValues {
             method_byte: 0,
-            direction_byte: 0,
-            align_offset_byte: 2,
+            direction_byte: [0; motor::COUNT],
+            align_offset_byte: [2; motor::COUNT],
             control_mode_byte: 1,
             frame_byte: 0,
             leader_byte: 0,
             side_byte: 0,
-            current_limit_ma: 10_000,
-            current_cal: 455,
+            current_limit_ma: [10_000; motor::COUNT],
+            current_cal: [455; motor::COUNT],
             imu_sign: sign,
             imu_roles: roles,
             rider_required_byte: 1,
@@ -1362,7 +1482,7 @@ mod tests {
         };
         let bias = Some([48, 13, -88]);
         for (sign, roles) in [([1, 1, -1], GOOD_ROLES), (GOOD_SIGN, GOOD_ROLES)] {
-            let r = rederive(&values(sign, roles), BOOT, bias);
+            let r = rederive(&values(sign, roles), [BOOT; motor::COUNT], bias);
             let cfg = r.imu.expect("an IMU board stages a config");
             assert_eq!(cfg.gyro_bias, [48, 13, -88]);
             assert_eq!(cfg.sign[..3], sign);
@@ -1377,8 +1497,8 @@ mod tests {
     fn a_board_with_no_imu_still_rederives() {
         let values = ArmValues {
             method_byte: 1,
-            direction_byte: 0,
-            align_offset_byte: 2,
+            direction_byte: [0; motor::COUNT],
+            align_offset_byte: [2; motor::COUNT],
             // Balance, on a board with no IMU: the byte travels UNDECODED, because a mode that
             // cannot run is demoted with the mode fault by the type that owns the IMU fact
             // (`ControlDispatch::re_apply_values`), exactly as at boot. It is not a refusal, so it
@@ -1387,8 +1507,8 @@ mod tests {
             frame_byte: 0,
             leader_byte: 0,
             side_byte: 0,
-            current_limit_ma: 12_000,
-            current_cal: 455,
+            current_limit_ma: [12_000; motor::COUNT],
+            current_cal: [455; motor::COUNT],
             // Deliberately a reflection: with no IMU it is never staged, so it cannot refuse.
             imu_sign: [1, 1, -1],
             imu_roles: [2, 2],
@@ -1398,7 +1518,7 @@ mod tests {
             drive_turn: [0, 24],
             pos_clamp: 900,
         };
-        let r = rederive(&values, BOOT, None);
+        let r = rederive(&values, [BOOT; motor::COUNT], None);
         assert!(r.imu.is_none(), "nothing to install");
         assert_eq!(
             r.control_mode_byte, 1,
@@ -1407,9 +1527,12 @@ mod tests {
         // The rest of the row is still derived, through its own owners. The stored byte is 1, and
         // sine is open-loop, so it is honoured as asked: no current sense is needed to run it, and
         // this board has none accepted (`BOOT`).
-        assert_eq!(r.motor.method, commutation::CommutationMethod::Sine.to_u8());
         assert_eq!(
-            r.motor.records.method(),
+            r.motor[0].method,
+            commutation::CommutationMethod::Sine.to_u8()
+        );
+        assert_eq!(
+            r.motor[0].records.method(),
             commutation::CommutationMethod::Sine
         );
         assert_eq!(r.rider_required_byte, 0);
@@ -1427,14 +1550,14 @@ mod tests {
     fn the_drive_turn_goes_through_its_seam_clamp() {
         let mut values = ArmValues {
             method_byte: 0,
-            direction_byte: 0,
-            align_offset_byte: 2,
+            direction_byte: [0; motor::COUNT],
+            align_offset_byte: [2; motor::COUNT],
             control_mode_byte: 0,
             frame_byte: 0,
             leader_byte: 0,
             side_byte: 0,
-            current_limit_ma: 10_000,
-            current_cal: 455,
+            current_limit_ma: [10_000; motor::COUNT],
+            current_cal: [455; motor::COUNT],
             imu_sign: GOOD_SIGN,
             imu_roles: GOOD_ROLES,
             rider_required_byte: 1,
@@ -1443,11 +1566,11 @@ mod tests {
             drive_turn: [i16::MAX, 0],
             pos_clamp: 45,
         };
-        let r = rederive(&values, BOOT, None);
+        let r = rederive(&values, [BOOT; motor::COUNT], None);
         assert_eq!(r.drive_turn.turn_max() as i32, base::TORQUE_FULL_SCALE);
         assert_eq!(r.drive_turn.turn_slew(), control::drive::TURN_SLEW_MIN);
         values.drive_turn = [-1, i16::MAX];
-        let r = rederive(&values, BOOT, None);
+        let r = rederive(&values, [BOOT; motor::COUNT], None);
         assert_eq!(r.drive_turn.turn_max(), 0, "negative is the disabled state");
         assert_eq!(r.drive_turn.turn_slew(), control::drive::TURN_SLEW_MAX);
     }
@@ -1468,22 +1591,22 @@ mod tests {
         let mut s = store::Store::mount(&mut flash).unwrap();
         s.set(store::MOTOR_METHOD, 0).unwrap();
         // The boot's first value: the registered default, Forward.
-        let first = rederive(&read_arm_values(&s), BOOT, None);
-        assert_eq!(first.motor.decode.direction(), Direction::Forward);
-        let MethodState::SixStep(st) = first.motor.records else {
+        let first = rederive(&read_arm_values(&s), [BOOT; motor::COUNT], None);
+        assert_eq!(first.motor[0].decode.direction(), Direction::Forward);
+        let MethodState::SixStep(st) = first.motor[0].records else {
             panic!("six-step records");
         };
         assert_eq!(st.decode.direction(), Direction::Forward);
         // The disarmed write (R4 is what keeps it disarmed; here there is no bridge at all), then
         // the next arm's re-read.
         s.set(store::MOTOR_DIRECTION.at(0), 1).unwrap();
-        let next = rederive(&read_arm_values(&s), BOOT, None);
+        let next = rederive(&read_arm_values(&s), [BOOT; motor::COUNT], None);
         assert_eq!(
-            next.motor.decode.direction(),
+            next.motor[0].decode.direction(),
             Direction::Reverse,
             "the angle path's install"
         );
-        let MethodState::SixStep(st) = next.motor.records else {
+        let MethodState::SixStep(st) = next.motor[0].records else {
             panic!("six-step records");
         };
         assert_eq!(
@@ -1491,18 +1614,17 @@ mod tests {
             Direction::Reverse,
             "the six-step decode"
         );
-        assert_eq!(next.motor.method, first.motor.method);
-        assert_eq!(next.motor.limit_counts, first.motor.limit_counts);
+        assert_eq!(next.motor[0].method, first.motor[0].method);
+        assert_eq!(next.motor[0].limit_counts, first.motor[0].limit_counts);
         // The same write reaches a sine board's angle path, where the records carry nothing.
         s.set(store::MOTOR_METHOD, 1).unwrap();
-        let sine = rederive(&read_arm_values(&s), BOOT, None);
-        assert!(matches!(sine.motor.records, MethodState::Sine));
-        assert_eq!(sine.motor.decode.direction(), Direction::Reverse);
+        let sine = rederive(&read_arm_values(&s), [BOOT; motor::COUNT], None);
+        assert!(matches!(sine.motor[0].records, MethodState::Sine));
+        assert_eq!(sine.motor[0].decode.direction(), Direction::Reverse);
         // And written back to 0, the next arm is Forward again: no reset in between.
         s.set(store::MOTOR_DIRECTION.at(0), 0).unwrap();
         assert_eq!(
-            rederive(&read_arm_values(&s), BOOT, None)
-                .motor
+            rederive(&read_arm_values(&s), [BOOT; motor::COUNT], None).motor[0]
                 .decode
                 .direction(),
             Direction::Forward
@@ -1524,11 +1646,11 @@ mod tests {
         use commutation::{Direction, MethodState};
         let mut flash = crate::test_flash::TestFlash::erased();
         let mut s = store::Store::mount(&mut flash).unwrap();
-        let first = rederive(&read_arm_values(&s), BOOT, None);
+        let first = rederive(&read_arm_values(&s), [BOOT; motor::COUNT], None);
         for offset in [1u8, 5, 0, 3] {
             s.set(store::MOTOR_ALIGN_OFFSET.at(0), offset).unwrap();
-            let next = rederive(&read_arm_values(&s), BOOT, None);
-            let MethodState::SixStep(st) = next.motor.records else {
+            let next = rederive(&read_arm_values(&s), [BOOT; motor::COUNT], None);
+            let MethodState::SixStep(st) = next.motor[0].records else {
                 panic!("six-step records");
             };
             assert_eq!(
@@ -1537,11 +1659,11 @@ mod tests {
                 "offset {offset}"
             );
             assert_eq!(
-                next.motor.decode.direction(),
-                first.motor.decode.direction()
+                next.motor[0].decode.direction(),
+                first.motor[0].decode.direction()
             );
-            assert_eq!(next.motor.method, first.motor.method);
-            assert_eq!(next.motor.limit_counts, first.motor.limit_counts);
+            assert_eq!(next.motor[0].method, first.motor[0].method);
+            assert_eq!(next.motor[0].limit_counts, first.motor[0].limit_counts);
         }
     }
 
@@ -1660,7 +1782,7 @@ mod tests {
             ("CONTROL_SIDE", store::CONTROL_SIDE.id()),
             ("MOTOR_ALIGN_OFFSET", store::MOTOR_ALIGN_OFFSET.id()),
         ];
-        let mut ids: std::vec::Vec<u8> = ARM_ROW.iter().map(|k| k.field_id).collect();
+        let mut ids: std::vec::Vec<u8> = ARM_ROW_BASE.iter().map(|k| k.field_id).collect();
         ids.dedup();
         let named: std::vec::Vec<u8> = handles.iter().map(|(_, id)| *id).collect();
         assert_eq!(named, ids, "the names here are the arm row's, in its order");
@@ -1696,6 +1818,18 @@ mod tests {
     ///
     /// Comment lines are stripped first, so prose may discuss arming while code may not. The tokens
     /// are assembled from pieces so this test's own source does not contain them (it scans itself).
+    /// The shutdown stores `ARMED` false before it clears MOE (`specs/twelve-fet.md` section 5.6):
+    /// the period ISR judges its sample by `armed()`, so the window between the two may only
+    /// distrust a reading, never trust a sample converted with MOE clear.
+    #[test]
+    fn the_shutdown_clears_armed_before_moe() {
+        let src = include_str!("arm.rs");
+        let body = &src[src.find(concat!("ShutdownStep::", "Disarm => {")).unwrap()..];
+        let armed = body.find(concat!("ARMED.store(", "false")).unwrap();
+        let moe = body.find(concat!("set_moe(g, ", "false)")).unwrap();
+        assert!(armed < moe, "ARMED must go false before MOE clears");
+    }
+
     #[test]
     fn the_arming_surface_is_confined_to_this_file() {
         let strip = |src: &str| -> std::string::String {

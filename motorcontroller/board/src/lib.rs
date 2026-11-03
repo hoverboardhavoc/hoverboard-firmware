@@ -4,13 +4,15 @@
 //! The firmware applies the stored configuration and checks none of it
 //! (`specs/config-read-once.md`); the CLI and the app check it before it is written. What this
 //! crate owns is what the firmware and the host tools share: the dead-time constants
-//! ([`DEAD_TIME_MIN_DTG`], the CLI's floor) and the [`status::StatusRecord`] a peripheral that does
-//! not come up adds an entry to.
+//! ([`DEAD_TIME_MIN_DTG`], the CLI's floor), the current limit's arithmetic ([`limit`], which the
+//! CLI's `limit_floor` check runs) and the [`status::StatusRecord`] a peripheral that does not come
+//! up adds an entry to.
 //!
 //! `no_std`; host tests in `#[cfg(test)]` link `std` via the host target.
 
 #![no_std]
 
+pub mod limit;
 pub mod status;
 
 /// The gate timer's clock, hertz. TIMER0 is on APB2 and the image's tree runs APB2 undivided, so

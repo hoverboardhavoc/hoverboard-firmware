@@ -1,0 +1,36 @@
+# Mode: with_polling over ADC1. STAT (0x00) reads 0x00000000: no conversion has ended (the first
+# pass after boot, before any start). One STAT read and no RDATA read on either side.
+description = """
+The battery's regular result on ADC1 before a conversion has ended: EOC is clear, so the result is
+not ready and RDATA is not read.
+
+Vendor: adc_flag_get(ADC_FLAG_EOC), clear, so no adc_regular_data_read.
+HAL: chip.adc_instance(Adc1), regular_result() (None).
+"""
+family = "gd32f10x"
+mode = "with_polling"
+assert_only = ["<ADC1_BASE>"]
+
+[read_responses]
+"<ADC1_BASE>+0x00" = 0x0000_0000
+
+[vendor]
+body = '''
+    if(SET == adc_flag_get(ADC1, ADC_FLAG_EOC)){
+        (void)adc_regular_data_read(ADC1);
+    }
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc_instance(PeriphLabel::Adc1).unwrap();
+        if adc.regular_result().is_some() {
+            loop {}
+        }
+    }
+'''

@@ -22,11 +22,13 @@ import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.board.BoardStatus
+import com.hoverboard.protocol.board.CurrentLimit
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.pincap.AdcInput
 import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.pincap.Func
 import com.hoverboard.protocol.pincap.FuncKind
+import com.hoverboard.protocol.pincap.Phase
 import com.hoverboard.protocol.pincap.Route
 import com.hoverboard.protocol.pincap.SWD
 import com.hoverboard.protocol.store.Names
@@ -825,6 +827,17 @@ class RustSourceDriftTest {
             "CyclicState::MACHINE_OFF",
         )
         assertEquals(CyclicState.WHEEL_RATE_OFF + 4, CyclicState.MACHINE_OFF)
+
+        // `motor`'s offset, which the encode and decode on both sides index by.
+        val motorOff = num(
+            findOne(
+                implBlock(linkctl, "DriveCmd"),
+                """pub const MOTOR_OFF: usize = (\d+);""",
+                "DriveCmd::MOTOR_OFF",
+            ).groupValues[1],
+        )
+        assertEquals(motorOff, DriveCmd.MOTOR_OFF, "DriveCmd::MOTOR_OFF drifted")
+        assertEquals(DriveCmd.LEN - 1, DriveCmd.MOTOR_OFF, "motor is the last byte")
     }
 
     /**
@@ -879,7 +892,9 @@ class RustSourceDriftTest {
                 "phasePeak" to "i16", "phaseMean" to "i16", "dutyOn" to "u16",
                 "bootTag" to "u8", "chip" to "ChipTag", "odometer" to "u32",
             ),
-            "DriveCmd" to listOf("kind" to "DriveKind", "value" to "i16", "steer" to "i16"),
+            "DriveCmd" to listOf(
+                "kind" to "DriveKind", "value" to "i16", "steer" to "i16", "motor" to "u8",
+            ),
             "Inputs" to listOf("buttons" to "u8", "rider" to "u8"),
         )
         // The ENCODED length for the payload that has an appended block, because that is what its
@@ -1446,22 +1461,22 @@ class RustSourceDriftTest {
         val arm = rust("motorcontroller/firmware/src/arm.rs")
         val decl = findOne(
             arm,
-            """^(?:pub\s+)?const\s+ARM_ROW\s*:\s*\[\s*store::Key\s*;\s*(\d+)\s*\]\s*=\s*\[""",
-            "the ARM_ROW declaration",
+            """^(?:pub\s+)?const\s+ARM_ROW_BASE\s*:\s*\[\s*store::Key\s*;\s*(\d+)\s*\]\s*=\s*\[""",
+            "the ARM_ROW_BASE declaration",
         )
         val open = decl.range.last
         val end = arm.indexOf("\n];", open)
-        check(end > open) { "Unterminated `ARM_ROW` array in motorcontroller/firmware/src/arm.rs" }
+        check(end > open) { "Unterminated `ARM_ROW_BASE` array in motorcontroller/firmware/src/arm.rs" }
         val armRows = findAllClaiming(
             arm.substring(open + 1, end),
             """store::([A-Z0-9_]+)\s*(?:\.at\(\s*\d+\s*\))?\s*\.key\(\)\s*,""",
             """\S""",
-            "the ARM_ROW entries",
+            "the ARM_ROW_BASE entries",
         )
         assertEquals(
-            literal("ARM_ROW", decl.groupValues[1], "the declared row length"),
+            literal("ARM_ROW_BASE", decl.groupValues[1], "the declared row length"),
             armRows.size,
-            "ARM_ROW declares a length its entries do not add up to",
+            "ARM_ROW_BASE declares a length its entries do not add up to",
         )
         assertEquals(
             armRows.map { it.groupValues[1] }.toSet(),
@@ -1738,11 +1753,12 @@ class RustSourceDriftTest {
         // bound at one assumed scale, which is the defect the count window replaced.
         // `Fields.CURRENT_LIMIT_MA` is therefore the client's own editor range, and what is pinned
         // here is the ceiling (`MAX_LIMIT_COUNTS`), that the window keeps the hard trip's 2x
-        // expressible, and the band the per-board FLOOR is clamped into.
-        val motor = rust("motorcontroller/firmware/src/motor.rs")
-        fun bound(name: String) = findOne(
+        // expressible, and the band the per-board FLOOR is clamped into. The arithmetic lives in
+        // the board crate, which the firmware re-exports and the CLI's `limit_floor` check calls.
+        val motor = rust("motorcontroller/board/src/limit.rs") + rust("motorcontroller/firmware/src/motor.rs")
+        fun bound(name: String, ty: String = "i16") = findOne(
             motor,
-            """^pub\s+const\s+$name\s*:\s*i16\s*=\s*([^;]+);""",
+            """^pub\s+const\s+$name\s*:\s*$ty\s*=\s*([^;]+);""",
             name,
         ).groupValues[1].trim()
         assertTrue(
@@ -1785,6 +1801,33 @@ class RustSourceDriftTest {
             motor,
             """stored\.clamp\(NOISE_FLOOR_MIN as u16, MAX_LIMIT_COUNTS as u16\)""",
             "noise_floor_counts' band clamp",
+        )
+        // The conversion `CurrentLimit` mirrors for the `limit_floor` check: the calibration's
+        // seam band, the request cap, the clamp into the window and the full scale less the floor.
+        // The shared check cases (`shared/config-checks/limit_floor.json`) run both sides' arithmetic.
+        assertEquals(
+            literal("CURRENT_CAL_MIN", bound("CURRENT_CAL_MIN", "u16"), "calibration seam bottom").toLong()..
+                literal("CURRENT_CAL_MAX", bound("CURRENT_CAL_MAX", "u16"), "calibration seam top").toLong(),
+            CurrentLimit.CURRENT_CAL,
+            "the calibration's seam band drifted from the mirror's",
+        )
+        assertEquals(maxLimit.toLong(), CurrentLimit.MAX_LIMIT_COUNTS, "MAX_LIMIT_COUNTS drifted from the mirror's")
+        assertEquals(
+            "(MAX_LIMIT_COUNTS as u32 + 1) * 1_000 / CURRENT_CAL_MIN as u32",
+            bound("LIMIT_REQUEST_CAP_MA", "u32"),
+            "LIMIT_REQUEST_CAP_MA's derivation drifted from the mirror's",
+        )
+        findOne(motor, """let\s+cal\s*=\s*cal\.clamp\(CURRENT_CAL_MIN,\s*CURRENT_CAL_MAX\)\s+as\s+u32;""", "request_counts' calibration clamp")
+        findOne(motor, """ma\.min\(LIMIT_REQUEST_CAP_MA\)\s*\*\s*cal\s*/\s*1_000""", "request_counts' conversion")
+        findOne(
+            motor,
+            """counts\.clamp\(\s*noise_floor_counts\(noise_floor\)\s+as\s+u32,\s*MAX_LIMIT_COUNTS\s+as\s+u32,?\s*\)""",
+            "limit_counts' window",
+        )
+        findOne(
+            motor,
+            """\(limit_counts\s+as\s+i32\s*-\s*noise_floor_counts\(noise_floor\)\s+as\s+i32\)\s*\.max\(0\)""",
+            "full_scale_counts' floor at zero",
         )
 
         // The turn bounds' two seam clamps, which the Machine section offers as the ranges of its
@@ -2331,9 +2374,9 @@ class RustSourceDriftTest {
 
     /**
      * The pin tables ([com.hoverboard.protocol.pincap]), against `motorcontroller/hal/src/pincap.rs`:
-     * the chips by name, which of them remap, and each chip's bonding, routes and ADC inputs, in
-     * order, both ways; and the SWD pair. Every `route(` and `adc(` in a table is read or the gate
-     * fails, so a route added to the Rust is a route the app's checks know.
+     * the chips by name, which of them remap, and each chip's bonding, routes, ADC inputs and sense
+     * pairs, in order, both ways; and the SWD pair. Every `route(`, `adc(` and sense pair in a table
+     * is read or the gate fails, so a route added to the Rust is a route the app's checks know.
      */
     @Test
     fun thePinTablesAgreeWithTheRustSource() {
@@ -2397,6 +2440,12 @@ class RustSourceDriftTest {
                 .toList()
             assertEquals(Regex("""\badc\(""").findAll(adcText).count(), adc.size, "${chip.id}: an ADC input this gate does not read")
             assertEquals(adc, chip.table.adc, "${chip.id}'s ADC inputs drifted")
+            val pairText = findOne(table, """sense_pairs:\s*&\[(.*)\],""", "${chip.id}'s sense pairs").groupValues[1]
+            val pairs = Regex("""\[\s*Phase::(\w)\s*,\s*Phase::(\w)\s*\]""").findAll(pairText)
+                .map { Phase.valueOf(it.groupValues[1]) to Phase.valueOf(it.groupValues[2]) }
+                .toList()
+            assertEquals(Regex("""\[""").findAll(pairText).count(), pairs.size, "${chip.id}: a sense pair this gate does not read")
+            assertEquals(pairs, chip.table.sensePairs, "${chip.id}'s sense pairs drifted")
         }
         val swd = findOne(pincap, """^pub const SWD: \[\(u8, u8\); 2\] = \[(.*)\];""", "pincap::SWD").groupValues[1]
         assertEquals(

@@ -33,11 +33,35 @@ enum class TickFrames {
     INPUTS_ONLY,
 }
 
-/** One board's share of one tick: the board's address [node], what it is told, and which payloads go out. */
-data class NodeTick(val node: Int, val command: RiderCommand, val frames: TickFrames)
+/**
+ * One board's share of one tick: the board's address [node], the [command] carrying its arm level,
+ * which payloads go out, and the [drives]: what each of its motors is told, one `DRIVE_CMD` each
+ * (`specs/twelve-fet.md` section 6.2). [drives] is empty for [TickFrames.INPUTS_ONLY]. On a
+ * one-motor board [command] is motor 0's command, the one [drives] carries.
+ */
+data class NodeTick(
+    val node: Int,
+    val command: RiderCommand,
+    val frames: TickFrames,
+    val drives: Map<Int, RiderCommand>,
+) {
+    /**
+     * This tick spelled as L3 PDUs from [src], in wire order: the board's one `INPUTS` when the
+     * tick carries it, then one `DRIVE_CMD` per motor in [drives], in motor order.
+     */
+    fun pdus(src: Int): List<ByteArray> {
+        val inputs = if (frames != TickFrames.DRIVE_ONLY) listOf(command.inputsPdu(src, node)) else emptyList()
+        val drive = if (frames != TickFrames.INPUTS_ONLY) {
+            drives.toSortedMap().map { (motor, c) -> c.drivePdu(src, node, motor) }
+        } else {
+            emptyList()
+        }
+        return inputs + drive
+    }
+}
 
 /**
- * Serialised, rate-limited sender for the rider's [RiderCommand] stream, to one board or two.
+ * Serialised, rate-limited sender for the rider's [RiderCommand] stream, to one wheel or several.
  *
  * Why this exists: BLE allows only one outstanding GATT operation at a time. Launching a coroutine
  * per touch-move event (a finger fires ~90/s) produced overlapping concurrent writes to the same
@@ -78,12 +102,15 @@ data class NodeTick(val node: Int, val command: RiderCommand, val frames: TickFr
  *
  * ## Two boards (`specs/remote-ui.md` 3.2)
  *
- * The held value is a [DriveFrame]: a command per board address, and the subset of them being DRIVEN. Each
- * DRIVEN board gets its own `DRIVE_CMD` every tick, and every addressed board gets its own `INPUTS`
- * bookkeeping, so an arm or disarm reaches each node with the change burst plus the keepalive, per
- * node. Both boards' payloads are staged by ONE [write] per tick, at the same cadence: a second
- * DRIVEN board doubles the bytes per tick (about 520 B/s of the CC2541's ~960 B/s for two boards)
- * and never raises the rate.
+ * The held value is a [DriveFrame]: a command per wheel, and the subset of them being DRIVEN. Each
+ * DRIVEN wheel gets its own `DRIVE_CMD` every tick (latest wins per wheel: the frame holds one
+ * command per wheel), and every addressed BOARD gets its own `INPUTS` bookkeeping, so an arm or
+ * disarm reaches each node with the change burst plus the keepalive, per node: arming is per board,
+ * because each board runs one mode machine for its motors (`specs/twelve-fet.md` section 6.2). A
+ * two-motor board is one [NodeTick] with two [NodeTick.drives] and one `INPUTS`. Every board's
+ * payloads are staged by ONE [write] per tick, at the same cadence: a second DRIVEN wheel doubles
+ * the drive bytes per tick (about 520 B/s of the CC2541's ~960 B/s for two boards) and never
+ * raises the rate.
  *
  * A board that is addressed but not driven costs only its keepalive, about 20 B/s, and on the ticks
  * in between it produces no tick at all ([TickFrames.INPUTS_ONLY]). That is what the rigid frame's
@@ -124,6 +151,10 @@ class CommandPump(
         // last INPUTS rather than the N+1th: counting after the decision made
         // [LinkConfig.INPUTS_KEEPALIVE_TICKS] mean one tick more than it says.
         var ticksSinceInputs = 0
+
+        // The motors the board was last addressed at: the wheels a disarm owed after it leaves the
+        // frame goes to, one neutral `DRIVE_CMD` each.
+        var motors: List<Int> = listOf(0)
 
         /** A board outside the frame is owed nothing once it holds the disarmed level, burst done. */
         val settledDisarmed: Boolean
@@ -174,18 +205,30 @@ class CommandPump(
             val books = mutableMapOf<Int, Book>()
             while (isActive) {
                 val frame = pending.value
+                val inFrame = frame.boards
                 // Every node in the frame, plus every node that left it still owed its disarm.
-                val owed = books.filter { (node, book) -> node !in frame.commands && !book.settledDisarmed }
-                    .mapValues { RiderCommand.DISARMED }
-                val targets = (frame.commands + owed).toSortedMap()
-                books.keys.retainAll(targets.keys)
+                val owed = books.filter { (node, book) -> node !in inFrame && !book.settledDisarmed }.keys
+                books.keys.retainAll(inFrame + owed)
 
-                // A board the frame addresses but does not drive is owed no DRIVE_CMD, so on a
-                // tick with no INPUTS to send it is owed nothing and appears in no write.
-                val ticks = targets.mapNotNull { (node, command) ->
-                    val driven = node in frame.driven || node in owed
-                    books.getOrPut(node) { Book() }.owing(command, driven)
-                        ?.let { NodeTick(node, command, it) }
+                // A board the frame addresses but drives no wheel of is owed no DRIVE_CMD, so on a
+                // tick with no INPUTS to send it is owed nothing and appears in no write. A board
+                // owed its disarm gets the neutral on every motor it was last addressed at.
+                val ticks = (inFrame + owed).sorted().mapNotNull { node ->
+                    val book = books.getOrPut(node) { Book() }
+                    val drives: Map<Int, RiderCommand>
+                    val command: RiderCommand
+                    if (node in owed) {
+                        command = RiderCommand.DISARMED
+                        drives = book.motors.associateWith { RiderCommand.DISARMED }
+                    } else {
+                        val wheels = frame.wheelsOf(node)
+                        book.motors = wheels.map { it.first.motor }
+                        command = wheels.first().second
+                        drives = wheels.filter { it.first in frame.driven }.associate { it.first.motor to it.second }
+                    }
+                    book.owing(command, drives.isNotEmpty())?.let { frames ->
+                        NodeTick(node, command, frames, if (frames == TickFrames.INPUTS_ONLY) emptyMap() else drives)
+                    }
                 }
 
                 try {

@@ -28,7 +28,7 @@ class RiderCommandTest {
     private val dst = 0x02
 
     private fun pdusOf(command: RiderCommand): List<Pdu> =
-        command.pdus(src, dst).map { checkNotNull(Pdu.decodeOrNull(it)) { "undecodable PDU" } }
+        command.pdus(src, dst, motor = 0).map { checkNotNull(Pdu.decodeOrNull(it)) { "undecodable PDU" } }
 
     @Test
     fun `a drive demand is emitted as DRIVE_CMD, and INPUTS carries only levels`() {
@@ -191,9 +191,10 @@ class RiderCommandTest {
      * The wire sizes the link budget rests on, measured through the real L2 stack rather than
      * asserted in a comment. They were asserted in comments, and were wrong by the frag-hdr byte.
      *
-     * They are load-bearing twice: 20 Hz x 13 B + 2 Hz x 10 B = ~280 B/s is what says the armed
-     * cruise sits under the module's ~360 B/s overrun ceiling, and 13 <= 20 is what says each frame
-     * is one ATT write rather than a split the CC2541 would re-chunk.
+     * Two things rest on them: 20 Hz x 14 B + 2 Hz x 10 B = ~300 B/s per wheel is what says the
+     * armed cruise sits under the module's ~360 B/s overrun ceiling, and 14 <= 20 is what says each
+     * frame is one ATT write rather than a split the CC2541 would re-chunk. The drive frame was 13 B
+     * until `DRIVE_CMD` gained its `motor` byte (`specs/twelve-fet.md` section 6.1).
      *
      * The INPUTS frame was 12 B until its throttle word was deleted (specs/link-control.md, the
      * INPUTS payload), which
@@ -201,21 +202,21 @@ class RiderCommandTest {
      * half of it.
      */
     @Test
-    fun `one tick is 10 and 13 bytes on the wire, one ATT write each`() {
+    fun `one tick is 10 and 14 bytes on the wire, one ATT write each`() {
         val transport = BleStreamTransport()
         val link = Link(transport)
         val command = RiderCommand.armed(1_000)
 
         link.send(command.inputsPdu(src, dst))
         val inputsFrame = checkNotNull(transport.drainOutgoing())
-        link.send(command.drivePdu(src, dst))
+        link.send(command.drivePdu(src, dst, motor = 0))
         val driveFrame = checkNotNull(transport.drainOutgoing())
 
         // SOF + len + frag-hdr + PDU + CRC16 = PDU + 5.
         assertEquals(command.inputsPdu(src, dst).size + 5, inputsFrame.size)
-        assertEquals(command.drivePdu(src, dst).size + 5, driveFrame.size)
+        assertEquals(command.drivePdu(src, dst, motor = 0).size + 5, driveFrame.size)
         assertEquals(10, inputsFrame.size)
-        assertEquals(13, driveFrame.size)
+        assertEquals(14, driveFrame.size)
         assertTrue(driveFrame.size <= ATT_WRITE, "a tick's frame must fit a single ATT write")
     }
 

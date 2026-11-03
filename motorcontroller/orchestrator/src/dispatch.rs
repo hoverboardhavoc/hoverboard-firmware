@@ -49,11 +49,11 @@ pub const UP_AXIS: usize = 2;
 /// producer records the orchestrator owns (`specs/control.md` mode.rs note), and the RAM control
 /// block's input words whose producers are out of scope this round (`control.md` (e): each word
 /// lives here, its canonical row, defaulted benign; tests and later producers write it).
-pub struct ControlCtl {
+pub struct ControlCtl<const M: usize> {
     /// The mode dispatch (boot seam: `CONTROL_MODE` + `CONTROL_FRAME` + `CONTROL_LEADER` bytes +
     /// `imu_configured` + `CONTROL_RIDER_REQUIRED` byte + `BOARD_BATTERY_FLOOR` word; the five
     /// stored ones are re-read at every arm through [`re_apply_control_values`]).
-    pub dispatch: ControlDispatch,
+    pub dispatch: ControlDispatch<M>,
     /// The throttle conditioning constants (EFeru defaults; a tunable surface).
     pub throttle_cfg: ThrottleConfig,
     /// The state-feedback law's carries (`specs/state-feedback.md` sections 3 and 4, balance
@@ -108,7 +108,11 @@ pub struct ControlCtl {
     /// the OBS snapshot), `CTRL_OBS`, and the cyclic's `peer_demand` on a leader, so what the
     /// leader commands its peer is exactly what it applies itself and a one-way link failure
     /// stops both wheels rather than one.
-    pub wheel_demand: i16,
+    ///
+    /// One per motor (`specs/twelve-fet.md` section 4.2): motor `m`'s word is what the firmware
+    /// publishes to that motor's `motor::DEMAND` cell. Only throttle mode drives a second motor
+    /// (section 6.1); every other producer leaves motor 1's word at 0.
+    pub wheel_demand: [i16; M],
     /// The demand this board commands its PEER to apply this pass: the other half of the
     /// steering split on a rigid leader, through the same freshness gate as
     /// [`Self::wheel_demand`], and 0 from every other producer. Sole writer:
@@ -120,7 +124,7 @@ pub struct ControlCtl {
     pub peer_demand: i16,
 }
 
-impl ControlCtl {
+impl<const M: usize> ControlCtl<M> {
     #[allow(clippy::too_many_arguments)]
     fn new(
         control_mode_byte: u8,
@@ -151,7 +155,7 @@ impl ControlCtl {
             turn: 0,
             gating: GatingFilter::default(),
             pre_env_ref: 0,
-            wheel_demand: 0,
+            wheel_demand: [0; M],
             peer_demand: 0,
         }
     }
@@ -161,7 +165,7 @@ impl ControlCtl {
 /// access are the motor era's). Writers annotated per row; the rows whose producers are out of
 /// scope this round hold documented placeholders and are settable (the block is their canonical
 /// home, not a test hack).
-pub struct BlockWords {
+pub struct BlockWords<const M: usize> {
     /// Attitude pitch word (stock CB+0x3a), centidegrees. Writer: the attitude step (step 2).
     pub pitch_word: i16,
     /// Attitude roll word (stock CB+0x3e), centidegrees. Writer: the attitude step.
@@ -180,13 +184,13 @@ pub struct BlockWords {
     /// than absolute inheritances.
     ///
     /// Writer: the firmware's 250 Hz shell, which narrows the period ISR's speed cell saturatingly
-    /// into motor 0's row before each pass (`motor::wheel_speed_word`); the ISR owns the cell and
-    /// this crate never names it, so the orchestrator stays host-testable. Motor 1 has no producer
-    /// in the image and its row holds 0.
+    /// into each motor's row before each pass (`motor::wheel_speed_word`); the ISR owns the cell
+    /// and this crate never names it, so the orchestrator stays host-testable. One row per motor
+    /// the image drives (`M`).
     ///
     /// Readers: the engagement blend's `ref_34`, the step-off latch's `b_motion`
     /// ([`crate::control_task`]) and the cyclic payload (`cyclic_state`).
-    pub wheel_speed: [i16; crate::N_MOTORS],
+    pub wheel_speed: [i16; M],
     /// This board's period-based wheel rate (`specs/control.md` (o)): the period ISR's
     /// `Commutation::rate_q`, the reciprocal of the periods between two same-direction hall
     /// edges in 1/4096 of a count (one count = one edge per 320-period window, `wheel_speed`'s
@@ -248,13 +252,13 @@ pub struct BlockWords {
     pub torque_is_current: bool,
 }
 
-impl BlockWords {
+impl<const M: usize> BlockWords<M> {
     fn new(role_right: bool) -> Self {
         BlockWords {
             pitch_word: 0,
             roll_word: 0,
             pitch_rate: 0,
-            wheel_speed: [0; crate::N_MOTORS],
+            wheel_speed: [0; M],
             wheel_rate_q12: 0,
             wheel_pos: 0,
             battery: 0,
@@ -285,7 +289,7 @@ pub(crate) const fn law_scale(battery: i16, torque_is_current: bool) -> i16 {
 
 /// Build the control section (the [`OrchestratorState`] constructor's delegate).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn new_ctl(
+pub(crate) fn new_ctl<const M: usize>(
     control_mode_byte: u8,
     frame_byte: u8,
     leader_byte: u8,
@@ -296,7 +300,7 @@ pub(crate) fn new_ctl(
     drive_turn: DriveTurn,
     rider_required_byte: u8,
     battery_floor: i16,
-) -> (ControlCtl, BlockWords) {
+) -> (ControlCtl<M>, BlockWords<M>) {
     (
         ControlCtl::new(
             control_mode_byte,
@@ -328,9 +332,12 @@ const fn side_is_right(byte: u8) -> bool {
 /// latest command's live words when fresh and of `Throttle` kind, else neutral (staleness is a
 /// reference-zeroing, not a fault; the conditioning's rate limit turns the snap into the decay
 /// ramp).
-fn effective_drive(inbox: &LinkInbox) -> (i16, i16) {
-    match inbox.drive() {
-        Some(d) if d.kind == DriveKind::Throttle && !inbox.drive_stale() => (d.value, d.steer),
+///
+/// Per motor: motor `motor`'s own slot (`specs/twelve-fet.md` section 6.1). The balance producers
+/// read motor 0's.
+fn effective_drive<const M: usize>(inbox: &LinkInbox<M>, motor: usize) -> (i16, i16) {
+    match inbox.drive(motor) {
+        Some(d) if d.kind == DriveKind::Throttle && !inbox.drive_stale(motor) => (d.value, d.steer),
         _ => (0, 0),
     }
 }
@@ -338,7 +345,7 @@ fn effective_drive(inbox: &LinkInbox) -> (i16, i16) {
 /// The folded rider level: local pads OR the remote `INPUTS` mirror OR the peer cyclic's rider
 /// flag (the consumption fold; the cyclic TX reports LOCAL pads only, so mirrored levels never
 /// feed back on themselves).
-pub(crate) fn rider_level(state: &OrchestratorState) -> bool {
+pub(crate) fn rider_level<const M: usize>(state: &OrchestratorState<M>) -> bool {
     state.rider_present
         || state.inbox.remote_rider_present()
         || state
@@ -355,15 +362,17 @@ pub(crate) fn rider_level(state: &OrchestratorState) -> bool {
 ///
 /// ONE substitution, both consumers in the dispatch: [`balance_step`]'s engage conjunction and its
 /// step-off producer, so the two cannot disagree about whether someone is aboard.
-pub(crate) fn effective_rider(state: &OrchestratorState) -> bool {
+pub(crate) fn effective_rider<const M: usize>(state: &OrchestratorState<M>) -> bool {
     !state.ctl.dispatch.rider_required() || rider_level(state)
 }
 
 /// Step 7: one control-dispatch pass. `run` is this tick's mode-machine outcome (`Mode::Run`),
 /// the engagement machine's power-enable nest (`control.md` (c): it nests inside RUN). Returns
-/// the WHEEL demand (also left in [`ControlCtl::wheel_demand`]): the engagement machine's torque
-/// setpoint (the block's sole-writer row, `state.ctl.fsm.torque_setpoint`) through the rigid
-/// freshness gate.
+/// the WHEEL demands, one per motor (also left in [`ControlCtl::wheel_demand`]): motor 0's is the
+/// engagement machine's torque setpoint (the block's sole-writer row,
+/// `state.ctl.fsm.torque_setpoint`) through the rigid freshness gate; a second motor's is
+/// [`throttle_step`]'s in throttle mode and 0 from every other producer (`specs/twelve-fet.md`
+/// section 6.1: the balance producers drive motor 0 and are not reachable on the two-motor image).
 ///
 /// **The one rule that covers most of the rigid frame's failure behaviour**
 /// (`specs/rover-one-imu.md` section 6): a rigid board, leader or follower, applies torque only
@@ -372,11 +381,16 @@ pub(crate) fn effective_rider(state: &OrchestratorState) -> bool {
 /// correct wheel demand is zero. A reference-zeroing and not a fault: the engagement machine keeps
 /// its sub-state and the next fresh frame restores torque, so a single late pass costs a tick of
 /// authority and not the machine; the 100 ms `comms_loss` disarm is the separate, slower clock.
-pub(crate) fn control_dispatch_step(state: &mut OrchestratorState, run: bool) -> i16 {
+pub(crate) fn control_dispatch_step<const M: usize>(
+    state: &mut OrchestratorState<M>,
+    run: bool,
+) -> [i16; M] {
     let producer = state.ctl.dispatch.mode();
+    // Motor 0's setpoint, and the other motors' words where the producer drives them.
+    let mut others = [0i16; M];
     let setpoint = match producer {
         Producer::Balance | Producer::Leader => balance_step(state, run),
-        Producer::Throttle => throttle_step(state, run),
+        Producer::Throttle => throttle_step(state, run, &mut others),
         Producer::Follower => follower_step(state, run),
     };
     // The steering split (`specs/rover-one-imu.md` section 5), on the LEADER and nowhere else:
@@ -394,7 +408,10 @@ pub(crate) fn control_dispatch_step(state: &mut OrchestratorState, run: bool) ->
     // it.
     let rigid = matches!(producer, Producer::Leader | Producer::Follower);
     let stale = rigid && state.inbox.rigid_peer().is_none();
-    state.ctl.wheel_demand = if stale { 0 } else { own };
+    // Motor 0 is `own`; a rigid producer leaves the other words at 0, so the gate needs no second
+    // case for them.
+    others[0] = if stale { 0 } else { own };
+    state.ctl.wheel_demand = others;
     state.ctl.peer_demand = if stale { 0 } else { peer };
     state.ctl.wheel_demand
 }
@@ -405,7 +422,8 @@ pub(crate) fn control_dispatch_step(state: &mut OrchestratorState, run: bool) ->
 /// OBS snapshot, so the counter, the cyclic `fault` word and `CTRL_OBS` cannot disagree about it.
 /// Not a Fault A, deliberately: the refusal is the cleared engagement gate in [`balance_step`],
 /// which keeps both boards from engaging while this level says why.
-pub(crate) fn mode_fault_level(state: &OrchestratorState) -> bool {
+#[inline]
+pub(crate) fn mode_fault_level<const M: usize>(state: &OrchestratorState<M>) -> bool {
     state.ctl.dispatch.mode_fault()
         || (state.ctl.dispatch.mode() == Producer::Leader
             && state.inbox.rigid_peer().is_some_and(|p| p.leader()))
@@ -437,7 +455,7 @@ pub(crate) fn mode_fault_level(state: &OrchestratorState) -> bool {
 /// faulted peer's producers clear on its own OFF pass, after which its next cyclic reports 0 and
 /// this level releases. What makes that true rather than hoped for is
 /// [`events::Levels::own_mask`], the byte the peer actually sends.
-pub(crate) fn peer_down_level(state: &OrchestratorState) -> bool {
+pub(crate) fn peer_down_level<const M: usize>(state: &OrchestratorState<M>) -> bool {
     matches!(
         state.ctl.dispatch.mode(),
         Producer::Leader | Producer::Follower
@@ -468,14 +486,17 @@ pub(crate) fn peer_down_level(state: &OrchestratorState) -> bool {
 /// the item and cannot go stale on a rename. `#[inline(never)]` is required alongside it, because
 /// `link_section` names where the emitted symbol lands and does not stop LLVM from inlining the
 /// body back into a caller that lives elsewhere.
+///
+/// It takes the two fields it writes rather than the generic [`ControlCtl`], so it is ONE
+/// function on every image and not an instance per motor count: the shell has nothing per motor.
 #[cfg_attr(target_arch = "arm", inline(never))]
 #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
-fn run_shell(ctl: &mut ControlCtl, inp: &FsmInputs) -> i16 {
-    ctl.pre_env_ref = clamp(inp.smoothed_ref, i16::MIN as i32, i16::MAX as i32) as i16;
+fn run_shell(fsm: &mut FsmState, pre_env_ref: &mut i16, inp: &FsmInputs) -> i16 {
+    *pre_env_ref = clamp(inp.smoothed_ref, i16::MIN as i32, i16::MAX as i32) as i16;
     // The machine is unchanged and still seeds and ramps a gain triple; nothing reads that triple
     // since the PID went, so every producer hands it the one constant profile
     // (`specs/state-feedback.md` section 5).
-    fsm_step(inp, &GainProfile::of(STANDBY_SET), &mut ctl.fsm)
+    fsm_step(inp, &GainProfile::of(STANDBY_SET), fsm)
 }
 
 /// The balance assembly: the turn input, the four-term state-feedback law
@@ -483,7 +504,7 @@ fn run_shell(ctl: &mut ControlCtl, inp: &FsmInputs) -> i16 {
 /// LEADER alike; the leader differs in one input, its engagement gate (below), and in what happens
 /// to its output afterwards ([`control_dispatch_step`]'s freshness gate and the cyclic's
 /// `peer_demand`).
-fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
+fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> i16 {
     let leader = state.ctl.dispatch.mode() == Producer::Leader;
     let peer_wheel = state.inbox.peer().map(|p| p.wheel_speed).unwrap_or(0);
     // The EFFECTIVE rider level ([`effective_rider`], `specs/control.md` (i)), read once and fed
@@ -491,7 +512,7 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
     // disagree about whether someone is aboard: waived, the conjunction drops the term and the
     // wind-down is held clear.
     let rider = effective_rider(state);
-    let (drive_value, drive_steer) = effective_drive(&state.inbox);
+    let (drive_value, drive_steer) = effective_drive(&state.inbox, 0);
 
     // The rigid frame's turn input (`specs/rover-one-imu.md` section 5), on the LEADER only: the
     // `DRIVE_CMD.steer` word as a bounded, slewed DIFFERENTIAL torque, stepped here where the
@@ -587,33 +608,62 @@ fn balance_step(state: &mut OrchestratorState, run: bool) -> i16 {
         pid_scale: state.block.battery,
         pid_kd: Fix::ZERO,
     };
-    run_shell(&mut state.ctl, &fsm_in)
+    run_shell(&mut state.ctl.fsm, &mut state.ctl.pre_env_ref, &fsm_in)
 }
 
 /// The throttle assembly: the EFeru conditioner off the effective drive command, feeding the
 /// SAME engagement shell with the balance-only gates parameterized off (zero upright reference,
 /// rider/step-off gates inert: pads are balance's rider detection; `control.md` (b)/(c)).
-fn throttle_step(state: &mut OrchestratorState, run: bool) -> i16 {
-    let (speed_cmd, steer_cmd) = effective_drive(&state.inbox);
+///
+/// One conditioner per motor, each on its own motor's drive command, and ONE engagement machine
+/// for the board (`specs/twelve-fet.md` section 6: each board runs one mode machine for its
+/// motors). Motor 0's reference is the machine's mirror, so its setpoint is the machine's output
+/// as on every one-motor board. A second motor rides the same machine: it is driven on the
+/// passes the machine drives its mirror (every arm but IDLE, which zeroes the mirror) and bounded
+/// by the same soft-start envelope, and its word is written into `others[m]`. Returns motor 0's
+/// setpoint.
+fn throttle_step<const M: usize>(
+    state: &mut OrchestratorState<M>,
+    run: bool,
+    others: &mut [i16; M],
+) -> i16 {
     let cfg = state.ctl.throttle_cfg;
-    let out = state
-        .ctl
-        .dispatch
-        .throttle_reference(&cfg, speed_cmd, steer_cmd);
-    let reference = if state.block.role_right {
-        out.ref_right
-    } else {
-        out.ref_left
-    };
+    let mut refs = [0i32; M];
+    for (m, reference) in refs.iter_mut().enumerate() {
+        let (speed_cmd, steer_cmd) = effective_drive(&state.inbox, m);
+        let out = state
+            .ctl
+            .dispatch
+            .throttle_reference(m, &cfg, speed_cmd, steer_cmd);
+        *reference = if state.block.role_right {
+            out.ref_right
+        } else {
+            out.ref_left
+        };
+    }
 
     // The mode's own gate input, on the +-28500 word the output stage envelopes: the demand's
-    // MAGNITUDE. The shell's fixed `> 500` therefore reads as a 1.75 % demand deadband
+    // MAGNITUDE, the largest of the board's motors, so a board engages for whichever wheel is
+    // asked to move. The shell's fixed `> 500` therefore reads as a 1.75 % demand deadband
     // (`DRIVE_CMD.value` ~590 of +-32767; 1000 -> 855, 2000 -> 1738), and because it is a
     // magnitude, both directions engage and the RUN pickup path stays inert in throttle mode
     // exactly as the step-off path does. The clamp cannot bind (the frame-out scale caps
     // |reference| at 28500); it is here so the i16 narrowing is a stated fact, not luck.
-    let demand_gate = clamp(iabs(reference), 0, i16::MAX as i32) as i16;
-    run_gated_shell(state, run, reference, demand_gate)
+    let magnitude = refs.iter().map(|r| iabs(*r)).max().unwrap_or(0);
+    let demand_gate = clamp(magnitude, 0, i16::MAX as i32) as i16;
+    // The arm the machine runs this pass, read before it runs: IDLE zeroes the mirror, every other
+    // arm mirrors the reference, which is the rule motor 0's output follows.
+    let driven = state.ctl.fsm.sub_state != SubState::Idle;
+    let setpoint = run_gated_shell(state, run, refs[0], demand_gate);
+    let env = state.ctl.fsm.env;
+    for (word, reference) in others.iter_mut().zip(refs).skip(1) {
+        *word = if driven {
+            clamp(reference, -env, env) as i16
+        } else {
+            0
+        };
+    }
+    setpoint
 }
 
 /// The rigid FOLLOWER's engagement intent on the shell's fixed `> 500` gate edge
@@ -640,7 +690,7 @@ pub const FOLLOWER_GATE: i16 = 1000;
 /// envelope still runs; the leader's word is already enveloped, so on boards that reach RUN
 /// within a few ticks of each other the second clamp is a no-op (section 9 records the open
 /// measurement).
-fn follower_step(state: &mut OrchestratorState, run: bool) -> i16 {
+fn follower_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> i16 {
     let leader = state.inbox.rigid_peer().filter(|p| p.leader());
     let demand = leader.map(|p| p.peer_demand).unwrap_or(0);
     let gate = match leader {
@@ -656,7 +706,12 @@ fn follower_step(state: &mut OrchestratorState, run: bool) -> i16 {
 /// output stage envelopes; `gate` is the producer's own engagement intent on the shell's `> 500`
 /// edge. Zero upright reference (the window always passes), rider present (the pad gate is
 /// balance's), battery ok (neither producer divides by the battery), no step-off.
-fn run_gated_shell(state: &mut OrchestratorState, run: bool, reference: i32, gate: i16) -> i16 {
+fn run_gated_shell<const M: usize>(
+    state: &mut OrchestratorState<M>,
+    run: bool,
+    reference: i32,
+    gate: i16,
+) -> i16 {
     let fsm_in = FsmInputs {
         orientation_nz: state.block.orientation_nz,
         upright_ref: Fix::ZERO, // the upright window parameterized off (always passes)
@@ -687,7 +742,7 @@ fn run_gated_shell(state: &mut OrchestratorState, run: bool, reference: i32, gat
         pid_scale: state.block.battery,
         pid_kd: Fix::ZERO,
     };
-    run_shell(&mut state.ctl, &fsm_in)
+    run_shell(&mut state.ctl.fsm, &mut state.ctl.pre_env_ref, &fsm_in)
 }
 
 /// Reset the engagement machine to its disengaged state (`specs/motor-integration.md`,
@@ -706,7 +761,7 @@ fn run_gated_shell(state: &mut OrchestratorState, run: bool, reference: i32, gat
 /// re-entering RUN would resume at full authority with no ramp. Resetting here rather than
 /// widening the FSM's abort inputs keeps the machine binary-faithful and keeps the disengage act
 /// on the orchestrator's existing OFF edge, beside the latch clear.
-pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
+pub(crate) fn reset_engagement<const M: usize>(ctl: &mut ControlCtl<M>) {
     ctl.fsm = FsmState::default();
     // The slewed turn is the engagement machine's companion carry (`specs/rover-one-imu.md`
     // section 5): a machine that comes back engaged
@@ -731,8 +786,8 @@ pub(crate) fn reset_engagement(ctl: &mut ControlCtl) {
 /// The argument list is the value row's control half one for one, the boot seam's precedent; a
 /// struct for the lint would be a type with this one caller and the firmware's one call site.
 #[allow(clippy::too_many_arguments)]
-pub fn re_apply_control_values(
-    state: &mut OrchestratorState,
+pub fn re_apply_control_values<const M: usize>(
+    state: &mut OrchestratorState<M>,
     control_mode_byte: u8,
     frame_byte: u8,
     leader_byte: u8,
@@ -768,7 +823,10 @@ pub fn re_apply_control_values(
 /// levels must not feed back); the `fault` word is this pass's gating-producer level mask; the
 /// lockdown flag has no local producer (the master-shutdown origin is motor-era work) and reports
 /// clear.
-pub fn cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicState> {
+pub fn cyclic_tx<const M: usize>(
+    state: &OrchestratorState<M>,
+    addressed: bool,
+) -> Option<CyclicState> {
     if !addressed {
         return None;
     }
@@ -816,7 +874,7 @@ pub const CYCLIC_EMIT_TICKS: u32 = 2;
 /// a one-way link failure stops both wheels rather than one; a FOLLOWER sets the follower flag
 /// and commands nothing; a pivoting or throttle board sets neither and commands nothing. The
 /// field has one writer, [`control_dispatch_step`], which is why no role test is needed here.
-fn cyclic_state(state: &OrchestratorState) -> CyclicState {
+fn cyclic_state<const M: usize>(state: &OrchestratorState<M>) -> CyclicState {
     // What the board runs against what it stores (`specs/machine-settings.md` section 5).
     let mut flags = state.machine.flags();
     if state.rider_present {
@@ -881,7 +939,10 @@ pub const BLE_CYCLIC_DIVISOR: u32 = 50;
 /// have unrelated budgets: the inter-board UART is 460800 baud and point-to-point, the BLE module is
 /// 9600 baud and shared with the command stream. Gated on `addressed` for the same reason
 /// [`cyclic_tx`] is: an unassigned board has no `src` worth publishing.
-pub fn ble_cyclic_tx(state: &OrchestratorState, addressed: bool) -> Option<CyclicState> {
+pub fn ble_cyclic_tx<const M: usize>(
+    state: &OrchestratorState<M>,
+    addressed: bool,
+) -> Option<CyclicState> {
     if !addressed {
         return None;
     }
@@ -931,7 +992,10 @@ pub struct PeerCyclic {
 /// BLE port no matter what it has heard. The state is re-encoded by the firmware through the same
 /// codec the peer encoded it with, which is a bijection on the 32 B layout, so the bytes that
 /// reach the phone are the bytes the peer put on the inter-board wire.
-pub fn ble_peer_tx(state: &OrchestratorState, addressed: bool) -> Option<PeerCyclic> {
+pub fn ble_peer_tx<const M: usize>(
+    state: &OrchestratorState<M>,
+    addressed: bool,
+) -> Option<PeerCyclic> {
     if !addressed || !state.ble_peer_due {
         return None;
     }

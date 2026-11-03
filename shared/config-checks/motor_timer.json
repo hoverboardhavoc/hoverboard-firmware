@@ -1,0 +1,298 @@
+[
+  {
+    "name": "motor 0 on TIMER0 and motor 1 on TIMER7 on the RC",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 32,
+            "hi_a": {
+              "port": "A",
+              "pin": 8
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15
+            }
+          }
+        },
+        {
+          "gate": {
+            "timer": 7,
+            "dead_time": 32,
+            "hi_a": {
+              "port": "C",
+              "pin": 6
+            },
+            "hi_b": {
+              "port": "C",
+              "pin": 7
+            },
+            "hi_c": {
+              "port": "C",
+              "pin": 8
+            },
+            "lo_a": {
+              "port": "A",
+              "pin": 7
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 0
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 1
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "motor 0 alone on the RC",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 32,
+            "hi_a": {
+              "port": "A",
+              "pin": 8
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "motor 1 without motor 0 on the RC",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {},
+        {
+          "gate": {
+            "timer": 7,
+            "dead_time": 32,
+            "hi_a": {
+              "port": "C",
+              "pin": 6
+            },
+            "hi_b": {
+              "port": "C",
+              "pin": 7
+            },
+            "hi_c": {
+              "port": "C",
+              "pin": 8
+            },
+            "lo_a": {
+              "port": "A",
+              "pin": 7
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 0
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 1
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[1].gate.hi_a"
+  },
+  {
+    "name": "motor 1 without motor 0 on the F103C8",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {},
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 28,
+            "hi_a": {
+              "port": "A",
+              "pin": 8
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[1].gate.hi_a"
+  },
+  {
+    "name": "the timers swapped on the RC",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 7,
+            "dead_time": 32,
+            "hi_a": {
+              "port": "C",
+              "pin": 6
+            },
+            "hi_b": {
+              "port": "C",
+              "pin": 7
+            },
+            "hi_c": {
+              "port": "C",
+              "pin": 8
+            },
+            "lo_a": {
+              "port": "A",
+              "pin": 7
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 0
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 1
+            }
+          }
+        },
+        {
+          "gate": {
+            "timer": 0,
+            "dead_time": 32,
+            "hi_a": {
+              "port": "A",
+              "pin": 8
+            },
+            "hi_b": {
+              "port": "A",
+              "pin": 9
+            },
+            "hi_c": {
+              "port": "A",
+              "pin": 10
+            },
+            "lo_a": {
+              "port": "B",
+              "pin": 13
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 14
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 15
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].gate.timer"
+  },
+  {
+    "name": "motor 0 alone on TIMER7 on the RC",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "timer": 7,
+            "dead_time": 32,
+            "hi_a": {
+              "port": "C",
+              "pin": 6
+            },
+            "hi_b": {
+              "port": "C",
+              "pin": 7
+            },
+            "hi_c": {
+              "port": "C",
+              "pin": 8
+            },
+            "lo_a": {
+              "port": "A",
+              "pin": 7
+            },
+            "lo_b": {
+              "port": "B",
+              "pin": 0
+            },
+            "lo_c": {
+              "port": "B",
+              "pin": 1
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].gate.timer"
+  }
+]

@@ -1,10 +1,12 @@
 package com.hoverboard.protocol.checks
 
+import com.hoverboard.protocol.board.CurrentLimit
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.pincap.Func
 import com.hoverboard.protocol.pincap.FuncKind
+import com.hoverboard.protocol.pincap.Phase
 import com.hoverboard.protocol.pincap.PinTable
 import com.hoverboard.protocol.pincap.SWD
 import com.hoverboard.protocol.store.Effect
@@ -69,8 +71,20 @@ enum class Check(val id: String) {
     /** A configured gate group's dead time is at or above the floor. */
     DEAD_TIME("dead_time"),
 
+    /** A motor's sensed phase pair is one the chip's image reads. */
+    PHASE_PAIR("phase_pair"),
+
+    /**
+     * Motor 1 is stored only beside motor 0, and on a two-motor chip each motor's gates are on its
+     * own timer.
+     */
+    MOTOR_TIMER("motor_timer"),
+
     /** An arm-row or calibration value is in its range. */
     RANGE("range"),
+
+    /** A motor's current limit converts above its noise floor. */
+    LIMIT_FLOOR("limit_floor"),
 
     /** The IMU axis signs and roles form a proper rotation. */
     FRAME("frame"),
@@ -121,13 +135,15 @@ enum class Periph(val label: String) {
  * A function's keys: its pins with their roles, and for a peripheral group its instance key and
  * remap key. Complete when every pin and the instance are stored, absent when none is. A group
  * with a [switch] (the IMU's `imu.model`) is all or none with the switch: off (0 or not stored),
- * its pins and instance may be stored or not.
+ * its pins and instance may be stored or not. A group with a [pick] (a motor's phase-current sense)
+ * is complete when exactly that many of its pins are stored.
  */
 class Group(
     val pins: List<Pair<PinSlot, Role>>,
     val instance: Pair<Key, Periph>? = null,
     val remap: Key? = null,
     val switch: Key? = null,
+    val pick: Int? = null,
 )
 
 /** One pin field at one index: its key and its registered field. */
@@ -140,6 +156,22 @@ data class PinSlot(val def: FieldDef, val index: Int) {
  * each stored key, a key that is not stored absent from the map.
  */
 object Checks {
+    /**
+     * A motor's phase-current sense pins with the phase each names, in phase order: a motor senses
+     * the two that are stored (`checks::SENSE_PHASES`, `specs/twelve-fet.md` section 5.3).
+     */
+    private val SENSE_PHASES: List<Pair<FieldDef, Phase>> = listOf(
+        Fields.MOTOR_PHASE_A to Phase.A,
+        Fields.MOTOR_PHASE_B to Phase.B,
+        Fields.MOTOR_PHASE_C to Phase.C,
+    )
+
+    /**
+     * The advanced timer each motor's gates use where the chip drives two (`checks::MOTOR_TIMER`,
+     * `specs/twelve-fet.md` section 5.2): TIMER0 triggers the injected ADC group and starts TIMER7.
+     */
+    private val MOTOR_TIMER: List<Int> = listOf(0, 7)
+
     /** Every function a board can configure, by its groups (`checks::groups`). */
     val GROUPS: List<Group> = buildList {
         add(Group(listOf(PinSlot(Fields.BOARD_SELF_HOLD, 0) to Role.Plain)))
@@ -194,11 +226,7 @@ object Checks {
                     Fields.MOTOR_GATE_REMAP.key(m),
                 ),
             )
-            add(
-                Group(
-                    listOf(Fields.MOTOR_PHASE_A, Fields.MOTOR_PHASE_B).map { PinSlot(it, m) to Role.Adc },
-                ),
-            )
+            add(Group(SENSE_PHASES.map { (def, _) -> PinSlot(def, m) to Role.Adc }, pick = 2))
         }
     }
 
@@ -249,10 +277,11 @@ object Checks {
 
     private fun refusal(check: Check, key: Key, msg: String) = Refusal(check, key, "${Names.pathOf(key)}: $msg")
 
-    /** Whether every pin of [g] and its instance are stored. */
-    private fun complete(g: Group, state: Map<Key, Value>): Boolean =
-        g.pins.all { (slot, _) -> slot.key in state } &&
-            (g.instance == null || byteOf(state, g.instance.first) != null)
+    /** Whether every pin of [g] is stored, or exactly [Group.pick] of them, and its instance stored. */
+    private fun complete(g: Group, state: Map<Key, Value>): Boolean {
+        val set = g.pins.count { (slot, _) -> slot.key in state }
+        return set == (g.pick ?: g.pins.size) && (g.instance == null || byteOf(state, g.instance.first) != null)
+    }
 
     /**
      * The group check for [g] (`checks::check_pins`, "complete or absent"): its refusal when it is
@@ -265,9 +294,14 @@ object Checks {
         val none = set.none { it } && (instance == null || instance.second == null)
         val on = g.switch?.let { (byteOf(state, it) ?: 0) != 0 }
         if (complete(g, state) || on == false || (none && on != true)) return null
+        val head = g.pins.first().first.key
+        if (g.pick != null) {
+            val paths = g.pins.joinToString(", ") { Names.pathOf(it.first.key) }
+            return refusal(Check.GROUP, head, "${g.pick} of $paths are stored together, not ${set.count { it }}")
+        }
         val missing = g.pins.zip(set).firstOrNull { !it.second }?.first?.first?.key
             ?: checkNotNull(instance).first
-        return refusal(Check.GROUP, g.pins.first().first.key, "the group is incomplete: ${Names.pathOf(missing)} is not stored")
+        return refusal(Check.GROUP, head, "the group is incomplete: ${Names.pathOf(missing)} is not stored")
     }
 
     /**
@@ -379,6 +413,46 @@ object Checks {
                 }
             }
         }
+        // Each motor's sensed pair is one the chip's image reads.
+        for (m in 0 until Fields.MOTORS) {
+            val sensed = SENSE_PHASES.filter { (def, _) -> def.key(m) in state }
+            if (sensed.size != 2) continue
+            val (first, second) = sensed[0].second to sensed[1].second
+            if (!t.senses(first, second)) {
+                val pairs = t.sensePairs.joinToString(" or ") { (a, b) -> "$a and $b" }
+                out += refusal(
+                    Check.PHASE_PAIR,
+                    sensed[1].first.key(m),
+                    "the $name image senses phases $pairs, not $first and $second",
+                )
+            }
+        }
+        // Motor 1 runs only beside motor 0, and on a two-motor chip each motor is on its own timer.
+        // A motor is stored when its gate group is complete.
+        val present = (0 until Fields.MOTORS).map { m ->
+            val g = GROUPS.first { it.pins.first().first.key == Fields.MOTOR_GATE_HI_A.key(m) }
+            g.pins.all { (slot, _) -> slot.key in state } && g.instance?.let { byteOf(state, it.first) } != null
+        }
+        if (present[1] && !present[0]) {
+            out += refusal(
+                Check.MOTOR_TIMER,
+                Fields.MOTOR_GATE_HI_A.key(1),
+                "motor 1 is stored without motor 0, whose TIMER0 triggers the ADC and starts motor 1's timer",
+            )
+        }
+        if (MOTOR_TIMER.all { t.hasTimer(it) }) {
+            for ((m, want) in MOTOR_TIMER.withIndex()) {
+                val key = Fields.MOTOR_GATE_TIMER.key(m)
+                val n = byteOf(state, key) ?: continue
+                if (present[m] && n != want) {
+                    out += refusal(
+                        Check.MOTOR_TIMER,
+                        key,
+                        "motor $m's gates are on advanced timer $want on the $name, not $n",
+                    )
+                }
+            }
+        }
         // A remap key is a GD32F10x key.
         if (!chip.remaps) {
             val remaps = listOf(Fields.IMU_REMAP.key()) +
@@ -405,7 +479,10 @@ object Checks {
         refusal(Check.AF_FORM, f.key, msg)
     }
 
-    /** Every check that needs no chip: the range table and the IMU frame (`checks::check_values`). */
+    /**
+     * Every check that needs no chip (`checks::check_values`): the range table, each motor's limit
+     * above its noise floor, and the IMU frame.
+     */
     fun checkValues(state: Map<Key, Value>): List<Refusal> {
         val out = mutableListOf<Refusal>()
         for (key in state.keys.sortedWith(compareBy({ it.fieldId }, { it.index }))) {
@@ -418,6 +495,16 @@ object Checks {
             val range = Fields.rangeOf(key) ?: continue
             val v = intOf(state.getValue(key)) ?: continue
             if (v !in range) out += refusal(Check.RANGE, key, "$v is outside ${range.first}..${range.last}")
+        }
+        // Each motor's limit above its floor, each of the three as the write leaves it or its
+        // registry default where it is not stored.
+        for (m in 0 until Fields.MOTORS) {
+            fun value(def: FieldDef): Long? = intOf(state[def.key(m)] ?: def.default)
+            val limit = Fields.MOTOR_CURRENT_LIMIT.key(m)
+            val ma = value(Fields.MOTOR_CURRENT_LIMIT) ?: continue
+            val cal = value(Fields.MOTOR_CURRENT_CAL) ?: continue
+            val floor = value(Fields.MOTOR_NOISE_FLOOR) ?: continue
+            limitFloor(ma, cal, floor)?.let { out += refusal(Check.LIMIT_FLOOR, limit, it) }
         }
         val signs = (0 until Fields.IMU_AXIS_SIGN.size).map { i ->
             (state[Key(Fields.IMU_AXIS_SIGN.id, i)] as? Value.I32)?.v ?: 0
@@ -437,6 +524,26 @@ object Checks {
             null -> Unit
         }
         return out
+    }
+
+    /**
+     * Why a motor's limit of [ma] milliamps fails the `limit_floor` check at [cal] counts per amp
+     * and a noise floor of [floor] counts, or null when it passes (`checks::limit_floor`): by the
+     * firmware's arithmetic ([CurrentLimit]), a limit passes when FOC's full scale is above zero. The
+     * lowest limit that passes is `floor * 1000 / cal + 1` rounded up to the next 100 mA, stepped up
+     * by 100 mA while the conversion's rounding still leaves it at the floor.
+     */
+    fun limitFloor(ma: Long, cal: Long, floor: Long): String? {
+        fun passes(ma: Long) = CurrentLimit.fullScaleCounts(CurrentLimit.limitCounts(ma, cal, floor), floor) > 0
+        if (passes(ma)) return null
+        val scale = cal.coerceIn(CurrentLimit.CURRENT_CAL)
+        val floorCounts = CurrentLimit.noiseFloorCounts(floor)
+        val start = (floorCounts * 1_000 / scale + 1 + 99) / 100 * 100
+        val lowest = (start..CurrentLimit.LIMIT_REQUEST_CAP_MA step 100).firstOrNull { passes(it) }
+        val fix = lowest?.let { "the lowest limit that passes is $it mA" }
+            ?: "no limit passes a floor at the top of the limit window"
+        return "$ma mA is ${CurrentLimit.requestCounts(ma, cal)} counts at a current.cal of $scale, at or below the " +
+            "noise floor of $floorCounts counts, so FOC's full scale is 0; $fix"
     }
 
     /**

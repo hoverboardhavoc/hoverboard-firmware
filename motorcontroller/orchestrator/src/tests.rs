@@ -8,6 +8,13 @@ use super::*;
 use linkctl::{CyclicObs, DriveKind, Inputs};
 use state::Mode;
 
+/// The breadth most vectors run at: two motors, the 12-FET's, where motor 1's latch, MOE decision
+/// and drive slot exist (`specs/twelve-fet.md` section 4). The vectors that pin what a one-motor
+/// image drops build `super::OrchestratorState<1>` themselves.
+const N_MOTORS: usize = 2;
+type OrchestratorState = super::OrchestratorState<N_MOTORS>;
+type ControlOutput = super::ControlOutput<N_MOTORS>;
+
 /// The per-boot identity these vectors emit under (`BoardIdentity`): a boot tag and a part.
 /// No vector's behaviour depends on either, because nothing in the orchestrator CONSUMES them;
 /// they are carried into the cyclic payload, which is what
@@ -437,8 +444,8 @@ fn off_inhibit_can_never_block_a_shutdown() {
 #[test]
 fn drive_staleness_at_51_ticks_and_never_received() {
     let mut s = fresh();
-    assert!(s.inbox.drive_stale(), "never received = stale");
-    assert_eq!(s.inbox.drive(), None);
+    assert!(s.inbox.drive_stale(0), "never received = stale");
+    assert_eq!(s.inbox.drive(0), None);
 
     s.inbox.accept(
         CTRL,
@@ -446,14 +453,18 @@ fn drive_staleness_at_51_ticks_and_never_received() {
             kind: DriveKind::Throttle,
             value: 500,
             steer: 0,
+            motor: 0,
         }),
     );
-    assert!(!s.inbox.drive_stale(), "fresh on receipt");
+    assert!(!s.inbox.drive_stale(0), "fresh on receipt");
     run_ticks(&mut s, 50);
-    assert_eq!(s.inbox.drive_age(), 50);
-    assert!(!s.inbox.drive_stale(), "age 50 is within the 200 ms window");
+    assert_eq!(s.inbox.drive_age(0), 50);
+    assert!(
+        !s.inbox.drive_stale(0),
+        "age 50 is within the 200 ms window"
+    );
     run_ticks(&mut s, 1);
-    assert!(s.inbox.drive_stale(), "age 51 > DRIVE_TIMEOUT_TICKS");
+    assert!(s.inbox.drive_stale(0), "age 51 > DRIVE_TIMEOUT_TICKS");
     // Latest-wins refresh restores freshness.
     s.inbox.accept(
         CTRL,
@@ -461,10 +472,11 @@ fn drive_staleness_at_51_ticks_and_never_received() {
             kind: DriveKind::Neutral,
             value: 0,
             steer: 0,
+            motor: 0,
         }),
     );
-    assert!(!s.inbox.drive_stale());
-    assert_eq!(s.inbox.drive().unwrap().kind, DriveKind::Neutral);
+    assert!(!s.inbox.drive_stale(0));
+    assert_eq!(s.inbox.drive(0).unwrap().kind, DriveKind::Neutral);
 }
 
 // --- Mirror staleness (`specs/link-control.md`, "Supervision": the remote INPUTS mirror) ------
@@ -579,6 +591,7 @@ fn demand(value: i16) -> Payload {
         kind: DriveKind::Throttle,
         value,
         steer: 0,
+        motor: 0,
     })
 }
 
@@ -713,10 +726,10 @@ fn a_demand_cannot_manufacture_a_power_request() {
         run_ticks(&mut s, DEMAND_GAP_TICKS);
     }
     assert!(
-        s.inbox.drive().is_some(),
+        s.inbox.drive(0).is_some(),
         "the demand landed in its own slot"
     );
-    assert!(!s.inbox.drive_stale(), "and is fresh there");
+    assert!(!s.inbox.drive_stale(0), "and is fresh there");
     assert!(s.inbox.remote_stale(), "but no mirror exists to be fresh");
     assert!(
         !s.inbox.remote_power_request(),
@@ -1490,6 +1503,7 @@ fn feed_drive(s: &mut OrchestratorState, value: i16, steer: i16) {
             kind: DriveKind::Throttle,
             value,
             steer,
+            motor: 0,
         }),
     );
 }
@@ -1741,7 +1755,7 @@ fn an_over_current_trip_latches_motor_0_and_clears_on_the_off_pass() {
     assert_eq!(t.mode_byte, Mode::Off.as_byte());
     assert_eq!(t.moe, [false; N_MOTORS]);
     assert_eq!(
-        t.torque_setpoint, 0,
+        t.torque_setpoint[0], 0,
         "the demand has gone to zero through the FSM"
     );
     assert!(!s.latches[0].is_latched(), "cleared on the OFF pass");
@@ -1915,7 +1929,7 @@ fn quiet_pipeline_holds_substate_zero_and_zero_torque() {
     for _ in 0..100 {
         let t = control_task(&mut s, None, 1);
         assert_eq!(t.sub_state, 0);
-        assert_eq!(t.torque_setpoint, 0);
+        assert_eq!(t.torque_setpoint[0], 0);
         assert_eq!(s.ctl.fsm.torque_setpoint, 0);
     }
 }
@@ -1936,12 +1950,15 @@ fn throttle_mode_produces_torque_then_decays_to_neutral_on_stale_drive() {
         }
         let t = control_task(&mut s, None, 1);
         assert_eq!(
-            t.torque_setpoint, s.ctl.fsm.torque_setpoint,
+            t.torque_setpoint[0], s.ctl.fsm.torque_setpoint,
             "sole-writer row"
         );
-        assert!(t.torque_setpoint >= 0);
-        assert!(t.torque_setpoint <= 28500, "never beyond the envelope cap");
-        peak = peak.max(t.torque_setpoint);
+        assert!(t.torque_setpoint[0] >= 0);
+        assert!(
+            t.torque_setpoint[0] <= 28500,
+            "never beyond the envelope cap"
+        );
+        peak = peak.max(t.torque_setpoint[0]);
     }
     assert!(peak > 20_000, "full drive reached authority, got {peak}");
     assert_eq!(
@@ -1954,7 +1971,7 @@ fn throttle_mode_produces_torque_then_decays_to_neutral_on_stale_drive() {
     let mut zero_seen_at = None;
     for k in 0..200 {
         let t = control_task(&mut s, None, 1);
-        if t.torque_setpoint == 0 && zero_seen_at.is_none() {
+        if t.torque_setpoint[0] == 0 && zero_seen_at.is_none() {
             zero_seen_at = Some(k);
         }
     }
@@ -2006,9 +2023,9 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
             // The soft-start property: the envelope admits at most 200/tick since engage.
             let env_bound = 200i32 * (k - e + 1);
             assert!(
-                (t.torque_setpoint as i32).abs() <= env_bound.min(28500),
+                (t.torque_setpoint[0] as i32).abs() <= env_bound.min(28500),
                 "torque {} exceeds envelope bound {} at tick {}",
-                t.torque_setpoint,
+                t.torque_setpoint[0],
                 env_bound,
                 k
             );
@@ -2046,7 +2063,10 @@ fn balance_engagement_walks_substates_and_stays_within_envelope() {
             // The tick AFTER reaching IDLE zeroes the mirror; from there the setpoint is 0.
             let t2 = control_task(&mut s, Some(&level), 1);
             assert_eq!(t2.sub_state, 0);
-            assert_eq!(t2.torque_setpoint, 0, "sub-state 0 forces a zero setpoint");
+            assert_eq!(
+                t2.torque_setpoint[0], 0,
+                "sub-state 0 forces a zero setpoint"
+            );
             return;
         }
         assert!(k < 39, "wind-down never completed");
@@ -2124,9 +2144,9 @@ fn a_fault_shutdown_resets_the_engagement_machine_so_re_entry_soft_starts() {
         if let Some(e) = re_engaged_at {
             let env_bound = 200i32 * (k - e + 1);
             assert!(
-                (t.torque_setpoint as i32).abs() <= env_bound.min(28500),
+                (t.torque_setpoint[0] as i32).abs() <= env_bound.min(28500),
                 "torque {} skips the soft-start envelope bound {} at tick {}",
-                t.torque_setpoint,
+                t.torque_setpoint[0],
                 env_bound,
                 k
             );
@@ -2162,7 +2182,7 @@ fn peer_lockdown_forces_substate_zero_and_zero_torque() {
     control_task(&mut s, None, 1);
     let t = control_task(&mut s, None, 1);
     assert_eq!(t.sub_state, 0, "lockdown forces sub-state 0");
-    assert_eq!(t.torque_setpoint, 0, "and a zero setpoint");
+    assert_eq!(t.torque_setpoint[0], 0, "and a zero setpoint");
 }
 
 #[test]
@@ -4955,7 +4975,7 @@ fn a_follower_applies_its_leaders_word_while_the_leader_is_fresh_and_running() {
         5000,
         "and, enveloped, the wheel demand"
     );
-    assert_eq!(f.ctl.wheel_demand, f.ctl.fsm.torque_setpoint);
+    assert_eq!(f.ctl.wheel_demand[0], f.ctl.fsm.torque_setpoint);
     assert!(!f.obs().imu_loss, "absence is not loss");
     assert!(!f.obs().comms_loss);
     assert_eq!(
@@ -4992,7 +5012,7 @@ fn a_follower_zeroes_its_wheel_within_the_rigid_window_and_disarms_at_the_superv
     control_task(&mut f, None, 1);
     assert_eq!(f.inbox.cyclic_age(), RIGID_STALE_TICKS + 1);
     assert_eq!(f.obs().torque_setpoint, 0, "the wheel is zeroed");
-    assert_eq!(f.ctl.wheel_demand, 0);
+    assert_eq!(f.ctl.wheel_demand[0], 0);
     assert_eq!(
         f.obs().pre_env_torque,
         0,
@@ -5380,7 +5400,7 @@ fn a_rigid_board_stops_when_its_peer_reports_a_fault_a_and_re_arms_when_it_clear
         Some(&tilted),
     );
     assert_ne!(l.mode.mode(), Mode::Run);
-    assert_eq!(l.ctl.wheel_demand, 0, "and the wheel coasts");
+    assert_eq!(l.ctl.wheel_demand[0], 0, "and the wheel coasts");
 }
 
 /// **A peer's one-way comms loss stops this board too** (section 6, and the reason `peer_down`
@@ -5477,7 +5497,7 @@ fn a_stale_peers_fault_is_not_peer_down() {
     }
     assert_eq!(f.inbox.cyclic_age(), RIGID_STALE_TICKS + 1);
     assert_eq!(f.events.levels() & EV_COMMS_LOSS, 0, "stale: released");
-    assert_eq!(f.ctl.wheel_demand, 0);
+    assert_eq!(f.ctl.wheel_demand[0], 0);
 }
 
 /// **A pivoting board ignores its peer's fault mask** (section 6: the level is rigid-only). Two
@@ -5559,7 +5579,7 @@ fn the_leader_splits_its_torque_by_its_side_and_commands_the_peer_the_other_half
         assert_eq!(l.ctl.turn, 3_000, "the turn is at its bound");
         let t = l.ctl.fsm.torque_setpoint as i32;
         assert_ne!(t, 0, "the law is commanding torque");
-        let (own, peer) = (l.ctl.wheel_demand as i32, l.ctl.peer_demand as i32);
+        let (own, peer) = (l.ctl.wheel_demand[0] as i32, l.ctl.peer_demand as i32);
         assert_eq!(own + peer, 2 * t, "the common torque is preserved exactly");
         assert_eq!(
             (own - peer).abs(),
@@ -5594,7 +5614,7 @@ fn a_saturated_leader_gives_up_the_turn_and_keeps_the_common_torque() {
     assert_eq!(l.ctl.turn, 3_000, "the command itself is unchanged");
     let t = l.ctl.fsm.torque_setpoint;
     assert_eq!(t.unsigned_abs(), 28_500, "the law is at full authority");
-    assert_eq!(l.ctl.wheel_demand, t, "no turn applied");
+    assert_eq!(l.ctl.wheel_demand[0], t, "no turn applied");
     assert_eq!(l.ctl.peer_demand, t);
 }
 
@@ -5607,9 +5627,9 @@ fn a_leader_with_no_turn_staged_drives_both_wheels_the_same() {
     let mut l = turning_leader(true, control::DriveTurn::default());
     run_turning(&mut l, 300, 32_767, &tilted);
     assert_eq!(l.ctl.turn, 0, "the carry never moves");
-    assert_ne!(l.ctl.wheel_demand, 0);
-    assert_eq!(l.ctl.wheel_demand, l.ctl.fsm.torque_setpoint);
-    assert_eq!(l.ctl.peer_demand, l.ctl.wheel_demand);
+    assert_ne!(l.ctl.wheel_demand[0], 0);
+    assert_eq!(l.ctl.wheel_demand[0], l.ctl.fsm.torque_setpoint);
+    assert_eq!(l.ctl.peer_demand, l.ctl.wheel_demand[0]);
 }
 
 /// **The turn slews in and decays out with the drive command** (section 5): a step in
@@ -5637,7 +5657,7 @@ fn the_turn_slews_in_and_decays_out_with_the_drive_command() {
         control_task(&mut l, Some(&tilted), 1);
     }
     assert_eq!(l.ctl.turn, 0, "back to straight");
-    assert_eq!(l.ctl.peer_demand, l.ctl.wheel_demand);
+    assert_eq!(l.ctl.peer_demand, l.ctl.wheel_demand[0]);
 }
 
 /// **A stale peer zeroes BOTH halves of a turning leader** (sections 5 and 6): the freshness gate
@@ -5650,14 +5670,14 @@ fn a_stale_peer_zeroes_both_halves_of_a_turning_leader() {
     let mut l = turning_leader(true, control::DriveTurn::new(3_000, 1_000));
     run_turning(&mut l, 300, 32_767, &tilted);
     assert_eq!(l.ctl.turn, 3_000);
-    assert_ne!(l.ctl.wheel_demand, 0);
+    assert_ne!(l.ctl.wheel_demand[0], 0);
     assert_ne!(l.ctl.peer_demand, 0);
     for _ in 0..=RIGID_STALE_TICKS + 1 {
         control_task(&mut l, Some(&tilted), 1);
     }
     assert!(l.inbox.cyclic_age() > RIGID_STALE_TICKS);
     assert_eq!(l.ctl.turn, 3_000, "the turn carry is not what was gated");
-    assert_eq!(l.ctl.wheel_demand, 0);
+    assert_eq!(l.ctl.wheel_demand[0], 0);
     assert_eq!(l.ctl.peer_demand, 0);
     let c = next_cyclic(&mut l, Some(&tilted));
     assert_eq!(c.peer_demand, 0, "and it commands its peer nothing");
@@ -5860,7 +5880,7 @@ fn a_fall_past_the_limit_disengages_and_disarms_the_board() {
         control_task(&mut s, Some(&fall_tick(at, rate)), 1);
         assert_eq!(s.mode.mode(), Mode::Off, "{rate} deg/s: disarmed");
         assert!(!s.mode.any_moe_allowed(), "the bridge is disarmed");
-        assert_eq!(s.ctl.wheel_demand, 0, "and commands its wheel nothing");
+        assert_eq!(s.ctl.wheel_demand[0], 0, "and commands its wheel nothing");
         assert_eq!(s.obs().torque_setpoint, 0);
     }
 }
@@ -6024,7 +6044,7 @@ fn a_fallen_leader_stops_its_follower_through_the_peer_mask() {
     run_with_peer(&mut f, 200, &leader_cyclic(Mode::Run, 5_000), None);
     assert_eq!(f.mode.mode(), Mode::Run, "armed behind a healthy leader");
     assert_ne!(f.ctl.fsm.sub_state as u8, 0, "engaged on the leader's gate");
-    assert_eq!(f.ctl.wheel_demand, 5_000, "applying the leader's word");
+    assert_eq!(f.ctl.wheel_demand[0], 5_000, "applying the leader's word");
 
     let fallen_leader = Payload::CyclicState(CyclicState {
         pitch: 5_000,
@@ -6041,7 +6061,7 @@ fn a_fallen_leader_stops_its_follower_through_the_peer_mask() {
         dispatch::peer_down_level(&f),
         "the interlock read the leader's byte"
     );
-    assert_eq!(f.ctl.wheel_demand, 0, "the follower's wheel is stopped");
+    assert_eq!(f.ctl.wheel_demand[0], 0, "the follower's wheel is stopped");
     assert_eq!(f.mode.mode(), Mode::Off, "and the follower is disarmed");
     assert!(!f.mode.any_moe_allowed());
 }
@@ -6335,9 +6355,9 @@ fn a_stale_drive_ramps_the_reference_to_zero_at_speed_slew_and_the_position_hold
     }
     assert_eq!(s.ctl.sf.v_ref, target);
     // The stream stops. The reference holds while the last command is fresh, then steps down.
-    while !s.inbox.drive_stale() {
+    while !s.inbox.drive_stale(0) {
         control_task(&mut s, Some(&level), 1);
-        if !s.inbox.drive_stale() {
+        if !s.inbox.drive_stale(0) {
             assert_eq!(s.ctl.sf.v_ref, target);
         }
     }
@@ -6706,4 +6726,172 @@ fn the_running_flags_ride_cyclic_state() {
     run_ticks(&mut s, 2);
     let c = cyclic_tx(&s, true).unwrap();
     assert!(c.rearm() && c.reboot());
+}
+
+// --- Per-motor drive (`specs/twelve-fet.md` sections 4 and 6.1) -----------------------------
+//
+// A board drives `M` motors: the 12-FET two, every other board one. Each motor has its own drive
+// slot, fed by the `DRIVE_CMD`s that name it, and goes stale on its own; the one engagement
+// machine and the one mode machine serve them all.
+
+/// A throttle board at breadth `M`, built as the firmware's boot builds it.
+fn throttle_board<const M: usize>() -> super::OrchestratorState<M> {
+    let mut s = super::OrchestratorState::<M>::new(
+        false,
+        false,
+        attitude::Config::default(),
+        sf_start(),
+        None,
+        TEST_IDENTITY,
+        test_machine(),
+    );
+    dispatch::re_apply_control_values(
+        &mut s,
+        0,
+        0,
+        0,
+        0,
+        store::CONTROL_RIDER_REQUIRED.default(),
+        store::BOARD_BATTERY_FLOOR.default(),
+        store::CONTROL_POS_CLAMP.default(),
+    );
+    s
+}
+
+/// A drive command for motor `motor`.
+fn drive_for(motor: u8, value: i16) -> Payload {
+    Payload::DriveCmd(DriveCmd {
+        kind: DriveKind::Throttle,
+        value,
+        steer: 0,
+        motor,
+    })
+}
+
+/// Hold the power request on a board of any breadth (the two-call press).
+fn press<const M: usize>(s: &mut super::OrchestratorState<M>) {
+    for _ in 0..2 {
+        input_task(
+            s,
+            &InputSample {
+                button_asserted: true,
+                ..Default::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn each_motor_has_its_own_drive_slot_and_staleness() {
+    let mut s = throttle_board::<2>();
+    s.inbox.accept(CTRL, drive_for(1, 5_000));
+    assert_eq!(s.inbox.drive(1).map(|d| d.value), Some(5_000));
+    assert_eq!(
+        s.inbox.drive(0),
+        None,
+        "motor 1's frame does not fill motor 0's slot"
+    );
+    assert!(s.inbox.drive_stale(0));
+    assert!(!s.inbox.drive_stale(1));
+    s.inbox.accept(CTRL, drive_for(0, 3_000));
+    for _ in 0..DRIVE_TIMEOUT_TICKS {
+        s.inbox.tick_ages(true);
+    }
+    s.inbox.accept(CTRL, drive_for(0, 3_000));
+    s.inbox.tick_ages(true);
+    assert!(!s.inbox.drive_stale(0), "refreshed");
+    assert!(s.inbox.drive_stale(1), "motor 1 went stale on its own");
+}
+
+#[test]
+fn a_drive_for_a_motor_the_board_lacks_is_dropped() {
+    let mut one = throttle_board::<1>();
+    one.inbox.accept(CTRL, drive_for(1, 5_000));
+    assert_eq!(
+        one.inbox.drive(0),
+        None,
+        "a one-motor board drops motor 1's frame"
+    );
+    assert!(one.inbox.drive_stale(0));
+    let mut two = throttle_board::<2>();
+    two.inbox.accept(CTRL, drive_for(2, 5_000));
+    assert_eq!((two.inbox.drive(0), two.inbox.drive(1)), (None, None));
+}
+
+#[test]
+fn both_moe_decisions_follow_the_mode_machine() {
+    let mut s = throttle_board::<2>();
+    let out = control_task(&mut s, None, 1);
+    assert_eq!(out.moe, [false; 2], "OFF");
+    press(&mut s);
+    let mut out = control_task(&mut s, None, 1);
+    for _ in 0..3 {
+        out = control_task(&mut s, None, 1);
+    }
+    assert_eq!(s.mode.mode(), Mode::Run);
+    assert_eq!(out.moe, [true; 2], "armed together");
+    assert_eq!(s.obs().moe_bits, 0b11);
+}
+
+/// Throttle on a two-motor board: each wheel follows its own slot through the one engagement
+/// machine, and a motor whose frames stop decays to zero within the drive timeout while the
+/// other keeps driving.
+#[test]
+fn a_stale_motor_1_coasts_while_motor_0_drives() {
+    let mut s = throttle_board::<2>();
+    press(&mut s);
+    for _ in 0..3 {
+        control_task(&mut s, None, 1);
+    }
+    let mut out = control_task(&mut s, None, 1);
+    for k in 0..400 {
+        if k % 10 == 0 {
+            s.inbox.accept(CTRL, drive_for(0, 8_000));
+            s.inbox.accept(CTRL, drive_for(1, -8_000));
+        }
+        out = control_task(&mut s, None, 1);
+    }
+    assert!(out.torque_setpoint[0] > 0, "{:?}", out.torque_setpoint);
+    assert!(out.torque_setpoint[1] < 0, "{:?}", out.torque_setpoint);
+    assert_eq!(
+        out.torque_setpoint[0], -out.torque_setpoint[1],
+        "the same conditioning on each slot"
+    );
+    // Motor 1's frames stop; motor 0's go on.
+    for k in 0..400 {
+        if k % 10 == 0 {
+            s.inbox.accept(CTRL, drive_for(0, 8_000));
+        }
+        out = control_task(&mut s, None, 1);
+    }
+    assert!(out.torque_setpoint[0] > 0, "motor 0 still drives");
+    assert_eq!(out.torque_setpoint[1], 0, "motor 1 decayed to neutral");
+    assert_eq!(
+        out.moe, [true; 2],
+        "a stale slot coasts the wheel, it does not disarm"
+    );
+}
+
+/// A one-motor board runs the same throttle path as motor 0 of a two-motor one.
+#[test]
+fn a_one_motor_board_drives_motor_0_as_a_two_motor_board_does() {
+    let mut one = throttle_board::<1>();
+    let mut two = throttle_board::<2>();
+    press(&mut one);
+    press(&mut two);
+    let mut a = control_task(&mut one, None, 1);
+    let mut b = control_task(&mut two, None, 1);
+    for k in 0..300 {
+        if k % 10 == 0 {
+            one.inbox.accept(CTRL, drive_for(0, 6_000));
+            two.inbox.accept(CTRL, drive_for(0, 6_000));
+        }
+        a = control_task(&mut one, None, 1);
+        b = control_task(&mut two, None, 1);
+    }
+    assert!(a.torque_setpoint[0] > 0);
+    assert_eq!(a.torque_setpoint[0], b.torque_setpoint[0]);
+    assert_eq!(b.torque_setpoint[1], 0, "motor 1 was never commanded");
+    assert_eq!(a.moe, [true]);
+    assert!(one.latches.len() == 1 && two.latches.len() == 2);
 }

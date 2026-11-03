@@ -45,7 +45,8 @@
       "motors": [
         {
           "current": {
-            "cal": 50
+            "cal": 50,
+            "limit": 30000
           }
         }
       ]

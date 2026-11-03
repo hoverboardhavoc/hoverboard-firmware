@@ -574,12 +574,13 @@
     <string name="layout_field_dead_time">Dead time (DTG)</string>
     <string name="layout_field_phase_a">Phase A sense</string>
     <string name="layout_field_phase_b">Phase B sense</string>
+    <string name="layout_field_phase_c">Phase C sense</string>
 
     <string name="layout_note_self_hold">Set from hoverboard-cli when the board is onboarded, not in this app. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
     <string name="layout_note_imu">With a model set: both pins and the I2C instance, and the two pins that instance\'s clock and data. With None fitted the IMU stays off and the pins may stay stored. Apply refuses anything else and names the field.</string>
     <string name="layout_note_gates">All six gates, the gate timer and a dead time at or above the floor, or none, and the six have to be that timer\'s complementary set. Apply refuses anything else and names the field.</string>
     <string name="layout_note_halls">All three halls, or none.</string>
-    <string name="layout_note_phase">Phase-current sense is fitted exactly when both pins are set, each with its pin\'s ADC channel.</string>
+    <string name="layout_note_phase">Phase-current sense is fitted exactly when two of the three pins are set, each with its pin\'s ADC channel. Phase C is read only where the chip drives two motors (the GD32F103RC), and never with phase A.</string>
     <string name="layout_note_dead_time">%1$d DTG ticks or more once the gates are configured; 0 only with them unset. A shorter one lets both FETs of a leg conduct.</string>
 
     <string name="layout_absent">not set</string>

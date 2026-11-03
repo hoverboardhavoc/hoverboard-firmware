@@ -2,7 +2,10 @@
 //! actually reaches the throttle-mode reference producer.
 //!
 //! Usage: `swd-mailbox-drive <openocd-host:port> [--base HEX] [--dst attached|ADDR]
-//!         [--value N] [--steer N] [--hold SECONDS] [--period-ms N] [--trace]`
+//!         [--motor N] [--value N] [--steer N] [--hold SECONDS] [--period-ms N] [--trace]`
+//!
+//! `--motor` is the motor on the addressed board (default 0); a two-motor board takes one demand
+//! per motor (`specs/twelve-fet.md` section 6.1).
 //!
 //! # Why this exists (and why `swd-mailbox-inputs --throttle` is not it)
 //!
@@ -68,7 +71,7 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage: swd-mailbox-drive <host:port> [--base HEX] [--dst attached|ADDR] \
-     [--value N] [--steer N] [--hold SECONDS] [--period-ms N] [--trace]";
+     [--motor N] [--value N] [--steer N] [--hold SECONDS] [--period-ms N] [--trace]";
 
 /// The default re-send period. Half the firmware's 200 ms staleness window, so a dropped frame
 /// still leaves one more send inside the window.
@@ -148,6 +151,7 @@ fn run() -> Result<(), String> {
 
     let mut base = MAILBOX_BASE;
     let mut dst = DstArg::Attached;
+    let mut motor: u8 = 0;
     let mut value: i16 = 0;
     let mut steer: i16 = 0;
     let mut hold_secs: u64 = 5;
@@ -164,6 +168,7 @@ fn run() -> Result<(), String> {
                     .map_err(|_| format!("bad --base {b:?}"))?;
             }
             "--dst" => dst = parse_dst(&val()?)?,
+            "--motor" => motor = parse_u8(&val()?)?,
             "--value" => value = parse_i16(&val()?)?,
             "--steer" => steer = parse_i16(&val()?)?,
             "--hold" => {
@@ -242,10 +247,11 @@ fn run() -> Result<(), String> {
         kind: DriveKind::Throttle,
         value,
         steer,
+        motor,
     };
     let pdu = encode_drive_pdu(src, dst, &live);
     println!(
-        "DRIVE 0x{src:02x}->0x{dst:02x}: value={value} steer={steer}, held for {hold_secs} s \
+        "DRIVE 0x{src:02x}->0x{dst:02x} motor {motor}: value={value} steer={steer}, held for {hold_secs} s \
          (re-sent every {} ms; the firmware decays to neutral {DECAY_MS} ms after the last one)",
         period.as_millis(),
     );
@@ -279,6 +285,7 @@ fn run() -> Result<(), String> {
         kind: DriveKind::Neutral,
         value: 0,
         steer: 0,
+        motor,
     };
     walk.send_pdu(&encode_drive_pdu(src, dst, &neutral))
         .map_err(|e| e.to_string())?;
@@ -297,14 +304,19 @@ mod tests {
 
     #[test]
     fn encodes_a_live_throttle_pdu() {
-        // L3 header [op, src, dst] then the payload [kind, value_lo, value_hi, steer_lo, steer_hi].
+        // L3 header [op, src, dst] then the payload
+        // [kind, value_lo, value_hi, steer_lo, steer_hi, motor].
         let cmd = DriveCmd {
             kind: DriveKind::Throttle,
             value: 1000,
             steer: 0,
+            motor: 1,
         };
         let pdu = encode_drive_pdu(0x80, 0x02, &cmd);
-        assert_eq!(pdu, vec![0x11, 0x80, 0x02, 0x01, 0xe8, 0x03, 0x00, 0x00]);
+        assert_eq!(
+            pdu,
+            vec![0x11, 0x80, 0x02, 0x01, 0xe8, 0x03, 0x00, 0x00, 0x01]
+        );
     }
 
     #[test]
@@ -313,9 +325,13 @@ mod tests {
             kind: DriveKind::Neutral,
             value: 0,
             steer: 0,
+            motor: 0,
         };
         let pdu = encode_drive_pdu(0x80, 0x02, &cmd);
-        assert_eq!(pdu, vec![0x11, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            pdu,
+            vec![0x11, 0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
@@ -324,9 +340,13 @@ mod tests {
             kind: DriveKind::Throttle,
             value: -1000,
             steer: 500,
+            motor: 0,
         };
         let pdu = encode_drive_pdu(0x81, 0x01, &cmd);
-        assert_eq!(pdu, vec![0x11, 0x81, 0x01, 0x01, 0x18, 0xfc, 0xf4, 0x01]);
+        assert_eq!(
+            pdu,
+            vec![0x11, 0x81, 0x01, 0x01, 0x18, 0xfc, 0xf4, 0x01, 0x00]
+        );
     }
 
     #[test]

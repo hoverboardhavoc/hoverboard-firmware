@@ -228,9 +228,10 @@ private fun SetupState.sendingByte(address: Int, key: Key): Int? =
 /**
  * The drive mode in force on the machine this session sees (`specs/remote-ui.md` section 2 and 3.2;
  * `specs/machine-settings.md` section 7), derived from the stored `machine.mode` and `machine.frame`
- * on the motor controllers, the number of them, the Ride screen's turn-axis setting [turnAxis], each
- * board's motor 0 `side`, and each board's stored `control.leader` (`specs/rigid-leader.md` section
- * 7). [DriveInForce.NONE] while no node is attached.
+ * on the motor controllers, their wheels (each board's motor count, `specs/twelve-fet.md` section
+ * 6.2), the Ride screen's turn-axis setting [turnAxis], each wheel's `side` at its motor index, and
+ * each board's stored `control.leader` (`specs/rigid-leader.md` section 7). [DriveInForce.NONE]
+ * while no node is attached.
  */
 fun SetupState.driveInForce(turnAxis: Boolean): DriveInForce =
     if (attached == null) {
@@ -240,7 +241,8 @@ fun SetupState.driveInForce(turnAxis: Boolean): DriveInForce =
             nodes = nodes,
             mode = { storedByte(it, SetupFields.CONTROL_MODE.key) },
             frame = { storedByte(it, SetupFields.CONTROL_FRAME.key) },
-            side = { storedByte(it, SetupFields.CONTROL_SIDE.key) },
+            motors = { setupOf(it).motors },
+            side = { w -> storedByte(w.node, Fields.CONTROL_SIDE.key(w.motor)) },
             leader = { storedByte(it, SetupFields.CONTROL_LEADER.key) },
             turnAxis = turnAxis,
         )

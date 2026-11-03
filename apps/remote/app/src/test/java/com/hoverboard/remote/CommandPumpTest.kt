@@ -9,6 +9,12 @@ import com.hoverboard.remote.model.DriveFrame
 import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.DriveTargets
 import com.hoverboard.remote.model.RiderCommand
+import com.hoverboard.remote.model.Wheel
+import com.hoverboard.protocol.l3.Pdu
+import com.hoverboard.protocol.linkctl.DriveCmd
+import com.hoverboard.protocol.linkctl.DriveKind
+import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
+import com.hoverboard.protocol.linkctl.OP_INPUTS
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -414,8 +420,68 @@ class CommandPumpTest {
         assertTrue(follower.all { it.command == RiderCommand.DISARMED && it.frames == TickFrames.INPUTS_ONLY })
     }
 
+    // --- two wheels on one board: the 12-FET (`specs/twelve-fet.md` section 6.2) -------------------
+
+    /**
+     * Two wheels on one node: each tick is one [NodeTick] for the board, which spells one
+     * `DRIVE_CMD` per motor (latest wins per wheel) and, on the ticks that carry the arm level,
+     * one `INPUTS`.
+     */
+    @Test
+    fun `two wheels on one board get two drive frames and one inputs per tick`() = runTest {
+        val writes = mutableListOf<List<NodeTick>>()
+        val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
+        pump.start()
+        val targets = DriveTargets(DriveMode.DIFFERENTIAL, listOf(Wheel(A, 0), Wheel(A, 1)), right = Wheel(A, 1))
+        pump.set(DriveFrame.of(targets, RiderCommand.armed(900), steer = 400))
+        pump.set(DriveFrame.of(targets, RiderCommand.armed(1_000), steer = 400))
+        advanceTimeBy(INTERVAL * 3 + 1)
+        runCurrent()
+
+        val ticks = writes.filter { it.isNotEmpty() }
+        assertTrue(ticks.isNotEmpty())
+        for (tick in ticks) {
+            val t = tick.single()
+            assertEquals(A, t.node)
+            val pdus = t.pdus(SRC).map { checkNotNull(Pdu.decodeOrNull(it)) }
+            assertTrue(pdus.all { it.src == SRC && it.dst == A })
+            assertEquals(if (t.frames == TickFrames.BOTH) 1 else 0, pdus.count { it.opcode == OP_INPUTS })
+            val drives = pdus.filter { it.opcode == OP_DRIVE_CMD }.map { checkNotNull(DriveCmd.decode(it.payload)) }
+            assertEquals(listOf(0, 1), drives.map { it.motor }, "one DRIVE_CMD per wheel, in motor order")
+            assertTrue(drives.all { it.kind == DriveKind.Throttle && it.steer == 0 })
+            val pair = com.hoverboard.remote.model.DriveMix.of(1_000, 400)
+            assertEquals(listOf(pair.left, pair.right), drives.map { it.value }, "the latest command, per wheel")
+        }
+        assertEquals(TickFrames.BOTH, ticks.first().single().frames, "the arm level goes with the first tick")
+    }
+
+    /** A two-motor board leaving the frame is disarmed on both motors, with one `INPUTS`. */
+    @Test
+    fun `a two-motor board leaving the frame gets the neutral on both motors`() = runTest {
+        val writes = mutableListOf<List<NodeTick>>()
+        val pump = CommandPump(backgroundScope, INTERVAL) { writes.add(it) }
+        pump.start()
+        val bound = DriveTargets(DriveMode.BOUND, listOf(Wheel(B, 0), Wheel(B, 1)))
+        pump.set(DriveFrame.of(bound, RiderCommand.armed(500)))
+        advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+        runCurrent()
+        writes.clear()
+
+        pump.set(single(RiderCommand.DISARMED))
+        advanceTimeBy(INTERVAL * LinkConfig.INPUTS_CHANGE_REPEATS + 1)
+        runCurrent()
+
+        val b = writes.mapNotNull { w -> w.firstOrNull { it.node == B } }
+        assertEquals(LinkConfig.INPUTS_CHANGE_REPEATS, b.size)
+        for (t in b) {
+            assertEquals(setOf(0, 1), t.drives.keys)
+            assertTrue(t.drives.values.all { it == RiderCommand.DISARMED })
+            assertEquals(1, t.pdus(SRC).count { Pdu.decodeOrNull(it)?.opcode == OP_INPUTS })
+        }
+    }
+
     /** One board's frame: what every single-board test above streams. */
-    private fun single(command: RiderCommand) = DriveFrame.of(DriveTargets(DriveMode.SINGLE, listOf(A)), command)
+    private fun single(command: RiderCommand) = DriveFrame.of(DriveTargets(DriveMode.SINGLE, wheels(A)), command)
 
     /**
      * A pump whose writes are reported as board A's (command, frames), for one-board tests. A tick
@@ -429,8 +495,11 @@ class CommandPumpTest {
         const val A = 0x01
         const val B = 0x02
 
-        val BOUND = DriveTargets(DriveMode.BOUND, listOf(A, B))
-        val RIGID = DriveTargets(DriveMode.RIGID, listOf(A, B), leader = A)
+        /** The app's guest address, for the PDUs a tick spells. */
+        const val SRC = 0x81
+
+        val BOUND = DriveTargets(DriveMode.BOUND, wheels(A, B))
+        val RIGID = DriveTargets(DriveMode.RIGID, wheels(A, B), leader = A)
 
         const val INTERVAL = 33L
 

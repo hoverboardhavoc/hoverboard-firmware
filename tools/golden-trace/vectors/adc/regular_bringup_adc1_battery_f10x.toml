@@ -1,0 +1,54 @@
+# Mode: final_state over the RCU and ADC1. The calibration polls end at once (CTL1's RSTCLB and CLB
+# are self-clearing in the family table); calibrate_adc0_f10x compares the polls. The vendor's
+# rcu_adc_clock_config writes the ADCPSC field twice and its helpers build CTL1 one field at a time;
+# the HAL writes each field once. End state:
+#   RCU APB2EN = ADC1 (bit 10); CFG0 ADCPSC = APB2 / 6 over the seeded tree
+#   ADC1 CTL0   = 0x00000000 (scan off)
+#   ADC1 CTL1   = 0x001E0001 (ADCON | ETSRC software (7 << 17) | ETERC (20)), the last write the
+#                 CLB command less its self-clearing bit
+#   ADC1 SAMPT0 = 0x000001C0 (channel 12 at 239.5 cycles, bits 8:6)
+#   ADC1 RSQ0   = 0x00000000 (one conversion), RSQ2 = 0x0000000C (rank 0 = channel 12)
+# ADC1 runs in free mode: SYNCM is ADC0's field ("only used in ADC0", ADC_CTL0) and keeps its reset
+# 0, which nothing in the firmware changes.
+description = """
+The 12-FET's battery conversion brought up on ADC1 (twelve-fet.md section 5.4): the ADC1 clock and
+the ADC clock divider, then one software-triggered regular conversion of channel 12 (PC2) at 239.5
+cycles, right-aligned, ADC on, calibrated. No conversion.
+
+Vendor: rcu_periph_clock_enable(RCU_ADC1); rcu_adc_clock_config(RCU_CKADC_CKAPB2_DIV6); scan and
+        continuous off, right alignment, regular length 1, rank 0 = channel 12 at 239.5, the
+        software trigger selected and enabled, adc_enable, adc_calibration_enable.
+HAL: clock::enable_adc(Adc1); chip.adc_instance(Adc1), configure_single(12, 7), calibrate().
+"""
+family = "gd32f10x"
+mode = "final_state"
+assert_only = ["<RCU_BASE>", "<ADC1_BASE>"]
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_ADC1);
+    rcu_adc_clock_config(RCU_CKADC_CKAPB2_DIV6);
+    adc_special_function_config(ADC1, ADC_SCAN_MODE, DISABLE);
+    adc_special_function_config(ADC1, ADC_CONTINUOUS_MODE, DISABLE);
+    adc_data_alignment_config(ADC1, ADC_DATAALIGN_RIGHT);
+    adc_channel_length_config(ADC1, ADC_REGULAR_CHANNEL, 1U);
+    adc_regular_channel_config(ADC1, 0U, ADC_CHANNEL_12, ADC_SAMPLETIME_239POINT5);
+    adc_external_trigger_source_config(ADC1, ADC_REGULAR_CHANNEL, ADC0_1_2_EXTTRIG_REGULAR_NONE);
+    adc_external_trigger_config(ADC1, ADC_REGULAR_CHANNEL, ENABLE);
+    adc_enable(ADC1);
+    adc_calibration_enable(ADC1);
+'''
+
+[hal]
+body = '''
+    use hal::{clock, Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        clock::enable_adc(chip.rcu_base().unwrap(), chip.clock(), PeriphLabel::Adc1).unwrap();
+        let adc = chip.adc_instance(PeriphLabel::Adc1).unwrap();
+        adc.configure_single(12, 7); // PC2 at 239.5 cycles
+        adc.calibrate().unwrap();
+    }
+'''

@@ -24,7 +24,11 @@ NAMES = {
         "who_am_i_after", "adc_calibrate", "vrefint", "temperature", "scl_level"],
     5: ["ctl0", "ctl1", "chctl0", "chctl1", "chctl2", "psc", "car", "crep", "ch3cv", "cchp",
         "timer_fail_mask", "injected_new", "eoic", "inj0", "inj1", "period_ipr", "systick_pri",
-        "priority_verdict", "moe_after", "verdict"],
+        "priority_verdict", "moe_after", "verdict",
+        # Words 22..42: TIMER7 (0 on a chip without it) and the ISQ read-back.
+        "t7_ctl0", "t7_ctl1", "t7_chctl0", "t7_chctl1", "t7_chctl2", "t7_psc", "t7_car", "t7_crep",
+        "t7_ch3cv", "t7_cchp", "t7_smcfg", "t7_cnt", "t7_fail_mask", "isq", "isq_wrong", "inj2",
+        "inj3", "t7_ctl0_after", "t0_cnt_after", "t7_cnt_after", "t7_moe_after"],
 }
 VALIDATOR = {1: "probe", 2: "fmc", 3: "serial", 4: "coldpath", 5: "motor-verify"}
 LABELS = ["Timer0", "Timer7", "Adc0", "Adc1", "Adc2", "I2c1", "Usart2"]
@@ -79,6 +83,7 @@ def main():
             flags = w[o + 1]
             print(f"  {lab:<7} sticky {flags & 1} writeback {flags >> 2 & 1} "
                   f"present {flags >> 3 & 1} | descriptor {w[o + 3]} | scratch reset {w[o + 2]:#010x}")
+        print(f"  w40 dbg_after      {w[40]:#010x}\n  w41 dbg_before     {w[41]:#010x}")
 
 
 if __name__ == "__main__":

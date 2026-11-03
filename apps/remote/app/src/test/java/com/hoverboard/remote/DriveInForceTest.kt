@@ -8,7 +8,9 @@ import com.hoverboard.remote.model.DriveMode
 import com.hoverboard.remote.model.DriveRefusal
 import com.hoverboard.remote.model.DriveTargets
 import com.hoverboard.remote.model.NodeInfo
+import com.hoverboard.remote.model.DriveMix
 import com.hoverboard.remote.model.RiderCommand
+import com.hoverboard.remote.model.Wheel
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -38,8 +40,17 @@ class DriveInForceTest {
         frames: Map<Int, Int?> = mapOf(0x01 to pivoting, 0x02 to pivoting),
         sides: Map<Int, Int?> = mapOf(0x01 to Fields.ControlSide.RIGHT, 0x02 to Fields.ControlSide.LEFT),
         leaders: Map<Int, Int?> = mapOf(0x01 to 0, 0x02 to 0),
+        motors: Map<Int, Int?> = nodes.associate { it.address to 1 },
         turnAxis: Boolean = false,
-    ) = DriveInForce.of(nodes, { modes[it] }, { frames[it] }, { sides[it] }, { leaders[it] }, turnAxis)
+    ) = DriveInForce.of(
+        nodes,
+        { modes[it] },
+        { frames[it] },
+        { motors[it] },
+        { w -> sides[w.node].takeIf { w.motor == 0 } },
+        { leaders[it] },
+        turnAxis,
+    )
 
     private fun flagged(vararg boards: Int) = mapOf(0x01 to 0, 0x02 to 0) + boards.associateWith { 1 }
 
@@ -47,21 +58,21 @@ class DriveInForceTest {
 
     @Test
     fun `the mode is derived from the frame, the control mode, the count and the turn axis`() {
-        assertEquals(DriveTargets(DriveMode.BOUND, listOf(0x01, 0x02)), of().targets, "two, pivoting, no turn axis")
+        assertEquals(DriveTargets(DriveMode.BOUND, wheels(0x01, 0x02)), of().targets, "two, pivoting, no turn axis")
         assertEquals(
-            DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02), right = 0x01),
+            DriveTargets(DriveMode.DIFFERENTIAL, wheels(0x01, 0x02), right = wheel0(0x01)),
             of(turnAxis = true).targets,
             "two, pivoting, the turn axis used",
         )
         val rigidBalance = of(modes = both(balance), frames = both(rigid), leaders = flagged(0x02))
-        assertEquals(DriveTargets(DriveMode.RIGID, listOf(0x01, 0x02), leader = 0x02), rigidBalance.targets)
+        assertEquals(DriveTargets(DriveMode.RIGID, wheels(0x01, 0x02), leader = 0x02), rigidBalance.targets)
         assertEquals(DriveMode.RIGID, of(modes = both(balance), frames = both(rigid), turnAxis = true).derived)
         // A rigid frame in throttle mode is not one rigid machine: the firmware resolves the frame
         // only in balance, so the two wheels are driven as a pair.
         assertEquals(DriveMode.BOUND, of(frames = both(rigid)).derived)
         assertEquals(DriveMode.BOUND, of(modes = both(balance)).derived, "balance on pivoting platforms")
         val one = of(nodes = pair.take(1), modes = mapOf(0x01 to balance), turnAxis = true)
-        assertEquals(DriveTargets(DriveMode.SINGLE, listOf(0x01)), one.targets, "one motor controller")
+        assertEquals(DriveTargets(DriveMode.SINGLE, wheels(0x01)), one.targets, "one motor controller")
         for (f in listOf(of(), of(turnAxis = true), rigidBalance, one)) assertNull(f.refusal)
     }
 
@@ -69,7 +80,7 @@ class DriveInForceTest {
     fun `single drives the one motor controller and never a bridge`() {
         val withBridge = listOf(NodeInfo(0x01, Walk.CLASS_BRIDGE, "esp"), NodeInfo(0x02, mc, "r"))
         val single = of(nodes = withBridge, modes = mapOf(0x02 to throttle), frames = mapOf(0x02 to pivoting))
-        assertEquals(DriveTargets(DriveMode.SINGLE, listOf(0x02)), single.targets)
+        assertEquals(DriveTargets(DriveMode.SINGLE, wheels(0x02)), single.targets)
     }
 
     @Test
@@ -132,38 +143,111 @@ class DriveInForceTest {
         val rigidBalance = of(modes = both(balance), frames = both(rigid), leaders = flagged(0x01))
         assertNull(rigidBalance.refusal)
         val frame = DriveFrame.of(rigidBalance.targets, RiderCommand.armed(1_000), steer = 5)
-        assertEquals(setOf(0x01, 0x02), frame.commands.keys)
-        assertEquals(setOf(0x01), frame.driven, "the flagged board is the one driven")
+        assertEquals(setOf(0x01, 0x02), frame.boards.toSet())
+        assertEquals(setOf(wheel0(0x01)), frame.driven, "the flagged board is the one driven")
         for (leaders in listOf(flagged(), flagged(0x01, 0x02), mapOf<Int, Int?>(0x01 to null, 0x02 to null))) {
             val bound = of(frames = both(rigid), leaders = leaders)
             assertNull(bound.refusal, "$leaders")
-            assertEquals(DriveTargets(DriveMode.BOUND, listOf(0x01, 0x02)), bound.targets)
+            assertEquals(DriveTargets(DriveMode.BOUND, wheels(0x01, 0x02)), bound.targets)
             val diff = of(frames = both(rigid), leaders = leaders, turnAxis = true)
             assertNull(diff.refusal, "$leaders")
-            assertEquals(DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02), right = 0x01), diff.targets)
+            assertEquals(DriveTargets(DriveMode.DIFFERENTIAL, wheels(0x01, 0x02), right = wheel0(0x01)), diff.targets)
         }
     }
 
     @Test
     fun `a frame addresses exactly the boards its targets name`() {
         val armed = RiderCommand.armed(1_000)
-        val bound = DriveFrame.of(DriveTargets(DriveMode.BOUND, listOf(0x02, 0x03)), armed)
-        assertEquals(setOf(0x02, 0x03), bound.commands.keys)
+        val bound = DriveFrame.of(DriveTargets(DriveMode.BOUND, wheels(0x02, 0x03)), armed)
+        assertEquals(setOf(0x02, 0x03), bound.boards.toSet())
         assertTrue(DriveFrame.of(DriveTargets.NONE, armed).commands.isEmpty())
         // A rigid frame drives its leader alone and tells both.
-        val rigidTargets = DriveTargets(DriveMode.RIGID, listOf(0x02, 0x03), leader = 0x03)
+        val rigidTargets = DriveTargets(DriveMode.RIGID, wheels(0x02, 0x03), leader = 0x03)
         val rigidFrame = DriveFrame.of(rigidTargets, armed, steer = 5)
-        assertEquals(setOf(0x02, 0x03), rigidFrame.commands.keys)
-        assertEquals(setOf(0x03), rigidFrame.driven)
+        assertEquals(setOf(0x02, 0x03), rigidFrame.boards.toSet())
+        assertEquals(setOf(wheel0(0x03)), rigidFrame.driven)
     }
 
     @Test
     fun `targets that cannot be driven are not constructed`() {
-        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.SINGLE, listOf(0x01, 0x02)) }
-        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02)) }
-        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.RIGID, listOf(0x01, 0x02)) }
-        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.RIGID, listOf(0x01, 0x02), leader = 0x03) }
+        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.SINGLE, wheels(0x01, 0x02)) }
+        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.DIFFERENTIAL, wheels(0x01, 0x02)) }
+        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.RIGID, wheels(0x01, 0x02)) }
+        assertThrows<IllegalArgumentException> { DriveTargets(DriveMode.RIGID, wheels(0x01, 0x02), leader = 0x03) }
         // A refused DIFFERENTIAL names its mode and addresses nobody, so it needs no right wheel.
         assertTrue(DriveTargets(DriveMode.DIFFERENTIAL, emptyList()).boards.isEmpty())
+    }
+
+    // --- two wheels on one node: the 12-FET (`specs/twelve-fet.md` section 6.2) -----------------
+
+    private val twelveFet = listOf(NodeInfo(0x01, mc, "12-FET"))
+
+    /** The 12-FET alone, with each motor's `control.side` as [sides] gives it by motor. */
+    private fun twelveFet(sides: Map<Int, Int?>, turnAxis: Boolean) = DriveInForce.of(
+        twelveFet,
+        mode = { throttle },
+        frame = { pivoting },
+        motors = { 2 },
+        side = { w -> sides[w.motor].takeIf { w.node == 0x01 } },
+        leader = { 0 },
+        turnAxis = turnAxis,
+    )
+
+    /** A 12-FET alone is a two-wheel machine: BOUND, or DIFFERENTIAL with the turn axis, never SINGLE. */
+    @Test
+    fun `a board with two motors is two wheels`() {
+        val sides = mapOf(0 to Fields.ControlSide.RIGHT, 1 to Fields.ControlSide.LEFT)
+        val both = listOf(Wheel(0x01, 0), Wheel(0x01, 1))
+        assertEquals(DriveTargets(DriveMode.BOUND, both), twelveFet(sides, turnAxis = false).targets)
+        val diff = twelveFet(sides, turnAxis = true)
+        assertNull(diff.refusal)
+        assertEquals(DriveTargets(DriveMode.DIFFERENTIAL, both, right = Wheel(0x01, 0)), diff.targets)
+        assertEquals(listOf(0x01), diff.targets.boards, "one board to arm")
+
+        // The motor count unread is a refusal, like any other unread copy.
+        val unread = DriveInForce.of(
+            twelveFet, { throttle }, { pivoting }, { null }, { Fields.ControlSide.LEFT }, { 0 }, false,
+        )
+        assertEquals(DriveRefusal.UNREAD, unread.refusal)
+    }
+
+    /** RIGHT is placed from `control.side` at the motor index, not at the board. */
+    @Test
+    fun `the right wheel is the motor whose own side is right`() {
+        val motorOneRight = mapOf(0 to Fields.ControlSide.LEFT, 1 to Fields.ControlSide.RIGHT)
+        assertEquals(Wheel(0x01, 1), twelveFet(motorOneRight, turnAxis = true).targets.right)
+        val noRight = mapOf(0 to Fields.ControlSide.LEFT, 1 to Fields.ControlSide.LEFT)
+        assertEquals(DriveRefusal.NO_RIGHT_WHEEL, twelveFet(noRight, turnAxis = true).refusal)
+        val motorOneUnread = mapOf(0 to Fields.ControlSide.RIGHT, 1 to null)
+        assertEquals(DriveRefusal.NO_RIGHT_WHEEL, twelveFet(motorOneUnread, turnAxis = true).refusal)
+    }
+
+    /**
+     * The frame over two wheels on one node: DIFFERENTIAL gives the right wheel the mix's right share
+     * and the other the left; BOUND the same value to both; every wheel carries the board's one arm
+     * level, and no wheel states a turn.
+     */
+    @Test
+    fun `the mix goes to two wheels of one board`() {
+        val right = Wheel(0x01, 1)
+        val left = Wheel(0x01, 0)
+        val diff = DriveTargets(DriveMode.DIFFERENTIAL, listOf(left, right), right = right)
+        val armed = RiderCommand.armed(4_000)
+        val frame = DriveFrame.of(diff, armed, steer = 6_000)
+        val pair = DriveMix.of(4_000, 6_000)
+        assertEquals(pair.right, frame.commands.getValue(right).demand)
+        assertEquals(pair.left, frame.commands.getValue(left).demand)
+        assertTrue(frame.commands.values.all { it.steer == 0 && it.armed })
+        assertEquals(listOf(0x01), frame.boards)
+        assertEquals(listOf(left, right), frame.wheelsOf(0x01).map { it.first })
+
+        val bound = DriveFrame.of(DriveTargets(DriveMode.BOUND, listOf(left, right)), armed, steer = 6_000)
+        assertEquals(setOf(armed), bound.commands.values.toSet())
+        assertEquals(setOf(left, right), bound.driven)
+
+        // One board, one arm level: a frame telling its two wheels different levels is refused.
+        assertThrows<IllegalArgumentException> {
+            DriveFrame(mapOf(left to armed, right to RiderCommand.DISARMED))
+        }
     }
 }

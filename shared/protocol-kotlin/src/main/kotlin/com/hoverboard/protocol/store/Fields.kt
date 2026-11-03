@@ -274,9 +274,20 @@ object Fields {
     /** The power-button sense; no fleet default is pinned yet, so absent until stored. */
     val BOARD_BUTTON = pin(0x0E, Type.Pin)
 
-    /** The two phase-current sense pins, per motor: the injected ADC group's ranks, in order. */
+    /**
+     * The phase-current sense pins, per motor: a motor's sensed pair is the two of [MOTOR_PHASE_A],
+     * [MOTOR_PHASE_B] and [MOTOR_PHASE_C] that are stored, and phase sense is fitted when two are.
+     * Only the two-motor image (the GD32F103RC) reads [MOTOR_PHASE_C] (`specs/twelve-fet.md` 5.3).
+     */
     val MOTOR_PHASE_A = pin(0x49, Type.PinAdc)
     val MOTOR_PHASE_B = pin(0x4A, Type.PinAdc)
+    val MOTOR_PHASE_C = pin(0x57, Type.PinAdc)
+
+    /**
+     * What a motor's phase sensors read: 0 = any state (they read current whatever the leg does),
+     * 1 = low side on (only while the leg's low side conducts) (`specs/twelve-fet.md` 5.5, 5.6).
+     */
+    val MOTOR_CURRENT_SENSE = FieldDef(0x58, Type.U8, Value.U8(0), Effect.BOOT)
 
     /**
      * What the pack IS: the number of cells in series (`shared/store/src/field.rs`,
@@ -522,6 +533,8 @@ object Fields {
         "BOARD_BUTTON" to BOARD_BUTTON,
         "MOTOR_PHASE_A" to MOTOR_PHASE_A,
         "MOTOR_PHASE_B" to MOTOR_PHASE_B,
+        "MOTOR_PHASE_C" to MOTOR_PHASE_C,
+        "MOTOR_CURRENT_SENSE" to MOTOR_CURRENT_SENSE,
         "IMU_I2C" to IMU_I2C,
         "IMU_MODEL" to IMU_MODEL,
         "IMU_REMAP" to IMU_REMAP,

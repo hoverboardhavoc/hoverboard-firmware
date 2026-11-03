@@ -463,7 +463,7 @@ class MachineStatusTest {
     /** The drive in force and the boards it addresses, by node label. */
     @Test
     fun theDriveLineNamesTheModeAndItsBoards() {
-        showState(pair(DriveInForce(DriveTargets(DriveMode.BOUND, listOf(0x01, 0x02)), DriveMode.BOUND, null)))
+        showState(pair(DriveInForce(DriveTargets(DriveMode.BOUND, wheels(0x01, 0x02)), DriveMode.BOUND, null)))
 
         val both = context.getString(R.string.status_and, BOARD, PEER)
         compose.onNodeWithText(context.getString(R.string.status_drive, "BOUND", both)).assertIsDisplayed()
@@ -484,7 +484,7 @@ class MachineStatusTest {
      */
     @Test
     fun aRigidThrottlePairIsNotToldAboutTheRigidLead() {
-        val rigidThrottle = pair(DriveInForce(DriveTargets(DriveMode.BOUND, listOf(0x01, 0x02)), DriveMode.BOUND, null))
+        val rigidThrottle = pair(DriveInForce(DriveTargets(DriveMode.BOUND, wheels(0x01, 0x02)), DriveMode.BOUND, null))
             .copy(machine = Machine(FramePair.Agree(rigid = true), SidePair.OneRight(0x01)))
         showState(rigidThrottle)
         val both = context.getString(R.string.status_and, BOARD, PEER)

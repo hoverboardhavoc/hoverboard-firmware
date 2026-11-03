@@ -72,7 +72,7 @@ class FakeHoverboardTransport(
      * The [RiderCommand] each frame told [ONE_BOARD], in order, skipping a frame that addressed it not
      * at all (one sent before the board's class was read): what a one-board test reads.
      */
-    val sent: List<RiderCommand> get() = frames.mapNotNull { it.commands[ONE_BOARD] }
+    val sent: List<RiderCommand> get() = frames.mapNotNull { it.commands[wheel0(ONE_BOARD)] }
 
     val last: RiderCommand? get() = sent.lastOrNull()
 
@@ -117,7 +117,8 @@ class FakeHoverboardTransport(
      *
      * Every node starts out answering what every board running this firmware answers unwritten:
      * its default `device.name`, `machine.mode` throttle, `machine.frame` pivoting, `control.leader`
-     * clear and `machine.battery.chemistry` li_ion. A test about a stored mode says so in [store].
+     * clear, `machine.battery.chemistry` li_ion and no motor 1 (`motors.1.gate.hi_a` unstored). A
+     * test about a stored mode says so in [store].
      */
     val store: MutableMap<Pair<Int, Key>, Value> = mutableMapOf()
     val defaults: MutableMap<Key, Value> = mutableMapOf(
@@ -126,6 +127,7 @@ class FakeHoverboardTransport(
         Fields.CONTROL_FRAME.key() to Fields.CONTROL_FRAME.default,
         Fields.CONTROL_LEADER.key() to Fields.CONTROL_LEADER.default,
         Fields.BOARD_BATTERY_CHEMISTRY.key() to Fields.BOARD_BATTERY_CHEMISTRY.default,
+        Fields.MOTOR_GATE_HI_A.key(1) to Fields.MOTOR_GATE_HI_A.default,
     )
 
     /**

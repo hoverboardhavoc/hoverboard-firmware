@@ -17,6 +17,11 @@
 //! | `ISQ`    | `0x38` | IL(21:20), the injected length less one; the rank channels, 5 bits each |
 //! | `IDATAx` | `0x3C` | injected data, `+4` per rank to `0x48`                               |
 //! | `RDATA`  | `0x4C` | regular data; on the F10x ADC0 in sync mode, ADC1's result in 31:16  |
+//!
+//! The regular group runs two ways: polled ([`Adc::read_channel`]) and split
+//! ([`Adc::start_regular`], then [`Adc::regular_result`] on a later pass), the second for a
+//! conversion the caller does not wait for (the 12-FET's battery on ADC1, `twelve-fet.md` section
+//! 5.4).
 
 use super::{InjectedAdcController, TriggeredAdc, ADC0_BASE, ADC_TIMEOUT};
 use crate::addr::PeriphLabel;
@@ -225,6 +230,20 @@ impl Chip {
         Adc { base: ADC0_BASE }
     }
 
+    /// ADC instance `label`, from the descriptor. No register access; its clock must be on
+    /// ([`crate::clock::enable_adc`]) before a conversion. Refused: a label that is not an ADC
+    /// (`Unsupported`), or one the chip does not carry (`MissingBase`).
+    #[inline]
+    pub const fn adc_instance(&self, label: PeriphLabel) -> Result<Adc, DescriptorError> {
+        if !label.is_adc() {
+            return Err(DescriptorError::Unsupported);
+        }
+        match self.base(label) {
+            Ok(base) => Ok(Adc { base }),
+            Err(e) => Err(e),
+        }
+    }
+
     /// ADC0 and ADC1 as the regular-simultaneous pair (the F10x ADC model only).
     #[cfg(hal_adc = "f10x")]
     #[inline]
@@ -274,13 +293,51 @@ impl Adc {
     /// written 0, so a read-modify-write could clear an `EOIC` raised between its read and its
     /// write (`tools/golden-trace` `adc/transfer_*`).
     pub fn read_channel(&self, channel: u8) -> Result<u16, AdcError> {
-        self.reg(STAT).write(!STAT_EOC);
+        self.clear_eoc();
         regular_rank0(channel).apply(self.base);
+        self.software_trigger();
+        self.wait_stat(STAT_EOC)?;
+        Ok(self.reg(RDATA).read() as u16)
+    }
+
+    /// Start one conversion of the regular group as [`Adc::configure_single`] left it, and return
+    /// without waiting: clear `EOC`, then a fresh `SWRCST` edge, the two steps
+    /// [`Adc::read_channel`] takes before its start and for the same measured reasons. The result
+    /// is [`Adc::regular_result`]'s once the conversion ends (at 239.5 cycles and the /6 ADC clock,
+    /// 252 ADC clocks, 21 us).
+    #[inline]
+    pub fn start_regular(&self) {
+        self.clear_eoc();
+        self.software_trigger();
+    }
+
+    /// The regular group's result (`RDATA`) when a conversion has ended since the last
+    /// [`Adc::start_regular`] (`STAT.EOC` set), or `None` while it runs or before any start. No
+    /// wait. Reading `RDATA` leaves `EOC` set on silicon ([`Adc::read_channel`]), so a second call
+    /// before the next start returns the same result.
+    #[inline]
+    pub fn regular_result(&self) -> Option<u16> {
+        if self.reg(STAT).read() & STAT_EOC == 0 {
+            return None;
+        }
+        Some(self.reg(RDATA).read() as u16)
+    }
+
+    /// Clear `STAT.EOC` with a plain write of every flag bit but `EOC` (the flags clear on a
+    /// written 0, so a read-modify-write could clear an `EOIC` raised between its read and its
+    /// write).
+    #[inline]
+    fn clear_eoc(&self) {
+        self.reg(STAT).write(!STAT_EOC);
+    }
+
+    /// A fresh `SWRCST` edge: clear, then set (`adc_software_trigger_enable`). `SWRCST` can still
+    /// read 1 after the conversion it started, and a set over a set makes no edge.
+    #[inline]
+    fn software_trigger(&self) {
         let ctl1 = self.reg(CTL1);
         ctl1.clear_bits(CTL1_SWRCST);
         ctl1.set_bits(CTL1_SWRCST);
-        self.wait_stat(STAT_EOC)?;
-        Ok(self.reg(RDATA).read() as u16)
     }
 
     /// Wait for the injected group's end of conversion (`STAT.EOIC`).
@@ -608,6 +665,59 @@ mod tests {
         let f = injected_sequence(&chans(&[1, 2, 3, 17]));
         assert_eq!(f.value, (3 << 20) | 1 | (2 << 5) | (3 << 10) | (17 << 15));
         assert_eq!(f.mask, ISQ_IL | 0x000F_FFFF);
+    }
+
+    #[test]
+    fn the_twelve_fet_four_rank_group_fills_every_slot() {
+        // twelve-fet.md section 5.2: motor 0's pair (PC4, PC5: channels 14, 15), then motor 1's
+        // (PA0, PC3: channels 0, 13). Four ranks take all four ISQ slots, rank n at 5n, IL 3.
+        let regs = fold(&injected_fields(&injected(
+            &[14, 15, 0, 13],
+            TimerTriggerLink::Trgo,
+        )));
+        assert_eq!(
+            regs[&ISQ],
+            (3 << 20) | 14 | (15 << 5) | (13 << 15),
+            "IL 3; rank 2 = channel 0 leaves 14:10 zero"
+        );
+        assert_eq!(regs[&ISQ] & (RANK_FIELD << 10), 0);
+        assert_eq!(
+            regs[&SAMPT0],
+            (1 << 9) | (1 << 12) | (1 << 15),
+            "14, 15, 13 at 7.5"
+        );
+        assert_eq!(regs[&SAMPT1], 1, "channel 0 at 7.5");
+        assert_eq!(regs[&CTL0], CTL0_SM | CTL0_EOICIE);
+        assert_eq!(
+            regs[&CTL1], 0x0000_8801,
+            "ADCON | DAL | ETSIC T0_TRGO | ETEIC"
+        );
+    }
+
+    #[test]
+    fn adc_instance_resolves_from_the_descriptor() {
+        // SAFETY: no register access.
+        let chip = unsafe { Chip::steal() };
+        assert_eq!(
+            chip.adc_instance(PeriphLabel::Adc0).unwrap().base,
+            ADC0_BASE
+        );
+        assert!(matches!(
+            chip.adc_instance(PeriphLabel::Timer0),
+            Err(DescriptorError::Unsupported)
+        ));
+        for (label, base) in [
+            (PeriphLabel::Adc1, 0x4001_2800),
+            (PeriphLabel::Adc2, 0x4001_3C00),
+        ] {
+            match DESCRIPTOR.addrs.get(label) {
+                Some(_) => assert_eq!(chip.adc_instance(label).unwrap().base, base),
+                None => assert!(matches!(
+                    chip.adc_instance(label),
+                    Err(DescriptorError::MissingBase(l)) if l == label
+                )),
+            }
+        }
     }
 
     #[test]

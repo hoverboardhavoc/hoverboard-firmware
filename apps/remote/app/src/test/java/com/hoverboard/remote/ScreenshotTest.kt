@@ -310,7 +310,7 @@ class ScreenshotTest {
     )
 
     private fun joystick(): UiState {
-        val targets = DriveTargets(DriveMode.DIFFERENTIAL, listOf(0x01, 0x02), right = 0x02)
+        val targets = DriveTargets(DriveMode.DIFFERENTIAL, wheels(0x01, 0x02), right = wheel0(0x02))
         return riding().copy(
             drive = DriveInForce(targets, DriveMode.DIFFERENTIAL, refusal = null),
             driving = targets,
@@ -471,7 +471,7 @@ class ScreenshotTest {
      */
     private fun sided(armed: Boolean): UiState {
         val boards = listOf(0x01, 0x02)
-        val targets = DriveTargets(DriveMode.BOUND, boards)
+        val targets = DriveTargets(DriveMode.BOUND, wheels(*boards.toIntArray()))
         return UiState(
             connectionState = ConnectionState.CONNECTED,
             armed = armed,

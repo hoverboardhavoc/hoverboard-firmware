@@ -1,0 +1,123 @@
+[
+  {
+    "name": "10,000 mA at a current.cal of 455 and a floor of 2,100: 4,550 counts",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "limit": 10000,
+            "cal": 455,
+            "noise_floor": 2100
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "3,000 mA at the defaults: 1,365 counts, under the 2,100-count floor",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "limit": 3000
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.limit"
+  },
+  {
+    "name": "motor 1's 3,000 mA at the defaults",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "limit": 10000
+          }
+        },
+        {
+          "current": {
+            "limit": 3000
+          }
+        }
+      ]
+    },
+    "refused": "motors[1].current.limit"
+  },
+  {
+    "name": "4,617 mA at the defaults converts to 2,100 counts, the floor itself",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "limit": 4617
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.limit"
+  },
+  {
+    "name": "4,618 mA at the defaults converts to 2,101 counts",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "limit": 4618
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "3,000 mA at a stored current.cal of 800: 2,400 counts",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "limit": 3000,
+            "cal": 800
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "the default 10,000 mA under a stored floor of 5,000 counts",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "noise_floor": 5000
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.limit"
+  },
+  {
+    "name": "3,000 mA over a stored floor of 1,200 counts",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "limit": 3000,
+            "noise_floor": 1200
+          }
+        }
+      ]
+    },
+    "refused": null
+  }
+]

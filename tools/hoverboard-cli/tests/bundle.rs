@@ -34,6 +34,11 @@ const F10X_64: BoardTarget = BoardTarget {
     family: Family::Gd32f10x,
     flash_kib: 64,
 };
+/// The 12-FET's GD32F103RC (`specs/twelve-fet.md` section 3.1).
+const F10X_256: BoardTarget = BoardTarget {
+    family: Family::Gd32f10x,
+    flash_kib: 256,
+};
 const F1X0_64: BoardTarget = BoardTarget {
     family: Family::Gd32f1x0,
     flash_kib: 64,
@@ -401,23 +406,47 @@ fn a_match_the_bridge_would_refuse_is_refused_naming_the_part() {
         .select(&chip(FAMILY_F1X0, 32), Some("mainboard-gd32f130c6"))
         .unwrap();
     assert_eq!(img.name, "mainboard-gd32f130c6");
-    // The 256 KiB F103 is in no row: an image for it matches, and is refused.
+    // A 128 KiB F103 is in no row: an image for it matches, and is refused.
     let (g103, elf103) = f103();
-    let rc = t(Family::Gd32f10x, 256);
+    let cb = t(Family::Gd32f10x, 128);
     let b = Bundle::open(&bundle_of(vec![(
-        image("mainboard-gd32f103rc", &[rc], &g103, &elf103),
+        image("mainboard-gd32f103cb", &[cb], &g103, &elf103),
         elf103.clone(),
     )]))
     .unwrap();
-    let e = b.select(&chip(FAMILY_F10X, 256), None).unwrap_err();
+    let e = b.select(&chip(FAMILY_F10X, 128), None).unwrap_err();
     assert_eq!(
         e,
         SelectError::BridgeRefuses {
-            name: "mainboard-gd32f103rc".into(),
-            chip: rc,
+            name: "mainboard-gd32f103cb".into(),
+            chip: cb,
         }
     );
-    assert!(e.to_string().contains("gd32f10x 256 KiB part"), "{e}");
+    assert!(e.to_string().contains("gd32f10x 128 KiB part"), "{e}");
+}
+
+#[test]
+fn the_12_fet_takes_the_gd32f103rc_image_by_its_family_and_flash_size() {
+    // `specs/twelve-fet.md` section 3.4: the bridge's part table has the GD32F103RC, so a
+    // `TARGET_ID` of gd32f10x 256 KiB picks its image and is not refused; the 64 KiB F103 still
+    // takes its own.
+    let (g103, elf103) = f103();
+    let rc = t(Family::Gd32f10x, 256);
+    let b = Bundle::open(&bundle_of(vec![
+        (
+            image("mainboard-gd32f103c8", &[F10X_64], &g103, &elf103),
+            elf103.clone(),
+        ),
+        (
+            image("mainboard-gd32f103rc", &[rc], &g103, &elf103),
+            elf103.clone(),
+        ),
+    ]))
+    .unwrap();
+    let (img, matched) = b.select(&chip(FAMILY_F10X, 256), None).unwrap();
+    assert_eq!((img.name.as_str(), matched), ("mainboard-gd32f103rc", rc));
+    let (img, _) = b.select(&chip(FAMILY_F10X, 64), None).unwrap();
+    assert_eq!(img.name, "mainboard-gd32f103c8");
 }
 
 #[test]
@@ -496,6 +525,7 @@ fn the_image_tables_are_in_their_cargo_toml() {
     for (name, target) in [
         ("mainboard-gd32f103c8", F10X_64),
         ("mainboard-gd32f130c8", F1X0_64),
+        ("mainboard-gd32f103rc", F10X_256),
     ] {
         let chip = name.strip_prefix("mainboard-").unwrap();
         assert_eq!(
@@ -507,9 +537,9 @@ fn the_image_tables_are_in_their_cargo_toml() {
             }
         );
     }
-    assert!(image_table(FIRMWARE_TOML, "mainboard-gd32f103rc")
+    assert!(image_table(FIRMWARE_TOML, "mainboard-mm32spin05")
         .unwrap_err()
-        .contains("no [package.metadata.hoverboard-image.mainboard-gd32f103rc]"));
+        .contains("no [package.metadata.hoverboard-image.mainboard-mm32spin05]"));
     let bad = "[package.metadata.hoverboard-image.x]\nkind = \"board\"\nfeatures = []\n\
                targets = [{ family = \"gd32f10x\", flash_kib = 64, ram_kib = 20 }]\n";
     assert!(image_table(bad, "x").is_err());

@@ -70,11 +70,23 @@ struct Pending {
 }
 
 impl Pending {
-    /// The latest-wins key: `DRIVE_CMD` and `INPUTS` to one destination replace each other.
-    fn latest_wins_key(&self) -> Option<(u8, u8)> {
+    /// The latest-wins key: an `INPUTS` replaces an older one to the same destination, and a
+    /// `DRIVE_CMD` an older one to the same destination and motor (`specs/twelve-fet.md` section
+    /// 6.1: one frame per wheel). A `DRIVE_CMD` too short to carry its motor has no key; the
+    /// board drops it.
+    fn latest_wins_key(&self) -> Option<(u8, u8, u8)> {
         let op = *self.bytes.first()?;
         let dst = *self.bytes.get(2)?;
-        (op == linkctl::OP_DRIVE_CMD || op == linkctl::OP_INPUTS).then_some((op, dst))
+        match op {
+            linkctl::OP_INPUTS => Some((op, dst, 0)),
+            linkctl::OP_DRIVE_CMD => {
+                let motor = *self
+                    .bytes
+                    .get(net::pdu::HEADER_LEN + linkctl::DriveCmd::MOTOR_OFF)?;
+                Some((op, dst, motor))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -148,8 +160,9 @@ impl<P: SwdPins> MailboxPort<P> {
         self.state = why;
     }
 
-    /// Queue a packet for the board. Drive frames are latest-wins: a newer `DRIVE_CMD` or
-    /// `INPUTS` to the same node replaces an unsent older one rather than queueing behind it.
+    /// Queue a packet for the board. Drive frames are latest-wins: a newer `INPUTS` to the same
+    /// node, or `DRIVE_CMD` to the same node and motor, replaces an unsent older one rather than
+    /// queueing behind it.
     pub fn send(&mut self, packet: &[u8]) {
         if self.state != MailboxState::Up || self.paused {
             return;

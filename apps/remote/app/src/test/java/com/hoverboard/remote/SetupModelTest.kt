@@ -56,7 +56,8 @@ class SetupModelTest {
      * What an attach reads before the screen is ever shown: what the node is (`IDENTIFY`, not a
      * read) and what it is called (`specs/remote-ui.md` section 2), then, because it is a motor
      * controller, the machine facts (the control mode and frame the drive mode is derived from, the
-     * side the arm control states, the pack and the rider requirement), the counts per amp the Ride
+     * side the arm control states, the pack and the rider requirement), whether it has a motor 1
+     * (`motors.1.gate.hi_a`, `specs/twelve-fet.md` section 6.2), the counts per amp the Ride
      * screen's current display needs (3.6) and the two facts the Travel section converts hall edges
      * with (3.6c); its boot status record is a `STATUS_READ` (3.1c). With one node in the session
      * they are read on the attached board alone.
@@ -64,6 +65,7 @@ class SetupModelTest {
     private val rideFacts = listOf(board to SetupFields.DEVICE_NAME.key) +
         SetupFields.MOTOR_FACTS.map { board to it.key } +
         listOf(
+            board to Fields.MOTOR_GATE_HI_A.key(1),
             board to Fields.MOTOR_CURRENT_CAL.key(),
             board to Fields.MOTOR_POLE_PAIRS.key(),
             board to Fields.WHEEL_DIAMETER_MM.key(),

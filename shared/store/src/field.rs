@@ -327,8 +327,8 @@ pub const MOTOR_CURRENT_LIMIT: Field<u32> = Field::new(0x4E, 10_000);
 /// re-read"), so a write while disarmed takes effect at the next ARM.
 ///
 /// `Foc` is a CAPABILITY request, like Balance in [`CONTROL_MODE`]: it is honoured only on a board
-/// that senses phase current (both phase pins set, [`MOTOR_PHASE_A`] and [`MOTOR_PHASE_B`]) and
-/// whose boot offset calibration was accepted. Elsewhere it is demoted to six-step with the
+/// that senses phase current (a sensed pair stored, two of [`MOTOR_PHASE_A`], [`MOTOR_PHASE_B`] and
+/// [`MOTOR_PHASE_C`]) and whose boot offset calibration was accepted. Elsewhere it is demoted to six-step with the
 /// method-demotion fault (`firmware::motor::running_method`), never run on no current.
 ///
 /// **What `Foc` makes of the demand word** (`specs/foc-torque.md`): a q-axis CURRENT reference, not
@@ -539,10 +539,22 @@ pub const MOTOR_GATE_REMAP: Field<u8> = Field::new(0x56, 0);
 /// `Capabilities::adc_channel` query `battery_sense.pin` uses. Ordered A then B, matching the injected
 /// rank order (rank 0 = phase A, rank 1 = phase B) and the gate channel order (CH0 = phase A).
 ///
-/// Group rule: the pair is all-or-none, and phase sense is fitted exactly when both pins are stored
+/// Group rule: a motor's sensed pair is the two of [`MOTOR_PHASE_A`], [`MOTOR_PHASE_B`] and
+/// [`MOTOR_PHASE_C`] that are stored, and phase sense is fitted exactly when two are
 /// (`specs/machine-settings.md` section 3.3). Each stores its ADC channel.
 pub const MOTOR_PHASE_A: PinField = PinField::new(0x49, Type::PinAdc);
 pub const MOTOR_PHASE_B: PinField = PinField::new(0x4A, Type::PinAdc);
+/// The third phase-current sense pin, per motor (`specs/twelve-fet.md` section 5.3): the 12-FET's
+/// motor 0 senses phases B and C. Only the two-motor image (the GD32F103RC) reads it, and the CLI
+/// refuses it on every other chip (`phase_pair`, from `hal::pincap`'s sense pairs), so the one-motor
+/// images' A-and-B ranks never meet a pair they would read wrongly.
+pub const MOTOR_PHASE_C: PinField = PinField::new(0x57, Type::PinAdc);
+/// What a motor's phase sensors read, per motor (`specs/twelve-fet.md` sections 5.5 and 5.6):
+/// `0` = `any_state`, a sensed phase reads its current whatever its leg is doing (the default, the
+/// rover and offroad boards); `1` = `low_side_on`, it reads its current only while its leg's low
+/// side conducts (the 12-FET), so the zeros are measured with the low sides on and a sample whose
+/// leg was off is not a reading.
+pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x58, 0);
 /// The power-button sense pin (`specs/board-model.md` `power.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
@@ -644,7 +656,7 @@ pub const MOTOR_ALIGN_OFFSET: Field<u8> = Field::new(0x51, 0);
 /// (the store validates type only): the boot seam (`firmware::motor::limit_counts`) clamps it to
 /// 100..=819, a plausibility band that bounds how far a typoed scale can move the ENFORCED limit
 /// away from the labelled one (the converted COUNT is bounded separately, below by this board's
-/// [`MOTOR_NOISE_FLOOR`] and above by `firmware::motor::MAX_LIMIT_COUNTS`). Per-motor via
+/// [`MOTOR_NOISE_FLOOR`] and above by `board::limit::MAX_LIMIT_COUNTS`). Per-motor via
 /// `Key.index`.
 pub const MOTOR_CURRENT_CAL: Field<u16> = Field::new(0x4C, 455);
 
@@ -671,7 +683,7 @@ pub const MOTOR_CURRENT_CAL: Field<u16> = Field::new(0x4C, 455);
 /// (`firmware::motor::noise_floor_counts`) clamps it to `1_000..=16_383`, a plausibility band the
 /// [`MOTOR_CURRENT_CAL`] class uses too. Below 1,000 a chain would claim a floor under the quietest
 /// rest reading any bench board has produced (1,054 median, 1,444 worst of five); at the top of the
-/// band the limit has no range left, because that is `firmware::motor::MAX_LIMIT_COUNTS`.
+/// band the limit has no range left, because that is `board::limit::MAX_LIMIT_COUNTS`.
 ///
 /// Boot-read, into the bring-up's `BootFixed` and carried from there into every arm-time
 /// re-derivation, so one floor serves the whole boot (`specs/integration.md`, "When a stored value
@@ -1073,6 +1085,8 @@ field_ids! {
     0x54, // MOTOR_ODOMETER
     0x55, // MOTOR_GATE_TIMER
     0x56, // MOTOR_GATE_REMAP
+    0x57, // MOTOR_PHASE_C
+    0x58, // MOTOR_CURRENT_SENSE
 }
 
 #[cfg(feature = "test-fields")]
@@ -1142,6 +1156,8 @@ field_ids! {
     0x54, // MOTOR_ODOMETER
     0x55, // MOTOR_GATE_TIMER
     0x56, // MOTOR_GATE_REMAP
+    0x57, // MOTOR_PHASE_C
+    0x58, // MOTOR_CURRENT_SENSE
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1228,10 +1244,10 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 65 + 19;
+pub const REGISTRY_LEN: usize = 67 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 67 + 19;
+pub const REGISTRY_LEN: usize = 69 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1463,6 +1479,8 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_ODOMETER.entry(Boot),
     MOTOR_GATE_TIMER.entry(Boot),
     MOTOR_GATE_REMAP.entry(Boot),
+    MOTOR_PHASE_C.entry(Boot),
+    MOTOR_CURRENT_SENSE.entry(Boot),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY, Client),
     #[cfg(feature = "test-fields")]
@@ -1681,6 +1699,7 @@ pub mod names {
     const DIRECTION: Kind = Kind::Enum(&[(0, "forward"), (1, "reverse")]);
     const AXIS: Kind = Kind::Enum(&[(1, "x"), (2, "y"), (3, "z")]);
     const CHEMISTRY: Kind = Kind::Enum(&[(0, "li_ion"), (1, "lev50"), (2, "lto")]);
+    const SENSE: Kind = Kind::Enum(&[(0, "any_state"), (1, "low_side_on")]);
     /// `active_high`'s bits name the input pins they describe, by path
     /// (`specs/machine-settings.md` section 3.1).
     const ACTIVE_HIGH: Kind = Kind::Bits(&[(0, "power.button"), (1, "pads.a"), (2, "pads.b")]);
@@ -1759,6 +1778,8 @@ pub mod names {
         FieldName::motor(MOTOR_ODOMETER, "odometer", Kind::Int),
         FieldName::motor(MOTOR_GATE_TIMER, "gate.timer", Kind::Int),
         FieldName::motor(MOTOR_GATE_REMAP, "gate.remap", Kind::Int),
+        FieldName::pin(MOTOR_PHASE_C, "current.phase_c", Index::Motor),
+        FieldName::motor(MOTOR_CURRENT_SENSE, "current.sense", SENSE),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -1831,9 +1852,9 @@ pub mod names {
         // TURN_SLEW_MIN..=TURN_SLEW_MAX.
         at(CONTROL_DRIVE_TURN.id(), 0, 0, 28500),
         at(CONTROL_DRIVE_TURN.id(), 1, 1, 1000),
-        // `current.cal`: `firmware::motor`'s CURRENT_CAL_MIN..=CURRENT_CAL_MAX.
+        // `current.cal`: `board::limit`'s CURRENT_CAL_MIN..=CURRENT_CAL_MAX.
         every(MOTOR_CURRENT_CAL.id(), 100, 819),
-        // `current.limit`, milliamps: `firmware::motor::LIMIT_REQUEST_CAP_MA`, the most the
+        // `current.limit`, milliamps: `board::limit::LIMIT_REQUEST_CAP_MA`, the most the
         // conversion takes as written.
         every(MOTOR_CURRENT_LIMIT.id(), 0, 163_840),
         every(MOTOR_DIRECTION.id(), 0, 1),
@@ -1848,7 +1869,7 @@ pub mod names {
         // offset -500..=500.
         at(BOARD_BATTERY_CAL.id(), 0, 10_000, 32_000),
         at(BOARD_BATTERY_CAL.id(), 1, -500, 500),
-        // `current.noise_floor`: `firmware::motor`'s NOISE_FLOOR_MIN..=MAX_LIMIT_COUNTS.
+        // `current.noise_floor`: `board::limit`'s NOISE_FLOOR_MIN..=MAX_LIMIT_COUNTS.
         every(MOTOR_NOISE_FLOOR.id(), 1_000, 16_383),
         // `wifi.tx_power`: the radio's own range; not a check the app makes.
         every(
@@ -2198,6 +2219,8 @@ mod registry_tests {
             (0x54, MOTOR_ODOMETER.id()),
             (0x55, MOTOR_GATE_TIMER.id()),
             (0x56, MOTOR_GATE_REMAP.id()),
+            (0x57, MOTOR_PHASE_C.id()),
+            (0x58, MOTOR_CURRENT_SENSE.id()),
         ];
         for (want, got) in map {
             assert_eq!(want, got);

@@ -286,3 +286,56 @@ fn file_state(files: &crate::config::Files) -> State {
     }
     state
 }
+
+/// `specs/twelve-fet.md` sections 9 and 12.1: the 12-FET's machine file passes every check on the
+/// GD32F103RC, its two motors' pairs (B and C on motor 0, A and B on motor 1) and timers included.
+/// Its one board is filed under a blank uid, which matches no board, so `machine apply` offers the
+/// entry to the one motor controller on the bridge (or takes `--map`).
+#[test]
+fn the_twelve_fet_machine_file_passes_on_the_gd32f103rc() {
+    let text = std::fs::read_to_string(dir().join("machines/EFeru.json")).unwrap();
+    let file = crate::machine::read_machine_file("EFeru", &text).unwrap();
+    assert_eq!(file.entries.len(), 1);
+    let files = file.board_files(Some(0));
+    assert!(files.problems.is_empty(), "{:?}", files.problems);
+    let got = file_refusals(Chip::Gd32f103rc, &files);
+    assert!(got.is_empty(), "{got:?}");
+    let state = file_state(&files);
+    for (m, phases) in [(0, [false, true, true]), (1, [true, true, false])] {
+        for ((f, _), want) in SENSE_PHASES.iter().zip(phases) {
+            assert_eq!(state.contains_key(&f.at(m).key()), want, "motor {m}");
+        }
+    }
+    assert!(check_leader(&[(0x01, &state)]).is_none());
+}
+
+/// `specs/config-read-once.md` section 4, `limit_floor`: the refusal names the limit's counts, the
+/// floor's and the lowest limit that passes, by the firmware's arithmetic (`board::limit`).
+#[test]
+fn the_limit_floor_refusal_names_the_counts_and_the_lowest_passing_limit() {
+    // The 12-FET's first drives: 3,000 mA at the defaults is 1,365 counts under 2,100.
+    assert_eq!(
+        limit_floor(3_000, 455, 2_100).unwrap(),
+        "3000 mA is 1365 counts at a current.cal of 455, at or below the noise floor of 2100 \
+         counts, so FOC's full scale is 0; the lowest limit that passes is 4700 mA"
+    );
+    assert_eq!(limit_floor(4_700, 455, 2_100), None);
+    // The calibration is clamped into the seam's band first, as `limit_counts` clamps it: a
+    // stored 50 converts at 100 counts per amp.
+    assert_eq!(
+        limit_floor(10_000, 50, 2_100).unwrap(),
+        "10000 mA is 1000 counts at a current.cal of 100, at or below the noise floor of 2100 \
+         counts, so FOC's full scale is 0; the lowest limit that passes is 21100 mA"
+    );
+    // `floor * 1000 / cal + 1` rounded up to 10,100 mA converts to 1,020 counts at 101 counts per
+    // amp, the floor itself, so the next 100 mA is the lowest that passes.
+    assert!(limit_floor(10_100, 101, 1_020).is_some());
+    assert!(limit_floor(10_200, 101, 1_020).is_none());
+    assert!(limit_floor(1_000, 101, 1_020)
+        .unwrap()
+        .ends_with("the lowest limit that passes is 10200 mA"));
+    // A floor at the window's top leaves no limit above it.
+    assert!(limit_floor(163_840, 455, 16_383)
+        .unwrap()
+        .ends_with("no limit passes a floor at the top of the limit window"));
+}

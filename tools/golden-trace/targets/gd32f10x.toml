@@ -70,6 +70,13 @@ base = 0x4001_2C00
 size = 0x400
 registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "SMCFG", "0x0C" = "DMAINTEN", "0x10" = "INTF", "0x14" = "SWEVG", "0x18" = "CHCTL0", "0x1C" = "CHCTL1", "0x20" = "CHCTL2", "0x24" = "CNT", "0x28" = "PSC", "0x2C" = "CAR", "0x30" = "CREP", "0x34" = "CH0CV", "0x38" = "CH1CV", "0x3C" = "CH2CV", "0x40" = "CH3CV", "0x44" = "CCHP" }
 
+# The second advanced timer (the high-density GD32F103RC only), the same register block as TIMER0
+# (gd32f10x_timer.h: TIMER7 = TIMER_BASE + 0x13400).
+[blocks.TIMER7_BASE]
+base = 0x4001_3400
+size = 0x400
+registers = { "0x00" = "CTL0", "0x04" = "CTL1", "0x08" = "SMCFG", "0x0C" = "DMAINTEN", "0x10" = "INTF", "0x14" = "SWEVG", "0x18" = "CHCTL0", "0x1C" = "CHCTL1", "0x20" = "CHCTL2", "0x24" = "CNT", "0x28" = "PSC", "0x2C" = "CAR", "0x30" = "CREP", "0x34" = "CH0CV", "0x38" = "CH1CV", "0x3C" = "CH2CV", "0x40" = "CH3CV", "0x44" = "CCHP" }
+
 [blocks.SPI0_BASE]
 base = 0x4001_3000
 size = 0x400
@@ -112,3 +119,10 @@ reset = { "0x04" = 0x001D_0408, "0x14" = 0x0000_0014 }
 base = 0x4002_2000
 size = 0x400
 registers = { "0x00" = "WS", "0x04" = "KEY", "0x08" = "OBKEY", "0x0C" = "STAT", "0x10" = "CTL", "0x14" = "ADDR" }
+
+# The debug block on the Cortex-M3 private bus (gd32f10x_dbg.h: DBG = 0xE0042000): DBG_ID and
+# DBG_CTL0, which carries the debug holds.
+[blocks.DBG_BASE]
+base = 0xE004_2000
+size = 0x400
+registers = { "0x00" = "ID", "0x04" = "CTL0" }

@@ -97,7 +97,7 @@ pub use clock::{clear_reset_cause, reset_cause_flags, ClockConfig};
 #[cfg(target_arch = "arm")]
 pub use cortex_m_rt::interrupt;
 #[cfg(hal_chip)]
-pub use dbg::debug_hold_timer0;
+pub use dbg::debug_hold_timers;
 #[cfg(hal_chip)]
 pub use descriptor::{McuDescriptor, PageSize};
 #[cfg(hal_chip)]

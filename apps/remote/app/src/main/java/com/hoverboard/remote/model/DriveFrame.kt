@@ -1,19 +1,28 @@
 package com.hoverboard.remote.model
 
 /**
- * How the joystick's demand is turned into what each motor controller is told
+ * One wheel: motor [motor] of the motor controller at [node] (`specs/twelve-fet.md` section 6.2).
+ * A one-motor board is one wheel, motor 0; the 12-FET is two wheels on one node. Each wheel gets its
+ * own `DRIVE_CMD`, with [motor] on the wire.
+ */
+data class Wheel(val node: Int, val motor: Int) : Comparable<Wheel> {
+    override fun compareTo(other: Wheel): Int = compareValuesBy(this, other, Wheel::node, Wheel::motor)
+}
+
+/**
+ * How the joystick's demand is turned into what each wheel is told
  * (`specs/remote-ui.md` 3.2). DERIVED, never stored (`specs/machine-settings.md` section 7): RIGID
- * is `machine.mode` balance with `machine.frame` rigid; SINGLE is a machine of one motor controller;
+ * is `machine.mode` balance with `machine.frame` rigid; SINGLE is a machine of one wheel;
  * with two or more and not rigid, BOUND or DIFFERENTIAL by whether the pad's turn axis is used,
  * which is an app setting on the Ride screen ([com.hoverboard.remote.ble.LinkSettings.turnAxis]).
  * The mode the app drives in is [DriveInForce], which derives it.
  */
 enum class DriveMode {
-    /** The demand to the one motor controller of a one-board machine. */
+    /** The demand to the one wheel of a one-wheel machine. */
     SINGLE,
 
     /**
-     * The SAME demand to both motor controllers, each addressed directly. This is "bind the two
+     * The SAME demand to both wheels, each addressed directly. This is "bind the two
      * wheels", and in pivoting balance mode it is the mapping `specs/control.md` (h) sets: the same
      * value to both boards with steer 0.
      */
@@ -21,8 +30,8 @@ enum class DriveMode {
 
     /**
      * A demand PER WHEEL, mixed in the app from the joystick's two axes ([DriveMix]) and sent to
-     * each board at its own address. Which board is the right wheel is its motor's own `side`, so
-     * the mode needs exactly one board to say it is.
+     * each wheel at its node and motor. Which wheel is the right one is its motor's own `side`, so
+     * the mode needs exactly one wheel to say it is.
      */
     DIFFERENTIAL,
 
@@ -42,7 +51,10 @@ enum class DriveMode {
     RIGID,
     ;
 
-    /** Whether the mode drives every motor controller found, and so needs exactly two of them. */
+    /**
+     * Whether the mode drives every wheel found, and so needs exactly two of them (RIGID: two motor
+     * controllers).
+     */
     val drivesBoth: Boolean get() = this != SINGLE
 
     /**
@@ -59,28 +71,39 @@ enum class DriveMode {
 }
 
 /**
- * Which motor controllers a drive addresses and how, by address (`specs/remote-ui.md` section 2,
- * "The motor controllers the drive addresses"). Built by [DriveInForce] from what the session has
- * read, and the only thing [DriveFrame.of] takes: a frame never decides for itself which boards a
- * mode reaches.
+ * Which wheels a drive addresses and how (`specs/remote-ui.md` section 2, "The motor controllers
+ * the drive addresses"; `specs/twelve-fet.md` section 6.2). Built by [DriveInForce] from what the
+ * session has read, and the only thing [DriveFrame.of] takes: a frame never decides for itself
+ * which wheels a mode reaches.
  *
- * @param boards every motor controller the drive addresses, which is also every board the arm
- *   control arms. Never a bridge. Empty for a drive the app refuses ([DriveInForce.refusal]),
- *   which still names its mode so the screen draws that mode's pad.
- * @param right the board that is the right wheel, for [DriveMode.DIFFERENTIAL] only.
+ * @param wheels every wheel the drive addresses. Never a bridge's. Empty for a drive the app
+ *   refuses ([DriveInForce.refusal]), which still names its mode so the screen draws that mode's
+ *   pad.
+ * @param right the wheel whose `control.side` is right, for [DriveMode.DIFFERENTIAL] only.
  * @param leader the board stored as the rigid frame's leader, for [DriveMode.RIGID] only
  *   (`specs/rigid-leader.md` section 7).
  */
-data class DriveTargets(val mode: DriveMode, val boards: List<Int>, val right: Int? = null, val leader: Int? = null) {
+data class DriveTargets(
+    val mode: DriveMode,
+    val wheels: List<Wheel>,
+    val right: Wheel? = null,
+    val leader: Int? = null,
+) {
+    /**
+     * Every motor controller the drive addresses, each once, in wheel order: every board the arm
+     * control arms, because arming is per board (each runs one mode machine for its motors).
+     */
+    val boards: List<Int> get() = wheels.map { it.node }.distinct()
+
     init {
-        require(mode.drivesBoth || boards.size <= 1) { "SINGLE addresses one board" }
+        require(mode.drivesBoth || wheels.size <= 1) { "SINGLE addresses one wheel" }
         require(
-            mode != DriveMode.DIFFERENTIAL || boards.isEmpty() ||
-                (right != null && right in boards && boards.size == 2),
+            mode != DriveMode.DIFFERENTIAL || wheels.isEmpty() ||
+                (right != null && right in wheels && wheels.size == 2),
         ) {
-            "DIFFERENTIAL needs its right wheel among its two boards"
+            "DIFFERENTIAL needs its right wheel among its two wheels"
         }
-        require(mode != DriveMode.RIGID || boards.isEmpty() || (leader != null && leader in boards)) {
+        require(mode != DriveMode.RIGID || wheels.isEmpty() || (leader != null && leader in boards)) {
             "RIGID needs its leader among its boards"
         }
     }
@@ -93,59 +116,72 @@ data class DriveTargets(val mode: DriveMode, val boards: List<Int>, val right: I
 }
 
 /**
- * One tick of what each board is told: a [RiderCommand] per board address, and which of them are
- * being DRIVEN.
+ * One tick of what each wheel is told: a [RiderCommand] per [Wheel], and which of them are being
+ * DRIVEN.
  *
- * [driven] is not always [commands]`.keys`. A board in [commands] but outside [driven] is told its
- * arm level and nothing else: the `INPUTS` mirror reaches it and no `DRIVE_CMD` does, which is what
- * the rigid frame's follower gets. That is a real distinction on the wire and not a zero demand
- * dressed up as one, because a zero demand is still a demand.
+ * [driven] is not always [commands]`.keys`. A wheel in [commands] but outside [driven] is told its
+ * board's arm level and nothing else: the `INPUTS` mirror reaches the board and no `DRIVE_CMD`
+ * reaches the wheel, which is what the rigid frame's follower gets. That is a real distinction on
+ * the wire and not a zero demand dressed up as one, because a zero demand is still a demand.
+ *
+ * The arm level is per BOARD (`INPUTS` has no motor): every wheel of one board carries the same
+ * levels, which the `init` holds, so the one `INPUTS` a board is sent states them all.
  *
  * The rule that must survive any edit of 3.2 holds here by construction, and the `init` below is
  * it: the app never sends a nonzero `steer` while also deciding what each wheel gets, or the
  * correction is applied twice, once by the app and once by the firmware's own mixer. A frame either
- * drives ONE board, which may then be told a turn and split it itself, or it drives two and has
- * already spent the turn on the difference between them.
+ * drives ONE wheel, whose board may then be told a turn and split it itself, or it drives two and
+ * has already spent the turn on the difference between them.
  */
-data class DriveFrame(val commands: Map<Int, RiderCommand>, val driven: Set<Int> = commands.keys) {
+data class DriveFrame(val commands: Map<Wheel, RiderCommand>, val driven: Set<Wheel> = commands.keys) {
     init {
-        require(commands.keys.containsAll(driven)) { "a board can only be driven if it is addressed" }
+        require(commands.keys.containsAll(driven)) { "a wheel can only be driven if it is addressed" }
         require(driven.size <= 1 || commands.values.all { it.steer == 0 }) {
-            "a frame that drives two boards has spent the turn on the pair and states none"
+            "a frame that drives two wheels has spent the turn on the pair and states none"
+        }
+        require(commands.entries.groupBy({ it.key.node }, { it.value.inputs }).values.all { it.toSet().size == 1 }) {
+            "every wheel of one board carries that board's one arm level"
         }
     }
+
+    /** The boards addressed, each once, in address order: each is sent one `INPUTS`. */
+    val boards: List<Int> get() = commands.keys.map { it.node }.distinct().sorted()
+
+    /** The board at [node]'s wheels, in motor order, with what each is told. */
+    fun wheelsOf(node: Int): List<Pair<Wheel, RiderCommand>> =
+        commands.entries.filter { it.key.node == node }.sortedBy { it.key }.map { it.key to it.value }
 
     companion object {
         /** The all-stop frame: nobody addressed. The pump still owes a disarm to a board it armed. */
         val DISARMED = DriveFrame(emptyMap())
 
         /**
-         * [command] to the boards [targets] names, with [steer] spent the way the mode spends it.
+         * [command] to the wheels [targets] names, with [steer] spent the way the mode spends it.
          *
-         * [steer] is the joystick's turn axis. SINGLE and BOUND send one value to their boards, so
+         * [steer] is the joystick's turn axis. SINGLE and BOUND send one value to their wheels, so
          * a turn has nowhere to go in them and is dropped here rather than left to a caller to
          * remember to zero. DIFFERENTIAL spends it on the difference between two per-wheel demands.
-         * RIGID puts it on the wire, on the leader's command alone: [DriveTargets.leader], the board
-         * stored as the rigid frame's leader.
+         * RIGID puts it on the wire, on the leader's command alone: motor 0 of
+         * [DriveTargets.leader], the board stored as the rigid frame's leader.
          */
         fun of(targets: DriveTargets, command: RiderCommand, steer: Int = 0): DriveFrame =
             when (targets.mode) {
-                DriveMode.SINGLE, DriveMode.BOUND -> DriveFrame(targets.boards.associateWith { command })
+                DriveMode.SINGLE, DriveMode.BOUND -> DriveFrame(targets.wheels.associateWith { command })
                 DriveMode.DIFFERENTIAL -> {
-                    val wheels = DriveMix.of(command.demand, steer)
+                    val pair = DriveMix.of(command.demand, steer)
                     // The arm level is the command's and goes to both; each wheel's demand goes to
-                    // the board whose own motor's `side` says it is that wheel.
+                    // the wheel whose own motor's `side` says it is that wheel.
                     DriveFrame(
-                        targets.boards.associateWith { board ->
-                            command.withDemand(if (board == targets.right) wheels.right else wheels.left)
+                        targets.wheels.associateWith { wheel ->
+                            command.withDemand(if (wheel == targets.right) pair.right else pair.left)
                         },
                     )
                 }
                 DriveMode.RIGID -> {
-                    val lead = targets.leader?.takeIf { it in targets.boards }
+                    val lead = targets.wheels.filter { it.node == targets.leader }.minOrNull()
                     DriveFrame(
-                        commands = targets.boards.associateWith { board ->
-                            if (board == lead) command.withTurn(steer) else command.withDemand(0)
+                        commands = targets.wheels.associateWith { wheel ->
+                            if (wheel == lead) command.withTurn(steer) else command.withDemand(0)
                         },
                         driven = setOfNotNull(lead),
                     )

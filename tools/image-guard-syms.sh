@@ -116,6 +116,15 @@ image_guards() {
       IMAGE_GUARD_REQ_SYMS='T main$,T SysTick$,T USART1$,T DMA_Channel3_4$,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
       IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,T ADC_CMP$,T SysTick$,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed,FmcFlashE6digest,4Type9fixed_len'
       ;;
+    mainboard-gd32f103rc)
+      # The 12-FET's two-motor image for the GD32F103RC (specs/twelve-fet.md section 3.3):
+      # mainboard-gd32f103c8's lists, every reason there, on the same ADC0_1 vector and USART1/DMA0
+      # channel 5 receive ring. 56,468 B of code at its first build (2026-11-02), against the
+      # F103C8's 50,516 B at the same commit; the floor is the F103C8's ratio of it.
+      IMAGE_GUARD_FLOOR=44000
+      IMAGE_GUARD_REQ_SYMS='T main$,T SysTick$,T USART1$,T DMA0_Channel5$,B CTRL_OBS$,B INJECT_UART_LINE_ERROR$,5motor2hw10period_isr,5motor2hw5MOTOR,5motor7PERIODS,5motor9OBS_STATE,5motor7OBS_CAL,3arm2hw4GATE,3arm2hw5ARMED'
+      IMAGE_GUARD_HOT_SYMS='5motor2hw10period_isr,12service_loop,control_task_cb,input_task_cb,9run_shell,T ADC0_1$,T SysTick$,route_emits,route_handback,4base5fixed3div,4base5fixed3mul,4base5fixed4sqrt,4base5crc16,FmcFlashE7compact,5store13scan_frontier,6record12parse_header,6record12is_committed'
+      ;;
     *) return 1 ;;
   esac
 }

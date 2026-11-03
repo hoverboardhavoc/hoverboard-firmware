@@ -175,8 +175,10 @@ jobs:
             cargo clippy -p store-test --features "$chip" --target thumbv7m-none-eabi -- -D warnings
             cargo clippy -p hal-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
           done
-          for chip in gd32f103c8 gd32f130c8; do
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
             cargo clippy -p firmware --features "$chip" --target thumbv7m-none-eabi -- -D warnings
+          done
+          for chip in gd32f103c8 gd32f130c8; do
             cargo clippy -p imu-bench --features "hardware $chip" --target thumbv7m-none-eabi -- -D warnings
             cargo clippy -p wdg-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
             cargo clippy -p l2-uart-bench --features "$chip" --target thumbv7m-none-eabi -- -D warnings
@@ -263,18 +265,19 @@ jobs:
       # its own target directory (motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware).
       # The aliases are motorcontroller/.cargo/config.toml's; CI runs the same invocation a developer
       # runs, so do not spell the flags out again here.
-      - name: Build the firmware images (cargo image-f103, cargo image-f130)
+      - name: Build the firmware images (cargo image-f103, cargo image-f130, cargo image-f103rc)
         working-directory: hoverboard-firmware/motorcontroller
         run: |
           cargo image-f103
           cargo image-f130
+          cargo image-f103rc
 
       # objcopy -O binary gives each flashable .bin. arm-none-eabi-objcopy comes from binutils;
       # the ELF keeps DWARF (profile.release debug = true) for SWD/nm, the .bin is what reaches flash.
       - name: objcopy to .bin
         run: |
           sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
-          for chip in gd32f103c8 gd32f130c8; do
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
             elf=motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
             arm-none-eabi-objcopy -O binary "$elf" "$elf.bin"
           done
@@ -290,7 +293,7 @@ jobs:
       - name: Assert release code floor + required symbols (LTO-gutted-image guard)
         run: |
           . tools/image-guard-syms.sh
-          for chip in gd32f103c8 gd32f130c8; do
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
           (
           elf=motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
           image_guards mainboard-$chip || { echo "FAIL: tools/image-guard-syms.sh has no mainboard-$chip" >&2; exit 1; }
@@ -362,7 +365,7 @@ jobs:
       # steps above use.
       - name: Assert no panic reachable from the motor hot paths
         run: |
-          for chip in gd32f103c8 gd32f130c8; do
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
             python3 tools/panic-reach.py motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
           done
 
@@ -517,13 +520,18 @@ jobs:
       # to each per-chip image (55,000 B F103, 55,172 B F130 measured locally at the retirement,
       # against the universal image's 59,584 B); the number stays 62,000 until a ratchet is taken
       # from this job's figures.
+      #
+      # 2026-11-02: the 12-FET's mainboard-gd32f103rc (specs/twelve-fet.md section 3.2). Its chip has
+      # 258,048 B below the store, but the bridge flashes from a 63,488 B RAM buffer, so that is its
+      # ceiling: an image past it can be flashed only over a wired probe.
       - name: Assert release flashed-span ceiling (upper size gate)
         run: |
-          for chip in gd32f103c8 gd32f130c8; do
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
           span=$(wc -c < motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware.bin)
           echo "mainboard-$chip release flashed span = ${span} B (.bin)"
           ceiling=62000
           hard=63488
+          if [ "$chip" = gd32f103rc ]; then ceiling=63488; fi
           # Derived, never written down twice: the previous message hardcoded a headroom figure that
           # went stale the moment the ceiling moved, and said 1,988 B when the truth was 7,488 B.
           headroom=$((hard - ceiling))
@@ -568,6 +576,35 @@ jobs:
             arm-none-eabi-size "$elf"
           done
 
+      # The GD32F103RC validators the 12-FET's first session runs (specs/twelve-fet.md section 10
+      # step 3, section 3.3): probe, fmc and motor-verify, linked into the part's 256 KiB less the
+      # store's two pages and refused if one carries a wfi or wfe. The 12-FET has no NRST wired, so a
+      # validator that locked SWD re-attach could not be recovered there. Uploaded as an artifact for
+      # the bench to flash over OpenOCD.
+      - name: Build the GD32F103RC validators (probe, fmc, motor-verify)
+        working-directory: hoverboard-firmware/motorcontroller
+        run: |
+          cargo build --release -p hal-bench --features gd32f103rc --target thumbv7m-none-eabi \
+            --target-dir target/hal-bench-gd32f103rc --bin probe --bin fmc --bin motor-verify
+          mkdir -p target/hal-bench-elfs
+          for v in probe fmc motor-verify; do
+            elf=target/hal-bench-gd32f103rc/thumbv7m-none-eabi/release/$v
+            test -f "$elf"
+            if arm-none-eabi-objdump -d "$elf" | grep -qwE 'wfi|wfe'; then
+              echo "$v carries a wfi or wfe" >&2
+              exit 1
+            fi
+            arm-none-eabi-size "$elf"
+            cp "$elf" "target/hal-bench-elfs/hal-bench-$v-gd32f103rc.elf"
+          done
+
+      - name: Upload the GD32F103RC validator ELFs
+        uses: actions/upload-artifact@v4
+        with:
+          name: hal-bench-gd32f103rc
+          path: hoverboard-firmware/motorcontroller/target/hal-bench-elfs/
+          if-no-files-found: error
+
       # The per-chip size gate (specs/hal.md section 6): each image's flashed span against its
       # chip's flash less the store's two pages, and its static RAM (.data + .bss + .uninit) against
       # its SRAM less the SWD mailbox carve. Both budgets are the image's own linker regions, which
@@ -577,7 +614,7 @@ jobs:
       - name: Per-chip image size gate (flash span, static RAM)
         run: |
           fail=0
-          for chip in gd32f103c8 gd32f130c8; do
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
             elf=motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware
             span=$(wc -c < "$elf.bin")
             syms=$(arm-none-eabi-nm "$elf")
@@ -603,7 +640,7 @@ jobs:
       - name: Name the ELFs by image
         run: |
           mkdir -p motorcontroller/target/elfs
-          for chip in gd32f103c8 gd32f130c8; do
+          for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
             cp motorcontroller/target/$chip/thumbv7m-none-eabi/release/firmware "motorcontroller/target/elfs/mainboard-$chip.elf"
           done
 
@@ -678,6 +715,44 @@ jobs:
             echo "| Static RAM | ${static} | ${ram} | $((static - ram)) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The one-motor images against main (specs/twelve-fet.md section 4.3): the GD32F103C8, GD32F130C8
+  # and MM32SPIN05 images built at this commit and at its merge base with main (the first parent on
+  # main itself), failing if any image's flashed span, `.hotcode` or static RAM is larger here. The
+  # log carries, per image, "byte-identical" or the `nm -S` symbol diff. The 12-FET's
+  # mainboard-gd32f103rc image is not in it: its second motor is what it is for.
+  size-vs-main:
+    name: One-motor images no larger than main
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+          fetch-depth: 0
+
+      - name: Install Rust (pinned nightly) + thumbv7m and thumbv6m targets + rust-src
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
+          targets: thumbv7m-none-eabi, thumbv6m-none-eabi
+          components: rustfmt, clippy, rust-src
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware/motorcontroller
+
+      - name: Size against the base
+        run: |
+          sudo apt-get update && sudo apt-get install -y binutils-arm-none-eabi
+          base=$(git merge-base HEAD origin/main)
+          if [ "$base" = "$(git rev-parse HEAD)" ]; then base=$(git rev-parse HEAD^1); fi
+          echo "base $(git rev-parse --short "$base")"
+          tools/size-vs-base.sh "$base" image-f103 image-f130 image-mm32
+
   # The firmware bundle (specs/firmware-bundle.md section 5): every image a commit builds, the two
   # board ELFs from the build job (`firmware-elfs`) and the bridge's two images from the bridge job
   # (`bridge-images`), in one .hbfw (a zip of the files and a manifest), which `hoverboard-cli board
@@ -739,6 +814,7 @@ jobs:
           "$cli" firmware pack "$bundle" \
             motorcontroller/firmware:mainboard-gd32f103c8=$img/mainboard-gd32f103c8.elf \
             motorcontroller/firmware:mainboard-gd32f130c8=$img/mainboard-gd32f130c8.elf \
+            motorcontroller/firmware:mainboard-gd32f103rc=$img/mainboard-gd32f103rc.elf \
             bridge:bridge-esp32c3=$img/bridge-esp32c3.bin \
             bridge:bridge-esp32c3-install=$img/bridge-esp32c3-install.bin
           "$cli" firmware info "$bundle"

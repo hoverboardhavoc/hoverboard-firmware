@@ -175,6 +175,9 @@ pub enum PwmError {
     DutyOutOfRange,
     BadTimerBase,
     BadPin,
+    /// [`crate::timer::PwmTimer::follow`]: the trigger matrix gives the slave no input that carries
+    /// the master's TRGO.
+    NoInternalTrigger,
     Other,
 }
 

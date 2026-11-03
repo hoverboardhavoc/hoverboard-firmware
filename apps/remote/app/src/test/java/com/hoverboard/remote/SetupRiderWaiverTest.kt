@@ -158,6 +158,7 @@ class SetupRiderWaiverTest {
             listOf(board to SetupFields.DEVICE_NAME.key) +
                 SetupFields.MOTOR_FACTS.map { board to it.key } +
                 listOf(
+                    board to Fields.MOTOR_GATE_HI_A.key(1),
                     board to Fields.MOTOR_CURRENT_CAL.key(),
                     board to Fields.MOTOR_POLE_PAIRS.key(),
                     board to Fields.WHEEL_DIAMETER_MM.key(),

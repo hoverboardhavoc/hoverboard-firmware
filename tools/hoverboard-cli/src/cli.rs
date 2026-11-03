@@ -221,13 +221,14 @@ pub enum Command {
         /// The boards; every motor controller when empty.
         targets: Vec<String>,
     },
-    /// `machine drive`.
+    /// `machine drive` (`specs/twelve-fet.md` section 6.3).
     Drive {
         /// The throttle value.
         value: i16,
         /// How long.
         secs: u64,
-        /// The boards; every motor controller when empty.
+        /// The wheels: `<board>` for all its motors, `<board>:<motor>` for one; every wheel of
+        /// every motor controller when empty.
         targets: Vec<String>,
     },
     /// `bridge info`: `ESP_INFO`.
@@ -302,7 +303,7 @@ pub const USAGE: &str =
   machine apply <file> [--map <uid>=<board>]... [--force]
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
   machine diff [--replace] [<file>] [--map <uid>=<board>]... [--force]
-  machine watch <secs> [<board>...] | drive <value> <secs> [<board>...]
+  machine watch <secs> [<board>...] | drive <value> <secs> [<board>[:<motor>]...]
   machine update <bundle> [--yes]
   bridge info <bridge> | update <bridge> <bundle|bin> [--yes] [--no-confirm]
   bridge install <bundle|image> [<file>...] [--yes]

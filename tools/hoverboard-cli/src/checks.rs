@@ -7,7 +7,8 @@
 //! Two kinds. The pin checks need the chip, which the CLI reads from `TARGET_ID` through the
 //! board's bridge, and test the pin, instance and remap keys against `hal::pincap`'s table of that
 //! chip. The value checks need no chip: the arm row and the calibration against the store's range
-//! table (`store::RANGES`), and the IMU frame against `imu::Config::frame_error`.
+//! table (`store::RANGES`), each motor's current limit against its noise floor by the firmware's
+//! own conversion (`board::limit`), and the IMU frame against `imu::Config::frame_error`.
 //!
 //! One check looks at the machine rather than at one board: [`check_leader`], the rigid frame's
 //! leader (`specs/rigid-leader.md` section 6.1), on every motor controller as the write would leave
@@ -19,7 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use hal::pincap::{Chip, Func, Table, SWD};
+use hal::pincap::{Chip, Func, Phase, Table, SWD};
 use serde_json::Value as Json;
 use store::{Key, PinField, Type, Value};
 
@@ -53,8 +54,15 @@ pub enum Check {
     Adc,
     /// A configured gate group's dead time is at or above the floor.
     DeadTime,
+    /// A motor's sensed phase pair is one the chip's image reads.
+    PhasePair,
+    /// Motor 1 is stored only beside motor 0, and on a two-motor chip each motor's gates are on
+    /// its own timer.
+    MotorTimer,
     /// An arm-row or calibration value is in its range.
     Range,
+    /// A motor's current limit converts above its noise floor.
+    LimitFloor,
     /// The IMU axis signs and roles form a proper rotation.
     Frame,
     /// A balance machine in the rigid frame has exactly one board set as leader.
@@ -63,7 +71,7 @@ pub enum Check {
 
 impl Check {
     /// Every check.
-    pub const ALL: [Check; 15] = [
+    pub const ALL: [Check; 18] = [
         Check::PinExists,
         Check::Swd,
         Check::PinTwice,
@@ -76,7 +84,10 @@ impl Check {
         Check::RemapChip,
         Check::Adc,
         Check::DeadTime,
+        Check::PhasePair,
+        Check::MotorTimer,
         Check::Range,
+        Check::LimitFloor,
         Check::Frame,
         Check::Leader,
     ];
@@ -96,7 +107,10 @@ impl Check {
             Check::RemapChip => "remap_chip",
             Check::Adc => "adc",
             Check::DeadTime => "dead_time",
+            Check::PhasePair => "phase_pair",
+            Check::MotorTimer => "motor_timer",
             Check::Range => "range",
+            Check::LimitFloor => "limit_floor",
             Check::Frame => "frame",
             Check::Leader => "leader",
         }
@@ -182,12 +196,14 @@ impl Periph {
 /// A function's keys: its pins with their roles, and for a peripheral group its instance key and
 /// its remap key. Complete when every pin and the instance are stored, absent when none is. A group
 /// with a `switch` (the IMU's `imu.model`) is all or none with the switch: off (0 or not stored),
-/// its pins and instance may be stored or not.
+/// its pins and instance may be stored or not. A group with a `pick` (a motor's phase-current
+/// sense) is complete when exactly that many of its pins are stored.
 struct Group {
     pins: Vec<(PinField, Role)>,
     instance: Option<(Key, Periph)>,
     remap: Option<Key>,
     switch: Option<Key>,
+    pick: Option<usize>,
 }
 
 impl Group {
@@ -197,6 +213,7 @@ impl Group {
             instance: None,
             remap: None,
             switch: None,
+            pick: None,
         }
     }
 }
@@ -221,6 +238,7 @@ fn groups() -> Vec<Group> {
             instance: Some((store::IMU_I2C.key(), Periph::I2c)),
             remap: Some(store::IMU_REMAP.key()),
             switch: Some(store::IMU_MODEL.key()),
+            pick: None,
         },
     ];
     for i in 0..store::LINKS {
@@ -232,6 +250,7 @@ fn groups() -> Vec<Group> {
             instance: Some((store::LINK_USART.at(i).key(), Periph::Usart)),
             remap: Some(store::LINK_REMAP.at(i).key()),
             switch: None,
+            pick: None,
         });
     }
     for m in 0..store::MOTORS {
@@ -244,6 +263,7 @@ fn groups() -> Vec<Group> {
             instance: None,
             remap: None,
             switch: None,
+            pick: None,
         });
         g.push(Group {
             pins: vec![
@@ -257,19 +277,34 @@ fn groups() -> Vec<Group> {
             instance: Some((store::MOTOR_GATE_TIMER.at(m).key(), Periph::Timer)),
             remap: Some(store::MOTOR_GATE_REMAP.at(m).key()),
             switch: None,
+            pick: None,
         });
         g.push(Group {
-            pins: vec![
-                (store::MOTOR_PHASE_A.at(m), Role::Adc),
-                (store::MOTOR_PHASE_B.at(m), Role::Adc),
-            ],
+            pins: SENSE_PHASES
+                .iter()
+                .map(|(f, _)| (f.at(m), Role::Adc))
+                .collect(),
             instance: None,
             remap: None,
             switch: None,
+            pick: Some(2),
         });
     }
     g
 }
+
+/// A motor's phase-current sense pins with the phase each names, in phase order: a motor senses
+/// the two that are stored (`specs/twelve-fet.md` section 5.3).
+const SENSE_PHASES: [(PinField, Phase); 3] = [
+    (store::MOTOR_PHASE_A, Phase::A),
+    (store::MOTOR_PHASE_B, Phase::B),
+    (store::MOTOR_PHASE_C, Phase::C),
+];
+
+/// The advanced timer each motor's gates use where the chip drives two (`specs/twelve-fet.md`
+/// section 5.2): TIMER0 triggers the injected ADC group and starts TIMER7, so motor 0 is on TIMER0
+/// and motor 1 on TIMER7.
+const MOTOR_TIMER: [u8; store::MOTORS as usize] = [0, 7];
 
 /// The stored bytes of a pin field, or `None` when it is not stored (an absent function).
 fn pin_of(state: &State, f: PinField) -> Option<Vec<u8>> {
@@ -358,8 +393,10 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
             .map(|(f, _)| state.contains_key(&f.key()))
             .collect();
         let instance = g.instance.map(|(k, p)| (k, p, byte_of(state, k)));
-        let all = set.iter().all(|s| *s) && instance.is_none_or(|(_, _, n)| n.is_some());
-        let none = !set.iter().any(|s| *s) && instance.is_none_or(|(_, _, n)| n.is_none());
+        let stored = set.iter().filter(|s| **s).count();
+        let all = g.pick.map_or(stored == set.len(), |n| stored == n)
+            && instance.is_none_or(|(_, _, n)| n.is_some());
+        let none = stored == 0 && instance.is_none_or(|(_, _, n)| n.is_none());
         // A switched group: on, it is all or none with its switch, so it needs every key; off, its
         // keys may be stored or not, and a whole bus is still routed below.
         let on = g.switch.map(|k| byte_of(state, k).unwrap_or(0) != 0);
@@ -370,6 +407,24 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
             continue;
         }
         if !all {
+            let head = g
+                .pins
+                .first()
+                .map(|(f, _)| f.key())
+                .expect("a group has a pin");
+            if let Some(n) = g.pick {
+                let paths: Vec<String> = g.pins.iter().map(|(f, _)| path_of(f.key())).collect();
+                refuse(
+                    &mut out,
+                    Check::Group,
+                    head,
+                    format!(
+                        "{n} of {} are stored together, not {stored}",
+                        paths.join(", ")
+                    ),
+                );
+                continue;
+            }
             let missing = g
                 .pins
                 .iter()
@@ -378,11 +433,6 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
                 .map(|((f, _), _)| f.key())
                 .or(instance.map(|(k, _, _)| k))
                 .expect("an incomplete group misses a key");
-            let head = g
-                .pins
-                .first()
-                .map(|(f, _)| f.key())
-                .expect("a group has a pin");
             refuse(
                 &mut out,
                 Check::Group,
@@ -470,6 +520,74 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
             }
         }
     }
+    // Each motor's sensed pair is one the chip's image reads.
+    for m in 0..store::MOTORS {
+        let sensed: Vec<(PinField, Phase)> = SENSE_PHASES
+            .iter()
+            .map(|(f, p)| (f.at(m), *p))
+            .filter(|(f, _)| state.contains_key(&f.key()))
+            .collect();
+        let [(_, first), (second_field, second)] = sensed[..] else {
+            continue;
+        };
+        if !t.senses(first, second) {
+            let pairs: Vec<String> = t
+                .sense_pairs
+                .iter()
+                .map(|[a, b]| format!("{a:?} and {b:?}"))
+                .collect();
+            refuse(
+                &mut out,
+                Check::PhasePair,
+                second_field.key(),
+                format!(
+                    "the {} image senses phases {}, not {first:?} and {second:?}",
+                    chip.name(),
+                    pairs.join(" or ")
+                ),
+            );
+        }
+    }
+    // Motor 1 runs only beside motor 0, and on a two-motor chip each motor is on its own timer. A
+    // motor is stored when its gate group is complete.
+    let present: Vec<bool> = (0..store::MOTORS)
+        .map(|m| {
+            groups()
+                .iter()
+                .find(|g| g.pins[0].0.key() == store::MOTOR_GATE_HI_A.at(m).key())
+                .is_some_and(|g| {
+                    g.pins.iter().all(|(f, _)| state.contains_key(&f.key()))
+                        && g.instance.is_some_and(|(k, _)| byte_of(state, k).is_some())
+                })
+        })
+        .collect();
+    if present[1] && !present[0] {
+        refuse(
+            &mut out,
+            Check::MotorTimer,
+            store::MOTOR_GATE_HI_A.at(1).key(),
+            "motor 1 is stored without motor 0, whose TIMER0 triggers the ADC and starts motor 1's \
+             timer"
+                .to_string(),
+        );
+    }
+    if MOTOR_TIMER.iter().all(|&n| t.has_timer(n)) {
+        for (m, want) in (0..store::MOTORS).zip(MOTOR_TIMER) {
+            let key = store::MOTOR_GATE_TIMER.at(m).key();
+            let Some(n) = byte_of(state, key).filter(|n| present[m as usize] && *n != want) else {
+                continue;
+            };
+            refuse(
+                &mut out,
+                Check::MotorTimer,
+                key,
+                format!(
+                    "motor {m}'s gates are on advanced timer {want} on the {}, not {n}",
+                    chip.name()
+                ),
+            );
+        }
+    }
     // A remap key is a GD32F10x key.
     if !chip.remaps() {
         let remaps = [store::IMU_REMAP.key()]
@@ -520,8 +638,9 @@ pub fn check_forms(chip: Chip, entries: &[Entry]) -> Vec<Refusal> {
     out
 }
 
-/// Every check that needs no chip: the range table over the arm row and the calibration, and the
-/// IMU frame. Another field's range (`wifi.tx_power`) is the forceable one encoding makes.
+/// Every check that needs no chip: the range table over the arm row and the calibration, each
+/// motor's limit above its noise floor, and the IMU frame. Another field's range (`wifi.tx_power`)
+/// is the forceable one encoding makes.
 pub fn check_values(state: &State) -> Vec<Refusal> {
     let mut out = Vec::new();
     for (key, (t, b)) in state {
@@ -536,6 +655,31 @@ pub fn check_values(state: &State) -> Vec<Refusal> {
                 check: Check::Range,
                 key: *key,
                 msg: format!("{}: {v} is outside {lo}..{hi}", path_of(*key)),
+            });
+        }
+    }
+    // Each motor's limit above its floor, each of the three as the write leaves it or its registry
+    // default where it is not stored.
+    for m in 0..store::MOTORS {
+        let value = |k: Key, default: u32| match state.get(&k) {
+            Some((t, b)) => int_of(*t, b).and_then(|v| u32::try_from(v).ok()),
+            None => Some(default),
+        };
+        let limit = store::MOTOR_CURRENT_LIMIT.at(m);
+        let cal = store::MOTOR_CURRENT_CAL.at(m);
+        let floor = store::MOTOR_NOISE_FLOOR.at(m);
+        let (Some(ma), Some(cal), Some(floor)) = (
+            value(limit.key(), limit.default()),
+            value(cal.key(), cal.default().into()).and_then(|v| u16::try_from(v).ok()),
+            value(floor.key(), floor.default().into()).and_then(|v| u16::try_from(v).ok()),
+        ) else {
+            continue;
+        };
+        if let Some(why) = limit_floor(ma, cal, floor) {
+            out.push(Refusal {
+                check: Check::LimitFloor,
+                key: limit.key(),
+                msg: format!("{}: {why}", path_of(limit.key())),
             });
         }
     }
@@ -563,6 +707,38 @@ pub fn check_values(state: &State) -> Vec<Refusal> {
         });
     }
     out
+}
+
+/// Why a motor's limit of `ma` milliamps fails the `limit_floor` check at `cal` counts per amp and a
+/// noise floor of `floor` counts, or `None` when it passes (`specs/config-read-once.md` section 4).
+/// The arithmetic is the firmware's (`board::limit`): a limit passes when FOC's full scale
+/// (`full_scale_counts`, the converted limit less the floor) is above zero, which is a conversion
+/// above the floor. The lowest limit that passes is `floor * 1000 / cal + 1` rounded up to the next
+/// 100 mA, stepped up by 100 mA while the conversion's rounding still leaves it at the floor.
+fn limit_floor(ma: u32, cal: u16, floor: u16) -> Option<String> {
+    use board::limit::{
+        full_scale_counts, limit_counts, noise_floor_counts, request_counts, CURRENT_CAL_MAX,
+        CURRENT_CAL_MIN, LIMIT_REQUEST_CAP_MA,
+    };
+    let passes = |ma: u32| full_scale_counts(limit_counts(ma, cal, floor), floor) > 0;
+    if passes(ma) {
+        return None;
+    }
+    let scale = cal.clamp(CURRENT_CAL_MIN, CURRENT_CAL_MAX) as u32;
+    let floor_counts = noise_floor_counts(floor) as u32;
+    let start = (floor_counts * 1_000 / scale + 1).div_ceil(100) * 100;
+    let lowest = (start..=LIMIT_REQUEST_CAP_MA)
+        .step_by(100)
+        .find(|ma| passes(*ma));
+    let fix = match lowest {
+        Some(l) => format!("the lowest limit that passes is {l} mA"),
+        None => "no limit passes a floor at the top of the limit window".to_string(),
+    };
+    Some(format!(
+        "{ma} mA is {} counts at a current.cal of {scale}, at or below the noise floor of \
+         {floor_counts} counts, so FOC's full scale is 0; {fix}",
+        request_counts(ma, cal)
+    ))
 }
 
 /// The keys whose write can change [`check_leader`]'s verdict: `machine.mode`, `machine.frame` and

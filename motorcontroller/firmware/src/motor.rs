@@ -14,6 +14,11 @@
 //! where slice 3's test enforced ABSENCE. Everything below it stays a disarmed layer: it can stop
 //! the bridge, through the demand word and the channel enables, and it cannot start one.
 //!
+//! The one MOE the bring-up causes is the calibration's, for a motor stored `current.sense` =
+//! `low_side_on` (`specs/twelve-fet.md` section 5.5): `main.rs` hands [`hw::bring_up`] the arming
+//! layer's `calibration_moe` as a function, and the calibration calls it with duties 0 and the
+//! channels enabled, so only the low sides turn on, and clears it before the period vector.
+//!
 //! Split, like the rest of this crate: everything that is pure arithmetic or ordering lives here on
 //! ALL targets (so the host test run reaches it), and the hardware half is `target_os = "none"`.
 //!
@@ -30,11 +35,14 @@
 //! (`specs/motor-integration.md`, "The 250 Hz to 16 kHz handoff": each word is independently
 //! meaningful and no reader derives a conjunction across two of them).
 //!
-//! # Single motor, deliberately
+//! # One motor or two
 //!
-//! The model is `N = 2`-ready but motor 1 is not built: no 12-FET board is in the validation loop,
-//! so a second set of handoff words and a second bring-up would be code nothing exercises. The
-//! words below are motor 0's.
+//! [`COUNT`] motors, the chip's advanced-timer count (`specs/twelve-fet.md`): two on the 12-FET's
+//! GD32F103RC, one everywhere else. On the RC, TIMER7 drives motor 1 as an event-mode slave of
+//! TIMER0, ADC0's injected group converts both motors' sensed pairs in four ranks on TIMER0's
+//! trigger, and one period ISR runs both motors' bodies; the battery is a regular conversion on
+//! ADC1 there, because four phase ranks fill the injected group. On the one-motor images every
+//! per-motor array below is one long and every per-motor loop one pass.
 
 // On a HOST target the whole `firmware` module (every consumer of these items) is compiled out, so
 // the pure half below reads as dead code there; CI clippys the host surface with
@@ -45,37 +53,68 @@
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use orchestrator::{EV_MOTOR_ARM, EV_MOTOR_CAL, EV_MOTOR_HALL, EV_MOTOR_PERIOD};
 
+/// How many motors this image drives: the chip's advanced-timer count (`specs/twelve-fet.md`
+/// section 4.1), 2 on the GD32F103RC and 1 on the GD32F103C8, the GD32F130C8 and the MM32SPIN05.
+/// The one owner of the count: the handoff words below, the bring-up, the period ISR's per-motor
+/// body, the arm and the orchestrator's per-motor state (`OrchestratorState<COUNT>`) are all sized
+/// by it, so a one-motor image carries no second motor's code or words.
+///
+/// `store::MOTORS` is a different number: the range of a wheel key's index, what a file can name.
+/// A motor the chip cannot drive is refused by the CLI's checks before it is written.
+///
+/// The host build has no chip; it takes the larger count, so the host tests reach the two-motor
+/// paths, and the pure functions that depend on the count take it as a parameter.
+#[cfg(target_os = "none")]
+pub const COUNT: usize = hal::descriptor::DESCRIPTOR.adv_timers as usize;
+#[cfg(not(target_os = "none"))]
+pub const COUNT: usize = 2;
+const _: () = assert!(COUNT >= 1 && COUNT <= 2);
+
 // -------------------------------------------------------------------------------------------
-// The handoff words (motor 0). One writer each; `Relaxed` throughout.
+// The handoff words, one per motor (index = motor). One writer each; `Relaxed` throughout. On a
+// one-motor image each is an array of one at the symbol the tools name, the same address and size
+// as the single word it replaces; motor 1's word is at the symbol plus its stride.
+//
+// On the two-motor image (the GD32F103RC's) each is `#[used]`: a word only the bench reads over SWD
+// has no reader in the image, and without it LTO splits the array and drops motor 1's element
+// (measured on the first RC build: `PERIODS`, `EDGES` and eleven others came out 4 B long), so the
+// stride the tools rely on would point at another word. The one-motor images keep what LTO keeps,
+// as they did before the arrays (a word nothing reads, `ANGLE`, is not in them).
 // -------------------------------------------------------------------------------------------
 
 /// The signed drive demand: the +-28500 stock-native torque word, verbatim (`specs/control.md`'s
 /// demand-scale contract: no rescaling anywhere). Written by the 250 Hz control task, read by the
 /// period ISR.
-pub static DEMAND: AtomicI32 = AtomicI32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static DEMAND: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// Demand write sequence: bumped by the 250 Hz task on every demand write, so the ISR can tell a
 /// fresh write from a repeated one WITHOUT the writer having to touch a second data word (a demand
 /// that happens to repeat its value is still a fresh write). The ISR's freshness guard counts
 /// periods since this last changed.
 pub static DEMAND_SEQ: AtomicU32 = AtomicU32::new(0);
 /// The wrapping electrical angle (u16 in a u32 cell). Written by the period ISR.
-pub static ANGLE: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static ANGLE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The signed edge count per 320-period window, raw (the pole-pair fold to speed units is the
 /// Phase-D consumer's). Written by the period ISR.
-pub static SPEED: AtomicI32 = AtomicI32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static SPEED: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The period-based wheel rate (`specs/control.md` (o)): the commutator's `rate_q`, the
 /// reciprocal of the periods between two same-direction hall edges in 1/4096 of a count (one
 /// count = one edge per 320-period window, [`SPEED`]'s unit), decaying as `1/t` between edges
 /// and 0 across a reversal. The outer speed loop's measurement; copied into the block beside the
 /// count, published as `CTRL_OBS` word 39. Written by the period ISR.
-pub static WHEEL_RATE_Q12: AtomicI32 = AtomicI32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static WHEEL_RATE_Q12: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The wheel's SIGNED edge position (`specs/state-feedback.md` section 3): the commutator's
 /// `pos_edges`, +1 or -1 per counted hall edge in the counter's own sense, never cleared, wrapping.
 /// Copied into the block's `wheel_pos` by the 250 Hz shell beside [`WHEEL_RATE_Q12`]; the cyclic carries
 /// its low 16 bits to the peer. Written by the period ISR.
-pub static POS_EDGES: AtomicI32 = AtomicI32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static POS_EDGES: [AtomicI32; COUNT] = [const { AtomicI32::new(0) }; COUNT];
 /// The free-running period counter: the liveness signal. Written by the period ISR.
-pub static PERIODS: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static PERIODS: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// This boot's ABSOLUTE hall-edge count, the odometer's raw material (`specs/odometer.md`): the
 /// commutator's own `edges_total`, which adds 1 on every counted edge whichever way the wheel
 /// turned. Written by the period ISR, in the once-per-64-periods branch that already closes the
@@ -83,17 +122,21 @@ pub static PERIODS: AtomicU32 = AtomicU32::new(0);
 ///
 /// It counts THIS BOOT and it wraps. The total a board keeps is this folded as deltas onto the
 /// value its store holds, which is [`crate::odometer::Odometer`]'s job and not this cell's.
-pub static EDGES: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static EDGES: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Motor fault bits ([`FAULT_HALL`], [`FAULT_DUTY_RANGE`], [`FAULT_DEMAND_STALE`],
 /// [`FAULT_INIT_CAL`], [`FAULT_METHOD`]). Written by the period ISR (sticky within a boot), seeded
 /// by the bring-up with the two bits it can raise before the ISR exists.
-pub static FAULT: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static FAULT: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The invalid-hall dwell count from the commutator's front end. Written by the period ISR.
-pub static INVALID_DWELL: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static INVALID_DWELL: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed: `hall_code | enables << 8 | method << 16 | flags << 24`. Written by the
 /// period ISR (the flags' `configured` / `current_sense` / `cal-accepted` bits are set once at
 /// bring-up).
-pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_STATE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The MEASURED quiet-bridge phase-current offsets, packed `offset_a | offset_b << 16`
 /// (`specs/motor-integration.md`, bring-up step 9 and silicon stage 3). Written ONCE, by the
 /// calibration step of the bring-up, before the period vector is unmasked; zero on a boot whose
@@ -111,12 +154,15 @@ pub static OBS_STATE: AtomicU32 = AtomicU32::new(0);
 /// so a bench read sees WHERE an out-of-window board actually sits rather than only that it was
 /// refused. Acceptance is the [`OBS_CAL_ACCEPTED`] flag; refusal is [`FAULT_INIT_CAL`]; a zero
 /// word with the refusal set means no conversion completed.
-pub static OBS_CAL: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_CAL: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The last applied duties, packed `d0 | d1 << 16`. Written by the period ISR.
-pub static OBS_DUTY01: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_DUTY01: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The last applied duty 2 plus the electrical angle, packed `d2 | angle << 16`. Written by the
 /// period ISR.
-pub static OBS_DUTY2_ANGLE: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_DUTY2_ANGLE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Whether the TIMER0 counter is turning, and therefore whether the period ISR should be firing.
 /// Set by the bring-up's `StartCounter`, on the boot thread, and never written again: the counter
 /// is the hall-edge measurement's clock, owned by the bring-up, and NOTHING in this image stops it
@@ -412,114 +458,11 @@ pub fn motor_fault_level(
 // The current limit (pure; `specs/motor-integration.md`, "The current limit")
 // -------------------------------------------------------------------------------------------
 
-/// The current-sense calibration's seam range, stock current counts per amp of phase current.
-///
-/// The count is the unit [`commutation::foc::current_from_adc`] defines and the FOC arm consumes
-/// (`offset - 2*sample` over the left-aligned injected word, so one 12-bit ADC LSB of deviation is
-/// 16 counts and the sensor's full scale is +-32767 counts); nothing is rescaled, the limit is
-/// converted INTO it. The scale itself is per-board data, read at boot from
-/// `store::MOTOR_CURRENT_CAL` (0x4C) by the arm row and carried into [`limit_counts`]:
-/// it is a property of the shunt and amplifier chain fitted, not a constant
-/// (`specs/motor-integration.md`, "The current-sense calibration").
-///
-/// The seam clamps it HERE, because the store validates type only (the
-/// `orchestrator::battery::VbattCal::new` precedent), and the band is a PLAUSIBILITY one on a board
-/// fact, the same class as the battery divider's slope clamp. It is no longer an arithmetic bound:
-/// 819 was once derived from a 40 A milliamp ceiling fitting the `i16` (`40_000 * 819 / 1000 <=
-/// i16::MAX`), and that ceiling is gone, because [`MAX_LIMIT_COUNTS`] bounds the CONVERTED count
-/// instead and nothing the conversion computes can leave the `i16` whatever the stored scale is.
-///
-/// What the band still buys, which the count window cannot: it bounds how far a typoed scale can
-/// move the ENFORCED limit away from the LABELLED one. The count ceiling bounds the limit in
-/// absolute terms; the ratio is the seam's. Without the upper bound a stored 8,190 would convert a
-/// deliberately conservative 5 A staging to the widest limit the window admits (16,383 counts,
-/// 36 A at this chain's measured scale) with nothing said; with it, the factor a wrong scale can
-/// introduce is at most `819 / true`, and the two scales any source has claimed for this hardware
-/// class both sit inside the band (455 measured here, EFeru's 800). The lower bound keeps a zero or
-/// a typo from collapsing every staged limit onto the noise floor, which reads as "no drive".
-pub const CURRENT_CAL_MIN: u16 = 100;
-/// The calibration's upper seam bound; see [`CURRENT_CAL_MIN`].
-pub const CURRENT_CAL_MAX: u16 = 819;
-
-/// The lowest noise floor a board may claim, in counts (1,000): the bottom of the plausibility band
-/// the boot seam clamps `store::MOTOR_NOISE_FLOOR` (0x6B) into, whose top is [`MAX_LIMIT_COUNTS`].
-///
-/// **The floor itself is per-board data and no longer a constant.** It is the rest noise of the
-/// shunt and amplifier chain fitted, measured in the same counts as `motor.current_cal`, and it was
-/// a compiled constant of 2,100, taken from the high-water of five rest-floor reads on ONE board in
-/// ONE session (1,444 / 1,863 / 1,910 / 1,941 / 2,097 counts, medians around 1,050). That spread is
-/// the argument. One number for every chain is too low for the noisy end, where it chops on the
-/// chain's own noise (this constant was 2,000 until an armed STILL soak on 2026-10-09 chopped in 2
-/// of 94 samples with demand and duty 0 throughout), and too high for the quiet end, where it
-/// silently raises the minimum enforceable current. 2,100 is now the FIELD's default, so a board
-/// with no record enforces exactly what the image enforced before
-/// (`specs/store-field-audit.md`, the 2026-10-09 sweep, Tier 1 item 1).
-///
-/// **Why 1,000 is the bottom.** A claim below it is under the quietest rest reading any bench board
-/// has produced (1,054 median, 1,444 worst of the five), so it is a typo rather than a measurement,
-/// and the consequence of accepting it is a board that trips at rest. The band is a PLAUSIBILITY
-/// one at the seam rather than a validated type, the shape `CURRENT_CAL_MIN` and the dead-time floor
-/// both use: the store validates type only, so [`noise_floor_counts`] is where a hand-poked flash
-/// value stops.
-pub const NOISE_FLOOR_MIN: i16 = 1_000;
-
-/// The converted limit's CEILING, in counts (16,383): half the sensor's full scale, the largest
-/// soft limit whose hard trip ([`hard_trip_counts`], twice the limit) is still expressible in the
-/// `i16` the comparison holds.
-///
-/// A count for the same reason as the noise floor (see [`NOISE_FLOOR_MIN`]), and one step further:
-/// this bound is a property of the COMPARISON, so it is not any board's number at all. It replaces a 40,000 mA
-/// ceiling, which is a count only once a scale is assumed, and which was the wrong half of the
-/// constraint: it checked that the SOFT limit fits the `i16` and never that the hard trip does. At
-/// 800 counts per amp a 40 A request converted to 32,000 counts, [`hard_trip_counts`] saturated at
-/// 32,767, and the 2x margin the trip's whole justification rests on degenerated to 1.02x with no
-/// diagnostic (`specs/store-field-audit.md`, the 2026-10-09 board-specifics sweep, Tier 1 item 2).
-///
-/// Clamping the converted count makes the 2x hold for every limit the window admits, and the real
-/// ceiling then follows the board's own scale, which is the point: 36.0 A at the measured 455
-/// counts per amp, 20.5 A at EFeru's 800, 20.0 A at the top of the calibration seam.
-///
-/// It is also the TOP of the noise floor's plausibility band, which is what keeps the 2x true now
-/// the floor is per-board: a floor clamped to at most this bound leaves every limit
-/// [`limit_counts`] can produce inside `0..=MAX_LIMIT_COUNTS` whatever a board claims. At the very
-/// top the window is one value wide and the limit has no range left, which is the diagnostic a
-/// board staging a floor there has asked for.
-pub const MAX_LIMIT_COUNTS: i16 = i16::MAX / 2;
-
-// What MAX_LIMIT_COUNTS is FOR, pinned here so it cannot drift from the function that depends on
-// it: the hard trip of the largest admissible limit is still an i16, so `hard_trip_counts`'
-// saturation is unreachable for every value `limit_counts` can produce. The runtime clamp in
-// `limit_counts` is what holds the property for any stored request and scale; this pins the bound
-// it clamps to.
-const _: () = assert!(
-    2 * MAX_LIMIT_COUNTS as i32 <= i16::MAX as i32,
-    "the hard trip of the largest admissible limit no longer fits the comparison's i16"
-);
-// The noise floor's band, which with a per-board floor is what the 2x assert above rests on: a
-// clamped floor never exceeds the ceiling, so `limit_counts`' clamp is well-formed (`i16::clamp`
-// panics on an inverted pair) and its result is bounded by `MAX_LIMIT_COUNTS` for every value a
-// board can stage.
-const _: () = assert!(
-    NOISE_FLOOR_MIN < MAX_LIMIT_COUNTS,
-    "the noise floor's plausibility band is empty: its bottom has reached the limit ceiling"
-);
-
-/// The largest staged request [`limit_counts`] multiplies: an OVERFLOW guard for its 32-bit
-/// arithmetic, not a policy ceiling, and derived from the window rather than from an assumed scale.
-/// Capping the request here cannot change what any board enforces, because even at the lowest scale
-/// the calibration seam admits this many milliamps already converts above the window's top: both
-/// properties are pinned below, so neither can drift if a bound moves.
-const LIMIT_REQUEST_CAP_MA: u32 = (MAX_LIMIT_COUNTS as u32 + 1) * 1_000 / CURRENT_CAL_MIN as u32;
-const _: () = assert!(
-    LIMIT_REQUEST_CAP_MA
-        .checked_mul(CURRENT_CAL_MAX as u32)
-        .is_some(),
-    "the capped request times the widest scale no longer fits the conversion's u32"
-);
-const _: () = assert!(
-    LIMIT_REQUEST_CAP_MA * CURRENT_CAL_MIN as u32 / 1_000 > MAX_LIMIT_COUNTS as u32,
-    "the request cap is low enough to move an enforced limit, so it is a ceiling and not a guard"
-);
+// The arithmetic is the board crate's (`board::limit`), so the configuration checks refuse a limit
+// by the same conversion. Only the target-side body calls it outside the tests, so the host build
+// reads the imports as unused, the `dead_code` allow above's reason.
+#[cfg_attr(not(target_os = "none"), allow(unused_imports))]
+pub use board::limit::{full_scale_counts, hard_trip_counts, limit_counts, noise_floor_counts};
 
 /// Consecutive over-limit periods that trip the hard over-current fault (one nominal control
 /// tick, the hall dwell fault's constant class): the chop is not containing the current.
@@ -527,11 +470,13 @@ pub const OVER_CURRENT_TRIP_PERIODS: u32 = 64;
 
 /// The over-current trip count: the period ISR increments it on each trip and is its sole
 /// writer; the 250 Hz task raises the motor-0 fault latch when it sees it change.
-pub static OVER_CURRENT_TRIPS: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OVER_CURRENT_TRIPS: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_motor_current`]: the last completed 64-period window's peak
 /// phase-current magnitude, the periods the soft limit floated in it, and the trip count's low
 /// byte. Written by the period ISR at each window boundary (`CTRL_OBS` word 31).
-pub static OBS_CURRENT: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_CURRENT: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_motor_mean_duty`]: the MEAN magnitude of the same window
 /// [`OBS_CURRENT`] closes, and the on-duty of the period that closed it
 /// (`specs/link-control.md`, the `CYCLIC_STATE` layout, offsets 13 and 15).
@@ -544,30 +489,35 @@ pub static OBS_CURRENT: AtomicU32 = AtomicU32::new(0);
 ///
 /// Not folded into [`OBS_CURRENT`]: that word's 32 bits are spoken for (peak, chop count, trip
 /// byte), and its layout is `CTRL_OBS` word 31, which is append-only.
-pub static OBS_MEAN_DUTY: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_MEAN_DUTY: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the window's MEAN conditioned phase currents, `ia`
 /// low half and `ib` high half, in current counts (`specs/foc-torque.md` section 7, `CTRL_OBS`
 /// word 47). From the same [`CurrentLimit::take_window`] close as [`OBS_CURRENT`], in every method:
 /// the sensed pair the FOC arm's frame is built from, so a bench host can run Clarke and Park over
 /// it at a held rotor's angle whatever method drives (gate O2 does, in sine). Written by the
 /// period ISR at each window boundary.
-pub static OBS_FOC_PHASE: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_FOC_PHASE: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the FOC arm's window means of the measured currents,
 /// `id` low half and `iq` high half ([`commutation::foc::FocState::take_window`]; `CTRL_OBS` word
 /// 48). Written by the period ISR at each window boundary; 0 while the method is not FOC.
-pub static OBS_FOC_DQ: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_FOC_DQ: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_i16_pair`]: the FOC arm's `iq` reference of the period that
 /// closed the window, low half, and the window's mean `vq` after the circular limit, high half
 /// (`CTRL_OBS` word 49). Written by the period ISR at each window boundary; 0 while the method is
 /// not FOC.
-pub static OBS_FOC_REF: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_FOC_REF: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Observation, packed by [`pack_foc_hold`]: the hold word (`specs/foc-torque.md` section 7, round
 /// 3, `CTRL_OBS` word 50): the periods of the closing window on which each sensed phase's sample
 /// was held ([`SampleHold`]), the periods the bridge was floated ([`coast_posture`]), and the
 /// cause byte naming which of the float's three conditions the window saw, whether a period had
 /// both sensed phases held, and the offset calibration's block-pair count and verdict for this
 /// boot. Written by the period ISR at each window boundary, in every method.
-pub static OBS_FOC_HOLD: AtomicU32 = AtomicU32::new(0);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_FOC_HOLD: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// The battery-sense count (`specs/sensing-and-safety.md`, "The battery word", acquisition): the
 /// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
 /// left-aligned datum's unit, bring-up step 9's contract). Written by the period ISR every period,
@@ -577,119 +527,75 @@ pub static OBS_FOC_HOLD: AtomicU32 = AtomicU32::new(0);
 pub static VBATT_RAW: AtomicU32 = AtomicU32::new(0);
 
 /// The injected group's channel list, in rank order (`specs/motor-integration.md` bring-up step
-/// 5): the two phase-current ranks from the plan (rank 0 = phase A, rank 1 = phase B, the ranks
-/// the current limit reads), plus the battery rank as rank 2 when the plan carries `board.battery.pin`.
-/// Two slots or three, never the stock four: the aux consumer does not exist here.
-pub fn injected_ranks(phase: [u8; 2], vbatt: Option<u8>) -> heapless::Vec<u8, 4> {
+/// 5, `specs/twelve-fet.md` section 5.2): each brought-up motor's sensed pair in motor order (ranks
+/// `2m` and `2m + 1`, the lower phase first, the ranks the current limit reads), plus the battery
+/// rank after them when the plan carries `board.battery.pin` and the image takes the battery from
+/// this group (one motor: rank 2). Two, three or four slots.
+pub fn injected_ranks(pairs: &[[u8; 2]], vbatt: Option<u8>) -> heapless::Vec<u8, 4> {
     let mut ranks = heapless::Vec::new();
-    // Cannot overflow: at most three pushes into a capacity-4 vector.
-    for ch in phase.into_iter().chain(vbatt) {
+    // Cannot overflow past the group: a two-motor image passes no battery rank (it is on ADC1),
+    // so at most four pushes into a capacity-4 vector, and a fifth would be dropped, not written.
+    for ch in pairs.iter().flatten().copied().chain(vbatt) {
         let _ = ranks.push(ch);
     }
     ranks
 }
 
-/// What this board's staged noise floor (`store::MOTOR_NOISE_FLOOR`, 0x6B) means to the limit: the
-/// stored word clamped into [`NOISE_FLOOR_MIN`]`..=`[`MAX_LIMIT_COUNTS`], the plausibility band.
-///
-/// The ONE owner of that band, so [`limit_counts`] and anything that reports what the board will do
-/// read the same number. The store validates type only, so this is the seam where a hand-poked or
-/// typoed flash value stops, the `CURRENT_CAL_MIN` shape and the `orchestrator::battery::VbattCal`
-/// precedent. Clamped rather than refused, for the reason [`limit_counts`] gives: a boot seam has
-/// nowhere to refuse a value TO, and a board that refused to enforce any limit would be worse than
-/// one enforcing a plausible floor.
-///
-/// The result is positive and at most [`MAX_LIMIT_COUNTS`], which is what [`limit_counts`]' clamp
-/// needs of it (see the const asserts beside the bounds).
-#[inline]
-pub fn noise_floor_counts(stored: u16) -> i16 {
-    stored.clamp(NOISE_FLOOR_MIN as u16, MAX_LIMIT_COUNTS as u16) as i16
-}
-
-/// Convert the staged `MOTOR_CURRENT_LIMIT` (milliamps) into the soft limit in stock current
-/// counts, once, at bring-up: `ma * clamp(cal, 100, 819) / 1000`, clamped into
-/// [`noise_floor_counts`]`(noise_floor)..=`[`MAX_LIMIT_COUNTS`].
-///
-/// **Both bounds are COUNTS, the domain the comparison works in**, and the clamp is on the RESULT,
-/// not on the request: the request is milliamps, what a milliamp buys is the board's scale, and a
-/// bound in milliamps is therefore a bound at one assumed scale (see [`MAX_LIMIT_COUNTS`] for what
-/// that cost). A request the board's scale cannot express is clamped DOWN to the ceiling, exactly
-/// as a request under the sense chain's noise is clamped UP to the floor: an out-of-range staged
-/// value is bounded here, never refused, and there is nowhere at a boot seam to refuse it to.
-///
-/// **Two of the three inputs are this board's own measured facts, not constants.** `cal` is its
-/// counts per amp (`store::MOTOR_CURRENT_CAL`, read with the arm row) and `noise_floor` is
-/// its sense chain's rest noise (`store::MOTOR_NOISE_FLOOR`, carried on [`BootFixed`]); this is the
-/// boot seam that clamps both, because the store validates type only, so a hand-poked out-of-range
-/// flash value cannot reach the comparison.
-///
-/// **The floor moves, the ceiling does not, and the hard trip stays twice the limit.** A board may
-/// raise its own minimum enforceable current; it cannot widen the window past
-/// [`MAX_LIMIT_COUNTS`], because its floor is clamped to at most that bound. So every limit this
-/// can return is still in `0..=MAX_LIMIT_COUNTS` and [`hard_trip_counts`]' doubling is still exact
-/// at every calibration and every claimed floor.
-#[inline]
-pub fn limit_counts(ma: u32, cal: u16, noise_floor: u16) -> i16 {
-    let cal = cal.clamp(CURRENT_CAL_MIN, CURRENT_CAL_MAX) as u32;
-    // The request is bounded only so the 32-bit multiply cannot overflow; see
-    // `LIMIT_REQUEST_CAP_MA` for why it is not a ceiling in disguise.
-    let counts = ma.min(LIMIT_REQUEST_CAP_MA) * cal / 1_000;
-    // The window, both ends visible in one expression. The cast cannot truncate: the clamped floor
-    // is positive and at most MAX_LIMIT_COUNTS, so the clamped value is in 0..=MAX_LIMIT_COUNTS.
-    counts.clamp(
-        noise_floor_counts(noise_floor) as u32,
-        MAX_LIMIT_COUNTS as u32,
-    ) as i16
-}
-
-/// The FOC arm's current-reference full scale, in counts: what a full-scale torque word (+-28,500,
-/// `base::TORQUE_FULL_SCALE`) asks the q-axis loop for (`specs/foc-torque.md` section 4). The soft
-/// limit [`limit_counts`] produced, less this board's noise floor ([`noise_floor_counts`]),
-/// floored at zero.
-///
-/// **Derived, not a field**, so its three inputs (`motor.current_limit` 0x20, `motor.current_cal`
-/// 0x67, `motor.noise_floor` 0x6B) each keep their one owner: a separate scale field would need a
-/// validation rule against the limit, because a reference above the chop threshold makes the chop
-/// and the loop fight, and one field cannot disagree with itself. EFeru's torque mode makes its
-/// current limit the reference ceiling the same way.
-///
-/// **Why the floor comes off.** The soft chop acts on this period's phase MAGNITUDE against the
-/// limit, unfiltered, and the loop regulates the vector's amplitude, whose phase peaks touch the
-/// magnitude six times per electrical turn; a reference AT the limit would chop on measurement
-/// noise at full demand, and one floated period moves the current by amps, which the loop then
-/// chases. The noise floor is the board's own figure for exactly that band, so `limit - floor` is
-/// the highest reference at which the chop stays silent and remains the backstop it is meant to be.
-///
-/// At the fleet defaults (10,000 mA, 455 counts per amp, floor 2,100) that is 4,550 - 2,100 = 2,450
-/// counts, 5.4 A of phase-current amplitude. The limit is never below the clamped floor, so this
-/// reaches zero exactly when the limit sits AT the floor, which is the board saying it cannot hold
-/// any current above its noise.
-#[inline]
-pub fn full_scale_counts(limit_counts: i16, noise_floor: u16) -> i16 {
-    // In i32, so a pair outside the window `limit_counts` produces still subtracts without wrapping;
-    // the result is in `0..=MAX_LIMIT_COUNTS` for every pair it can produce.
-    (limit_counts as i32 - noise_floor_counts(noise_floor) as i32)
-        .max(0)
-        .min(i16::MAX as i32) as i16
-}
-
-/// The hard trip's magnitude: twice the soft limit, saturated to the sensor's full scale. A
-/// working chop cannot be holding a current this far over its limit (one period of float moves a
-/// few amps); a shorted phase or a wrong hall table into a locked rotor can.
-///
-/// **The saturation is unreachable for every limit [`limit_counts`] produces**, which is what
-/// [`MAX_LIMIT_COUNTS`] exists to guarantee and what the const assert beside it pins: the 2x is
-/// exact across the whole admissible window, including at its top. It stays as the guard for an
-/// argument this `pub fn`'s `i16` admits and the conversion cannot hand it.
-#[inline]
-pub const fn hard_trip_counts(limit_counts: i16) -> i16 {
-    let h = 2 * limit_counts as i32;
-    if h > i16::MAX as i32 {
-        i16::MAX
+/// The duties of a motor's two sensed phases, in the order its ranks convert them: A and B, or B
+/// and C (`specs/twelve-fet.md` section 5.3). The sample hold arms on these.
+#[inline(always)]
+pub fn sensed_duties(duties: [u16; 3], bc: bool) -> [u16; 2] {
+    if bc {
+        [duties[1], duties[2]]
     } else {
-        h as i16
+        [duties[0], duties[1]]
     }
 }
+
+/// A motor's sensed pair as Clarke's `(ia, ib)` (`specs/twelve-fet.md` section 5.3): the pair
+/// itself for A and B; for B and C, `ia = -(ib + ic)` and `ib` the first sensed phase, saturated
+/// into the word. `phase_magnitude` and the current limit then run on `(ia, ib)` unchanged.
+#[inline(always)]
+pub fn clarke_pair(sensed: (i16, i16), bc: bool) -> (i16, i16) {
+    if bc {
+        let ia = -(sensed.0 as i32 + sensed.1 as i32);
+        (ia.clamp(i16::MIN as i32, i16::MAX as i32) as i16, sensed.0)
+    } else {
+        sensed
+    }
+}
+
+/// Which of a motor's two sensed phases are readings this period (`specs/twelve-fet.md` section
+/// 5.6). On a `current.sense` = `low_side_on` motor (`low_side`) a sensed phase reads its current
+/// only while its leg's low side conducts, so it is a reading when its own leg was enabled for the
+/// sample (`enables`, what the ISR applied the period before) and the bridge is armed. The sensed
+/// legs are B and C on a `bc` motor, A and B otherwise. An `any_state` motor reads both always.
+#[inline(always)]
+pub fn sensed_readings(low_side: bool, armed: bool, enables: [bool; 3], bc: bool) -> [bool; 2] {
+    if !low_side {
+        return [true; 2];
+    }
+    let (l0, l1) = if bc { (1, 2) } else { (0, 1) };
+    [armed && enables[l0], armed && enables[l1]]
+}
+
+/// The highest phase compare at which motor 1's sensed phases are taken as fresh: the end of rank
+/// 3's aperture less a 3-tick margin (`specs/twelve-fet.md` section 5.2, the sampling instants
+/// table). Motor 0's ranks open first and keep [`hold_compare_max`]; motor 1's open 240 ticks
+/// later, on the down count, where a rank is valid while the compare is below the counter at the
+/// end of its aperture.
+pub const MOTOR_1_HOLD_COMPARE: u16 = {
+    // Rank n opens at the trigger plus the latency plus n ranks, at 7.5 + 12.5 = 20 ADC clocks a
+    // rank, and its aperture is 7.5 clocks: ticks after the trigger, on a counter that turns at
+    // ARR, 50 ticks after it.
+    let latency = ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV;
+    let rank = 20 * ADC_CLOCK_DIV;
+    let aperture = 15 * ADC_CLOCK_DIV / 2;
+    let ends = latency + 3 * rank + aperture;
+    let top = (commutation::ARR - TRIGGER_COMPARE) as u32;
+    (commutation::ARR as u32 - (ends - top) - 3) as u16
+};
+const _: () = assert!(MOTOR_1_HOLD_COMPARE == 1_880);
 
 /// The phase-current magnitude this period, from the two sensed phases: the third is the
 /// Kirchhoff remainder `-(ia + ib)`, saturated the stock way, and the magnitude is the largest of
@@ -895,6 +801,20 @@ impl CurrentLimit {
         CurrentVerdict { chop: true, trip }
     }
 
+    /// A period with no reading (`specs/twelve-fet.md` section 5.6: both sensed legs off, or the
+    /// bridge disarmed, on a `low_side_on` motor): no chop, no trip, and nothing else moves. The
+    /// over-limit run and the episode's tripped state stay as they were, so a sustained
+    /// over-current whose chops float every other period still reaches
+    /// [`OVER_CURRENT_TRIP_PERIODS`] over the driven ones; the window adds nothing to its sums or
+    /// its peak, so its mean still divides by the 64 periods with this one at 0.
+    #[inline(always)]
+    pub fn pass(&self) -> CurrentVerdict {
+        CurrentVerdict {
+            chop: false,
+            trip: false,
+        }
+    }
+
     /// Trips so far this boot.
     #[inline(always)]
     pub fn trips(&self) -> u32 {
@@ -1017,7 +937,9 @@ const _: () = assert!(
 /// `commutation::ARR`, which no compare exceeds: nothing held. The bake rule applies once gate
 /// N2 confirms a value.
 #[no_mangle]
-pub static FOC_HOLD_COMPARE: AtomicU32 = AtomicU32::new(commutation::ARR as u32);
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static FOC_HOLD_COMPARE: [AtomicU32; COUNT] =
+    [const { AtomicU32::new(commutation::ARR as u32) }; COUNT];
 
 /// How many consecutive periods a sensed phase may be held before its raw sample is taken again
 /// (`specs/foc-torque.md` section 14, "A hold that does not end"): 1,024 periods, 64 ms, 23
@@ -1106,12 +1028,12 @@ impl SampleHold {
         ((out[0], out[1]), any)
     }
 
-    /// Flag, for the coming period, each sensed phase whose compare in `duties` (the three
-    /// channel compares the ISR is about to write, in channel order) is above `threshold`
-    /// ([`FOC_HOLD_COMPARE`]).
+    /// Flag, for the coming period, each sensed phase whose compare in `sensed` (the two sensed
+    /// phases' compares the ISR is about to write, in rank order: [`sensed_duties`]) is above
+    /// `threshold` ([`FOC_HOLD_COMPARE`]).
     #[inline(always)]
-    pub fn arm(&mut self, duties: [u16; 3], threshold: u16) {
-        self.flagged = [duties[0] > threshold, duties[1] > threshold];
+    pub fn arm(&mut self, sensed: [u16; 2], threshold: u16) {
+        self.flagged = [sensed[0] > threshold, sensed[1] > threshold];
     }
 }
 
@@ -1362,6 +1284,12 @@ pub enum BringUpStep {
     ConfigureTimer,
     /// Program CH3 as the ADC-trigger compare (2249, PWM mode 1) and TRGO = update.
     ConfigureTriggerChannel,
+    /// Make TIMER7 TIMER0's event-mode slave, on the 12-FET's motor 1 only (`specs/twelve-fet.md`
+    /// section 5.1): its counter preset to [`SLAVE_START_COUNT`] and `SMCFG` set to event mode on
+    /// `ITI0`, so TIMER0's first trigger starts it in step. AFTER both timers are configured,
+    /// because `PwmTimer::configure` ends with the `UPG` that resets the counter, and BEFORE
+    /// `StartCounter`, which starts TIMER0 and with it TIMER7.
+    FollowTimer0,
     /// Route the six gate pins to the advanced-timer alternate function. AFTER the timer is
     /// configured, so the pins take the configured idle levels the instant they leave input mode.
     RouteGatePins,
@@ -1401,13 +1329,27 @@ pub enum BringUpStep {
     EnablePeriodVector,
 }
 
-/// The bring-up sequence, in order. One list: a motor without phase-current sense is not brought up
+/// The trigger-to-`CEN` delay of TIMER7's event-mode start, in timer ticks (`specs/twelve-fet.md`
+/// section 5.1, step 2). MEASURED on the 12-FET (2026-11-02, section 12.4 step 5,
+/// `specs/bench-evidence/2026-11-02/twelve-fet/`): with the preset at `TRIGGER_COMPARE` alone,
+/// twenty halts under the debug hold read TIMER7's counter one tick behind TIMER0's every time,
+/// on the up count and the down count alike; one tick of preset puts them in step.
+pub const SLAVE_START_TICKS: u16 = 1;
+/// TIMER7's preset count: TIMER0's counter at its first trigger edge, plus the resynchronisation
+/// delay, so the two counters run in step with centres aligned.
+pub const SLAVE_START_COUNT: u16 = TRIGGER_COMPARE + SLAVE_START_TICKS;
+
+/// The bring-up sequence, in order. Each step runs once for every motor it concerns: the timer and
+/// pin steps and the install per motor, the trigger channel on TIMER0, [`BringUpStep::FollowTimer0`]
+/// on motor 1, and the ADC, counter, calibration and vector steps once for the board
+/// (`specs/twelve-fet.md` section 5.5). One list: a motor without phase-current sense is not brought up
 /// at all in this slice (the no-current-sense period vector is the TIMER0 update interrupt, and the
 /// HAL wires no registered handler to it), so there is no second ordering to express.
-pub const BRING_UP_STEPS: [BringUpStep; 12] = [
+pub const BRING_UP_STEPS: [BringUpStep; 13] = [
     BringUpStep::EnableTimerClock,
     BringUpStep::ConfigureTimer,
     BringUpStep::ConfigureTriggerChannel,
+    BringUpStep::FollowTimer0,
     BringUpStep::RouteGatePins,
     BringUpStep::EnableAdcClock,
     BringUpStep::ConfigurePhasePins,
@@ -1432,6 +1374,9 @@ pub enum MotorSkip {
     /// A bring-up step failed on the hardware (a base that did not resolve, a refused config, a
     /// calibration timeout). Carries the step that failed.
     StepFailed(BringUpStep),
+    /// Motor 1 is configured and motor 0 is not up: TIMER0 is both the ADC trigger and TIMER7's
+    /// master, so motor 1 comes up only with motor 0 (`specs/twelve-fet.md` section 5.2).
+    NoMotor0,
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1758,6 +1703,17 @@ pub fn rederive(
     }
 }
 
+/// Motor 1's outcome from motor 0's and its own (`specs/twelve-fet.md` section 5.2): its own while
+/// motor 0 is up; with motor 0 down, an absent motor 1 stays absent and any other is
+/// [`MotorSkip::NoMotor0`], because TIMER0 is both the ADC trigger and TIMER7's master.
+pub fn second_outcome<T>(first_up: bool, second: Result<T, MotorSkip>) -> Result<T, MotorSkip> {
+    match second {
+        Err(MotorSkip::Absent) => Err(MotorSkip::Absent),
+        s if first_up => s,
+        _ => Err(MotorSkip::NoMotor0),
+    }
+}
+
 /// Record a motor that was NOT brought up into the observation word, so a bench read distinguishes
 /// "no motor configured" from "configured but this slice cannot drive it" from "a step failed, and
 /// which one" -- all of which look alike as a silent absence otherwise. Every arm leaves
@@ -1765,11 +1721,14 @@ pub fn rederive(
 /// `#[inline(always)]` with its ONE call site (the boot path): a single packed store. Left to the
 /// inliner it stayed out of line, as a 86 B function, once the boot/loop split stopped `main` being
 /// one whole-program body; inlined it costs the boot frame nothing.
+/// `motor` is the index of the motor that was not brought up.
 #[inline(always)]
-pub fn record_skip(skip: MotorSkip) {
+pub fn record_skip(motor: usize, skip: MotorSkip) {
     let (flag, step_index) = match skip {
         MotorSkip::Absent => (OBS_SKIP_ABSENT, 0),
         MotorSkip::NoCurrentSense => (OBS_SKIP_NO_SENSE, 0),
+        // Recorded as motor 0's skip: the cause is that motor's, not a step of this one.
+        MotorSkip::NoMotor0 => (OBS_SKIP_ABSENT, 0xFE),
         MotorSkip::StepFailed(step) => (
             OBS_SKIP_STEP_FAILED,
             BRING_UP_STEPS
@@ -1778,10 +1737,12 @@ pub fn record_skip(skip: MotorSkip) {
                 .unwrap_or(0xFF) as u8,
         ),
     };
-    OBS_STATE.store(
-        pack_obs_state(0, [false; 3], step_index, flag),
-        Ordering::Relaxed,
-    );
+    if let Some(word) = OBS_STATE.get(motor) {
+        word.store(
+            pack_obs_state(0, [false; 3], step_index, flag),
+            Ordering::Relaxed,
+        );
+    }
 }
 
 /// Pack the observation word the bench reads out of `CTRL_OBS`.
@@ -1801,7 +1762,7 @@ pub use hw::{bring_up, period_isr_hz};
 #[cfg(target_os = "none")]
 pub mod hw {
     use super::*;
-    use crate::layout::{Motor, Pin3};
+    use crate::layout::{Motor, Pair, Pin3, Sense};
     use commutation::foc::PhaseOffsets;
     use commutation::Commutator;
     use core::ptr::addr_of_mut;
@@ -1883,6 +1844,10 @@ pub mod hw {
     /// The injected sample-time code for 7.5 ADC cycles (`ADC_SAMPLETIME_7POINT5`), the stock
     /// inserted-group value on every phase-current channel.
     const SAMPLE_TIME_7P5: u8 = 1;
+    /// The regular sample-time code for 239.5 ADC cycles (`ADC_SAMPLETIME_239POINT5`), the
+    /// two-motor image's battery conversion on ADC1.
+    #[cfg(feature = "gd32f103rc")]
+    const SAMPLE_TIME_239P5: u8 = 7;
 
     /// Everything the period ISR touches, built once at bring-up. The ISR is its SOLE accessor
     /// after installation (the main thread installs it before the vector is unmasked and never
@@ -1899,6 +1864,16 @@ pub mod hw {
         /// The bring-up's flag bits (configured / current-sense), ORed into every published state.
         base_flags: u32,
         method: u8,
+        /// The motor senses phases B and C (`crate::layout::Pair::Bc`), not A and B: the hold arms
+        /// on channels 1 and 2 and the pair is mapped to Clarke's `(ia, ib)` ([`clarke_pair`]).
+        /// Never set on a one-motor image, which reads no `phase_c`.
+        bc: bool,
+        /// `current.sense` = `low_side_on` ([`crate::layout::Motor::sense_low_side`]): the sample
+        /// rule of [`sensed_readings`] applies.
+        low_side: bool,
+        /// The channel enables this ISR applied last period: the posture the coming sample is
+        /// converted under ([`sensed_readings`]).
+        sample_enables: [bool; 3],
         /// Free-running period count (the ISR's own copy; published into [`PERIODS`]).
         periods: u32,
         /// Periods since the demand word was last freshly written.
@@ -1939,8 +1914,10 @@ pub mod hw {
     /// left in `.data`, the static's whole init image (all zero but the niche byte that spells
     /// `None`) sat in flash. [`bring_up`] writes `None` on entry, and the only reader, the period
     /// ISR, can only be registered by `bring_up` after that, so no read ever sees reset garbage.
+    ///
+    /// One per motor, by index. Motor 1's is `Some` only where motor 0's is (section 5.2).
     #[link_section = ".uninit.MOTOR"]
-    static mut MOTOR: Option<MotorRuntime> = None;
+    static mut MOTOR: [Option<MotorRuntime>; COUNT] = [const { None }; COUNT];
 
     /// The configured timer, as the 250 Hz thread's own handle on it. Written once by the bring-up
     /// on the boot thread; read afterwards only by [`float_all_channels`], which runs on the
@@ -1953,7 +1930,9 @@ pub mod hw {
     /// so neither write can reach a gate driver, and the ISR itself holds the all-float posture
     /// from the next period on, because the bridge is disarmed ([`coast_posture`]). The float is
     /// the posture, not the silencing act; the silencing act is MOE.
-    static mut TIMER: Option<PwmTimer> = None;
+    ///
+    /// One per motor, by index.
+    static mut TIMER: [Option<PwmTimer>; COUNT] = [None; COUNT];
 
     /// The bring-up-row facts this motor was configured with, or `None` on a board with no
     /// runtime. The arm path hands them to [`rederive`] so an arm-time rebuild converts the limit
@@ -1963,11 +1942,15 @@ pub mod hw {
     /// Read under `cortex_m::interrupt::free` for the reason stated on [`MOTOR`]: the field itself
     /// is written once by the bring-up and never again, but forming a reference to the runtime at
     /// all has to exclude the period ISR. A handful of cycles, once per arm.
-    pub fn boot_fixed() -> Option<BootFixed> {
+    ///
+    /// Per motor, by index.
+    pub fn boot_fixed() -> [Option<BootFixed>; COUNT] {
         cortex_m::interrupt::free(|_| {
             // SAFETY: the period vector cannot fire inside this section, so the 250 Hz thread is
             // the only accessor of the runtime for its duration (the `MOTOR` invariant).
-            unsafe { (*addr_of_mut!(MOTOR)).as_ref() }.map(|m| m.boot)
+            unsafe { &*addr_of_mut!(MOTOR) }
+                .each_ref()
+                .map(|m| m.as_ref().map(|m| m.boot))
         })
     }
 
@@ -2036,9 +2019,10 @@ pub mod hw {
     /// [`crate::arm::rederive`] computes as plain values beforehand. Visible in the disassembly of
     /// the masked region: [`limit_counts`]' calibration clamp (the 100 and 819 compares), its
     /// overflow cap (the 163,840 compare), the 32x16 multiply and the magic-number divide by 1,000,
-    /// its count-window clamp (the staged floor's own band and the [`MAX_LIMIT_COUNTS`] compares),
-    /// [`hard_trip_counts`]' doubling as a bare shift (the window makes the saturating branch
-    /// unreachable and the optimizer drops it), and even the align-offset `% 6` the decode and
+    /// its count-window clamp (the staged floor's own band and the
+    /// [`MAX_LIMIT_COUNTS`](board::limit::MAX_LIMIT_COUNTS) compares), [`hard_trip_counts`]'
+    /// doubling as a bare shift (the window makes the saturating branch unreachable and the
+    /// optimizer drops it), and even the align-offset `% 6` the decode and
     /// `angle_path_offset` each ask for, folded together into one conditional correction of the
     /// sector count. Nothing in the source asks for that, and nothing in the source prevents it.
     ///
@@ -2049,30 +2033,91 @@ pub mod hw {
     /// structural claim nobody can verify per build is worse than a measurement with its date on
     /// it. What does hold independently of codegen is that the region is branch-free and
     /// call-free, so it is bounded by its instruction count however the optimizer arranges it.
-    pub fn install_rederived(r: &Rederived) -> bool {
+    ///
+    /// Every motor's re-derivation (by index) inside the ONE critical section, so a two-motor
+    /// board's period ISR never runs a pass with one motor on the new values and the other on the
+    /// old (`specs/twelve-fet.md` section 5.7). `true` when motor 0 has a runtime.
+    pub fn install_rederived(r: &[Rederived; COUNT]) -> bool {
         cortex_m::interrupt::free(|_| {
             // SAFETY: the period vector cannot fire inside this section, so the 250 Hz thread is
             // the only accessor of the runtime for its duration (the `MOTOR` invariant).
-            match unsafe { (*addr_of_mut!(MOTOR)).as_mut() } {
-                Some(m) => {
+            let motors = unsafe { &mut *addr_of_mut!(MOTOR) };
+            for (slot, r) in motors.iter_mut().zip(r) {
+                if let Some(m) = slot.as_mut() {
                     m.method = r.method;
                     m.current.reconfigure(r.limit_counts);
                     m.commutator.switch_method(r.records, r.decode);
                     m.faults = (m.faults & !FAULT_METHOD) | r.method_fault;
-                    true
                 }
-                None => false,
             }
+            motors[0].is_some()
         })
     }
 
     /// Float every phase (the shutdown sequence's explicit coast posture). Not inferable from a
     /// zero demand across methods, so it is applied directly.
+    /// Every motor's.
     pub fn float_all_channels() {
         // SAFETY: read-only access to a static written once on the boot thread, from the 250 Hz
         // task, which is the only reader.
-        if let Some(t) = unsafe { (*addr_of_mut!(TIMER)).as_ref() } {
+        for t in unsafe { (*addr_of_mut!(TIMER)).iter().flatten() } {
             t.handle().set_channel_outputs([false; 3]);
+        }
+    }
+
+    /// ADC1, the two-motor image's battery converter (`specs/twelve-fet.md` section 5.4; the
+    /// GD32F103RC's image, the one image with two motors and the HAL's split regular conversion), once
+    /// [`battery_bring_up`] has configured and calibrated it. Main-thread only: written at boot,
+    /// read by the 250 Hz task.
+    #[cfg(feature = "gd32f103rc")]
+    static mut BATTERY_ADC: Option<hal::Adc> = None;
+
+    /// Bring ADC1 up for the battery: its clock, one regular channel `channel` at 239.5 cycles
+    /// (the divider's source impedance), software-triggered, calibrated. Free mode: nothing writes
+    /// `SYNCM`. A refusal leaves no converter, and the battery word stays 0 (UNKNOWN).
+    #[cfg(feature = "gd32f103rc")]
+    fn battery_bring_up(chip: &Chip, channel: u8) {
+        let Ok(rcu) = chip.rcu_base() else { return };
+        if clock::enable_adc(rcu, chip.clock(), PeriphLabel::Adc1).is_err() {
+            return;
+        }
+        let Ok(adc) = chip.adc_instance(PeriphLabel::Adc1) else {
+            return;
+        };
+        adc.configure_single(channel, SAMPLE_TIME_239P5);
+        if adc.calibrate().is_ok() {
+            // SAFETY: the one write, on the boot thread, before the scheduler exists.
+            unsafe { *addr_of_mut!(BATTERY_ADC) = Some(adc) };
+            adc.start_regular();
+        }
+    }
+
+    /// The 250 Hz pass's battery read, at its start: the conversion [`battery_start`] began at the
+    /// end of the previous pass, into [`VBATT_RAW`] (12-bit, right-aligned). Nothing on a one-motor
+    /// image, whose ISR takes the battery from the injected group's rank 2.
+    #[inline]
+    pub fn battery_read() {
+        #[cfg(feature = "gd32f103rc")]
+        {
+            // SAFETY: main-thread only (see the static).
+            if let Some(adc) = unsafe { (*addr_of_mut!(BATTERY_ADC)).as_ref() } {
+                if let Some(raw) = adc.regular_result() {
+                    VBATT_RAW.store(u32::from(raw), Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// The 250 Hz pass's battery start, at its end: the next conversion, 21 us of ADC1 that the
+    /// next pass reads. Nothing on a one-motor image.
+    #[inline]
+    pub fn battery_start() {
+        #[cfg(feature = "gd32f103rc")]
+        {
+            // SAFETY: main-thread only (see the static).
+            if let Some(adc) = unsafe { (*addr_of_mut!(BATTERY_ADC)).as_ref() } {
+                adc.start_regular();
+            }
         }
     }
 
@@ -2088,21 +2133,32 @@ pub mod hw {
         pub timer: PwmTimer,
     }
 
-    /// Bring motor 0 up from its stored configuration (`crate::layout::read`), disarmed
-    /// (`BRING_UP_STEPS`, in order).
+    /// Bring every stored motor up from its stored configuration (`crate::layout::read`), disarmed
+    /// (`BRING_UP_STEPS`, in order; each step for the motors it concerns, `specs/twelve-fet.md`
+    /// section 5.5).
     ///
-    /// Returns the summary on success, or the step that stopped it. Nothing here writes MOE: the
-    /// arming gate is not built, not held, and not reachable from this module. The summary carries
-    /// the configured timer so `crate::arm` can build one, which is the only route by which this
-    /// board becomes armable at all.
+    /// Returns, per motor index, the summary on success or why that motor did not come up. A motor
+    /// that fails a per-motor step is not brought up and the other comes up alone, except that
+    /// motor 0 failing takes motor 1 with it ([`MotorSkip::NoMotor0`]): TIMER0 is the ADC trigger
+    /// and TIMER7's master. A board-wide step (the ADC, the counter start, the trigger confirm, the
+    /// calibration's conversions, the vector) failing fails every motor still up. The arming gate
+    /// is not built, not held, and not named in this module; the only MOE is the calibration's,
+    /// through `cal_moe` for a motor calibrated with its low sides on. The summary carries the configured timer so `crate::arm` can build its gate, which is the only
+    /// route by which a motor becomes armable at all.
+    ///
     /// `period_hz` is the rate this bring-up's period ISR will run at ([`period_isr_hz`] of the
     /// configured timer clock). The commutator's hall debounce window is derived from it.
-    /// `noise_floor` is the boot-read `MOTOR_NOISE_FLOOR` at this motor's index, the one input to the
-    /// limit conversion that is BOOT-read: it rides [`BootFixed`] from here so every install
+    /// `noise_floor` is the boot-read `MOTOR_NOISE_FLOOR` at each motor's index, the one input to
+    /// the limit conversion that is BOOT-read: it rides [`BootFixed`] from here so every install
     /// converts against one floor.
-    /// `vbatt` is the stored battery-sense input with its ADC channel: `Some` adds the battery rank
-    /// to the injected group (rank 2, after the two phase ranks) and puts its pin in analog mode
-    /// beside them.
+    /// `cal_moe` is the arming layer's calibration MOE (`crate::arm::hw::calibration_moe`), which
+    /// [`BringUpStep::CalibratePhaseOffsets`] calls for a motor stored `low_side_on` alone
+    /// ([`Motor::sense_low_side`], section 5.5).
+    /// `vbatt` is the stored battery-sense input with its ADC channel. On a one-motor image `Some`
+    /// adds the battery rank to the injected group (rank 2, after the two phase ranks); on the
+    /// two-motor image the four phase ranks fill the group and the battery is ADC1's regular
+    /// conversion ([`battery_start`], section 5.4). Either way its pin goes to analog mode with
+    /// the phase pins.
     ///
     /// The method, the limit, the direction and the align offset are the arm row's, which the
     /// boot installs right after this through the same install every arm uses
@@ -2110,63 +2166,136 @@ pub mod hw {
     /// offset 0, at the floor's limit, on a bridge MOE holds off.
     pub fn bring_up(
         chip: &Chip,
-        motor: Option<&Motor>,
+        motors: &[Option<Motor>; COUNT],
         vbatt: Option<Pin3>,
         period_hz: u32,
-        noise_floor: u16,
+        noise_floor: [u16; COUNT],
+        cal_moe: fn(&PwmTimer, bool),
+    ) -> [Result<MotorRuntimeSummary, MotorSkip>; COUNT] {
+        // Motor 1's outcome, which the bring-up writes as it goes (a two-motor image only).
+        let mut second = Err(MotorSkip::Absent);
+        let first = bring_up_motors(
+            chip,
+            motors,
+            vbatt,
+            period_hz,
+            noise_floor,
+            cal_moe,
+            &mut second,
+        );
+        let mut out = [Err(MotorSkip::Absent); COUNT];
+        if COUNT > 1 {
+            // Motor 1 rides on motor 0 (section 5.2): a configured motor 1 is down with it.
+            out[COUNT - 1] = second_outcome(first.is_ok(), second);
+        }
+        out[0] = first;
+        out
+    }
+
+    /// [`bring_up`]'s body: motor 0's steps in order, stopping at the first that fails, with
+    /// motor 1's share of each step beside motor 0's (`COUNT > 1`, compiled out on a one-motor
+    /// image). A failure of motor 1's own share stops motor 1 alone and is written to `second`;
+    /// motor 1's success is written there at the end.
+    fn bring_up_motors(
+        chip: &Chip,
+        motors: &[Option<Motor>; COUNT],
+        vbatt: Option<Pin3>,
+        period_hz: u32,
+        noise_floor: [u16; COUNT],
+        cal_moe: fn(&PwmTimer, bool),
+        second: &mut Result<MotorRuntimeSummary, MotorSkip>,
     ) -> Result<MotorRuntimeSummary, MotorSkip> {
-        // `MOTOR` lives in `.uninit` (see the static): give it the `None` its initializer names
+        // `MOTOR` lives in `.uninit` (see the static): give it the `None`s its initializer names
         // before anything that could register its reader. `write`, not `=`, so the reset garbage
-        // is never dropped.
+        // is never dropped, and one slot at a time: a whole-array write materializes the array's
+        // image in flash and copies it, where a `None` is one niche byte.
         // SAFETY: the boot thread, before the period vector is registered or unmasked; no
-        // reference formed.
-        unsafe { addr_of_mut!(MOTOR).write(None) };
+        // reference formed, and `i` is inside the array.
+        for i in 0..COUNT {
+            unsafe {
+                (addr_of_mut!(MOTOR) as *mut Option<MotorRuntime>)
+                    .add(i)
+                    .write(None)
+            };
+        }
         // Step 1 of the spec's list, before the ordered steps: an absent motor (its halls, gates
-        // or gate timer not stored) is a valid board state, not a fault.
-        let m = motor.ok_or(MotorSkip::Absent)?;
-        let phase = m.phase.ok_or(MotorSkip::NoCurrentSense)?;
-        // The advanced timer this motor's gate set belongs to, taken from the VALIDATED model
-        // rather than written as a literal: `board::Capabilities::gate_set` derived the index from
-        // the six gate pins, and the 12-FET's second motor is TIMER7. One resolution, one owner
-        // ([`gate_timer_label`]), consumed by the clock enable, the timer config and the
-        // injected-group trigger alike. Attributed to `EnableTimerClock` because that is the first
-        // step that needs it. An index with no label stops the bring-up here; a TIMER7 gate set
-        // gets its label and stops later, at `ConfigureInjectedGroup`, where the ADC's trigger mux
-        // refuses anything but TIMER0 (see [`gate_timer_label`]). Either way the motor fails loudly
-        // instead of driving TIMER0's registers under another timer's name.
-        let timer_label = gate_timer_label(m.timer)
-            .ok_or(MotorSkip::StepFailed(BringUpStep::EnableTimerClock))?;
+        // or gate timer not stored) is a valid board state, not a fault; a motor without phase
+        // pins is not brought up.
+        let resolve = |m: Option<Motor>| -> Result<(Motor, Sense, PeriphLabel), MotorSkip> {
+            let m = m.ok_or(MotorSkip::Absent)?;
+            let sense = m.phase.ok_or(MotorSkip::NoCurrentSense)?;
+            // The advanced timer this motor's gate set belongs to, taken from the stored
+            // `gate.timer` rather than written as a literal: one resolution, one owner
+            // ([`gate_timer_label`]), consumed by the clock enable, the timer config, the trigger
+            // and the follow alike. Attributed to `EnableTimerClock` because that is the first
+            // step that needs it.
+            let label = gate_timer_label(m.timer)
+                .ok_or(MotorSkip::StepFailed(BringUpStep::EnableTimerClock))?;
+            Ok((m, sense, label))
+        };
+        // Motor 1, while it is still coming up; `None` once it is absent or a step of its own
+        // failed, with the reason in `second`.
+        let mut m1 = None;
+        if COUNT > 1 {
+            match resolve(motors[COUNT - 1]) {
+                Ok(r) => m1 = Some(r),
+                Err(skip) => *second = Err(skip),
+            }
+        }
+        let (m, sense, timer_label) = resolve(motors[0])?;
+        let phase = sense.pins;
         // Six-step until the arm row's install, which follows this bring-up at boot.
         let requested = commutation::CommutationMethod::SixStep;
 
-        // The one configured timer object, built by `ConfigureTimer` and reused by every later
-        // step that touches the timer (the trigger channel, the counter start, the per-cycle
-        // handle): configuring it once is the bring-up, not a step that repeats.
+        // The configured timer objects, built by `ConfigureTimer` and reused by every later step
+        // that touches a timer (the trigger channel, the follow, the counter start, the per-cycle
+        // handle): configuring each once is the bring-up, not a step that repeats.
         let mut timer: Option<PwmTimer> = None;
+        let mut timer1: Option<PwmTimer> = None;
         let mut injected = None;
-        // The calibration's two products, set by `CalibratePhaseOffsets`: the GATED pair (the FOC
-        // capability, and the value `FocState::new` takes) and the RAW measured pair the ISR reads
-        // currents against whether or not it was accepted.
-        let mut cal: Option<(Option<PhaseOffsets>, (u16, u16))> = None;
-        // The calibration's bits of the hold word (section 7), set by `CalibratePhaseOffsets`.
-        let mut cal_bits = 0u32;
+        // The calibration's products, set by `CalibratePhaseOffsets`: per motor, the GATED pair
+        // (the FOC capability, and the value `FocState::new` takes), the RAW measured pair the ISR
+        // reads currents against whether or not it was accepted, and the hold word's calibration
+        // bits (section 7).
+        let mut cal: [(Option<PhaseOffsets>, (u16, u16), u32); COUNT] = [(None, (0, 0), 0); COUNT];
+        let mut calibrated = false;
 
         for step in BRING_UP_STEPS {
             let failed = |s: BringUpStep| MotorSkip::StepFailed(s);
+            // Motor 1's share of a per-motor step failed: motor 1 is down, motor 0 goes on.
+            let mut drop_m1 = |m1: &mut Option<_>| {
+                *m1 = None;
+                *second = Err(failed(step));
+            };
             match step {
                 BringUpStep::EnableTimerClock => {
                     let rcu = chip.rcu_base().map_err(|_| failed(step))?;
                     clock::enable_timer(rcu, chip.clock(), timer_label)
                         .map_err(|_| failed(step))?;
+                    if COUNT > 1 {
+                        if let Some((_, _, l)) = m1 {
+                            if clock::enable_timer(rcu, chip.clock(), l).is_err() {
+                                drop_m1(&mut m1);
+                            }
+                        }
+                    }
                 }
                 BringUpStep::ConfigureTimer => {
                     timer = Some(
                         PwmTimer::configure(chip, &timer_config(m.dead_time, timer_label))
                             .map_err(|_| failed(step))?,
                     );
+                    if COUNT > 1 {
+                        if let Some((m1m, _, l)) = m1 {
+                            match PwmTimer::configure(chip, &timer_config(m1m.dead_time, l)) {
+                                Ok(t) => timer1 = Some(t),
+                                Err(_) => drop_m1(&mut m1),
+                            }
+                        }
+                    }
                 }
                 BringUpStep::ConfigureTriggerChannel => {
-                    // The trigger channel + TRGO are a separate step on the SAME configured timer
+                    // The trigger channel + TRGO are a separate step on motor 0's timer, TIMER0
                     // (the HAL keeps them out of `configure` so the channel golden stays
                     // CH3-untouched).
                     timer.ok_or(failed(step))?.configure_trigger(
@@ -2179,12 +2308,34 @@ pub mod hw {
                         TrgoSource::Ch3Compare,
                     );
                 }
+                BringUpStep::FollowTimer0 => {
+                    // Section 5.1 steps 2 and 4: motor 1's timer preset in step with TIMER0's
+                    // first trigger and set to start on it. `follow` refuses any pair but TIMER7
+                    // on TIMER0, so a motor 1 staged on the wrong timer stops here. Nothing on a
+                    // one-motor image.
+                    if COUNT > 1 {
+                        if let (Some(master), Some(slave)) = (timer, timer1) {
+                            if m1.is_some() && slave.follow(&master, SLAVE_START_COUNT).is_err() {
+                                drop_m1(&mut m1);
+                            }
+                        }
+                    }
+                }
                 BringUpStep::RouteGatePins => {
                     // The GD32F10x routes the timer by its AFIO remap, the stored one.
-                    #[cfg(feature = "gd32f103c8")]
+                    #[cfg(any(feature = "gd32f103c8", feature = "gd32f103rc"))]
                     hal::afio::remap(timer_label, m.remap);
                     for [port, pin, af] in m.gates {
                         chip.gate_pin(PinAf { port, pin, af });
+                    }
+                    if COUNT > 1 {
+                        if let Some((m1m, _, _l)) = m1 {
+                            #[cfg(any(feature = "gd32f103c8", feature = "gd32f103rc"))]
+                            hal::afio::remap(_l, m1m.remap);
+                            for [port, pin, af] in m1m.gates {
+                                chip.gate_pin(PinAf { port, pin, af });
+                            }
+                        }
                     }
                 }
                 BringUpStep::EnableAdcClock => {
@@ -2193,9 +2344,14 @@ pub mod hw {
                         .map_err(|_| failed(step))?;
                 }
                 BringUpStep::ConfigurePhasePins => {
-                    // The battery-sense pin rides with the phase pins: every analog input the
-                    // injected group converts is put in analog mode by this one step.
-                    for [port, pin, _] in phase.iter().chain(vbatt.as_ref()) {
+                    // The battery-sense pin rides with the phase pins: every analog input this
+                    // board converts is put in analog mode by this one step.
+                    let second_pair = m1.map(|(_, s, _)| s.pins).filter(|_| COUNT > 1);
+                    for [port, pin, _] in phase
+                        .iter()
+                        .chain(second_pair.iter().flatten())
+                        .chain(vbatt.as_ref())
+                    {
                         chip.analog_pin(PinId {
                             port: *port,
                             pin: *pin,
@@ -2203,24 +2359,40 @@ pub mod hw {
                     }
                 }
                 BringUpStep::ConfigureInjectedGroup => {
+                    // Motor 0's pair, motor 1's after it, and the battery where the group carries
+                    // it (one motor: rank 2; two motors: ADC1's, section 5.4).
+                    let first = [phase[0][2], phase[1][2]];
+                    let pairs = match m1.filter(|_| COUNT > 1) {
+                        Some((_, s, _)) => [first, [s.pins[0][2], s.pins[1][2]]],
+                        None => [first; 2],
+                    };
+                    let n = if COUNT > 1 && m1.is_some() { 2 } else { 1 };
+                    let vbatt_rank = vbatt.filter(|_| COUNT == 1).map(|v| v[2]);
                     let handle = InjectedAdcController::new()
                         .configure(
                             chip,
-                            &injected_config(
-                                &injected_ranks([phase[0][2], phase[1][2]], vbatt.map(|v| v[2])),
-                                timer_label,
-                            ),
+                            &injected_config(&injected_ranks(&pairs[..n], vbatt_rank), timer_label),
                         )
                         .map_err(|_| failed(step))?;
                     injected = Some(handle);
+                    #[cfg(feature = "gd32f103rc")]
+                    if let Some(v) = vbatt {
+                        battery_bring_up(chip, v[2]);
+                    }
                 }
                 BringUpStep::StartCounter => {
+                    // TIMER0 alone: TIMER7 starts on TIMER0's first trigger (section 5.1 step 5).
                     let t = timer.ok_or(failed(step))?;
                     t.enable_counter();
                     COUNTER_RUNNING.store(true, Ordering::Relaxed);
-                    // SAFETY: the one write, on the boot thread, before the scheduler exists and
-                    // therefore before any 250 Hz reader does.
-                    unsafe { *addr_of_mut!(TIMER) = Some(t) };
+                    // SAFETY: the one write per motor, on the boot thread, before the scheduler
+                    // exists and therefore before any 250 Hz reader does.
+                    unsafe {
+                        (*addr_of_mut!(TIMER))[0] = Some(t);
+                        if COUNT > 1 && m1.is_some() {
+                            (*addr_of_mut!(TIMER))[COUNT - 1] = timer1;
+                        }
+                    }
                 }
                 BringUpStep::ConfirmTriggerStart => {
                     let inj = injected.ok_or(failed(step))?;
@@ -2232,109 +2404,93 @@ pub mod hw {
                     // Unconditional (`specs/motor-integration.md`, "The current limit"): the limit
                     // reads both sensed phases against these zeros whatever method runs. A
                     // refusal does NOT fail the step: the motor still comes up, on six-step,
-                    // carrying the init-failure fault, which keeps it from arming.
+                    // carrying the init-failure fault, which keeps it from arming. Every block
+                    // reads both motors' ranks from the same conversions; the verdict, the
+                    // accepted pair and OBS_CAL are per motor (section 5.5).
                     let inj = injected.ok_or(failed(step))?;
-                    cal = Some(match measure_offsets(&inj) {
-                        Some(verdict) => {
-                            cal_bits = cal_hold_bits(verdict);
-                            // The pair published and the pair the ISR reads currents against: the
-                            // agreed mean, or the last block of a refused run (so a refused board
-                            // reports where it sat); only an agreed pair is offered to the gate.
+                    calibrated = true;
+                    // The bridge state each motor's zeros are measured in (section 5.5): a motor
+                    // stored `low_side_on` has its three channels enabled and MOE set before the
+                    // settle, at `PwmTimer::configure`'s zero duty, which nothing writes before
+                    // the period vector, so its low sides are on and its high sides off for the
+                    // whole measurement; after it, MOE is cleared and the channels disabled, the
+                    // posture `float_all_channels` leaves. Every exit of `measure_offsets` passes
+                    // the release.
+                    let low1 = COUNT > 1 && m1.is_some_and(|(m1m, _, _)| m1m.sense_low_side);
+                    let hold = |on: bool| {
+                        if let (Some(t), true) = (&timer, m.sense_low_side) {
+                            cal_hold(t, on, cal_moe);
+                        }
+                        if let (Some(t), true) = (&timer1, low1) {
+                            cal_hold(t, on, cal_moe);
+                        }
+                    };
+                    hold(true);
+                    let measured = measure_offsets(&inj);
+                    hold(false);
+                    if let Some(verdicts) = measured {
+                        for (i, (c, verdict)) in cal.iter_mut().zip(verdicts).enumerate() {
+                            // The pair published and the pair the ISR reads currents against:
+                            // the agreed mean, or the last block of a refused run (so a refused
+                            // board reports where it sat); only an agreed pair is offered to the
+                            // gate.
                             let (agreed, (a, b)) = match verdict {
                                 CalVerdict::Agreed(mean, _) => (Some(mean), mean),
                                 CalVerdict::Refused(last) => (None, last),
                                 // Not an outcome `measure_offsets` returns; read as a refusal.
                                 CalVerdict::Again => (None, (0, 0)),
                             };
-                            OBS_CAL.store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
+                            OBS_CAL[i].store((a as u32) | ((b as u32) << 16), Ordering::Relaxed);
                             // The acceptance window's single owner is the commutation crate's
                             // gated newtype, so the check is ITS constructor, never a copy of its
-                            // constants here, and what is carried on is the constructor's OUTPUT:
-                            // the accepted pair a FOC record can be built from, or nothing.
-                            (
+                            // constants here, and what is carried on is the constructor's
+                            // OUTPUT: the accepted pair a FOC record can be built from, or
+                            // nothing.
+                            *c = (
                                 agreed.and_then(|(a, b)| PhaseOffsets::try_new(a, b)),
                                 (a, b),
-                            )
+                                cal_hold_bits(verdict),
+                            );
                         }
-                        // No conversion inside the poll budget: no trustworthy zero-current
-                        // reference, and OBS_CAL stays zero to say the measurement itself never
-                        // happened.
-                        None => (None, (0, 0)),
-                    });
+                    }
+                    // No conversion inside the poll budget: no trustworthy zero-current
+                    // reference, and OBS_CAL stays zero to say the measurement itself never
+                    // happened.
                 }
                 BringUpStep::SelectMethodAndInstall => {
-                    let (pwm, inj, (accepted, offsets)) = match (timer, injected, cal) {
-                        (Some(t), Some(i), Some(c)) => (t.handle(), i, c),
-                        _ => return Err(failed(step)),
+                    let (Some(t), Some(inj), true) = (timer, injected, calibrated) else {
+                        return Err(failed(step));
                     };
-                    let group = chip.input_group(m.halls.map(|[port, pin]| PinId { port, pin }));
-                    // The boot-fixed facts, kept on the runtime so the arm-time re-derivation
-                    // rebuilds the records from the SAME floor and accepted zeros rather than
-                    // re-measuring the bridge (`specs/integration.md`, the arm-time re-read).
-                    let boot = BootFixed {
-                        noise_floor,
-                        accepted_offsets: accepted,
-                    };
-                    // Forward, offset 0, and the floor's limit until the arm row's install.
-                    let decode =
-                        commutation::sixstep::SixStep::new(commutation::Direction::Forward, 0);
-                    let limit = noise_floor_counts(boot.noise_floor);
-                    // One construction shape for the records, shared with `motor::rederive`, and
-                    // the method that runs is the records' own: a demoted request cannot publish
-                    // the method it asked for.
-                    let records = method_records(
+                    install(
+                        chip,
+                        0,
+                        &m,
+                        &sense,
+                        t,
+                        inj,
+                        cal[0],
+                        noise_floor[0],
+                        period_hz,
                         requested,
-                        boot,
-                        decode,
-                        full_scale_counts(limit, boot.noise_floor),
                     );
-                    let method = records.method();
-                    let cal = cal_outcome(accepted);
-                    let base_flags = OBS_CONFIGURED
-                        | OBS_CURRENT_SENSE
-                        | if cal == CalOutcome::Accepted {
-                            OBS_CAL_ACCEPTED
-                        } else {
-                            0
-                        };
-                    // The init-failure and method-demotion fault bits, published here and SEEDED
-                    // into the ISR's own accumulator: the ISR stores its accumulator over `FAULT` every period, so an
-                    // init fault the ISR did not know about would be erased on the first entry.
-                    // Seeding it keeps the ISR the sole writer of `FAULT` after the unmask while
-                    // still carrying a fault raised before it.
-                    let init_faults = init_fault_bits(cal);
-                    FAULT.store(init_faults, Ordering::Relaxed);
-                    // SAFETY: the one write, on the boot thread, BEFORE the period vector is
-                    // unmasked (the next-but-one step), so no ISR can observe it half-built.
-                    unsafe {
-                        *addr_of_mut!(MOTOR) = Some(MotorRuntime {
-                            pwm,
-                            injected: inj,
-                            halls: group,
-                            commutator: Commutator::new(records, period_hz, decode),
-                            boot,
-                            base_flags,
-                            method: method.to_u8(),
-                            periods: 0,
-                            since_demand: 0,
-                            last_seq: DEMAND_SEQ.load(Ordering::Relaxed),
-                            faults: init_faults,
-                            offsets,
-                            current: CurrentLimit::new(limit),
-                            hold: SampleHold::new(),
-                            coasted: 0,
-                            causes: cal_bits,
-                        });
+                    if COUNT > 1 {
+                        if let (Some((m1m, s1, _)), Some(t1)) = (m1, timer1) {
+                            let i = COUNT - 1;
+                            install(
+                                chip,
+                                i,
+                                &m1m,
+                                &s1,
+                                t1,
+                                inj,
+                                cal[i],
+                                noise_floor[i],
+                                period_hz,
+                                requested,
+                            );
+                            *second = Ok(MotorRuntimeSummary { timer: t1 });
+                        }
                     }
-                    // The sample hold's threshold for THIS board's dead time
-                    // (`specs/foc-torque.md` section 14): stored once, here, so the derivation
-                    // runs against the staged `motor.dead_time` the timer was just configured
-                    // with, and the knob keeps whatever a bench session writes over it after.
-                    FOC_HOLD_COMPARE.store(hold_compare_max(m.dead_time) as u32, Ordering::Relaxed);
-                    OBS_STATE.store(
-                        pack_obs_state(0, [false; 3], method.to_u8(), base_flags),
-                        Ordering::Relaxed,
-                    );
                 }
                 BringUpStep::EnablePeriodVector => {
                     let period_irq = irq::period_irq(chip.irq());
@@ -2346,6 +2502,113 @@ pub mod hw {
         Ok(MotorRuntimeSummary {
             timer: timer.ok_or(MotorSkip::StepFailed(BringUpStep::ConfigureTimer))?,
         })
+    }
+
+    /// One motor's calibration posture (section 5.5): `on` enables the three channels then sets
+    /// MOE through `cal_moe`; off clears MOE then disables the channels.
+    #[inline(never)]
+    fn cal_hold(t: &PwmTimer, on: bool, cal_moe: fn(&PwmTimer, bool)) {
+        let h = t.handle();
+        if on {
+            h.set_channel_outputs([true; 3]);
+        }
+        cal_moe(t, on);
+        if !on {
+            h.set_channel_outputs([false; 3]);
+        }
+    }
+
+    /// [`BringUpStep::SelectMethodAndInstall`] for motor `i`: build its records and install the
+    /// runtime the ISR reads, with its published words. `#[inline(always)]`: one call per motor
+    /// the image drives, so a one-motor image carries the body once, where it was.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn install(
+        chip: &Chip,
+        i: usize,
+        m: &Motor,
+        sense: &Sense,
+        timer: PwmTimer,
+        inj: InjectedHandle,
+        (accepted, offsets, cal_bits): (Option<PhaseOffsets>, (u16, u16), u32),
+        noise_floor: u16,
+        period_hz: u32,
+        requested: commutation::CommutationMethod,
+    ) {
+        let group = chip.input_group(m.halls.map(|[port, pin]| PinId { port, pin }));
+        // The boot-fixed facts, kept on the runtime so the arm-time re-derivation rebuilds the
+        // records from the SAME floor and accepted zeros rather than re-measuring the bridge
+        // (`specs/integration.md`, the arm-time re-read).
+        let boot = BootFixed {
+            noise_floor,
+            accepted_offsets: accepted,
+        };
+        // Forward, offset 0, and the floor's limit until the arm row's install.
+        let decode = commutation::sixstep::SixStep::new(commutation::Direction::Forward, 0);
+        let limit = noise_floor_counts(boot.noise_floor);
+        // One construction shape for the records, shared with `motor::rederive`, and the method
+        // that runs is the records' own: a demoted request cannot publish the method it asked for.
+        let records = method_records(
+            requested,
+            boot,
+            decode,
+            full_scale_counts(limit, boot.noise_floor),
+        );
+        let method = records.method();
+        let cal = cal_outcome(accepted);
+        let base_flags = OBS_CONFIGURED
+            | OBS_CURRENT_SENSE
+            | if cal == CalOutcome::Accepted {
+                OBS_CAL_ACCEPTED
+            } else {
+                0
+            };
+        // The init-failure and method-demotion fault bits, published here and SEEDED into the
+        // ISR's own accumulator: the ISR stores its accumulator over `FAULT` every period, so an
+        // init fault the ISR did not know about would be erased on the first entry. Seeding it
+        // keeps the ISR the sole writer of `FAULT` after the unmask while still carrying a fault
+        // raised before it.
+        let init_faults = init_fault_bits(cal);
+        FAULT[i].store(init_faults, Ordering::Relaxed);
+        // SAFETY: the one write per motor, on the boot thread, BEFORE the period vector is
+        // unmasked (the next step), so no ISR can observe it half-built.
+        unsafe {
+            (*addr_of_mut!(MOTOR))[i] = Some(MotorRuntime {
+                pwm: timer.handle(),
+                injected: inj,
+                halls: group,
+                commutator: Commutator::new(records, period_hz, decode),
+                boot,
+                base_flags,
+                method: method.to_u8(),
+                bc: COUNT > 1 && sense.pair == Pair::Bc,
+                low_side: m.sense_low_side,
+                sample_enables: [false; 3],
+                periods: 0,
+                since_demand: 0,
+                last_seq: DEMAND_SEQ.load(Ordering::Relaxed),
+                faults: init_faults,
+                offsets,
+                current: CurrentLimit::new(limit),
+                hold: SampleHold::new(),
+                coasted: 0,
+                causes: cal_bits,
+            });
+        }
+        // The sample hold's threshold for THIS motor (`specs/foc-torque.md` section 14): motor 0's
+        // from the staged `motor.dead_time` the timer was just configured with; motor 1's from
+        // where its later ranks sample (`specs/twelve-fet.md` section 5.2). Stored once, here; the
+        // knob keeps whatever a bench session writes over it after.
+        let threshold = if i == 0 {
+            hold_compare_max(m.dead_time)
+        } else {
+            MOTOR_1_HOLD_COMPARE
+        };
+        FOC_HOLD_COMPARE[i].store(threshold as u32, Ordering::Relaxed);
+        OBS_STATE[i].store(
+            pack_obs_state(0, [false; 3], method.to_u8(), base_flags),
+            Ordering::Relaxed,
+        );
     }
 
     /// Re-assert the injected group's external-trigger enable until the group actually converts.
@@ -2392,44 +2655,68 @@ pub mod hw {
     /// ([`commutation::foc::cal_accumulate`]) and the two sums folded by [`cal_offsets`] into the
     /// offset unit. `None` if any conversion failed to complete inside the poll budget. The two
     /// ranks are read from the SAME conversion, so both channels come from one instant of each
-    /// period. Two words of the bring-up's frame, where round 3's arrays were 128 B.
-    fn measure_block(injected: &InjectedHandle) -> Option<CalBlock> {
-        let (mut sum_a, mut sum_b) = (0u32, 0u32);
+    /// period. Two words per motor of the bring-up's frame, where round 3's arrays were 128 B.
+    ///
+    /// Every motor's pair from the same conversions: motor `m`'s ranks are `2m` and `2m + 1`
+    /// (`specs/twelve-fet.md` section 5.5). A motor not up reads ranks the group does not convert;
+    /// its block is never used.
+    fn measure_block(injected: &InjectedHandle) -> Option<[CalBlock; COUNT]> {
+        let mut sums = [[0u32; 2]; COUNT];
         for _ in 0..CAL_SAMPLES {
             if !await_conversion(injected) {
                 return None;
             }
             let s = injected.read_injected();
-            sum_a = commutation::foc::cal_accumulate(sum_a, s[0]);
-            sum_b = commutation::foc::cal_accumulate(sum_b, s[1]);
+            let (ranks, _) = s.as_chunks::<2>();
+            for (sum, rank) in sums.iter_mut().zip(ranks) {
+                sum[0] = commutation::foc::cal_accumulate(sum[0], rank[0]);
+                sum[1] = commutation::foc::cal_accumulate(sum[1], rank[1]);
+            }
         }
-        Some(cal_offsets(sum_a, sum_b))
+        Some(sums.map(|[a, b]| cal_offsets(a, b)))
     }
 
     /// Measure the quiet-bridge phase-current zero offsets (`specs/foc-torque.md` section 15):
     /// [`CAL_SETTLE_CONVERSIONS`] conversions discarded, then blocks until two consecutive ones
     /// agree or [`CAL_BLOCKS`] have not ([`cal_verdict`], the one rule, applied after each block
     /// so the loop stops at the first agreement). `None` if any conversion failed to complete
-    /// inside the poll budget; otherwise the verdict, never `Again`.
+    /// inside the poll budget; otherwise each motor's verdict, never `Again`.
     ///
-    /// The bridge is quiet by construction, not by convention: MOE is never written in this crate,
-    /// so no phase can be driven while this runs.
-    fn measure_offsets(injected: &InjectedHandle) -> Option<CalVerdict> {
+    /// Every motor is judged, each by its own blocks, from the same conversions: the loop stops
+    /// when every one has its verdict, and a motor that decided early keeps its verdict while the
+    /// other measures on. A motor that is not up reads ranks the group does not convert; its
+    /// verdict is never used.
+    ///
+    /// The bridge is quiet or holds its low sides on, as the caller set it (`current.sense`,
+    /// section 5.5); no high side is on while this runs.
+    fn measure_offsets(injected: &InjectedHandle) -> Option<[CalVerdict; COUNT]> {
         for _ in 0..CAL_SETTLE_CONVERSIONS {
             if !await_conversion(injected) {
                 return None;
             }
         }
-        let mut blocks: [CalBlock; CAL_BLOCKS] = [(0, 0); CAL_BLOCKS];
+        let mut blocks: [[CalBlock; CAL_BLOCKS]; COUNT] = [[(0, 0); CAL_BLOCKS]; COUNT];
+        let mut verdicts = [CalVerdict::Again; COUNT];
         for n in 0..CAL_BLOCKS {
-            blocks[n] = measure_block(injected)?;
-            match cal_verdict(&blocks[..=n]) {
-                CalVerdict::Again => {}
-                verdict => return Some(verdict),
+            let block = measure_block(injected)?;
+            let mut decided = true;
+            for ((v, b), mb) in verdicts.iter_mut().zip(blocks.iter_mut()).zip(block) {
+                if *v == CalVerdict::Again {
+                    b[n] = mb;
+                    *v = match cal_verdict(&b[..=n]) {
+                        // Unreachable by the rule (the last block decides), kept as the refusal
+                        // it would be.
+                        CalVerdict::Again if n + 1 == CAL_BLOCKS => CalVerdict::Refused(mb),
+                        verdict => verdict,
+                    };
+                }
+                decided &= *v != CalVerdict::Again;
+            }
+            if decided {
+                break;
             }
         }
-        // Unreachable by the rule (the last block decides), kept as the refusal it would be.
-        Some(CalVerdict::Refused(blocks[CAL_BLOCKS - 1]))
+        Some(verdicts)
     }
 
     /// The advanced-timer label behind the stored `gate.timer` ([`crate::layout::Motor::timer`]):
@@ -2437,15 +2724,11 @@ pub mod hw {
     /// label numbers). `None` for anything else, which is a model
     /// mismatch rather than a board state: the fleet's parts carry at most two advanced timers.
     ///
-    /// A `Timer7` gate set resolves its label here and then FAILS the bring-up at
-    /// `ConfigureInjectedGroup`, and that is the honest outcome rather than a gap in this match:
-    /// the HAL has the label, and it is the ADC's injected trigger mux that refuses it
-    /// (`hal::adc::etsic_for_link` returns `None` for any trigger timer but TIMER0,
-    /// because ADC0's injected external-trigger selector has no TIMER7 TRGO slot on these parts).
-    /// So this change makes the second motor fail LOUDLY where it used to silently drive TIMER0's
-    /// registers, which is the point; it does not make a second motor work. The 12-FET's second
-    /// bridge needs an injected-trigger path resolved on silicon (its own ADC instance, or a
-    /// timer-link the mux does offer), and that is not done.
+    /// A `Timer7` gate set is the 12-FET's motor 1 (`specs/twelve-fet.md` section 5): its timer
+    /// follows TIMER0 ([`BringUpStep::FollowTimer0`]) and its ranks ride ADC0's one injected group,
+    /// which TIMER0 triggers. ADC0's injected selector has no TIMER7 TRGO slot; `ETSIC = 6` selects
+    /// TIMER7_CH3 when `AFIO_PCF0.ADC0_ETRGINS_REMAP` is set on high-density parts (GD32F10x User
+    /// Manual Rev2.3, Table 7-4), and this design uses neither.
     fn gate_timer_label(timer: u8) -> Option<PeriphLabel> {
         match timer {
             0 => Some(PeriphLabel::Timer0),
@@ -2515,13 +2798,13 @@ pub mod hw {
         }
     }
 
-    /// The injected-group configuration over [`injected_ranks`]: two slots, or three with the
-    /// battery rank, never the stock four (the aux consumer does not exist here, so populating it
-    /// would model samples nothing reads). 7.5 cycles on every rank.
+    /// The injected-group configuration over [`injected_ranks`]: two slots, three with the battery
+    /// rank on a one-motor image, or the two-motor image's four phase ranks. 7.5 cycles on every
+    /// rank.
     fn injected_config(ranks: &[u8], trigger_timer: PeriphLabel) -> InjectedAdcConfig {
         let mut chans: Vec<InjectedChannel, 4> = Vec::new();
         for &channel in ranks.iter() {
-            // Cannot overflow: `injected_ranks` yields at most three into a capacity-4 vector.
+            // Cannot overflow: `injected_ranks` yields at most four into a capacity-4 vector.
             let _ = chans.push(InjectedChannel {
                 channel,
                 sample_time: SAMPLE_TIME_7P5,
@@ -2574,40 +2857,76 @@ pub mod hw {
         // exist are the bring-up's write before the unmask, this ISR, and that masked install, and
         // no two of them can be live at once. A later reader deciding whether that critical section
         // is necessary should start from the install's own doc comment, not from this line.
-        let Some(m) = (unsafe { (*addr_of_mut!(MOTOR)).as_mut() }) else {
+        let motors = unsafe { &mut *addr_of_mut!(MOTOR) };
+        // Motor 0 owns the injected group and TIMER0's trigger: motor 1 is up only with it.
+        let Some(m0) = motors[0].as_mut() else {
             return;
         };
         // FIRST: clear the injected end-of-conversion flag. It is a level source into the NVIC and
         // reading IDATAx does not clear it, so this is what makes the vector fire once per period
         // instead of re-entering forever.
-        m.injected.clear_eoic();
+        m0.injected.clear_eoic();
         // THEN re-assert the injected group's external-trigger enable, stock parity: stock's
         // per-period op is exactly this pair (clear EOIC, `ADC_CTL1 |= 0x8000`), which is what
         // keeps the enable a maintained fact rather than a one-shot arming for as long as the ISR
         // runs. The bring-up's start-confirm is the other half, and it is the half that fixes the
         // POR race, since a group that never converts never reaches this line.
-        m.injected.reassert_trigger_enable();
+        m0.injected.reassert_trigger_enable();
 
-        let samples = m.injected.read_injected();
-        // The battery rank's count (rank 2), reduced once to 12 bits and handed to the 250 Hz task.
-        // Not in this period's decision; the ISR owns it only because it owns the ADC. With no
-        // battery rank configured IDATA2 is never written and reads its reset 0.
-        VBATT_RAW.store((samples[2] >> 3) as u32, Ordering::Relaxed);
+        let samples = m0.injected.read_injected();
+        // The battery rank's count (rank 2 on a one-motor image), reduced once to 12 bits and
+        // handed to the 250 Hz task. Not in this period's decision; the ISR owns it only because it
+        // owns the ADC. With no battery rank configured IDATA2 is never written and reads its
+        // reset 0. The two-motor image's battery is ADC1's, read by the 250 Hz task itself.
+        if COUNT == 1 {
+            VBATT_RAW.store((samples[2] >> 3) as u32, Ordering::Relaxed);
+        }
+        // Motor `i`'s sensed pair is ranks `2i` and `2i + 1`.
+        motor_period(m0, 0, [samples[0], samples[1]]);
+        for (k, slot) in motors[1..].iter_mut().enumerate() {
+            let i = k + 1;
+            if let Some(m) = slot.as_mut() {
+                motor_period(m, i, [samples[2 * i], samples[2 * i + 1]]);
+            }
+        }
+    }
+
+    /// One motor's share of a period: offsets, hold, pair mapping, current limit, halls, demand
+    /// freshness, coast posture, commutator step, duties and enables, hold arm, the published words
+    /// at index `i` (`specs/twelve-fet.md` section 5.6). Inlined into [`period_isr`] once per
+    /// motor, so the hot window carries no call. Every motor reads the one demand sequence and the
+    /// one arm state (section 5.6), so a stalled 250 Hz task coasts both.
+    #[inline(always)]
+    fn motor_period(m: &mut MotorRuntime, i: usize, raw: [u16; 2]) {
         // The two conditioned phase currents, this period, from the same two samples (the stock
         // unit, against the bring-up's measured zeros): the current limit's input, and the FOC
         // arm's, which takes this pair rather than computing it a second time. Where FOC runs the
         // measured zeros ARE the accepted pair (the calibration gates the pair it measured).
-        let ia = commutation::foc::current_from_adc(m.offsets.0, samples[0]);
-        let ib = commutation::foc::current_from_adc(m.offsets.1, samples[1]);
+        let ia = commutation::foc::current_from_adc(m.offsets.0, raw[0]);
+        let ib = commutation::foc::current_from_adc(m.offsets.1, raw[1]);
+        // The sample rule (`specs/twelve-fet.md` section 5.6): on a `low_side_on` motor a sensed
+        // phase whose leg was off for this sample, or any while disarmed, reads the phase voltage,
+        // so it is taken as 0, its true current; with neither a reading the limit is passed.
+        let armed = crate::arm::hw::armed();
+        let read = sensed_readings(m.low_side, armed, m.sample_enables, m.bc);
+        let ia = if read[0] { ia } else { 0 };
+        let ib = if read[1] { ib } else { 0 };
         // The sample hold (`specs/foc-torque.md` section 14): a phase flagged from the duties this
         // ISR wrote last period keeps its last fresh value, so neither the limit below nor the
         // arm sees the transient a shunt reads when its leg's low side is barely on.
-        let ((ia, ib), hold) = m.hold.apply(ia, ib);
+        let (sensed, hold) = m.hold.apply(ia, ib);
+        // The sensed pair as Clarke's `(ia, ib)`: itself for A and B, `ia = -(ib + ic)` for B and C
+        // (`specs/twelve-fet.md` section 5.3). A one-motor image senses A and B only.
+        let (ia, ib) = clarke_pair(sensed, COUNT > 1 && m.bc);
         // The current limit's verdict on this period's phase-current magnitude (folded inside, with
         // the window's sums).
-        let current = m.current.step(ia, ib);
+        let current = if read[0] || read[1] {
+            m.current.step(ia, ib)
+        } else {
+            m.current.pass()
+        };
         if current.trip {
-            OVER_CURRENT_TRIPS.store(m.current.trips(), Ordering::Relaxed);
+            OVER_CURRENT_TRIPS[i].store(m.current.trips(), Ordering::Relaxed);
         }
         let code = m.halls.read();
         let levels = [code & 1, (code >> 1) & 1, (code >> 2) & 1];
@@ -2620,14 +2939,13 @@ pub mod hw {
         } else {
             m.since_demand = m.since_demand.saturating_add(1);
         }
-        let demand = DEMAND.load(Ordering::Relaxed);
+        let demand = DEMAND[i].load(Ordering::Relaxed);
         let stale = demand_stale(m.since_demand);
         // The posture is decided BEFORE the step, because the FOC arm needs it: all three inputs
         // are known by now, and on a period whose output will float the arm zeroes its two
         // accumulators instead of integrating measurement noise into a voltage it would apply on
         // the first armed period (`specs/foc-torque.md` section 2). A code motion only: the bridge
         // writes below keep their order (duties, then enables).
-        let armed = crate::arm::hw::armed();
         let coast = coast_posture(armed, stale, current.chop);
         // Word 50's count of floated periods (at most 64 a window, a plain add) and which of the
         // three conditions floated them (zero bits on a driven period), branch-free.
@@ -2639,8 +2957,10 @@ pub mod hw {
         // Flag, for the coming period, the sensed phases these duties drive above the threshold
         // (section 14, step 13 of the chain): decided on the duties as computed, since a coasted
         // period floats every leg and its sample is not a shunt reading either way.
-        m.hold
-            .arm(duties, FOC_HOLD_COMPARE.load(Ordering::Relaxed) as u16);
+        m.hold.arm(
+            sensed_duties(duties, COUNT > 1 && m.bc),
+            FOC_HOLD_COMPARE[i].load(Ordering::Relaxed) as u16,
+        );
 
         let applied_enables = if coast {
             // The explicit coast posture: all phases float regardless of method. It cannot be
@@ -2667,39 +2987,43 @@ pub mod hw {
             m.faults |= FAULT_DUTY_RANGE;
             enables
         };
-        // Re-arm the ADC trigger compare so the next period samples at the same instant.
-        let _ = m.pwm.rearm_trigger(TRIGGER_COMPARE);
+        m.sample_enables = applied_enables;
+        // Re-arm the ADC trigger compare so the next period samples at the same instant: motor 0's
+        // timer, TIMER0, carries the trigger for the board.
+        if i == 0 {
+            let _ = m.pwm.rearm_trigger(TRIGGER_COMPARE);
+        }
 
         // Publish the handoff + observation words (this ISR is the sole writer of each).
         m.periods = m.periods.wrapping_add(1);
-        PERIODS.store(m.periods, Ordering::Relaxed);
+        PERIODS[i].store(m.periods, Ordering::Relaxed);
         // The current observation: one whole 64-period window per publish, so a 250 Hz reader
         // never sees a half-built peak. The mean and the on-duty ride in the same branch, from
         // the same close, so the three words a consumer compares describe one window and the
         // period that ended it (`specs/link-control.md`, the `CYCLIC_STATE` layout).
-        if m.periods % PERIODS_PER_TICK_NOMINAL == 0 {
+        if m.periods.is_multiple_of(PERIODS_PER_TICK_NOMINAL) {
             // The odometer's edge count rides in this branch for the same reason the current
             // window does: once per 64 periods is 250 Hz, far faster than the service loop that
             // folds it, and the per-period path pays nothing (`specs/odometer.md`).
-            EDGES.store(m.commutator.front().comm.edges_total, Ordering::Relaxed);
+            EDGES[i].store(m.commutator.front().comm.edges_total, Ordering::Relaxed);
             let (current, mean, (mean_a, mean_b)) = m.current.take_window();
-            OBS_CURRENT.store(current, Ordering::Relaxed);
-            OBS_MEAN_DUTY.store(
+            OBS_CURRENT[i].store(current, Ordering::Relaxed);
+            OBS_MEAN_DUTY[i].store(
                 pack_motor_mean_duty(mean, on_duty(duties, applied_enables)),
                 Ordering::Relaxed,
             );
             // The FOC observation (`specs/foc-torque.md` section 7): the phase means in every
             // method, from the close above; the arm's own window closed here too, and zeros where
             // the method keeps none, so a non-FOC board's words 48 and 49 read 0.
-            OBS_FOC_PHASE.store(pack_i16_pair(mean_a, mean_b), Ordering::Relaxed);
+            OBS_FOC_PHASE[i].store(pack_i16_pair(mean_a, mean_b), Ordering::Relaxed);
             let foc = m.commutator.take_foc_window().unwrap_or_default();
-            OBS_FOC_DQ.store(pack_i16_pair(foc.id, foc.iq), Ordering::Relaxed);
-            OBS_FOC_REF.store(pack_i16_pair(foc.iq_ref, foc.vq), Ordering::Relaxed);
+            OBS_FOC_DQ[i].store(pack_i16_pair(foc.id, foc.iq), Ordering::Relaxed);
+            OBS_FOC_REF[i].store(pack_i16_pair(foc.iq_ref, foc.vq), Ordering::Relaxed);
             // The hold word (section 7, word 50): the window's held and floated counts with the
             // causes, closed and restarted here; the calibration bits ride along every close.
             let (held, both) = m.hold.take_window();
             let causes = m.causes | if both { HOLD_CAUSE_BOTH_HELD } else { 0 };
-            OBS_FOC_HOLD.store(pack_foc_hold(held, m.coasted, causes), Ordering::Relaxed);
+            OBS_FOC_HOLD[i].store(pack_foc_hold(held, m.coasted, causes), Ordering::Relaxed);
             m.coasted = 0;
             m.causes &= HOLD_CAL_PAIRS_MASK | HOLD_CAL_DISAGREED;
         }
@@ -2709,22 +3033,22 @@ pub mod hw {
         if comm.hall_fault {
             m.faults |= FAULT_HALL;
         }
-        ANGLE.store(comm.angle as u32, Ordering::Relaxed);
-        SPEED.store(comm.speed, Ordering::Relaxed);
-        WHEEL_RATE_Q12.store(comm.rate_q, Ordering::Relaxed);
-        POS_EDGES.store(comm.pos_edges, Ordering::Relaxed);
-        INVALID_DWELL.store(comm.invalid_dwell, Ordering::Relaxed);
-        FAULT.store(m.faults, Ordering::Relaxed);
+        ANGLE[i].store(comm.angle as u32, Ordering::Relaxed);
+        SPEED[i].store(comm.speed, Ordering::Relaxed);
+        WHEEL_RATE_Q12[i].store(comm.rate_q, Ordering::Relaxed);
+        POS_EDGES[i].store(comm.pos_edges, Ordering::Relaxed);
+        INVALID_DWELL[i].store(comm.invalid_dwell, Ordering::Relaxed);
+        FAULT[i].store(m.faults, Ordering::Relaxed);
         let flags = m.base_flags | if stale { OBS_COASTING } else { 0 };
-        OBS_STATE.store(
+        OBS_STATE[i].store(
             pack_obs_state(comm.prev_any_code, applied_enables, m.method, flags),
             Ordering::Relaxed,
         );
-        OBS_DUTY01.store(
+        OBS_DUTY01[i].store(
             (duties[0] as u32) | ((duties[1] as u32) << 16),
             Ordering::Relaxed,
         );
-        OBS_DUTY2_ANGLE.store(
+        OBS_DUTY2_ANGLE[i].store(
             (duties[2] as u32) | ((comm.angle as u32) << 16),
             Ordering::Relaxed,
         );
@@ -2733,7 +3057,7 @@ pub mod hw {
     /// A per-chip image's period vector: the ADC vector of its flash table (`ADC0_1` on the
     /// GD32F103, `ADC_CMP` on the GD32F130, `ADC1_COMP` on the MM32SPIN05, the vendor names), which carries the injected end of
     /// conversion. Both run `period_isr`; the trampoline is placed with it in the zero-wait window.
-    #[cfg(feature = "gd32f103c8")]
+    #[cfg(any(feature = "gd32f103c8", feature = "gd32f103rc"))]
     #[interrupt]
     #[link_section = ".hotcode"]
     fn ADC0_1() {
@@ -2760,6 +3084,7 @@ pub mod hw {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use board::limit::{CURRENT_CAL_MAX, CURRENT_CAL_MIN, MAX_LIMIT_COUNTS, NOISE_FLOOR_MIN};
 
     /// This board's counts per amp, as every test below converts against it: the registered
     /// default of `store::MOTOR_CURRENT_CAL` (0x67), which is where the scale now lives. Taken
@@ -2778,11 +3103,11 @@ mod tests {
     /// PB0/PB1 = 8/9.
     #[test]
     fn injected_ranks_two_slots_or_three_with_the_battery() {
-        assert_eq!(injected_ranks([8, 9], None).as_slice(), &[8, 9]);
-        assert_eq!(injected_ranks([8, 0], Some(4)).as_slice(), &[8, 0, 4]);
+        assert_eq!(injected_ranks(&[[8, 9]], None).as_slice(), &[8, 9]);
+        assert_eq!(injected_ranks(&[[8, 0]], Some(4)).as_slice(), &[8, 0, 4]);
         // The phase ranks keep their positions either way.
-        let three = injected_ranks([8, 0], Some(4));
-        assert_eq!(&three[..2], injected_ranks([8, 0], None).as_slice());
+        let three = injected_ranks(&[[8, 0]], Some(4));
+        assert_eq!(&three[..2], injected_ranks(&[[8, 0]], None).as_slice());
     }
 
     /// The freshness guard's boundary, exactly as the spec states it: it does NOT fire at 256
@@ -2991,6 +3316,7 @@ mod tests {
                     BringUpStep::EnableTimerClock
                         | BringUpStep::ConfigureTimer
                         | BringUpStep::ConfigureTriggerChannel
+                        | BringUpStep::FollowTimer0
                         | BringUpStep::RouteGatePins
                         | BringUpStep::EnableAdcClock
                         | BringUpStep::ConfigurePhasePins
@@ -3884,8 +4210,8 @@ mod tests {
     /// step. `configured` stays clear in every arm.
     #[test]
     fn skip_reasons_are_distinguishable_in_the_observation() {
-        record_skip(MotorSkip::Absent);
-        let w = OBS_STATE.load(Ordering::Relaxed);
+        record_skip(0, MotorSkip::Absent);
+        let w = OBS_STATE[0].load(Ordering::Relaxed);
         assert_eq!(
             (w >> 24) & 0xFF,
             OBS_SKIP_ABSENT >> 4 << 4 >> 4 << 4,
@@ -3893,12 +4219,15 @@ mod tests {
         );
         assert_eq!(w & OBS_CONFIGURED, 0);
 
-        record_skip(MotorSkip::NoCurrentSense);
-        let w = OBS_STATE.load(Ordering::Relaxed);
+        record_skip(0, MotorSkip::NoCurrentSense);
+        let w = OBS_STATE[0].load(Ordering::Relaxed);
         assert_eq!((w >> 24) & 0xFF, OBS_SKIP_NO_SENSE >> 4 << 4 >> 4 << 4);
 
-        record_skip(MotorSkip::StepFailed(BringUpStep::ConfigureInjectedGroup));
-        let w = OBS_STATE.load(Ordering::Relaxed);
+        record_skip(
+            0,
+            MotorSkip::StepFailed(BringUpStep::ConfigureInjectedGroup),
+        );
+        let w = OBS_STATE[0].load(Ordering::Relaxed);
         assert_eq!((w >> 24) & 0xFF, OBS_SKIP_STEP_FAILED);
         assert_eq!(
             (w >> 16) & 0xFF,
@@ -4054,7 +4383,7 @@ mod tests {
         assert_eq!(hold_compare_max(0), 1_996);
         // Until the bring-up derives it the knob holds the period itself, which no compare exceeds.
         assert_eq!(
-            FOC_HOLD_COMPARE.load(Ordering::Relaxed),
+            FOC_HOLD_COMPARE[0].load(Ordering::Relaxed),
             commutation::ARR as u32
         );
     }
@@ -4065,18 +4394,18 @@ mod tests {
         // Nothing armed: both fresh, and both stored.
         assert_eq!(h.apply(300, -200), ((300, -200), false));
         // Phase A's leg above the threshold for the coming period, B's not.
-        h.arm([1_941, 1_940, 2_250], 1_940);
+        h.arm(sensed_duties([1_941, 1_940, 2_250], false), 1_940);
         // ...so the NEXT sample of A is replaced by its last fresh value; B is taken as read.
         assert_eq!(h.apply(32_767, -210), ((300, -210), true));
         // The flags stand until re-armed: still held, still the same last value.
         assert_eq!(h.apply(-32_767, -220), ((300, -220), true));
         // Re-armed below the threshold: the next sample is fresh again, and becomes the value.
-        h.arm([1_125, 1_125, 1_125], 1_940);
+        h.arm(sensed_duties([1_125, 1_125, 1_125], false), 1_940);
         assert_eq!(h.apply(310, -230), ((310, -230), false));
         // Both sensed legs above: both held; the third leg is not sensed and never flags.
-        h.arm([2_000, 2_000, 0], 1_940);
+        h.arm(sensed_duties([2_000, 2_000, 0], false), 1_940);
         assert_eq!(h.apply(1, 2), ((310, -230), true));
-        h.arm([0, 0, 2_250], 1_940);
+        h.arm(sensed_duties([0, 0, 2_250], false), 1_940);
         assert_eq!(h.apply(1, 2), ((1, 2), false));
     }
 
@@ -4088,7 +4417,7 @@ mod tests {
         let ((ia, ib), _) = h.apply(300, -150);
         assert!(!lim.step(ia, ib).chop);
         // Phase A's leg driven above the threshold next period; its shunt then reads a rail.
-        h.arm([2_100, 900, 400], 1_940);
+        h.arm(sensed_duties([2_100, 900, 400], false), 1_940);
         let ((ia, ib), held) = h.apply(32_767, -150);
         assert!(held);
         let v = lim.step(ia, ib);
@@ -4110,7 +4439,7 @@ mod tests {
     fn a_hold_is_released_on_the_1025th_period_and_the_fresh_sample_rearms_it() {
         let mut h = SampleHold::new();
         assert_eq!(h.apply(500, 0), ((500, 0), false));
-        h.arm([2_200, 0, 0], 1_940);
+        h.arm(sensed_duties([2_200, 0, 0], false), 1_940);
         for k in 0..HOLD_MAX_PERIODS {
             assert_eq!(h.apply(-32_767, 0), ((500, 0), true), "period {k}");
         }
@@ -4119,7 +4448,7 @@ mod tests {
         // The flag still stands, so the next period holds again, on the sample just stored.
         assert_eq!(h.apply(123, 0), ((-32_767, 0), true));
         // A phase that is not flagged is never counted: B's run stays clear throughout.
-        h.arm([0, 0, 0], 1_940);
+        h.arm(sensed_duties([0, 0, 0], false), 1_940);
         assert_eq!(h.apply(7, 9), ((7, 9), false));
     }
 
@@ -4131,15 +4460,15 @@ mod tests {
     #[test]
     fn the_hold_word_packs_the_windows_counts_and_causes() {
         let mut h = SampleHold::new();
-        h.arm([2_000, 0, 0], 1_940);
+        h.arm(sensed_duties([2_000, 0, 0], false), 1_940);
         for _ in 0..5 {
             h.apply(1, 2);
         }
-        h.arm([2_000, 2_000, 0], 1_940);
+        h.arm(sensed_duties([2_000, 2_000, 0], false), 1_940);
         for _ in 0..3 {
             h.apply(1, 2);
         }
-        h.arm([0, 2_000, 0], 1_940);
+        h.arm(sensed_duties([0, 2_000, 0], false), 1_940);
         h.apply(1, 2);
         let (held, both) = h.take_window();
         assert_eq!((held, both), ([8, 4], true));
@@ -4149,7 +4478,7 @@ mod tests {
             "the close restarts the counts"
         );
         // A window with a lone phase held never raises the both bit.
-        h.arm([2_000, 0, 0], 1_940);
+        h.arm(sensed_duties([2_000, 0, 0], false), 1_940);
         h.apply(1, 2);
         assert_eq!(h.take_window(), ([1, 0], false));
         // The cause bits, one per input of `coast_posture`, none for a driven period's inputs.
@@ -4495,6 +4824,90 @@ mod tests {
         assert_eq!(c.trips(), 2);
     }
 
+    /// The sample rule's predicate (`specs/twelve-fet.md` section 5.6): an `any_state` motor
+    /// reads both phases in every posture; a `low_side_on` motor reads a sensed phase only when
+    /// its own leg was enabled and the bridge is armed, on both pair mappings.
+    #[test]
+    fn a_sensed_phase_is_a_reading_only_with_its_leg_on_and_the_bridge_armed() {
+        for e in 0..8u8 {
+            let en = [e & 1 != 0, e & 2 != 0, e & 4 != 0];
+            for armed in [false, true] {
+                for bc in [false, true] {
+                    assert_eq!(sensed_readings(false, armed, en, bc), [true; 2]);
+                    let (l0, l1) = if bc { (1, 2) } else { (0, 1) };
+                    assert_eq!(
+                        sensed_readings(true, armed, en, bc),
+                        [armed && en[l0], armed && en[l1]],
+                        "enables {en:?} armed {armed} bc {bc}"
+                    );
+                }
+            }
+        }
+        // Six-step's sectors: one leg floats, and on the A-B pair only C's float leaves both.
+        assert_eq!(
+            sensed_readings(true, true, [true, true, false], false),
+            [true; 2]
+        );
+        assert_eq!(
+            sensed_readings(true, true, [false, true, true], false),
+            [false, true]
+        );
+        assert_eq!(
+            sensed_readings(true, true, [true, false, true], true),
+            [false, true]
+        );
+        assert_eq!(
+            sensed_readings(true, true, [true, true, false], true),
+            [true, false]
+        );
+    }
+
+    /// `pass` decides nothing and moves nothing: no chop, no trip, and the run, the episode, the
+    /// trip count, the peak, the sums and the chop count are as before it.
+    #[test]
+    fn a_passed_period_moves_nothing() {
+        let lim = limit_counts(2_000, CAL, FLOOR);
+        let mut c = CurrentLimit::new(lim);
+        for mag in [lim + 1, 30, lim + 9] {
+            c.step(mag, 0);
+        }
+        let before = c;
+        let v = c.pass();
+        assert!(!v.chop && !v.trip);
+        assert_eq!(c, before);
+    }
+
+    /// Passed periods mixed into a driven sequence leave the driven periods' verdicts as they are
+    /// without them: a sustained over-current whose chops float every other period still trips
+    /// at the `OVER_CURRENT_TRIP_PERIODS`th driven over-limit period, where zeros in their place
+    /// would reset the run and never trip.
+    #[test]
+    fn passed_periods_leave_the_driven_verdicts_and_the_run_trip() {
+        let lim = limit_counts(2_000, CAL, FLOOR);
+        let over = lim + 1;
+        let mut alone = CurrentLimit::new(lim);
+        let mut mixed = CurrentLimit::new(lim);
+        let mut tripped_at = None;
+        for k in 0..OVER_CURRENT_TRIP_PERIODS {
+            let a = alone.step(over, 0);
+            assert!(!mixed.pass().chop);
+            let m = mixed.step(over, 0);
+            assert_eq!(a, m, "driven period {k}");
+            if m.trip {
+                tripped_at = Some(k + 1);
+            }
+        }
+        assert_eq!(tripped_at, Some(OVER_CURRENT_TRIP_PERIODS));
+        assert_eq!(alone, mixed);
+
+        let mut zeroed = CurrentLimit::new(lim);
+        for _ in 0..4 * OVER_CURRENT_TRIP_PERIODS {
+            zeroed.step(over, 0);
+            zeroed.step(0, 0);
+        }
+        assert_eq!(zeroed.trips(), 0, "zeros in place of passes never trip");
+    }
+
     /// The observation window: the peak is the window's maximum magnitude, `chopped` its count of
     /// floated periods, and closing the window publishes both and restarts them.
     #[test]
@@ -4763,5 +5176,101 @@ mod tests {
         assert_eq!((w >> 8) & 0xFF, 0b101, "enables");
         assert_eq!((w >> 16) & 0xFF, 1, "method");
         assert_eq!((w >> 24) & 0xFF, 0b101, "flags");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The 12-FET's second motor (`specs/twelve-fet.md` sections 5.2 to 5.5, 12.1)
+    // ---------------------------------------------------------------------------------------
+
+    /// Two motors' ranks: motor 0's pair, then motor 1's, and no battery rank (it is ADC1's).
+    #[test]
+    fn two_motors_convert_their_pairs_in_motor_order() {
+        assert_eq!(
+            injected_ranks(&[[14, 15], [0, 13]], None).as_slice(),
+            &[14, 15, 0, 13]
+        );
+        assert_eq!(injected_ranks(&[[0, 8]], Some(4)).as_slice(), &[0, 8, 4]);
+    }
+
+    /// The B and C pair maps to Clarke's `(ia, ib)` as `ia = -(ib + ic)`: the same currents read
+    /// as A and B and as B and C give the same pair, so `phase_magnitude` and the limit see the
+    /// same thing.
+    #[test]
+    fn a_bc_pair_maps_to_the_ab_pair_of_the_same_currents() {
+        for (ia, ib) in [(1_000i16, -400i16), (-2_500, 1_200), (0, 0), (300, 300)] {
+            let ic = -(ia as i32 + ib as i32) as i16;
+            assert_eq!(clarke_pair((ib, ic), true), (ia, ib));
+            assert_eq!(clarke_pair((ia, ib), false), (ia, ib));
+            assert_eq!(
+                phase_magnitude(clarke_pair((ib, ic), true).0, clarke_pair((ib, ic), true).1),
+                phase_magnitude(ia, ib)
+            );
+        }
+        // Saturated into the word rather than wrapped.
+        assert_eq!(clarke_pair((i16::MIN, i16::MIN), true).0, i16::MAX);
+    }
+
+    /// The hold arms on the duties of the two SENSED phases: channels 0 and 1 for A and B, 1 and
+    /// 2 for B and C.
+    #[test]
+    fn the_hold_arms_on_the_sensed_phases_duties() {
+        let duties = [100, 2_100, 2_200];
+        assert_eq!(sensed_duties(duties, false), [100, 2_100]);
+        assert_eq!(sensed_duties(duties, true), [2_100, 2_200]);
+        let mut h = SampleHold::new();
+        h.arm(sensed_duties(duties, true), 1_940);
+        // Both sensed phases are above the threshold, so the next period holds both.
+        let (_, held) = h.apply(5, 6);
+        assert!(held);
+        let mut h = SampleHold::new();
+        h.arm(sensed_duties(duties, false), 1_940);
+        h.apply(5, 6);
+        assert_eq!(
+            h.take_window(),
+            ([0, 1], false),
+            "only phase B (index 1) held"
+        );
+    }
+
+    /// Motor 1's hold threshold is the end of rank 3's aperture less 3 ticks (section 5.2's
+    /// table): 1,880, below motor 0's at the 12-FET's dead time.
+    #[test]
+    fn motor_1_holds_above_1880() {
+        assert_eq!(MOTOR_1_HOLD_COMPARE, 1_880);
+        assert!(MOTOR_1_HOLD_COMPARE < hold_compare_max(32));
+        assert_eq!(hold_compare_max(32), 1_932, "section 5.2: 1,932 at DTG 32");
+    }
+
+    /// `FollowTimer0` comes after the timers are configured (their `UPG` resets the counter the
+    /// follow presets) and before `StartCounter` (which starts TIMER0 and, through it, TIMER7).
+    #[test]
+    fn the_follow_is_between_the_configures_and_the_start() {
+        let at = |s: BringUpStep| BRING_UP_STEPS.iter().position(|x| *x == s).unwrap();
+        assert!(at(BringUpStep::ConfigureTimer) < at(BringUpStep::FollowTimer0));
+        assert!(at(BringUpStep::FollowTimer0) < at(BringUpStep::StartCounter));
+        assert_eq!(SLAVE_START_COUNT, TRIGGER_COMPARE + SLAVE_START_TICKS);
+    }
+
+    /// Motor 1 comes up only with motor 0.
+    #[test]
+    fn motor_1_is_not_brought_up_without_motor_0() {
+        assert_eq!(second_outcome(true, Ok::<u8, _>(1)), Ok(1));
+        assert_eq!(
+            second_outcome(false, Ok::<u8, _>(1)),
+            Err(MotorSkip::NoMotor0)
+        );
+        assert_eq!(
+            second_outcome::<u8>(false, Err(MotorSkip::NoCurrentSense)),
+            Err(MotorSkip::NoMotor0)
+        );
+        assert_eq!(
+            second_outcome::<u8>(false, Err(MotorSkip::Absent)),
+            Err(MotorSkip::Absent),
+            "an absent motor 1 stays absent"
+        );
+        assert_eq!(
+            second_outcome::<u8>(true, Err(MotorSkip::StepFailed(BringUpStep::FollowTimer0))),
+            Err(MotorSkip::StepFailed(BringUpStep::FollowTimer0))
+        );
     }
 }
