@@ -8,7 +8,7 @@
       "active_high": 6,
       "buzzer": {"port":"A","pin":4},
       "leds": { "green": {"port":"B","pin":2} },
-      "battery_sense": { "pin": {"port":"C","pin":2,"adc":12}, "cal": [26609, 0] },
+      "battery_sense": { "pin": {"port":"C","pin":2,"adc":12}, "cal": [25276, 52] },
       "motors": [
         { "side": "right", "align_offset": 1, "pole_pairs": 15,
           "hall": { "a": {"port":"C","pin":10}, "b": {"port":"C","pin":11}, "c": {"port":"C","pin":12} },
