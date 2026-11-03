@@ -28,7 +28,6 @@ import com.hoverboard.remote.model.DriveRefusal
 import com.hoverboard.remote.model.FaultLamp
 import com.hoverboard.remote.model.MissingSetting
 import com.hoverboard.remote.ui.components.ArmToggle
-import com.hoverboard.remote.ui.components.HornButton
 import com.hoverboard.remote.ui.components.JoystickPad
 import com.hoverboard.remote.ui.components.ThrottlePad
 import com.hoverboard.remote.ui.theme.Primary
@@ -54,8 +53,6 @@ import com.hoverboard.remote.ui.theme.ToneText
  *   motor-controller-off card, 3.1): no pad, no grid and no statements.
  * @param statementsHeight the fixed height of the statements' slot on Ride (3.1), so the slots under
  *   it never move; null on Tune, where the statements take what they need.
- * @param onHorn the horn held (`true`) or released (`false`), the button beside the arm toggle
- *   (`specs/tones.md` section 5), on the Ride screen; null draws no horn (the Tune screen's copy).
  * @param onOpenLamp open a lamp's sheet, which the fault-disarm statement does when tapped. The
  *   caller releases the drive first: the sheet's scrim covers the pad.
  * @param onOpenSetup open Setup on a board, scrolled to a row, which a missing setting's statement
@@ -69,7 +66,6 @@ internal fun RideControls(
     onJoystickMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
     onThrottleRelease: () -> Unit,
     modifier: Modifier = Modifier,
-    onHorn: ((Boolean) -> Unit)? = null,
     grid: (@Composable () -> Unit)? = null,
     padShown: Boolean = true,
     statementsHeight: Dp? = null,
@@ -90,18 +86,7 @@ internal fun RideControls(
             }
             Spacer(modifier = Modifier.height(SLOT_GAP))
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            ArmToggle(
-                armed = state.armed,
-                enabled = state.canArm,
-                onToggle = onArmToggle,
-                modifier = Modifier.weight(1f),
-            )
-            if (onHorn != null) {
-                Spacer(modifier = Modifier.width(HORN_GAP))
-                HornButton(onHorn = onHorn)
-            }
-        }
+        ArmToggle(armed = state.armed, enabled = state.canArm, onToggle = onArmToggle)
         val shown = if (grid != null || !padShown) emptyList() else statements(state).take(MAX_STATEMENTS)
         if (statementsHeight != null) {
             Spacer(modifier = Modifier.height(STATEMENTS_GAP))
@@ -346,6 +331,3 @@ internal val SLOT_GAP = 12.dp
 
 /** The statements shown at once. */
 private const val MAX_STATEMENTS = 2
-
-/** The gap between the arm toggle and the horn beside it. */
-private val HORN_GAP = 8.dp

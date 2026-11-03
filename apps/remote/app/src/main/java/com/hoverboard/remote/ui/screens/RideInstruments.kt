@@ -55,6 +55,7 @@ import com.hoverboard.remote.model.litSegments
 import com.hoverboard.remote.model.phaseFill
 import com.hoverboard.remote.model.ringScale
 import com.hoverboard.remote.model.speedText
+import com.hoverboard.remote.ui.components.HornButton
 import com.hoverboard.remote.ui.theme.Atkinson
 import com.hoverboard.remote.ui.theme.BgCode
 import com.hoverboard.remote.ui.theme.BgElevated
@@ -91,10 +92,11 @@ fun ridePhaseTag(side: SlotSide): String = "ride_phase_${side.name.lowercase()}"
 
 /**
  * The instruments slot: full width, and as tall as the room it is given up to
- * [INSTRUMENTS_HEIGHT], centred vertically in that room.
+ * [INSTRUMENTS_HEIGHT], centred vertically in that room. With [onHorn] the horn button sits
+ * between the two phase readouts (`specs/tones.md` section 5); null draws none.
  */
 @Composable
-internal fun RideInstruments(state: UiState, modifier: Modifier = Modifier) {
+internal fun RideInstruments(state: UiState, modifier: Modifier = Modifier, onHorn: ((Boolean) -> Unit)? = null) {
     val (_, battery) = state.ring
     val low = state.batteryIsLow
     BoxWithConstraints(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -109,7 +111,7 @@ internal fun RideInstruments(state: UiState, modifier: Modifier = Modifier) {
             state.slots.right?.let {
                 AttitudeCorner(state, it, Modifier.align(Alignment.TopEnd).offset(x = -CORNER_INSET, y = cornerTop))
             }
-            PhaseBars(state, top = h - PHASE_FROM_BOTTOM)
+            PhaseBars(state, top = h - PHASE_FROM_BOTTOM, onHorn = onHorn)
         }
     }
 }
@@ -308,18 +310,26 @@ private fun MiniHorizon(attitude: Pair<Float, Float>?, size: Dp) {
     }
 }
 
-/** One phase bar per slot, the row inset 40 dp from each edge, the two 32 dp apart. */
+/**
+ * One phase bar per slot, the row inset 40 dp from each edge, the two 32 dp apart, and the horn
+ * button centred in that gap when [onHorn] is given. The row alone sets the height and the bars'
+ * widths: the horn is drawn over the row's bounds, so it takes nothing from them.
+ */
 @Composable
-private fun BoxScope.PhaseBars(state: UiState, top: Dp) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .offset(y = top)
-            .padding(horizontal = PHASE_INSET),
-        horizontalArrangement = Arrangement.spacedBy(32.dp),
-    ) {
-        for (slot in listOf(state.slots.left, state.slots.right)) {
-            Box(Modifier.weight(1f)) { if (slot != null) PhaseBar(state, slot) }
+private fun BoxScope.PhaseBars(state: UiState, top: Dp, onHorn: ((Boolean) -> Unit)?) {
+    Box(Modifier.fillMaxWidth().offset(y = top)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PHASE_INSET),
+            horizontalArrangement = Arrangement.spacedBy(PHASE_GAP),
+        ) {
+            for (slot in listOf(state.slots.left, state.slots.right)) {
+                Box(Modifier.weight(1f)) { if (slot != null) PhaseBar(state, slot) }
+            }
+        }
+        if (onHorn != null) {
+            Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) { HornButton(onHorn) }
         }
     }
 }
@@ -420,4 +430,5 @@ private const val CENTI = 100f
 /** The phase row's top, above the slot's bottom. */
 private val PHASE_FROM_BOTTOM = 32.dp
 private val PHASE_INSET = 40.dp
+private val PHASE_GAP = 32.dp
 
