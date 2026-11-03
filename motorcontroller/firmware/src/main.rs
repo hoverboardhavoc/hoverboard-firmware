@@ -649,13 +649,17 @@ mod firmware {
     /// borrowed for the one call (`specs/tones.md` section 4.2).
     struct StoreTunes<'a>(&'a Store<'static, FmcFlash>);
 
+    /// Each event's tune field, by the event's discriminant: an indexed load rather than a match.
+    const TUNES: [store::BlobField; 3] = {
+        let mut t = [store::TONE_HORN; 3];
+        t[tones::Event::BatteryCritical as usize] = store::TONE_BATTERY_CRITICAL;
+        t[tones::Event::BatteryLow as usize] = store::TONE_BATTERY_LOW;
+        t
+    };
+
     impl tones::Tunes for StoreTunes<'_> {
         fn with<R>(&self, e: tones::Event, f: impl FnOnce(&[u8]) -> R) -> R {
-            f(self.0.get_bytes(match e {
-                tones::Event::Horn => store::TONE_HORN,
-                tones::Event::BatteryCritical => store::TONE_BATTERY_CRITICAL,
-                tones::Event::BatteryLow => store::TONE_BATTERY_LOW,
-            }))
+            f(self.0.get_bytes(TUNES[e as usize]))
         }
     }
 

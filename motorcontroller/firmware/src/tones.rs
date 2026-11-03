@@ -39,13 +39,9 @@ pub struct Levels {
 }
 
 impl Levels {
-    /// `e`'s level.
-    const fn of(self, e: Event) -> bool {
-        match e {
-            Event::Horn => self.horn,
-            Event::BatteryCritical => self.battery_critical,
-            Event::BatteryLow => self.battery_low,
-        }
+    /// The levels as bits, bit `k` for [`EVENTS`]`[k]`: one byte to compare and test.
+    const fn bits(self) -> u8 {
+        self.horn as u8 | (self.battery_critical as u8) << 1 | (self.battery_low as u8) << 2
     }
 }
 
@@ -114,8 +110,8 @@ pub struct Player {
     /// The period ISR's rate, Hz (`R`): the motor module's `period_isr_hz`.
     rate_hz: u32,
     playing: Option<Playing>,
-    /// The levels of the previous tick, so a change selects again at once.
-    levels: Levels,
+    /// The levels of the previous tick ([`Levels::bits`]), so a change selects again at once.
+    levels: u8,
 }
 
 impl Player {
@@ -124,11 +120,7 @@ impl Player {
         Player {
             rate_hz,
             playing: None,
-            levels: Levels {
-                horn: false,
-                battery_critical: false,
-                battery_low: false,
-            },
+            levels: 0,
         }
     }
 
@@ -146,6 +138,7 @@ impl Player {
         let note_over = self
             .playing
             .is_some_and(|p| p.elapsed_ms >= u32::from(p.dur_ms));
+        let levels = levels.bits();
         if levels != self.levels || note_over {
             self.levels = levels;
             self.select(levels, note_over, tunes);
@@ -156,9 +149,9 @@ impl Player {
     /// Choose what plays from here: the highest event that is on and has a playable note. The one
     /// already playing keeps its place mid-note, or moves to its next playable note when its note
     /// is over (carrying the overshoot, so a looping tune keeps its period).
-    fn select(&mut self, levels: Levels, note_over: bool, tunes: &impl Tunes) {
-        for e in EVENTS {
-            if !levels.of(e) {
+    fn select(&mut self, levels: u8, note_over: bool, tunes: &impl Tunes) {
+        for (k, &e) in EVENTS.iter().enumerate() {
+            if levels & 1 << k == 0 {
                 continue;
             }
             let current = self.playing.filter(|p| p.event == e);
@@ -198,7 +191,22 @@ struct Filtered {
 }
 
 impl Filtered {
-    fn step(&mut self, cond: bool, dt_ms: u32) -> bool {
+    /// One tick of the level whose condition is the battery word `word` known (non-zero) and below
+    /// `threshold`, with `threshold <= 0` = none. An UNKNOWN word turns the level off at once and
+    /// starts its filter over.
+    ///
+    /// `#[inline(never)]`, with the condition and the UNKNOWN rule inside: one body for the two
+    /// levels, each called with three arguments (flash, `specs/tones.md` section 6).
+    #[inline(never)]
+    fn step(&mut self, word: i16, threshold: i16, dt_ms: u32) -> bool {
+        if word == 0 {
+            *self = Filtered {
+                on: false,
+                against_ms: 0,
+            };
+            return false;
+        }
+        let cond = threshold > 0 && word < threshold;
         if cond == self.on {
             self.against_ms = 0;
         } else {
@@ -239,13 +247,10 @@ impl BatteryAlarm {
     ///
     /// An UNKNOWN word sounds nothing: both levels go off at once and their filters start over.
     pub fn step(&mut self, word: i16, floor: i16, warn: i16, dt_ms: u32) -> (bool, bool) {
-        if word == 0 {
-            *self = BatteryAlarm::new();
-            return (false, false);
-        }
-        let critical = self.critical.step(floor > 0 && word < floor, dt_ms);
-        let low = self.low.step(warn > 0 && word < warn, dt_ms);
-        (critical, low)
+        (
+            self.critical.step(word, floor, dt_ms),
+            self.low.step(word, warn, dt_ms),
+        )
     }
 }
 
