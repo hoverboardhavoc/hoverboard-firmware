@@ -42,6 +42,7 @@ import com.hoverboard.remote.ui.screens.MACHINE_DIFFER_TAG
 import com.hoverboard.remote.ui.screens.statusRearmTag
 import com.hoverboard.remote.ui.screens.statusRebootTag
 import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.Wheel
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
@@ -115,7 +116,7 @@ class MachineStatusTest {
      */
     @Test
     fun aWheelThatDoesNotTurnHasItsLineUnderItsBoard() {
-        showState(pair(DriveInForce.NONE).copy(notTurning = setOf(0x02)))
+        showState(pair(DriveInForce.NONE).copy(notTurning = setOf(Wheel(0x02, 0))))
 
         compose.onAllNodesWithText(context.getString(R.string.status_not_turning)).assertCountEquals(1)
         val line = compose.onNodeWithText(context.getString(R.string.status_not_turning))
@@ -447,7 +448,7 @@ class MachineStatusTest {
             nodes = addresses.map { NodeInfo(it, Walk.CLASS_MOTOR, "Hoverboard") },
             attachedNode = 0x01,
             telemetryByBoard = reports,
-            countsPerAmp = countsPerAmp?.let { c -> addresses.associateWith { c } }.orEmpty(),
+            countsPerAmp = countsPerAmp?.let { c -> addresses.associate { Wheel(it, 0) to c } }.orEmpty(),
         )
         compose.setContent {
             HoverboardRemoteTheme {

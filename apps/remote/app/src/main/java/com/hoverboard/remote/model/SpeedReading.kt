@@ -6,15 +6,18 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * What one board brings to the machine's speed (`specs/remote-ui.md` 3.1a): its period-measured
- * wheel rate off `CYCLIC_STATE` and the three stored facts that turn it into a road speed.
+ * What one wheel brings to the machine's speed (`specs/remote-ui.md` 3.1a): its period-measured
+ * rate off `CYCLIC_STATE` and the three stored facts that turn it into a road speed, each its own
+ * motor's.
  *
- * @param address the board's L3 address: whom a missing fact is missing on (3.1, "Missing settings").
- * @param wheelRateQ12 `CYCLIC_STATE.wheel_rate`: Q12 of one hall edge per 320-period window, in
- *   the board's own counter sense.
- * @param polePairs `motors.0.pole_pairs`, null while unread and 0 while unset.
- * @param diameterMm `motors.0.wheel_diameter_mm`, null while unread and 0 while unset.
- * @param side motor 0's `side`, null while unread; [Fields.ControlSide.RIGHT] mirrors the rate.
+ * @param address the wheel's board's L3 address: whom a missing fact is missing on (3.1, "Missing
+ *   settings").
+ * @param wheelRateQ12 the motor's `wheel_rate` (motor 0's in the base, motor 1's in the motor-1
+ *   block): Q12 of one hall edge per 320-period window, in the motor's own counter sense.
+ * @param polePairs `motors.<motor>.pole_pairs`, null while unread and 0 while unset.
+ * @param diameterMm `motors.<motor>.wheel_diameter_mm`, null while unread and 0 while unset.
+ * @param side the motor's `side`, null while unread; [Fields.ControlSide.RIGHT] mirrors the rate.
+ * @param motor the wheel's motor on its board: 0, or 1 on a two-motor board.
  */
 data class SpeedFacts(
     val address: Int,
@@ -22,6 +25,7 @@ data class SpeedFacts(
     val polePairs: Int?,
     val diameterMm: Int?,
     val side: Int?,
+    val motor: Int = 0,
 )
 
 /** What the Ride panel's speed says. */
@@ -65,14 +69,23 @@ sealed interface SpeedReading {
     }
 
     companion object {
-        /** The CLI name of [SpeedFacts.polePairs]'s field. */
-        const val POLE_PAIRS = "motors.0.pole_pairs"
+        /** The CLI name of motor [motor]'s [SpeedFacts.polePairs] field. */
+        fun polePairs(motor: Int): String = "motors.$motor.pole_pairs"
 
-        /** The CLI name of [SpeedFacts.diameterMm]'s field. */
-        const val WHEEL_DIAMETER = "motors.0.wheel_diameter_mm"
+        /** The CLI name of motor [motor]'s [SpeedFacts.diameterMm] field. */
+        fun wheelDiameter(motor: Int): String = "motors.$motor.wheel_diameter_mm"
 
-        /** The CLI name of [SpeedFacts.side]'s field. */
-        const val SIDE = "motors.0.side"
+        /** The CLI name of motor [motor]'s [SpeedFacts.side] field. */
+        fun side(motor: Int): String = "motors.$motor.side"
+
+        /** Motor 0's [polePairs] name. */
+        val POLE_PAIRS = polePairs(0)
+
+        /** Motor 0's [wheelDiameter] name. */
+        val WHEEL_DIAMETER = wheelDiameter(0)
+
+        /** Motor 0's [side] name. */
+        val SIDE = side(0)
 
         private const val TENTHS = 10.0
         private const val WHOLE_FROM_TENTHS = 100
@@ -88,12 +101,13 @@ private fun kmh(rateQ12: Int, polePairs: Int, diameterMm: Int, right: Boolean): 
 }
 
 /**
- * The machine's speed: the MEAN of the reporting boards' speeds, each turned into the machine's
+ * The machine's speed: the MEAN of the reporting wheels' speeds, each turned into the machine's
  * forward sense by its own motor's `side` (the fold `control::wheel_forward` applies on the board),
- * since the two wheels of a machine turn opposite ways in their own senses.
+ * since the two wheels of a machine turn opposite ways in their own senses. A wheel is a board's
+ * motor: a 12-FET reports two.
  *
- * A speed only when every reporting board has all three facts; otherwise [SpeedReading.NoSpeed]
- * naming what is missing, and never a speed taken from the one board that could convert, since a
+ * A speed only when every reporting wheel has all three facts; otherwise [SpeedReading.NoSpeed]
+ * naming what is missing, and never a speed taken from the one wheel that could convert, since a
  * one-wheel figure on a turning machine is not the machine's.
  */
 fun machineSpeed(boards: List<SpeedFacts>): SpeedReading {
@@ -107,9 +121,9 @@ fun machineSpeed(boards: List<SpeedFacts>): SpeedReading {
         }
     }
     for (b in boards) {
-        need(b.polePairs, SpeedReading.POLE_PAIRS)
-        need(b.diameterMm, SpeedReading.WHEEL_DIAMETER)
-        if (b.side == null) unread += SpeedReading.SIDE
+        need(b.polePairs, SpeedReading.polePairs(b.motor))
+        need(b.diameterMm, SpeedReading.wheelDiameter(b.motor))
+        if (b.side == null) unread += SpeedReading.side(b.motor)
     }
     val speeds = boards.mapNotNull { b ->
         val polePairs = b.polePairs?.takeIf { it > 0 }

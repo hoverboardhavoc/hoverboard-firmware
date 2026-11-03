@@ -38,6 +38,7 @@ import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
 import com.hoverboard.remote.model.TripBaseline
 import com.hoverboard.remote.model.WheelGeometry
+import com.hoverboard.remote.model.Wheel
 import com.hoverboard.remote.ui.screens.AppDestination
 import com.hoverboard.remote.ui.screens.ConnectScreen
 import com.hoverboard.remote.ui.screens.ConnectedScreen
@@ -273,7 +274,7 @@ class ScreenshotTest {
 
     private fun unknown(): UiState = sided(armed = false).copy(
         telemetryByBoard = mapOf(0x01 to board(battery = 0, pitch = 120, roll = -40)),
-        countsPerAmp = mapOf(0x02 to DRIVING_CAL),
+        countsPerAmp = mapOf(Wheel(0x02, 0) to DRIVING_CAL),
         imuModel = mapOf(0x01 to 0, 0x02 to IMU_FITTED),
         speedFacts = listOf(
             SpeedFacts(0x01, 0, polePairs = POLE_PAIRS, diameterMm = 0, side = Fields.ControlSide.LEFT),
@@ -299,7 +300,7 @@ class ScreenshotTest {
         )
     }
 
-    private fun notTurning(): UiState = riding().copy(notTurning = setOf(0x02))
+    private fun notTurning(): UiState = riding().copy(notTurning = setOf(Wheel(0x02, 0)))
 
     private fun boardsOff(): UiState = UiState(
         connectionState = ConnectionState.CONNECTED,
@@ -485,11 +486,11 @@ class ScreenshotTest {
                 SidePair.OneRight(0x02),
             ),
             telemetryByBoard = boards.associateWith { board() },
-            countsPerAmp = boards.associateWith { DRIVING_CAL },
+            countsPerAmp = boards.associate { Wheel(it, 0) to DRIVING_CAL },
             packCells = boards.associateWith { PACK_CELLS },
             packChemistry = boards.associateWith { Fields.BatteryChemistry.LI_ION },
-            sides = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.RIGHT),
-            currentLimit = boards.associateWith { LIMIT_MA },
+            sides = mapOf(Wheel(0x01, 0) to Fields.ControlSide.LEFT, Wheel(0x02, 0) to Fields.ControlSide.RIGHT),
+            currentLimit = boards.associate { Wheel(it, 0) to LIMIT_MA },
             imuModel = boards.associateWith { IMU_FITTED },
             batteryFloor = boards.associateWith { 0 },
             wheelGeometry = boards.associateWith { WheelGeometry(POLE_PAIRS, DIAMETER_MM) },

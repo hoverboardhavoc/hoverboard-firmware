@@ -61,6 +61,21 @@ class SpeedReadingTest {
         )
     }
 
+    /**
+     * A 12-FET's two wheels are two of the reporting wheels, each converted with its own motor's
+     * facts, and a fact motor 1 lacks is named as motor 1's field (`specs/remote-ui.md` 3.1a).
+     */
+    @Test
+    fun `two wheels on one board are each their own motor's`() {
+        val m0 = SpeedFacts(0x01, Q12, 15, 165, LEFT, motor = 0)
+        val m1 = SpeedFacts(0x01, -3 * Q12, 15, 165, RIGHT, motor = 1)
+        assertEquals(2 * ONE_EDGE_KMH, kmh(machineSpeed(listOf(m0, m1))), TOLERANCE)
+        assertEquals(
+            SpeedReading.NoSpeed(unread = emptyList(), unset = listOf("motors.1.wheel_diameter_mm")),
+            machineSpeed(listOf(m0, m1.copy(diameterMm = 0))),
+        )
+    }
+
     @Test
     fun `no reporting board is silence`() {
         assertEquals(SpeedReading.Silent, machineSpeed(emptyList()))

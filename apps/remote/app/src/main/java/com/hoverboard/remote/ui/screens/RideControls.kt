@@ -165,8 +165,8 @@ private fun statements(state: UiState): List<Statement> =
  */
 @Composable
 private fun ridingStatements(state: UiState): List<Statement> = buildList {
-    for (board in state.notTurning.sorted()) {
-        add(Statement(stringResource(R.string.ride_not_turning, boardName(state, board, inline = false)), Tone.WARNING))
+    for (wheel in state.notTurning.sorted()) {
+        add(Statement(stringResource(R.string.ride_not_turning, wheelName(state, wheel)), Tone.WARNING))
     }
     if (state.armed) {
         for ((board, word) in state.lampWords.toSortedMap()) {

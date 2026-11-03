@@ -173,7 +173,7 @@ private fun BoardRow(state: UiState, address: Int, label: String) {
     if ((telemetry.cyclic?.fault ?: 0) and CyclicState.EV_MODE_FAULT != 0) {
         CautionText(stringResource(R.string.board_mode_demoted, label), style = small)
     }
-    if (address in state.notTurning) {
+    if (state.notTurning.any { it.node == address }) {
         WarningText(stringResource(R.string.status_not_turning), style = small)
     }
 }

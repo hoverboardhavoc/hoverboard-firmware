@@ -33,6 +33,7 @@ import com.hoverboard.remote.R
 import com.hoverboard.remote.UiState
 import com.hoverboard.remote.model.FaultLamp
 import com.hoverboard.remote.model.SlotSide
+import com.hoverboard.remote.model.Wheel
 import com.hoverboard.remote.model.lampColumns
 import com.hoverboard.remote.ui.theme.BgCode
 import com.hoverboard.remote.ui.theme.BgElevated
@@ -151,7 +152,8 @@ internal fun litWhere(state: UiState, lamp: FaultLamp): String {
 internal fun boardName(state: UiState, address: Int, inline: Boolean): String {
     val slot = state.slots.of(address)
     return when {
-        slot == null || !slot.bySide -> state.nodeAt(address)?.let { nodeLabel(it) } ?: boardHex(address)
+        slot == null || !slot.bySide || state.slots.both(address) ->
+            state.nodeAt(address)?.let { nodeLabel(it) } ?: boardHex(address)
         slot.side == SlotSide.LEFT ->
             stringResource(if (inline) R.string.ride_board_left_inline else R.string.lamp_board_left)
         else -> stringResource(if (inline) R.string.ride_board_right_inline else R.string.lamp_board_right)
@@ -222,3 +224,20 @@ private val LAMP_CORNER = 10.dp
 private const val DARK_MARK_ALPHA = 0.5f
 private const val UNLIT_MARK_ALPHA = 0.35f
 private const val SCRIM_ALPHA = 0.6f
+
+/**
+ * [wheel] named in a sentence (`specs/remote-ui.md` 3.1, "Wheel slots"): on a board with two motors
+ * the board's [nodeLabel] and the wheel, by its slot's side when that slot is placed by side ("12-FET
+ * left wheel"), else by its motor; on a one-motor board the board ([boardName]).
+ */
+@Composable
+internal fun wheelName(state: UiState, wheel: Wheel): String {
+    if ((state.motorCounts[wheel.node] ?: 1) < 2) return boardName(state, wheel.node, inline = false)
+    val board = state.nodeAt(wheel.node)?.let { nodeLabel(it) } ?: boardHex(wheel.node)
+    val slot = state.slots.all.firstOrNull { it.wheel == wheel }
+    return when {
+        slot == null || !slot.bySide -> stringResource(R.string.ride_wheel_motor, board, wheel.motor)
+        slot.side == SlotSide.LEFT -> stringResource(R.string.ride_wheel_left, board)
+        else -> stringResource(R.string.ride_wheel_right, board)
+    }
+}

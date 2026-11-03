@@ -68,8 +68,8 @@ use linkctl::{
 use state::{FaultLatch, InitAction, ModeInputs, ModeMachine, ShutdownAction};
 
 pub use dispatch::{
-    ble_cyclic_tx, ble_peer_tx, cyclic_tx, re_apply_control_values, PeerCyclic, BLE_CYCLIC_DIVISOR,
-    BLE_PEER_CYCLIC_TICKS, CYCLIC_EMIT_TICKS,
+    ble_cyclic_tx, ble_peer_tx, cyclic_motor, cyclic_tx, re_apply_control_values, PeerCyclic,
+    BLE_CYCLIC_DIVISOR, BLE_PEER_CYCLIC_TICKS, CYCLIC_EMIT_TICKS,
 };
 pub use events::{
     counted, COUNTED_MOTOR, EV_COMMS_LOSS, EV_CONFIG, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B,
@@ -758,16 +758,17 @@ pub struct OrchestratorState<const M: usize> {
     /// It is not sticky beyond that: a machine still lying down re-asserts the level on the next
     /// tick, so the latch cannot be cleared out from under a fallen board.
     pub tilt_latch: bool,
-    /// The last current window the period ISR closed ([`PhaseWindow`]), copied by the firmware
-    /// from `motor::OBS_CURRENT` / `motor::OBS_MEAN_DUTY` before each pass, the
-    /// [`Self::vbatt_raw`] pattern.
+    /// The last current window the period ISR closed ([`PhaseWindow`]), one per motor the image
+    /// drives (`M`), copied by the firmware from `motor::OBS_CURRENT` / `motor::OBS_MEAN_DUTY`
+    /// before each pass, the [`Self::vbatt_raw`] pattern. Motor 0's rides the base's
+    /// [`linkctl::CyclicObs`], motor 1's the motor-1 block ([`cyclic_motor`]).
     ///
     /// Telemetry only: no control consumer reads it (the limiter acts in the 16 kHz ISR, which
     /// owns the words this copy comes from). A board with no motor brought up leaves it zeroed,
     /// and zeroed is the only reading there is: a board carrying no current. There is no
     /// "did not say" on the wire either, because every accepted `CYCLIC_STATE` carries the block
     /// ([`linkctl::CyclicState::obs`]).
-    pub phase: PhaseWindow,
+    pub phase: [PhaseWindow; M],
     /// This wheel's LIVE odometer in absolute hall edges: the total the board's store last
     /// recorded plus every edge counted since boot (`specs/odometer.md`). Copied in from
     /// `firmware::ODOMETER_TOTAL` each tick, the [`PhaseWindow`] pattern, and carried on the wire
@@ -903,7 +904,7 @@ impl<const M: usize> OrchestratorState<M> {
             events: FaultEvents::default(),
             own_levels: 0,
             tilt_latch: false,
-            phase: PhaseWindow::default(),
+            phase: [PhaseWindow::default(); M],
             odometer: 0,
             identity,
             machine,

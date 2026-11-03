@@ -1,6 +1,7 @@
 package com.hoverboard.remote
 
 import com.hoverboard.protocol.linkctl.ChipTag
+import com.hoverboard.protocol.linkctl.CyclicMotor
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.remote.model.CurrentReading
@@ -151,6 +152,32 @@ class CurrentReadingTest {
 
         assertNull(machineSupplyAmps(listOf(master, CurrentReading.Silent)))
         assertNull(machineSupplyAmps(listOf(master, CurrentReading.Unscaled)))
+    }
+
+    /**
+     * Motor 1's figure is its own: the motor-1 block's mean and duty over motor 1's own scale; a
+     * one-motor board's frame has no motor 1, which is no reading (`specs/link-control.md`, "The
+     * motor-1 block").
+     */
+    @Test
+    fun `motor 1's figure is the motor-1 block over its own calibration`() {
+        val base = telemetry(mean = 910, duty = CyclicObs.DUTY_FULL)
+        val two = base.merge(
+            base.cyclic!!.copy(
+                motor1 = CyclicMotor(
+                    wheelSpeed = 0,
+                    phasePeak = 1_000,
+                    phaseMean = 820,
+                    dutyOn = CyclicObs.DUTY_FULL,
+                    wheelRate = 0,
+                ),
+            ),
+        )
+        val motor1 = assertInstanceOf(CurrentReading.Amps::class.java, currentReading(two, 410, motor = 1))
+        assertEquals(2.0f, motor1.motor, 0.001f)
+        val motor0 = assertInstanceOf(CurrentReading.Amps::class.java, currentReading(two, cal, motor = 0))
+        assertEquals(2.0f, motor0.motor, 0.001f)
+        assertEquals(CurrentReading.Silent, currentReading(base, 410, motor = 1))
     }
 
     private fun telemetry(

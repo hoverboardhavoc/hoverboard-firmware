@@ -14,8 +14,8 @@ use hoverboard_cli::guest::{
 };
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 use linkctl::{
-    ChipTag, CyclicObs, CyclicState, DriveCmd, DriveKind, Inputs, OP_CYCLIC_STATE, OP_DRIVE_CMD,
-    OP_INPUTS,
+    ChipTag, CyclicMotor, CyclicObs, CyclicState, DriveCmd, DriveKind, Inputs, OP_CYCLIC_STATE,
+    OP_DRIVE_CMD, OP_INPUTS,
 };
 use net::pdu::{Opcode, Pdu, GUEST_FIRST, NO_ADDRESS};
 use net::walk::{CFG_OK, KIND_CONTROLLER, PROTO_VER};
@@ -108,6 +108,35 @@ fn the_tally_counts_each_source_with_its_rate_and_longest_gap() {
             "0x02: 2 frames in 1.0s, 2.00/s, longest gap 0.42s",
         ]
     );
+}
+
+/// A two-motor board's 46 B frame: the board's part of the line ends in motor 1's peak, mean and
+/// rate (`specs/link-control.md`, "The motor-1 block"); a one-motor board's 34 B frame adds none.
+#[test]
+fn the_line_carries_motor_1_from_a_two_motor_board() {
+    let m1 = CyclicMotor {
+        wheel_speed: 3,
+        phase_peak: 812,
+        phase_mean: 405,
+        duty_on: 900,
+        wheel_rate: -8192,
+    };
+    let mut b = [0u8; CyclicState::TWO_MOTOR_LEN];
+    let n = state(3, 0, 310).encode(&mut b);
+    m1.encode(&mut b[n..]);
+    let mut t = Tally::new();
+    assert!(t.feed(&pdu(OP_CYCLIC_STATE, 0x01, NO_ADDRESS, &b), ms(0)));
+    assert!(t.feed(&cyclic(0x02, &state(2, 0, 0)), ms(0)));
+    assert_eq!(t.last_motor1(0x01), Some(&m1));
+    assert_eq!(t.last_motor1(0x02), None);
+    assert_eq!(
+        t.line(ms(1000)),
+        "t=1s  0x01 1 frames 1.0/s gap 0.00s mode 3 peer_demand 0 battery 310 fault 0x0000 \
+         m1 peak 812 mean 405 rate -8192 | \
+         0x02 1 frames 1.0/s gap 0.00s mode 2 peer_demand 0 battery 0 fault 0x0000"
+    );
+    // A truncated two-motor frame is a length the decoder refuses.
+    assert!(!t.feed(&pdu(OP_CYCLIC_STATE, 0x01, NO_ADDRESS, &b[..45]), ms(10)));
 }
 
 #[test]

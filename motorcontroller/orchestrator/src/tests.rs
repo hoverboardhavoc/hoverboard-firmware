@@ -2550,7 +2550,7 @@ fn cyclic_tx_is_gated_on_an_assigned_address_and_round_trips_linkctl() {
 #[test]
 fn the_cyclic_payload_carries_the_window_and_the_boards_identity() {
     let mut a = fresh();
-    a.phase = PhaseWindow {
+    a.phase[0] = PhaseWindow {
         peak: 1_234,
         mean: 567,
         duty_on: 1_125,
@@ -4131,7 +4131,7 @@ fn an_arm_time_mode_change_resets_the_law_and_an_unchanged_mode_does_not() {
         )
     };
     let mut s = balance_board(sf_start());
-    s.block.wheel_rate_q12 = 4096;
+    s.block.wheel_rate_q12[0] = 4096;
     run_ticks(&mut s, 30);
     let carried = s.ctl.sf;
     assert_ne!(
@@ -6117,7 +6117,7 @@ fn the_cyclic_carries_the_wheel_rate_unscaled_and_the_peer_decodes_it() {
         for rate in [0i32, 4096, -4096, 80 * 4096, -1, i32::MAX, i32::MIN] {
             let mut a = fresh();
             a.block.role_right = role_right;
-            a.block.wheel_rate_q12 = rate;
+            a.block.wheel_rate_q12[0] = rate;
             let c = cyclic_tx(&a, true).expect("tick 0 emits");
             assert_eq!(c.wheel_rate, rate, "rate {rate}, right {role_right}");
             let mut wire = [0u8; CyclicState::ENCODED_LEN];
@@ -6456,7 +6456,7 @@ fn a_rigid_follower_runs_no_law_and_publishes_its_position() {
     let mut s = rigid_board(false);
     assert_eq!(s.obs().control_mode, control::Producer::Follower as u8);
     walk_to_run(&mut s);
-    s.block.wheel_rate_q12 = -80 * 4096;
+    s.block.wheel_rate_q12[0] = -80 * 4096;
     s.block.wheel_pos = 1_234;
     feed_drive(&mut s, i16::MAX, 0);
     run_with_peer(&mut s, 100, &leader_cyclic(Mode::Run, 1000), None);
@@ -6471,7 +6471,7 @@ fn a_rigid_follower_runs_no_law_and_publishes_its_position() {
 #[test]
 fn the_observation_carries_the_terms_and_the_reference() {
     let mut s = balance_board(sf_start());
-    s.block.wheel_rate_q12 = 4096;
+    s.block.wheel_rate_q12[0] = 4096;
     for _ in 0..50 {
         control_task(&mut s, Some(&tilted_sample()), 1);
     }
@@ -6894,4 +6894,47 @@ fn a_one_motor_board_drives_motor_0_as_a_two_motor_board_does() {
     assert_eq!(b.torque_setpoint[1], 0, "motor 1 was never commanded");
     assert_eq!(a.moe, [true]);
     assert!(one.latches.len() == 1 && two.latches.len() == 2);
+}
+
+/// The motor-1 block's builder reads motor 1's rows and motor 0's base reads motor 0's, from the
+/// same state in the same pass (`specs/link-control.md`, "The motor-1 block").
+#[test]
+fn the_motor1_block_carries_motor_1s_words_and_the_base_motor_0s() {
+    let mut s = throttle_board::<2>();
+    s.block.wheel_speed = [11, -22];
+    s.block.wheel_rate_q12 = [4096, -3 * 4096];
+    s.phase = [
+        PhaseWindow {
+            peak: 100,
+            mean: 50,
+            duty_on: 700,
+        },
+        PhaseWindow {
+            peak: 900,
+            mean: 450,
+            duty_on: 1_100,
+        },
+    ];
+    s.cyclic_due = true;
+    let base = cyclic_tx(&s, true).expect("due and addressed");
+    assert_eq!(
+        (
+            base.wheel_speed,
+            base.wheel_rate,
+            base.obs.phase_peak,
+            base.obs.phase_mean,
+            base.obs.duty_on
+        ),
+        (11, 4096, 100, 50, 700)
+    );
+    assert_eq!(
+        cyclic_motor(&s, 1),
+        linkctl::CyclicMotor {
+            wheel_speed: -22,
+            phase_peak: 900,
+            phase_mean: 450,
+            duty_on: 1_100,
+            wheel_rate: -3 * 4096,
+        }
+    );
 }

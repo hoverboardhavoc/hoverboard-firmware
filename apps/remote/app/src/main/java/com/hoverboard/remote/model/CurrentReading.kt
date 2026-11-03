@@ -53,15 +53,17 @@ sealed interface CurrentReading {
 }
 
 /**
- * What [telemetry] and that board's own [countsPerAmp] (`motor.current_cal`) come to.
+ * What [telemetry]'s words for [motor] and that motor's own [countsPerAmp] (`motors.<motor>.current.cal`)
+ * come to: motor 0's from the frame's base, motor 1's from its motor-1 block, which a one-motor
+ * board's frame does not have, so its motor 1 is [CurrentReading.Silent].
  *
  * The scale is per board, because it is a property of the shunt and amplifier chain fitted rather
  * than of the firmware, so one board's figure is never derived from the other's constant. A
  * missing or zero scale yields [CurrentReading.Unscaled] rather than a figure at an assumed one.
  */
-fun currentReading(telemetry: TelemetryUi?, countsPerAmp: Int?): CurrentReading {
-    val mean = telemetry?.phaseMeanCounts
-    val duty = telemetry?.dutyOn
+fun currentReading(telemetry: TelemetryUi?, countsPerAmp: Int?, motor: Int = 0): CurrentReading {
+    val mean = telemetry?.phaseMeanOf(motor)
+    val duty = telemetry?.dutyOnOf(motor)
     return when {
         mean == null || duty == null -> CurrentReading.Silent
         telemetry.mode !in MEASURING_MODES -> CurrentReading.MotorsOff

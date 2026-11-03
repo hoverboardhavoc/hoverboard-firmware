@@ -325,20 +325,20 @@ private fun BoxScope.PhaseBars(state: UiState, top: Dp) {
 }
 
 /**
- * One board's PHASE current, the current the limiter acts on, with its bar filled against that
- * board's own current limit ([phaseFill]). The derived supply figure stays on Setup, because it
- * over-reads under Sine and FOC.
+ * One wheel's PHASE current, the current the limiter acts on, from its own motor's words, with its
+ * bar filled against that motor's own current limit ([phaseFill]). The derived supply figure stays
+ * on Setup, because it over-reads under Sine and FOC.
  */
 @Composable
 private fun PhaseBar(state: UiState, slot: RideSlot) {
-    val reading = if (state.telemetryOf(slot.address) == null) CurrentReading.Silent else state.currentOf(slot.address)
+    val reading = if (state.telemetryOf(slot.address) == null) CurrentReading.Silent else state.currentOf(slot.wheel)
     val figure = when (reading) {
         is CurrentReading.Amps -> stringResource(R.string.ride_phase_amps, abs(reading.motor))
         CurrentReading.MotorsOff -> stringResource(R.string.ride_phase_off)
         CurrentReading.Coasting -> stringResource(R.string.ride_phase_amps, 0f)
         CurrentReading.Silent, CurrentReading.Unscaled -> stringResource(R.string.ride_phase_none)
     }
-    val fill = phaseFill(reading, state.currentLimit[slot.address])
+    val fill = phaseFill(reading, state.currentLimit[slot.wheel])
     Column {
         Row(verticalAlignment = Alignment.Bottom) {
             Text(slotLabel(slot), style = ride(12.sp), color = FgMuted)

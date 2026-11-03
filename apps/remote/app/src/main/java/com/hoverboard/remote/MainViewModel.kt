@@ -38,7 +38,9 @@ import com.hoverboard.remote.model.SpeedReading
 import com.hoverboard.remote.model.TelemetryUi
 import com.hoverboard.remote.model.Throttle
 import com.hoverboard.remote.model.TripBaseline
+import com.hoverboard.remote.model.Wheel
 import com.hoverboard.remote.model.WheelGeometry
+import com.hoverboard.remote.model.asLong
 import com.hoverboard.remote.model.batteryLow
 import com.hoverboard.remote.model.batteryReading
 import com.hoverboard.remote.model.currentReading
@@ -111,16 +113,18 @@ import kotlinx.coroutines.launch
  * @param findingBoards whether the Connect screen's scan for nearby boards is running.
  * @param boardsSeen what that scan has turned up so far, one row per address, in the order the
  *   boards were first heard from ([ScanList]).
- * @param countsPerAmp each board's `motor.current_cal`, as the attach-time ride-facts read got it
- *   ([SetupState.countsPerAmpOf]), by address: the scale belongs to the sense chain fitted to that
- *   board.
+ * @param countsPerAmp each wheel's `motors.<motor>.current.cal`, as the attach-time ride-facts read
+ *   got it ([SetupState.countsPerAmpOf]), by wheel: the scale belongs to the sense chain fitted to
+ *   that motor.
+ * @param motorCounts each motor controller's motor count ([BoardSetup.motors]), absent while
+ *   unread: what [wheels] are.
  * @param packCells each board's `board.battery.cells`, from the same read ([SetupState.packCellsOf]).
  * @param wheelGeometry each board's pole-pair count and wheel diameter, from the same read
  *   ([SetupState.wheelGeometryOf]): what turns that wheel's counted hall edges into a distance.
- * @param speedFacts each REPORTING motor controller's wheel rate with its geometry and side
- *   ([SetupState.speedFactsOf]), in address order: what [speed] is computed from.
- * @param sides each board's stored motor 0 `side`, from the same read: what places it in a Ride
- *   slot ([slots]).
+ * @param speedFacts each REPORTING wheel's rate with its motor's geometry and side
+ *   ([SetupState.speedFactsOf]), in wheel order: what [speed] is computed from.
+ * @param sides each wheel's stored `side` at its motor index, from the same read: what places it in
+ *   a Ride slot ([slots]).
  * @param batteryFloor each board's `board.battery.floor`, centivolts, from the same read: where the
  *   Ride ring turns caution ([batteryLow]).
  * @param imuModel each board's `imu.model`, from the same read: 0 is no IMU fitted.
@@ -130,8 +134,8 @@ import kotlinx.coroutines.launch
  * @param machineDifferences the machine settings whose copies differ, each with every motor
  *   controller's value ([SetupState.machineDifferences]): what Setup lists while a board reports
  *   the boards disagree (`EV_MACHINE`, `specs/machine-settings.md` section 7).
- * @param currentLimit each board's `motors.0.current.limit`, milliamps, from the same read: what a
- *   Ride phase bar is full at.
+ * @param currentLimit each wheel's `motors.<motor>.current.limit`, milliamps, from the same read:
+ *   what its Ride phase bar is full at.
  * @param faultDisarm why the app dropped the arm level by itself for a board fault, kept until the
  *   next ARM tap ([MainViewModel.onArmToggle], `specs/remote-ui.md` 3.1).
  * @param latchHeld each board's latch bits the app holds lit since it last saw them, until the next
@@ -141,8 +145,8 @@ import kotlinx.coroutines.launch
  * @param boardsOff whether the link has been up for 1 s with no motor controller in the inbox: the
  *   boards are unpowered behind a bridge, and Ride shows its motor-controller-off card in place of
  *   the instruments and the pad (`specs/remote-ui.md` 3.1).
- * @param notTurning the boards the app has asked for drive for 1 s whose wheel has reported no
- *   rotation all that time (`specs/remote-ui.md` 3.1, "A wheel that does not turn").
+ * @param notTurning the wheels the app has asked for drive for 1 s that have reported no rotation
+ *   all that time (`specs/remote-ui.md` 3.1, "A wheel that does not turn").
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -168,23 +172,24 @@ data class UiState(
     val selectedBoard: SelectedBoard? = null,
     val findingBoards: Boolean = false,
     val boardsSeen: List<ScanCandidate> = emptyList(),
-    val countsPerAmp: Map<Int, Int> = emptyMap(),
+    val countsPerAmp: Map<Wheel, Int> = emptyMap(),
+    val motorCounts: Map<Int, Int> = emptyMap(),
     val packCells: Map<Int, Int> = emptyMap(),
     val packChemistry: Map<Int, Int> = emptyMap(),
     val wheelGeometry: Map<Int, WheelGeometry> = emptyMap(),
     val speedFacts: List<SpeedFacts> = emptyList(),
-    val sides: Map<Int, Int> = emptyMap(),
+    val sides: Map<Wheel, Int> = emptyMap(),
     val batteryFloor: Map<Int, Int> = emptyMap(),
     val imuModel: Map<Int, Int> = emptyMap(),
     val boardStatus: Map<Int, List<BoardStatus.Entry>> = emptyMap(),
     val machineDifferences: Map<Key, Map<Int, Value>> = emptyMap(),
-    val currentLimit: Map<Int, Int> = emptyMap(),
+    val currentLimit: Map<Wheel, Int> = emptyMap(),
     val faultDisarm: FaultDisarm? = null,
     val latchHeld: Map<Int, Int> = emptyMap(),
     val lampTest: Boolean = false,
     val trip: TripBaseline = TripBaseline.NONE,
     val boardsOff: Boolean = false,
-    val notTurning: Set<Int> = emptySet(),
+    val notTurning: Set<Wheel> = emptySet(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -226,7 +231,14 @@ data class UiState(
      * What the board at [address]'s current display shows (`specs/remote-ui.md` 3.6): that board's
      * own window words against that board's own scale, or the reason there is no figure.
      */
-    fun currentOf(address: Int): CurrentReading = currentReading(telemetryOf(address), countsPerAmp[address])
+    fun currentOf(address: Int): CurrentReading = currentOf(Wheel(address, 0))
+
+    /**
+     * What [wheel]'s phase current shows (`specs/remote-ui.md` 3.1, the phase bars): its motor's
+     * own window words (motor 1's from the motor-1 block) against that motor's own scale.
+     */
+    fun currentOf(wheel: Wheel): CurrentReading =
+        currentReading(telemetryOf(wheel.node), countsPerAmp[wheel], wheel.motor)
 
     /**
      * What the board at [address]'s battery display shows (`specs/remote-ui.md` 3.6b): its reported
@@ -249,8 +261,15 @@ data class UiState(
      */
     val speed: SpeedReading get() = machineSpeed(speedFacts)
 
-    /** The Ride screen's two board slots ([rideSlots]). */
-    val slots: RideSlots get() = rideSlots(motorControllers.map { it.address }) { sides[it] }
+    /**
+     * The machine's wheels (`specs/twelve-fet.md` section 6.2): each motor controller's motors, in
+     * address then motor order; a board whose motor count is unread counts its motor 0 alone.
+     */
+    val wheels: List<Wheel>
+        get() = motorControllers.flatMap { n -> (0 until (motorCounts[n.address] ?: 1)).map { Wheel(n.address, it) } }
+
+    /** The Ride screen's two wheel slots ([rideSlots]). */
+    val slots: RideSlots get() = rideSlots(wheels) { sides[it] }
 
     /** Whether a motor controller reports the machine's boards disagree (`EV_MACHINE`). */
     val machineDisagrees: Boolean get() = reporting.any { telemetryByBoard[it]?.machineDisagrees == true }
@@ -353,7 +372,7 @@ data class UiState(
             speedFacts = speedFacts,
             ringBoard = ring.first,
             battery = ring.second,
-            slotBoards = slots.all.map { it.address }.filter { it in telemetryByBoard }.map { it to currentOf(it) },
+            slotWheels = slots.all.map { it.wheel }.filter { it.node in telemetryByBoard }.map { it to currentOf(it) },
             countsPerAmp = countsPerAmp,
         )
 
@@ -527,12 +546,12 @@ class MainViewModel(
     private val boardsOff = MutableStateFlow(false)
 
     /**
-     * The boards judged not turning ([UiState.notTurning]), and per board the 1 s wait that judges
-     * one: started when its demand reaches [NOT_TURNING_DEMAND] with its wheel reading no rate, and
+     * The wheels judged not turning ([UiState.notTurning]), and per wheel the 1 s wait that judges
+     * one: started when its demand reaches [NOT_TURNING_DEMAND] with it reading no rate, and
      * cancelled the moment either stops being so.
      */
-    private val notTurning = MutableStateFlow<Set<Int>>(emptySet())
-    private val turningWaits = mutableMapOf<Int, Job>()
+    private val notTurning = MutableStateFlow<Set<Wheel>>(emptySet())
+    private val turningWaits = mutableMapOf<Wheel, Job>()
 
     /**
      * What the session knows about its nodes, gathered for [uiState]: the node list, the machine
@@ -599,6 +618,8 @@ class MainViewModel(
         }.combine(boards) { ui, b ->
             val driving = if (ui.armed) ui.driving else b.drive.targets
             val mcs = b.nodes.filter { it.isMotorController }.map { it.address }
+            val counts = mcs.mapNotNull { a -> b.setup.setupOf(a).motors?.let { a to it } }.toMap()
+            val wheels = mcs.flatMap { a -> (0 until (counts[a] ?: 1)).map { Wheel(a, it) } }
             ui.copy(
                 attachedNode = b.attached,
                 nodes = b.nodes,
@@ -609,19 +630,22 @@ class MainViewModel(
                 driving = driving,
                 riderWaiver = b.setup.riderWaiver(driving.boards),
                 telemetryByBoard = b.telemetry,
-                countsPerAmp = mcs.mapNotNull { a -> b.setup.countsPerAmpOf(a)?.let { a to it } }.toMap(),
+                countsPerAmp = wheels.mapNotNull { w ->
+                    b.setup.countsPerAmpOf(w.node, w.motor)?.let { w to it }
+                }.toMap(),
+                motorCounts = counts,
                 packCells = mcs.mapNotNull { a -> b.setup.packCellsOf(a)?.let { a to it } }.toMap(),
                 packChemistry = mcs.mapNotNull { a -> b.setup.packChemistryOf(a)?.let { a to it } }.toMap(),
                 wheelGeometry = mcs.mapNotNull { a -> b.setup.wheelGeometryOf(a)?.let { a to it } }.toMap(),
-                speedFacts = mcs.mapNotNull { a ->
-                    b.telemetry[a]?.wheelRateQ12?.let { b.setup.speedFactsOf(a, it) }
+                speedFacts = wheels.mapNotNull { w ->
+                    b.telemetry[w.node]?.wheelRateOf(w.motor)?.let { b.setup.speedFactsOf(w, it) }
                 },
-                sides = b.setup.rideFacts(mcs, SetupFields.CONTROL_SIDE),
+                sides = b.setup.wheelFacts(wheels, SetupFields.CONTROL_SIDE),
                 batteryFloor = b.setup.rideFacts(mcs, SetupFields.BATTERY_FLOOR),
                 imuModel = b.setup.rideFacts(mcs, SetupFields.IMU_MODEL),
                 boardStatus = mcs.mapNotNull { a -> b.setup.setupOf(a).status?.let { a to it } }.toMap(),
                 machineDifferences = b.setup.machineDifferences,
-                currentLimit = b.setup.rideFacts(mcs, SetupFields.MOTOR_CURRENT_LIMIT),
+                currentLimit = b.setup.wheelFacts(wheels, SetupFields.MOTOR_CURRENT_LIMIT),
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
@@ -1059,28 +1083,26 @@ class MainViewModel(
     }
 
     /**
-     * Judge each board the frame drives against what its wheel reports (`specs/remote-ui.md` 3.1, "A
-     * wheel that does not turn"): armed, a demand of at least [NOT_TURNING_DEMAND] in that board's
-     * own command and a `wheel_rate` of 0 start a [NOT_TURNING_MS] wait, and the board is not turning
-     * once it ends. Any of the three stopping being so cancels the wait and clears the board. The
-     * app does not disarm for it.
+     * Judge each wheel the frame drives against what it reports (`specs/remote-ui.md` 3.1, "A wheel
+     * that does not turn"): armed, a demand of at least [NOT_TURNING_DEMAND] in that wheel's own
+     * command and its motor's `wheel_rate` at 0 (motor 1's from the motor-1 block) start a
+     * [NOT_TURNING_MS] wait, and the wheel is not turning once it ends. Any of the three stopping
+     * being so cancels the wait and clears the wheel. The app does not disarm for it.
      */
     private fun watchTurning(frame: DriveFrame, telemetry: Map<Int, TelemetryUi>) {
         val suspects = if (!local.value.armed) {
             emptySet()
         } else {
-            // A board's `CYCLIC_STATE` carries motor 0's wheel words alone (`specs/twelve-fet.md`
-            // section 6.1), so motor 0 is the wheel that can be judged.
             frame.commands.filter { (wheel, c) ->
-                wheel.motor == 0 && abs(c.demand) >= NOT_TURNING_DEMAND && telemetry[wheel.node]?.wheelRateQ12 == 0
-            }.keys.map { it.node }.toSet()
+                abs(c.demand) >= NOT_TURNING_DEMAND && telemetry[wheel.node]?.wheelRateOf(wheel.motor) == 0
+            }.keys
         }
-        for (board in turningWaits.keys - suspects) turningWaits.remove(board)?.cancel()
+        for (wheel in turningWaits.keys - suspects) turningWaits.remove(wheel)?.cancel()
         notTurning.update { it intersect suspects }
-        for (board in suspects - turningWaits.keys) {
-            turningWaits[board] = viewModelScope.launch {
+        for (wheel in suspects - turningWaits.keys) {
+            turningWaits[wheel] = viewModelScope.launch {
                 delay(NOT_TURNING_MS)
-                notTurning.update { it + board }
+                notTurning.update { it + wheel }
             }
         }
     }
@@ -1168,3 +1190,13 @@ class MainViewModel(
 /** Each of [mcs]'s stored ride fact [field] ([SetupState.rideFactOf]), for the boards it is read from. */
 private fun SetupState.rideFacts(mcs: List<Int>, field: SetupField): Map<Int, Int> =
     mcs.mapNotNull { a -> rideFactOf(a, field)?.let { a to it } }.toMap()
+
+/**
+ * Each of [wheels]' stored per-motor ride fact [field] (`control.side`, `motors.<i>.current.limit`)
+ * at its own motor index, the unread left out. Motor 0's are read with [SetupFields.MOTOR_FACTS],
+ * motor 1's with the board's motor count.
+ */
+private fun SetupState.wheelFacts(wheels: List<Wheel>, field: SetupField): Map<Wheel, Int> =
+    wheels.mapNotNull { w ->
+        setupOf(w.node).values[field.def.key(w.motor)]?.asLong()?.toInt()?.let { w to it }
+    }.toMap()

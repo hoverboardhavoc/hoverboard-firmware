@@ -22,10 +22,13 @@ import androidx.compose.ui.test.up
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.l3.Walk
+import com.hoverboard.protocol.linkctl.CyclicMotor
+import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.model.SetupFields
+import com.hoverboard.remote.model.SlotSide
 import com.hoverboard.remote.model.ConnectionState
 import com.hoverboard.remote.model.DriveInForce
 import com.hoverboard.remote.model.DriveMode
@@ -42,6 +45,7 @@ import com.hoverboard.remote.model.TripBaseline
 import com.hoverboard.remote.model.WheelGeometry
 import com.hoverboard.remote.model.totalKmText
 import com.hoverboard.remote.model.tripKmText
+import com.hoverboard.remote.model.Wheel
 import com.hoverboard.remote.ui.components.ARM_TAG
 import com.hoverboard.remote.ui.components.JOYSTICK_TAG
 import com.hoverboard.remote.ui.components.THROTTLE_TAG
@@ -58,6 +62,7 @@ import com.hoverboard.remote.ui.screens.RIDE_TRIP_TAG
 import com.hoverboard.remote.ui.screens.RIDE_TURN_TAG
 import com.hoverboard.remote.ui.screens.RideTopBarStatus
 import com.hoverboard.remote.ui.screens.lampTag
+import com.hoverboard.remote.ui.screens.ridePhaseTag
 import com.hoverboard.remote.ui.theme.HoverboardRemoteTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -536,7 +541,7 @@ class ControlScreenTest {
     @Test
     fun armedThePadStaysAndALitLampIsAStatement() {
         val single = ride(armed = true, mode = DriveMode.SINGLE, other = 0x02)
-            .copy(sides = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.RIGHT))
+            .copy(sides = mapOf(Wheel(0x01, 0) to Fields.ControlSide.LEFT, Wheel(0x02, 0) to Fields.ControlSide.RIGHT))
             .reporting(0x02, board(fault = CyclicState.EV_IMU_LOSS))
         show(single)
         compose.onNodeWithTag(THROTTLE_TAG).assertIsDisplayed()
@@ -548,8 +553,43 @@ class ControlScreenTest {
     /** A driven wheel that does not turn is a warning statement naming the board. */
     @Test
     fun aWheelThatDoesNotTurnIsSaid() {
-        show(sided(armed = true).copy(notTurning = setOf(0x02)))
+        show(sided(armed = true).copy(notTurning = setOf(Wheel(0x02, 0))))
         compose.onNodeWithText(s(R.string.ride_not_turning, s(R.string.lamp_board_right))).assertIsDisplayed()
+    }
+
+    /**
+     * A 12-FET fills both slots (`specs/remote-ui.md` 3.1, "Wheel slots"): each phase bar is its own
+     * motor's window over its own motor's calibration, and the not-turning statement names the wheel.
+     */
+    @Test
+    fun aTwoMotorBoardFillsBothSlotsWithItsOwnWheelsFigures() {
+        val m0 = Wheel(0x01, 0)
+        val m1 = Wheel(0x01, 1)
+        val pulling = TelemetryUi().merge(
+            QUIET_STATE.copy(
+                mode = 2,
+                obs = QUIET_OBS.copy(phaseMean = 910, dutyOn = CyclicObs.DUTY_FULL),
+                motor1 = CyclicMotor(
+                    wheelSpeed = 0,
+                    phasePeak = 0,
+                    phaseMean = 1_230,
+                    dutyOn = CyclicObs.DUTY_FULL,
+                    wheelRate = 0,
+                ),
+            ),
+        )
+        val fet = ride(armed = true, mode = DriveMode.BOUND).copy(
+            nodes = listOf(NodeInfo(0x01, Walk.CLASS_MOTOR, "12-FET")),
+            motorCounts = mapOf(0x01 to 2),
+            sides = mapOf(m0 to Fields.ControlSide.LEFT, m1 to Fields.ControlSide.RIGHT),
+            countsPerAmp = mapOf(m0 to 455, m1 to 410),
+            notTurning = setOf(m1),
+        ).reporting(0x01, pulling)
+        show(fet)
+        compose.onNodeWithTag(ridePhaseTag(SlotSide.LEFT)).assertTextEquals(s(R.string.ride_phase_amps, 2.0f))
+        compose.onNodeWithTag(ridePhaseTag(SlotSide.RIGHT)).assertTextEquals(s(R.string.ride_phase_amps, 3.0f))
+        val wheel = s(R.string.ride_wheel_right, "12-FET 0x01")
+        compose.onNodeWithText(s(R.string.ride_not_turning, wheel)).assertIsDisplayed()
     }
 
     /** The trip line is blank while there is no machine distance, and reads both figures when there is. */
@@ -684,7 +724,7 @@ class ControlScreenTest {
 
     /** The pair BOUND, 0x01 the left wheel and 0x02 the right, both reporting. */
     private fun sided(armed: Boolean) = ride(armed = armed, mode = DriveMode.BOUND, other = 0x02)
-        .copy(sides = mapOf(0x01 to Fields.ControlSide.LEFT, 0x02 to Fields.ControlSide.RIGHT))
+        .copy(sides = mapOf(Wheel(0x01, 0) to Fields.ControlSide.LEFT, Wheel(0x02, 0) to Fields.ControlSide.RIGHT))
 
     /** This disarmed state driving [drive], as the view model has it: the arm would arm its targets. */
     private fun UiState.driving(drive: DriveInForce) = copy(drive = drive, driving = drive.targets)
