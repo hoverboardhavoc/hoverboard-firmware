@@ -404,6 +404,7 @@ class ScreenshotTest {
                     onThrottleMove = { _, _ -> },
                     onJoystickMove = { _, _, _, _ -> },
                     onThrottleRelease = {},
+                    onHorn = {},
                 )
             },
             tune = {},

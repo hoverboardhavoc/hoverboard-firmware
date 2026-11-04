@@ -283,6 +283,25 @@ class MainViewModelTest : RiderVmTest() {
         assertFalse(currentState().armed)
     }
 
+    /** `specs/tones.md` section 5: the horn sounds disarmed, keeps the arm level, and backgrounding drops it. */
+    @Test
+    fun `the horn is held while pressed, armed or not, and backgrounding releases it`() = runTest(dispatcher) {
+        transport.setConnectionState(ConnectionState.CONNECTED)
+        reporting(ONE_BOARD)
+        dispatcher.scheduler.runCurrent()
+        viewModel.onHorn(true)
+        assertEquals(RiderCommand.DISARMED.withHorn(true), transport.last)
+        viewModel.onHorn(false)
+        assertEquals(RiderCommand.DISARMED, transport.last)
+
+        viewModel.onArmToggle()
+        viewModel.onHorn(true)
+        val held = checkNotNull(transport.last)
+        assertTrue(held.armed && held.horn)
+        viewModel.onAppBackgrounded()
+        assertEquals(RiderCommand.DISARMED, transport.last, "no horn left held in the background")
+    }
+
     @Test
     fun `release path 2, backgrounding the app disarms`() = runTest(dispatcher) {
         connectAndArm()

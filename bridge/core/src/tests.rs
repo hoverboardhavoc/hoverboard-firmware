@@ -703,7 +703,7 @@ fn the_flash_guard_and_the_store_erase_use_the_store_crates_one_region() {
     );
     let p = &part::GD32F130C8;
     assert_eq!(p.store_len() as usize, store::geometry::region_len(1024));
-    assert_eq!(flash::MAX_IMAGE + p.store_len() as usize, 64 * 1024);
+    assert_eq!(p.max_image() + p.store_len() as usize, 64 * 1024);
     let mut s = board(Family::F1x0, Inject::default(), 1);
     s.connect().unwrap();
     target::halt(&mut s).unwrap();
@@ -721,7 +721,7 @@ fn the_flash_guard_and_the_store_erase_use_the_store_crates_one_region() {
     // The erase reaches exactly the pages the guard refuses: the model counts every bus erase of
     // its last two pages, and an image filling everything below them is left whole.
     let mut s = board(Family::F10x, Inject::default(), 1);
-    let img = image(flash::MAX_IMAGE);
+    let img = image(part::GD32F103_64.max_image());
     model(&mut s).load(&img);
     flash::erase_store(&mut s).unwrap();
     let g = model(&mut s);
@@ -917,7 +917,7 @@ fn the_store_image_limit_ring_and_stack_follow_the_row() {
         (&part::GD32F130C6, 0x0800_7800, 30_720, 2048, 0x2000_1000),
         (&part::MM32SPIN05, 0x0800_7800, 30_720, 2048, 0x2000_1000),
         // The image buffer caps the 12-FET's limit, not its store.
-        (&part::GD32F103RC, 0x0803_F000, 63_488, 4096, 0x2000_2000),
+        (&part::GD32F103RC, 0x0803_F000, 73_728, 4096, 0x2000_2000),
     ] {
         assert_eq!(row.store_start(), store, "{}", row.name);
         assert_eq!(
@@ -939,7 +939,7 @@ fn the_store_image_limit_ring_and_stack_follow_the_row() {
     }
     assert_eq!(
         flash::MAX_IMAGE,
-        63_488,
+        73_728,
         "the image buffer, every row's limit capped at it"
     );
     assert_eq!(
@@ -1162,10 +1162,10 @@ fn the_rc_identifies_and_its_store_is_the_last_two_2_kib_pages() {
 #[test]
 fn an_image_larger_than_the_buffer_is_refused_on_the_rc_before_the_board_is_touched() {
     let rc = &part::GD32F103RC;
-    assert_eq!(flash::check_image(rc, 63_488), Ok(()));
-    assert_eq!(flash::check_image(rc, 63_489), Err(FlashError::StoreRange));
+    assert_eq!(flash::check_image(rc, 73_728), Ok(()));
+    assert_eq!(flash::check_image(rc, 73_729), Err(FlashError::StoreRange));
     assert!(matches!(
-        FlashJob::new(63_489, Finish::Boot),
+        FlashJob::new(73_729, Finish::Boot),
         Err(FlashError::StoreRange)
     ));
     // FLASH_BEGIN: refused with STORE_RANGE, nothing read or written on the board.
@@ -1178,7 +1178,7 @@ fn an_image_larger_than_the_buffer_is_refused_on_the_rc_before_the_board_is_touc
         store_mounted: true,
     };
     let begin = Msg::FlashBegin {
-        len: 63_489,
+        len: 73_729,
         sha256: [0; 32],
     };
     let mut got = None;
@@ -1224,7 +1224,7 @@ fn the_rc_flashes_in_2_kib_pages_and_the_whole_buffer_fits() {
     let mut s = rc_board();
     let g = model(&mut s);
     let store_at = ((rc.store_start() - FLASH_BASE) / 2) as usize;
-    let above = (63_488 / 2) as usize;
+    let above = (73_728 / 2) as usize;
     g.flash[above..].fill(0x5A5A);
     let img = image(rc.max_image());
     run_job(&mut s, &img).unwrap();
@@ -1264,7 +1264,7 @@ fn a_gdb_session_on_the_rc_maps_flash_in_2_kib_blocks_up_to_the_buffer() {
     crate::gdb::memory_map(&mut xml, rc.image_end(), rc.page);
     assert!(
         xml.contains(
-            "<memory type=\"flash\" start=\"0x8000000\" length=\"0xf800\">\
+            "<memory type=\"flash\" start=\"0x8000000\" length=\"0x12000\">\
              <property name=\"blocksize\">0x800</property>"
         ),
         "{xml}"

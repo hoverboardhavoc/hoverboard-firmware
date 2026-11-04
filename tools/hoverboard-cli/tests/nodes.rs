@@ -1487,3 +1487,43 @@ fn the_leader_check_through_the_binary() {
     assert!(!err.contains("walked"), "{err}");
     server.join().unwrap();
 }
+
+/// `specs/tones.md` section 4: a tune is a node field, `tone.<event>`, which `board set` writes
+/// (raw or RTTTL) and `board get` reads back as raw notes; the machine commands refuse it.
+#[test]
+fn a_tune_is_set_and_read_by_event_on_one_board() {
+    let (code, _, err) = cli_code(&[
+        "--tcp=127.0.0.1:9",
+        "machine",
+        "set",
+        "tone.horn",
+        "4000/30",
+    ]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("tone.horn is not a machine field"), "{err}");
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 3));
+    let run = |args: &[&str]| {
+        let mut a = vec![tcp.as_str()];
+        a.extend_from_slice(args);
+        cli_code(&a)
+    };
+    let (code, out, err) = run(&["board", "get", "0x01", "tone.battery_low"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out.trim(),
+        "Hoverboard: tone.battery_low = \"2000/15 0/255 0/230\" (default)"
+    );
+    let (code, out, err) = run(&["board", "set", "0x01", "tone.horn", "t:d=4,o=5,b=120:c6,8p"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out,
+        "Hoverboard: tone.horn: \"4000/50\" (default) -> \"1047/50 0/25\"\n"
+    );
+    let (code, out, err) = run(&["board", "get", "0x01", "tone.horn"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "Hoverboard: tone.horn = \"1047/50 0/25\"");
+    server.join().unwrap();
+}

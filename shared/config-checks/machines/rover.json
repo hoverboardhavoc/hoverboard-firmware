@@ -150,10 +150,14 @@
             "dead_time": 28,
             "timer": 0
           },
+          "direction": "forward",
           "side": "left",
           "align_offset": 1
         }
-      ]
+      ],
+      "tone": {
+        "horn": "415/50"
+      }
     },
     "8adc39323335381255343333": {
       "device": {
@@ -297,7 +301,10 @@
           "pole_pairs": 15,
           "wheel_diameter_mm": 165
         }
-      ]
+      ],
+      "tone": {
+        "horn": "415/50"
+      }
     }
   }
 }

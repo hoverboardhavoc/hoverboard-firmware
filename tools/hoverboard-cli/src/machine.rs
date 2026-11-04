@@ -787,6 +787,11 @@ mod tests {
             .unwrap_err()
             .contains("not a machine field"));
         assert!(machine_key("motors.0.side").is_err());
+        // The tunes are a node field (`specs/tones.md` section 4): the board commands take them.
+        assert!(machine_key("tone.horn")
+            .unwrap_err()
+            .contains("not a machine field"));
+        assert!(machine_key("machine.tone.horn").is_err());
     }
 
     #[test]

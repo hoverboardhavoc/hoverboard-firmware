@@ -9,6 +9,7 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.down
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -19,6 +20,9 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.up
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
+import androidx.compose.ui.unit.width
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hoverboard.protocol.l3.Walk
@@ -47,12 +51,14 @@ import com.hoverboard.remote.model.totalKmText
 import com.hoverboard.remote.model.tripKmText
 import com.hoverboard.remote.model.Wheel
 import com.hoverboard.remote.ui.components.ARM_TAG
+import com.hoverboard.remote.ui.components.HORN_TAG
 import com.hoverboard.remote.ui.components.JOYSTICK_TAG
 import com.hoverboard.remote.ui.components.THROTTLE_TAG
 import com.hoverboard.remote.ui.screens.ControlScreen
 import com.hoverboard.remote.ui.screens.FAULT_GRID_TAG
 import com.hoverboard.remote.ui.screens.FRAME_STATS_TAG
 import com.hoverboard.remote.ui.screens.RIDE_BOARDS_OFF_TAG
+import com.hoverboard.remote.ui.screens.RIDE_INSTRUMENTS_TAG
 import com.hoverboard.remote.ui.screens.RIDE_PACK_TAG
 import com.hoverboard.remote.ui.screens.RIDE_PAD_SLOT_TAG
 import com.hoverboard.remote.ui.screens.RIDE_REVERSE_TAG
@@ -677,6 +683,84 @@ class ControlScreenTest {
         compose.onNodeWithTag(RIDE_TURN_TAG).assertDoesNotExist()
     }
 
+    // --- the horn (`specs/tones.md` section 5) -------------------------------------------------
+
+    /**
+     * The horn is a round button centred in the gap between the L and R phase readouts, at least
+     * 48 dp square, and it moves and shrinks nothing: the phase figures and the full-width ARM keep
+     * the bounds they have with no horn.
+     */
+    @Test
+    fun theHornSitsBetweenThePhaseReadoutsAndTakesNothingFromThem() {
+        show(sided(armed = false))
+        compose.onNodeWithTag(HORN_TAG).assertDoesNotExist()
+        val tags = listOf(ridePhaseTag(SlotSide.LEFT), ridePhaseTag(SlotSide.RIGHT), ARM_TAG)
+        val without = tags.map(::bounds)
+        assertEquals("ARM takes the full row", padBounds().width, bounds(ARM_TAG).width, 0.5f)
+
+        hornCallback.value = {}
+        compose.waitForIdle()
+        assertEquals("the horn moved or shrank nothing", without, tags.map(::bounds))
+        val horn = compose.onNodeWithTag(HORN_TAG).assertIsDisplayed().getUnclippedBoundsInRoot()
+        assertTrue("touch target ${horn.width} x ${horn.height}", horn.width >= 48.dp && horn.height >= 48.dp)
+        val b = bounds(HORN_TAG)
+        val (left, right) = without
+        assertEquals("centred in the gap", bounds(RIDE_INSTRUMENTS_TAG).center.x, b.center.x, 1f)
+        assertTrue("between the readouts", left.right < b.center.x && b.center.x < right.left)
+        val barBottom = left.bottom + with(compose.density) { 12.dp.toPx() }
+        assertTrue("on the phase row", b.center.y > left.top && b.center.y < barBottom)
+    }
+
+    /**
+     * With one board found only one phase readout is drawn, and the horn stays at the row's
+     * horizontal centre whichever side is empty, clear of the readout that is there.
+     */
+    @Test
+    fun theHornStaysCentredWithOnePhaseReadout() {
+        fun one(side: Int) = ride(armed = false, mode = DriveMode.SINGLE).copy(sides = mapOf(Wheel(0x01, 0) to side))
+        show(one(Fields.ControlSide.RIGHT), onHorn = {})
+        for ((side, present, absent) in listOf(
+            Triple(Fields.ControlSide.RIGHT, SlotSide.RIGHT, SlotSide.LEFT),
+            Triple(Fields.ControlSide.LEFT, SlotSide.LEFT, SlotSide.RIGHT),
+        )) {
+            update(one(side))
+            compose.onNodeWithTag(ridePhaseTag(absent)).assertDoesNotExist()
+            val b = bounds(HORN_TAG)
+            assertEquals("centred with $absent absent", bounds(RIDE_INSTRUMENTS_TAG).center.x, b.center.x, 1f)
+            val readout = bounds(ridePhaseTag(present))
+            assertTrue("clear of the $present readout", b.center.x < readout.left || b.center.x > readout.right)
+        }
+    }
+
+    /** Held, the horn reports `true`; let go, `false`; and a horn that leaves under a finger lets go. */
+    @Test
+    fun theHornIsHeldWhilePressedAndReleasedOnLiftOrWhenItGoes() {
+        val events = mutableListOf<Boolean>()
+        show(sided(armed = false), onHorn = { events += it })
+        compose.onNodeWithTag(HORN_TAG).performTouchInput { down(center) }
+        compose.waitForIdle()
+        assertEquals(listOf(true), events)
+        compose.onNodeWithTag(HORN_TAG).performTouchInput { up() }
+        compose.waitForIdle()
+        assertEquals(listOf(true, false), events)
+
+        compose.onNodeWithTag(HORN_TAG).performTouchInput { down(center) }
+        update(sided(armed = false).copy(boardsOff = true))
+        compose.onNodeWithTag(HORN_TAG).assertDoesNotExist()
+        assertEquals("leaving composition releases it", listOf(true, false, true, false), events)
+    }
+
+    /** No horn without a callback, and none on the motor-controller-off card. */
+    @Test
+    fun noHornWithoutACallbackOrOnTheBoardsOffCard() {
+        show(sided(armed = false))
+        compose.onNodeWithTag(HORN_TAG).assertDoesNotExist()
+        hornCallback.value = {}
+        update(sided(armed = false).copy(boardsOff = true))
+        compose.onNodeWithTag(RIDE_BOARDS_OFF_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(HORN_TAG).assertDoesNotExist()
+    }
+
     // --- fixtures ------------------------------------------------------------------------------
 
     /** A board's frame: [fault] its word, [battery] centivolts, at rest in OFF. */
@@ -739,6 +823,9 @@ class ControlScreenTest {
     /** The state the screen is composed from: one `setContent` per test, recomposed by [update]. */
     private val rideState = mutableStateOf(UiState())
 
+    /** The horn callback the screen is composed with; null draws no horn. */
+    private val hornCallback = mutableStateOf<((Boolean) -> Unit)?>(null)
+
     private fun show(
         state: UiState,
         onArmToggle: () -> Unit = {},
@@ -746,8 +833,10 @@ class ControlScreenTest {
         onThrottleRelease: () -> Unit = {},
         showFrameStats: Boolean = false,
         onOpenSetup: (Int, Key) -> Unit = { _, _ -> },
+        onHorn: ((Boolean) -> Unit)? = null,
     ) {
         rideState.value = state
+        hornCallback.value = onHorn
         compose.setContent {
             HoverboardRemoteTheme {
                 ControlScreen(
@@ -758,6 +847,7 @@ class ControlScreenTest {
                     onThrottleRelease = onThrottleRelease,
                     showFrameStats = showFrameStats,
                     onOpenSetup = onOpenSetup,
+                    onHorn = hornCallback.value,
                 )
             }
         }

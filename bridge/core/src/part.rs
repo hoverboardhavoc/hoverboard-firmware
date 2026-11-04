@@ -266,10 +266,12 @@ impl Part {
     }
 }
 
-/// The bridge's image buffer, in its RAM: 63,488 B, the 64 KiB rows' limit. A row's image limit
-/// is capped at it ([`Part::max_image`]), so a larger part does not grow it: the ESP32-C3 also
-/// runs BLE and Wi-Fi in its RAM (`specs/twelve-fet.md` section 3.4).
-pub const IMAGE_BUFFER: usize = 63_488;
+/// The bridge's image buffer, in its RAM: 73,728 B (72 KiB). The 64 KiB rows stop below it at
+/// their store (63,488 B); the 12-FET's RC is capped at it ([`Part::max_image`]). The ESP32-C3 also
+/// runs BLE and Wi-Fi in its RAM, so the buffer's 10,240 B above the 64 KiB rows' limit come out
+/// of the heap (`main.rs`, the second region), which left 58,820 B free with both radios up at
+/// the 63,488 B buffer (2026-11-04, the `boot-log` build on the 12-FET's bridge).
+pub const IMAGE_BUFFER: usize = 73_728;
 
 /// The smallest image limit of any row: where a GDB session's flash ends when the part is not
 /// known (`crate::gdb`).

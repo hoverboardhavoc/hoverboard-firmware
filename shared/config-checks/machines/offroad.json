@@ -273,7 +273,10 @@
           "pole_pairs": 15,
           "wheel_diameter_mm": 214
         }
-      ]
+      ],
+      "tone": {
+        "horn": "415/50"
+      }
     }
   }
 }

@@ -116,6 +116,26 @@ class RiderCommandTest {
         assertEquals(Inputs.RIDER_PRESENT, simulated.rider and Inputs.RIDER_PRESENT)
     }
 
+    /** The horn is `buttons` bit1, armed or not, and survives the per-wheel mix (`specs/tones.md` section 5). */
+    @Test
+    fun `the horn rides INPUTS buttons bit1, armed or disarmed`() {
+        fun inputsOf(c: RiderCommand) =
+            checkNotNull(Inputs.decode(pdusOf(c).single { it.opcode == OP_INPUTS }.payload))
+        val disarmed = inputsOf(RiderCommand.DISARMED.withHorn(true))
+        assertTrue(disarmed.horn())
+        assertFalse(disarmed.powerRequest(), "the horn arms nothing")
+        assertEquals(Inputs.BUTTON_HORN, disarmed.buttons)
+        val armed = inputsOf(RiderCommand.armed(2_000).withHorn(true))
+        assertEquals(Inputs.BUTTON_POWER or Inputs.BUTTON_HORN, armed.buttons)
+        assertTrue(RiderCommand.armed(2_000).withHorn(true).withDemand(100).horn, "kept through the mix")
+        assertTrue(RiderCommand.DISARMED.withHorn(true).withDemand(100).horn)
+        assertFalse(inputsOf(RiderCommand.DISARMED).horn(), "the all-stop is silent")
+        val drive = checkNotNull(
+            DriveCmd.decode(pdusOf(RiderCommand.DISARMED.withHorn(true)).single { it.opcode == OP_DRIVE_CMD }.payload),
+        )
+        assertEquals(DriveKind.Neutral, drive.kind, "a disarmed horn drives nothing")
+    }
+
     @Test
     fun `the all-stop command claims nothing at all`() {
         val disarmed = checkNotNull(

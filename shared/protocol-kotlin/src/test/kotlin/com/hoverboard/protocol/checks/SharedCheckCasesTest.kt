@@ -78,10 +78,13 @@ class SharedCheckCasesTest {
     private fun add(key: Key, v: JsonElement, into: Board) {
         if (v.isJsonNull) return
         val row = checkNotNull(Names.byId(key.fieldId))
+        // No check reads a tune, so a machine file's tunes (`tone.<event>`) are left out of the board.
+        if (row.kind == Names.Kind.TUNE) return
         val type = checkNotNull(Fields.typeOf(key.fieldId))
         into.state[key] = when (row.kind) {
             Names.Kind.PIN -> pin(key, type, v.asJsonObject, into)
             Names.Kind.STR -> Value.Str(v.asString)
+            Names.Kind.TUNE -> error("${row.path}: unreachable, returned above")
             Names.Kind.BOOL -> integer(type, if (v.asBoolean) 1 else 0)
             Names.Kind.ENUM -> integer(
                 type,

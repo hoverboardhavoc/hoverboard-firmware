@@ -92,7 +92,7 @@
     "count": 1,
     "kind": "pin",
     "scope": "node",
-    "effect": "client only",
+    "effect": "boot",
     "board_owned": false
   },
   {
@@ -406,6 +406,22 @@
     "board_owned": false
   },
   {
+    "id": 31,
+    "path": "tone",
+    "type": "blob",
+    "index": "named",
+    "names": [
+      "horn",
+      "battery_low",
+      "battery_critical"
+    ],
+    "count": 3,
+    "kind": "tune",
+    "scope": "node",
+    "effect": "live",
+    "board_owned": false
+  },
+  {
     "id": 32,
     "path": "machine.mode",
     "type": "u8",
@@ -625,6 +641,17 @@
     ],
     "scope": "machine",
     "effect": "arm",
+    "board_owned": false
+  },
+  {
+    "id": 44,
+    "path": "machine.battery.warn",
+    "type": "i16",
+    "index": "single",
+    "count": 1,
+    "kind": "int",
+    "scope": "machine",
+    "effect": "boot",
     "board_owned": false
   },
   {

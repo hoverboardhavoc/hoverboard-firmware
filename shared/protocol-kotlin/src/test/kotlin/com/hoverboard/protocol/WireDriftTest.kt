@@ -22,6 +22,7 @@ import com.hoverboard.protocol.linkctl.decodeControl
 import com.hoverboard.protocol.store.Type
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -395,6 +396,17 @@ class WireDriftTest {
         assertEquals(inp, Inputs.decode(expected))
     }
 
+    /** From `the_horn_is_buttons_bit1` in `shared/linkctl/src/lib.rs`. */
+    @Test
+    fun theHornIsButtonsBit1() {
+        val inp = Inputs(buttons = Inputs.BUTTON_HORN, rider = 0)
+        assertArrayEquals(byteArrayOf(0x02, 0x00), inp.encode())
+        val back = checkNotNull(Inputs.decode(byteArrayOf(0x02, 0x00)))
+        assertTrue(back.horn() && !back.powerRequest())
+        assertTrue(checkNotNull(Inputs.decode(byteArrayOf(0x03, 0x00))).let { it.horn() && it.powerRequest() })
+        assertFalse(checkNotNull(Inputs.decode(byteArrayOf(0x01, 0x00))).horn())
+    }
+
     /**
      * Flag and action bit values, all in `shared/linkctl/src/lib.rs`: `CyclicState::FLAG_RIDER` /
      * `CyclicState::FLAG_LEADER` / `CyclicState::FLAG_FOLLOWER` / `CyclicState::FLAG_LOCKDOWN`,
@@ -434,6 +446,7 @@ class WireDriftTest {
             "shared/linkctl/src/lib.rs, CyclicState::FLAG_LOCKDOWN",
         )
         assertEquals(0x01, Inputs.BUTTON_POWER, "shared/linkctl/src/lib.rs, Inputs::BUTTON_POWER")
+        assertEquals(0x02, Inputs.BUTTON_HORN, "shared/linkctl/src/lib.rs, Inputs::BUTTON_HORN")
         assertEquals(0x01, Inputs.RIDER_PRESENT, "shared/linkctl/src/lib.rs, Inputs::RIDER_PRESENT")
     }
 

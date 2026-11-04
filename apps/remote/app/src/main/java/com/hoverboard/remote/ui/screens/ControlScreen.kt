@@ -76,6 +76,8 @@ import java.util.Locale
  * machine status section (3.1c); the board link dots and the BATTERY LOW and LAMP TEST chips are in
  * the top bar ([RideTopBarStatus]).
  *
+ * @param onHorn the horn held (`true`) or released (`false`), the round button between the phase
+ *   readouts (`specs/tones.md` section 5); null draws no horn.
  * @param onOpenSetup open Setup on a board, scrolled to a row: a missing setting's statement.
  */
 @Composable
@@ -86,6 +88,7 @@ fun ControlScreen(
     onJoystickMove: (x: Float, y: Float, width: Float, height: Float) -> Unit,
     onThrottleRelease: () -> Unit,
     modifier: Modifier = Modifier,
+    onHorn: ((Boolean) -> Unit)? = null,
     showFrameStats: Boolean = false,
     onOpenSetup: (board: Int, row: Key) -> Unit = { _, _ -> },
 ) {
@@ -107,7 +110,7 @@ fun ControlScreen(
             )
             Spacer(modifier = Modifier.height(SLOT_GAP))
         } else {
-            RideInstruments(state, Modifier.weight(1f))
+            RideInstruments(state, Modifier.weight(1f), onHorn = onHorn)
             Spacer(modifier = Modifier.height(SLOT_GAP))
         }
         // The grid takes the pad's bounds only while disarmed: while armed the pad keeps its place

@@ -493,6 +493,30 @@ fn to_timeout_edge(since: usize) -> usize {
 }
 
 #[test]
+fn the_horn_reads_the_mirror_and_goes_silent_at_its_timeout() {
+    // `specs/tones.md` section 4.3: the horn is a level on the mirror, and it expires with it.
+    let mut s = fresh();
+    assert!(!s.inbox.remote_horn(), "no mirror, no horn");
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_HORN, 0));
+    run_ticks(&mut s, 3);
+    assert!(s.inbox.remote_horn());
+    assert!(
+        !s.inbox.remote_power_request(),
+        "the horn is not a power request"
+    );
+    run_ticks(&mut s, to_timeout_edge(3));
+    assert!(s.inbox.remote_horn(), "held through the last fresh tick");
+    control_task(&mut s, None, 1);
+    assert!(s.inbox.remote_stale());
+    assert!(!s.inbox.remote_horn(), "a stale mirror sounds nothing");
+    // A release is a fresh mirror without the bit.
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_HORN, 0));
+    assert!(s.inbox.remote_horn());
+    s.inbox.accept(CTRL, mirror(0, 0));
+    assert!(!s.inbox.remote_horn());
+}
+
+#[test]
 fn a_stale_remote_mirror_releases_the_bridge_it_armed() {
     // The failure this closes: the mirror slot never expired, so a board armed over the link
     // stayed in RUN with the motor enables set INDEFINITELY once the link dropped. The drive
