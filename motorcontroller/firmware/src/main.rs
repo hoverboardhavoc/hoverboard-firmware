@@ -1490,7 +1490,7 @@ mod firmware {
         // 12-bit), handed over BEFORE the pass whose source rule converts and filters it
         // (`specs/sensing-and-safety.md`, "The battery word"). Loaded every tick on every board;
         // only a sensing board consumes it, and it stays 0 until the group converts. On the
-        // two-motor image the count is ADC1's regular conversion instead, started at the end of
+        // two-motor image the count is ADC2's regular conversion instead, started at the end of
         // the previous pass and read here (`specs/twelve-fet.md` section 5.4).
         motor::hw::battery_read();
         shell.orch.vbatt_raw = motor::VBATT_RAW.load(Ordering::Relaxed) as u16;
