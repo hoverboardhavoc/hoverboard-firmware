@@ -1,0 +1,89 @@
+# Mode: final_state over the ADC0 and ADC1 blocks, as inject_bringup_four_ranks_adc0_f10x (the
+# calibrations' command bits self-clearing). The vendor configures both groups and sets the sync
+# mode last, as the HAL does: "we must disable sync mode before any configuration change"
+# (GD32F10x User Manual Rev2.3, ADC_CTL0.SYNCM). End state:
+#   ADC0 CTL0   = 0x00050180 (SYNCM = 5, inserted parallel | SM | EOICIE)
+#   ADC0 CTL1   = 0x00008801 (ETEIC | ETSIC = TIMER0 TRGO (0) | DAL (left) | ADCON)
+#   ADC0 SAMPT0 = 0x00001000 (channel 14 at 7.5 cycles)   ADC0 SAMPT1 = 0x00000001 (channel 0)
+#   ADC0 ISQ    = 0x00103800 (IL = 1 | rank 0 = 14 at 14:10 | rank 1 = 0 at 19:15)
+#   ADC1 CTL0   = 0x00000100 (SM; no EOICIE: ADC0's flag is the period vector's one source)
+#   ADC1 CTL1   = 0x0000F801 (ETEIC | ETSIC = software (7), the slave's | DAL | ADCON)
+#   ADC1 SAMPT0 = 0x00008200 (channels 13 and 15 at 7.5 cycles)
+#   ADC1 ISQ    = 0x0016BC00 (IL = 1 | rank 0 = 15 at 14:10 | rank 1 = 13 at 19:15)
+description = """
+ADC0 and ADC1 in inserted parallel mode for the 12-FET's two motors (twelve-fet.md section 5.2):
+two ranks each, rank 0 motor 0's pair (channel 14, PC4, on ADC0; 15, PC5, on ADC1), rank 1 motor
+1's (0, PA0, on ADC0; 13, PC3, on ADC1), every channel at 7.5 cycles, left-aligned, scan on. ADC0's
+group triggered by TIMER0's TRGO with the injected end-of-conversion interrupt; ADC1's on the
+software trigger with the trigger enable set, as the sync-mode slave (GD32F10x User Manual Rev2.3
+section 11.5). Both on, both calibrated, then ADC0's SYNCM = inserted parallel. No conversion.
+
+Vendor: ADC0's group as inject_bringup_four_ranks_adc0_f10x with two ranks; ADC1's the same with
+        ADC0_1_2_EXTTRIG_INSERTED_NONE and no interrupt; adc_mode_config(ADC_DAUL_INSERTED_PARALLEL).
+HAL: chip.dual_adc().configure_inserted_parallel(&chip, &InjectedParallelConfig { primary: Adc0,
+     [14, 0] at code 1, left-aligned, Timer0 Trgo, /6; secondary: [15, 13] }).
+"""
+family = "gd32f10x"
+mode = "final_state"
+assert_only = ["<ADC0_BASE>", "<ADC1_BASE>"]
+
+[vendor]
+body = '''
+    adc_special_function_config(ADC0, ADC_SCAN_MODE, ENABLE);
+    adc_data_alignment_config(ADC0, ADC_DATAALIGN_LEFT);
+    adc_channel_length_config(ADC0, ADC_INSERTED_CHANNEL, 2U);
+    adc_inserted_channel_config(ADC0, 0U, ADC_CHANNEL_14, ADC_SAMPLETIME_7POINT5);
+    adc_inserted_channel_config(ADC0, 1U, ADC_CHANNEL_0, ADC_SAMPLETIME_7POINT5);
+    adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_TRGO);
+    adc_external_trigger_config(ADC0, ADC_INSERTED_CHANNEL, ENABLE);
+    adc_interrupt_enable(ADC0, ADC_INT_EOIC);
+    adc_enable(ADC0);
+    adc_calibration_enable(ADC0);
+    adc_enable(ADC0);
+
+    adc_special_function_config(ADC1, ADC_SCAN_MODE, ENABLE);
+    adc_data_alignment_config(ADC1, ADC_DATAALIGN_LEFT);
+    adc_channel_length_config(ADC1, ADC_INSERTED_CHANNEL, 2U);
+    adc_inserted_channel_config(ADC1, 0U, ADC_CHANNEL_15, ADC_SAMPLETIME_7POINT5);
+    adc_inserted_channel_config(ADC1, 1U, ADC_CHANNEL_13, ADC_SAMPLETIME_7POINT5);
+    adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
+    adc_external_trigger_config(ADC1, ADC_INSERTED_CHANNEL, ENABLE);
+    adc_enable(ADC1);
+    adc_calibration_enable(ADC1);
+    adc_enable(ADC1);
+
+    adc_mode_config(ADC_DAUL_INSERTED_PARALLEL);
+'''
+
+[hal]
+body = '''
+    use hal::config::{
+        AdcClockDiv, InjectedAdcConfig, InjectedChannel, InjectedParallelConfig, TimerTriggerLink,
+    };
+    use hal::{Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let mut channels = heapless::Vec::new();
+        for channel in [14, 0] {
+            channels.push(InjectedChannel { channel, sample_time: 1 }).unwrap();
+        }
+        let mut secondary = heapless::Vec::new();
+        for channel in [15, 13] {
+            secondary.push(channel).unwrap();
+        }
+        let cfg = InjectedParallelConfig {
+            primary: InjectedAdcConfig {
+                adc: PeriphLabel::Adc0,
+                channels,
+                left_aligned: true,
+                trigger_timer: PeriphLabel::Timer0,
+                trigger_link: TimerTriggerLink::Trgo,
+                clock_div: AdcClockDiv::Div6,
+            },
+            secondary,
+        };
+        chip.dual_adc().configure_inserted_parallel(&chip, &cfg).unwrap();
+    }
+'''

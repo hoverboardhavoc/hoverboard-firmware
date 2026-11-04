@@ -65,6 +65,15 @@ registers = { "0x00" = "STAT", "0x04" = "CTL0", "0x08" = "CTL1", "0x0C" = "SAMPT
 # CTL1.RSTCLB and CLB (bits 3, 2): set by software, cleared by hardware when the step finishes.
 self_clearing = { "0x08" = 0x0000_000C }
 
+# The third ADC (the high-density GD32F103RC only; gd32f10x_adc.h: ADC2 = ADC_BASE + 0x1800), the
+# same register block as ADC0.
+[blocks.ADC2_BASE]
+base = 0x4001_3C00
+size = 0x400
+registers = { "0x00" = "STAT", "0x04" = "CTL0", "0x08" = "CTL1", "0x0C" = "SAMPT0", "0x10" = "SAMPT1", "0x2C" = "RSQ0", "0x30" = "RSQ1", "0x34" = "RSQ2", "0x38" = "ISQ", "0x3C" = "IDATA0", "0x40" = "IDATA1", "0x44" = "IDATA2", "0x48" = "IDATA3", "0x4C" = "RDATA" }
+# CTL1.RSTCLB and CLB (bits 3, 2): set by software, cleared by hardware when the step finishes.
+self_clearing = { "0x08" = 0x0000_000C }
+
 [blocks.TIMER0_BASE]
 base = 0x4001_2C00
 size = 0x400

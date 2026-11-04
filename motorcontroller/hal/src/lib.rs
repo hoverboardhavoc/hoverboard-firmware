@@ -83,10 +83,10 @@ pub mod usart_tx;
 pub mod watchdog;
 
 #[cfg(hal_chip)]
-#[cfg(hal_adc = "f10x")]
-pub use adc::DualAdc;
-#[cfg(hal_chip)]
 pub use adc::{Adc, InjectedAdcController, InjectedHandle, TriggeredAdc};
+#[cfg(hal_chip)]
+#[cfg(hal_adc = "f10x")]
+pub use adc::{DualAdc, InjectedParallelHandle};
 #[cfg(hal_chip)]
 pub use addr::{AddrTable, PeriphLabel};
 #[cfg(hal_chip)]

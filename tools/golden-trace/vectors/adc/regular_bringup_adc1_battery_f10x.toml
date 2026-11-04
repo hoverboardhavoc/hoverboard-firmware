@@ -11,9 +11,10 @@
 # ADC1 runs in free mode: SYNCM is ADC0's field ("only used in ADC0", ADC_CTL0) and keeps its reset
 # 0, which nothing in the firmware changes.
 description = """
-The 12-FET's battery conversion brought up on ADC1 (twelve-fet.md section 5.4): the ADC1 clock and
-the ADC clock divider, then one software-triggered regular conversion of channel 12 (PC2) at 239.5
-cycles, right-aligned, ADC on, calibrated. No conversion.
+A battery conversion brought up on ADC1 (the 12-FET's is on ADC2,
+regular_bringup_adc2_battery_f10x): the ADC1 clock and the ADC clock divider, then one
+software-triggered regular conversion of channel 12 (PC2) at 239.5 cycles, right-aligned, ADC on,
+calibrated. No conversion.
 
 Vendor: rcu_periph_clock_enable(RCU_ADC1); rcu_adc_clock_config(RCU_CKADC_CKAPB2_DIV6); scan and
         continuous off, right alignment, regular length 1, rank 0 = channel 12 at 239.5, the

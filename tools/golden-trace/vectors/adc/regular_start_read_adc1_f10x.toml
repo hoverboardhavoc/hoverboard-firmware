@@ -1,5 +1,6 @@
-# Mode: with_polling over ADC1. One 250 Hz pass of the 12-FET's battery read (twelve-fet.md section
-# 5.4): the previous conversion's result, then the next conversion's start, with no wait.
+# Mode: with_polling over ADC1. One 250 Hz pass of a battery read on ADC1 (the 12-FET's is on ADC2,
+# regular_start_read_adc2_f10x): the previous conversion's result, then the next conversion's
+# start, with no wait.
 #
 # STAT (0x00) reads 0x00000002 (EOC set: the conversion the last pass started has ended). RDATA
 # (0x4C) reads 0x0000_0800 (a placeholder, not a silicon capture).

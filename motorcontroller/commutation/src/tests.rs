@@ -2586,9 +2586,9 @@ fn a_back_emf_above_the_voltage_ceiling_clamps_the_accumulator() {
 // --- The arm through a hold, on a turning rotor (`specs/foc-torque.md` section 14, round 3) -------
 
 /// The compare count above which the period ISR holds a sensed phase: `firmware::motor::
-/// hold_compare_max(28)`, the fleet's staged dead time (section 14 derives it; the firmware's own
-/// test pins the derivation). The commutation crate cannot see that function, so the figure is
-/// repeated here as the ISR's rule, not as a crate constant.
+/// hold_compare_max(0, 28)`, rank 0 at the fleet's staged dead time (section 14 derives it; the
+/// firmware's own test pins the derivation). The commutation crate cannot see that function, so
+/// the figure is repeated here as the ISR's rule, not as a crate constant.
 const HOLD_THRESHOLD: u16 = 1_940;
 
 /// The back-EMF the plant's phases carry for a rotor whose q axis is at `theta` and whose EMF is

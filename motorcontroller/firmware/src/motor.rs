@@ -39,10 +39,11 @@
 //!
 //! [`COUNT`] motors, the chip's advanced-timer count (`specs/twelve-fet.md`): two on the 12-FET's
 //! GD32F103RC, one everywhere else. On the RC, TIMER7 drives motor 1 as an event-mode slave of
-//! TIMER0, ADC0's injected group converts both motors' sensed pairs in four ranks on TIMER0's
-//! trigger, and one period ISR runs both motors' bodies; the battery is a regular conversion on
-//! ADC1 there, because four phase ranks fill the injected group. On the one-motor images every
-//! per-motor array below is one long and every per-motor loop one pass.
+//! TIMER0, ADC0 and ADC1 convert both motors' sensed pairs in inserted parallel mode on TIMER0's
+//! trigger (rank 0 motor 0's pair, rank 1 motor 1's, one phase on each ADC), and one period ISR
+//! runs both motors' bodies; the battery is a regular conversion on ADC2 there, because the pairs
+//! fill both converters' ranks. On the one-motor images every per-motor array below is one long
+//! and every per-motor loop one pass.
 
 // On a HOST target the whole `firmware` module (every consumer of these items) is compiled out, so
 // the pure half below reads as dead code there; CI clippys the host surface with
@@ -522,23 +523,60 @@ pub static OBS_FOC_HOLD: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUN
 /// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
 /// left-aligned datum's unit, bring-up step 9's contract). Written by the period ISR every period,
 /// one store and no arithmetic; read by the 250 Hz task, which converts and filters it
-/// (`orchestrator::battery`). Stays 0 on a board whose group has no battery rank or never
-/// converts, which the reader takes as "no conversion yet" (the word stays UNKNOWN).
+/// (`orchestrator::battery`). On the two-motor image it is ADC2's regular conversion, stored by
+/// the 250 Hz task itself (`hw::battery_read`). Stays 0 on a board whose group has no battery rank
+/// or never converts, which the reader takes as "no conversion yet" (the word stays UNKNOWN).
 pub static VBATT_RAW: AtomicU32 = AtomicU32::new(0);
 
-/// The injected group's channel list, in rank order (`specs/motor-integration.md` bring-up step
-/// 5, `specs/twelve-fet.md` section 5.2): each brought-up motor's sensed pair in motor order (ranks
-/// `2m` and `2m + 1`, the lower phase first, the ranks the current limit reads), plus the battery
-/// rank after them when the plan carries `board.battery.pin` and the image takes the battery from
-/// this group (one motor: rank 2). Two, three or four slots.
+/// The one-motor images' injected group, its channel list in rank order
+/// (`specs/motor-integration.md` bring-up step 5): the motor's sensed pair (ranks 0 and 1, the
+/// lower phase first, the ranks the current limit reads), plus the battery rank after them when
+/// the plan carries `board.battery.pin` (rank 2). Two or three slots. The two-motor image
+/// converts its pairs in inserted parallel mode instead ([`parallel_channels`]).
+#[cfg(any(not(feature = "gd32f103rc"), not(target_os = "none")))]
 pub fn injected_ranks(pairs: &[[u8; 2]], vbatt: Option<u8>) -> heapless::Vec<u8, 4> {
     let mut ranks = heapless::Vec::new();
-    // Cannot overflow past the group: a two-motor image passes no battery rank (it is on ADC1),
-    // so at most four pushes into a capacity-4 vector, and a fifth would be dropped, not written.
+    // Cannot overflow past the group: one pair and the battery are three pushes into a
+    // capacity-4 vector, and a fifth would be dropped, not written.
     for ch in pairs.iter().flatten().copied().chain(vbatt) {
         let _ = ranks.push(ch);
     }
     ranks
+}
+
+/// The two-motor image's inserted ranks (`specs/twelve-fet.md` section 5.2): ADC0's channel list
+/// and ADC1's, in rank order, from the brought-up motors' sensed pairs in motor order. Rank `r` is
+/// motor `r`'s pair ([`sample_rank`]), its first sensed phase on ADC0 and its second on ADC1, so
+/// both phases of a motor are sampled at one instant.
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+pub fn parallel_channels(pairs: &[[u8; 2]]) -> [heapless::Vec<u8, COUNT>; 2] {
+    let mut out = [heapless::Vec::new(), heapless::Vec::new()];
+    // Cannot overflow: at most `COUNT` pairs into capacity-`COUNT` vectors; a pair past it would
+    // be dropped, not written.
+    for &[first, second] in pairs {
+        let _ = out[0].push(first);
+        let _ = out[1].push(second);
+    }
+    out
+}
+
+/// The inserted rank motor `motor`'s sensed pair converts in on the two-motor image, and the rank
+/// whose sampling instant bounds its hold threshold ([`hold_compare_max`]): rank 0 for motor 0,
+/// rank 1 for motor 1 (`specs/twelve-fet.md` section 5.2). A one-motor image's motor 0 converts
+/// its pair in ranks 0 and 1 of one ADC, and rank 0's bound is the stricter of the two.
+#[inline(always)]
+pub const fn sample_rank(motor: usize) -> u8 {
+    motor as u8
+}
+
+/// The two-motor image's samples in motor order, from the inserted parallel ranks as the HAL reads
+/// them (rank `r` as `[ADC0's, ADC1's]`): motor `m`'s pair at `2m` and `2m + 1`, its first sensed
+/// phase first, the order the period ISR and the calibration read.
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+#[inline(always)]
+pub fn parallel_samples(ranks: [[u16; 2]; 2]) -> [u16; 4] {
+    let [[a0, a1], [b0, b1]] = ranks;
+    [a0, a1, b0, b1]
 }
 
 /// The duties of a motor's two sensed phases, in the order its ranks convert them: A and B, or B
@@ -578,24 +616,6 @@ pub fn sensed_readings(low_side: bool, armed: bool, enables: [bool; 3], bc: bool
     let (l0, l1) = if bc { (1, 2) } else { (0, 1) };
     [armed && enables[l0], armed && enables[l1]]
 }
-
-/// The highest phase compare at which motor 1's sensed phases are taken as fresh: the end of rank
-/// 3's aperture less a 3-tick margin (`specs/twelve-fet.md` section 5.2, the sampling instants
-/// table). Motor 0's ranks open first and keep [`hold_compare_max`]; motor 1's open 240 ticks
-/// later, on the down count, where a rank is valid while the compare is below the counter at the
-/// end of its aperture.
-pub const MOTOR_1_HOLD_COMPARE: u16 = {
-    // Rank n opens at the trigger plus the latency plus n ranks, at 7.5 + 12.5 = 20 ADC clocks a
-    // rank, and its aperture is 7.5 clocks: ticks after the trigger, on a counter that turns at
-    // ARR, 50 ticks after it.
-    let latency = ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV;
-    let rank = 20 * ADC_CLOCK_DIV;
-    let aperture = 15 * ADC_CLOCK_DIV / 2;
-    let ends = latency + 3 * rank + aperture;
-    let top = (commutation::ARR - TRIGGER_COMPARE) as u32;
-    (commutation::ARR as u32 - (ends - top) - 3) as u16
-};
-const _: () = assert!(MOTOR_1_HOLD_COMPARE == 1_880);
 
 /// The phase-current magnitude this period, from the two sensed phases: the third is the
 /// Kirchhoff remainder `-(ia + ib)`, saturated the stock way, and the magnitude is the largest of
@@ -900,33 +920,69 @@ pub const ADC_TRIGGER_LATENCY_CLOCKS: u32 = 2;
 /// speed, and this is that figure with half again as margin. Gate N2 sweeps the knob it sets.
 pub const SHUNT_SETTLE_NS: u32 = 3_000;
 
-/// The highest compare count at which a sensed phase's low-side shunt sample is taken as valid,
-/// for a board whose dead time is `dead_time_dtg` (`motor.dead_time`, 0x64, in DTG codes of
-/// `board::DEAD_TIME_DTS_DIV` timer ticks each). Above it the phase is held
-/// ([`SampleHold::arm`]).
+/// One inserted rank in timer ticks: 7.5 sampling plus 12.5 conversion ADC clocks.
+pub const ADC_RANK_TICKS: u32 = 20 * ADC_CLOCK_DIV;
+
+/// A rank's sampling aperture in timer ticks: 7.5 ADC clocks.
+pub const ADC_APERTURE_TICKS: u32 = 15 * ADC_CLOCK_DIV / 2;
+
+/// The margin between the end of a down-count aperture and its phase's low side switching off,
+/// timer ticks (`specs/twelve-fet.md` section 5.2).
+pub const DOWN_COUNT_MARGIN_TICKS: u32 = 3;
+
+/// Where inserted rank `rank`'s aperture opens, counted from the trigger's up count through the
+/// top (so past `commutation::ARR` for a rank that opens on the down count): [`TRIGGER_COMPARE`]
+/// plus the trigger latency plus `rank` ranks. 2,212 for rank 0 and 2,332 for rank 1.
+const fn rank_opens(rank: u8) -> u32 {
+    TRIGGER_COMPARE as u32
+        + ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV
+        + rank as u32 * ADC_RANK_TICKS
+}
+
+/// The settle bound of inserted rank `rank` with no dead time (the highest it reaches):
+/// [`SHUNT_SETTLE_NS`] between a phase's low side turning on and the aperture opening.
+const fn rank_settle_bound(rank: u8) -> u32 {
+    rank_opens(rank) - SHUNT_SETTLE_NS * (board::GATE_TIMER_HZ / 1_000_000) / 1_000
+}
+
+/// The down-count bound of inserted rank `rank`: the counter where its aperture ends, on the down
+/// count, less [`DOWN_COUNT_MARGIN_TICKS`]. A phase at compare `c` has its low side on through the
+/// top until the counter falls back to `c`, so the aperture must end before that. 2,240 for rank 0
+/// and 2,120 for rank 1.
+pub const fn rank_down_bound(rank: u8) -> u32 {
+    let ends = rank_opens(rank) + ADC_APERTURE_TICKS;
+    commutation::ARR as u32 - (ends - commutation::ARR as u32) - DOWN_COUNT_MARGIN_TICKS
+}
+
+/// The highest compare count at which a sensed phase converted in inserted rank `rank`
+/// ([`sample_rank`]) has its low-side shunt sample taken as valid, for a motor whose dead time is
+/// `dead_time_dtg` (`motor.dead_time`, 0x64, in DTG codes of `board::DEAD_TIME_DTS_DIV` timer ticks
+/// each). Above it the phase is held ([`SampleHold::arm`]).
 ///
-/// The derivation (`specs/foc-torque.md` section 14): rank 0's aperture opens at
-/// [`TRIGGER_COMPARE`] plus the ADC's trigger latency, on the up count; a phase at compare `c` has
-/// its low side turn on at `c` plus the dead time, and needs [`SHUNT_SETTLE_NS`] after that before
-/// the aperture, so `c <= TRIGGER_COMPARE + latency - settle - dead_time`. Rank 1 opens 120 ticks
-/// later and its own bound is looser; the stricter serves both. At the fleet's staged 28 this is
-/// 2200 + 12 - 216 - 56 = **1,940**.
-pub const fn hold_compare_max(dead_time_dtg: u8) -> u16 {
-    let ticks_per_us = board::GATE_TIMER_HZ / 1_000_000;
-    let opens = TRIGGER_COMPARE as i32 + (ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV) as i32;
-    let settle = (SHUNT_SETTLE_NS * ticks_per_us / 1_000) as i32;
+/// The derivation (`specs/foc-torque.md` section 14, `specs/twelve-fet.md` section 5.2): rank
+/// `rank`'s aperture opens at [`TRIGGER_COMPARE`] plus the ADC's trigger latency plus `rank` ranks
+/// of [`ADC_RANK_TICKS`], counted through the top; a phase at compare `c` has its low side turn on
+/// at `c` plus the dead time on the up count, and needs [`SHUNT_SETTLE_NS`] after that before the
+/// aperture, so `c <= opens - settle - dead_time`. A rank's down-count bound
+/// ([`rank_down_bound`]) is looser at every DTG code (asserted below), so the settle bound is the
+/// threshold. Rank 0 at the fleet's staged 28: 2200 + 12 - 216 - 56 = **1,940**; at the 12-FET's
+/// 32, **1,932** for rank 0 and 2332 - 216 - 64 = **2,052** for rank 1.
+///
+/// On a one-motor image the pair is ranks 0 and 1 of one ADC, and rank 0's bound, the stricter,
+/// serves both.
+pub const fn hold_compare_max(rank: u8, dead_time_dtg: u8) -> u16 {
     let dead = dead_time_dtg as i32 * board::DEAD_TIME_DTS_DIV as i32;
-    (opens - settle - dead) as u16
+    (rank_settle_bound(rank) as i32 - dead) as u16
 }
 
 // The cast above is exact for every DTG code: the margin is wider than the longest dead time the
 // byte can encode, so the derivation never goes negative (and it falls with the dead time, so the
 // longest code is the lowest value).
-const _: () = assert!(
-    TRIGGER_COMPARE as u32 + ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV
-        > SHUNT_SETTLE_NS * (board::GATE_TIMER_HZ / 1_000_000) / 1_000
-            + u8::MAX as u32 * board::DEAD_TIME_DTS_DIV
-);
+const _: () = assert!(rank_settle_bound(0) > u8::MAX as u32 * board::DEAD_TIME_DTS_DIV);
+// The settle bound is the tighter at every DTG code for both ranks the two-motor image uses: it
+// falls with the dead time, so its highest value, at no dead time, is the one to compare.
+const _: () = assert!(rank_settle_bound(0) <= rank_down_bound(0));
+const _: () = assert!(rank_settle_bound(1) <= rank_down_bound(1));
 
 /// The compare threshold the period ISR holds a sensed phase above, as a live bench knob
 /// (`specs/foc-torque.md` section 14, the `FOC_GAINS` pattern): one `AtomicU32`, read with a
@@ -1293,14 +1349,18 @@ pub enum BringUpStep {
     /// Route the six gate pins to the advanced-timer alternate function. AFTER the timer is
     /// configured, so the pins take the configured idle levels the instant they leave input mode.
     RouteGatePins,
-    /// Enable the ADC peripheral clock (and its prescaler).
+    /// Enable the ADC peripheral clocks (and their prescaler): ADC0, and on the two-motor image
+    /// ADC1 (the parallel pair's second converter) and ADC2 (the battery).
     EnableAdcClock,
     /// Put the two phase-current pins, and the battery-sense pin when the plan carries one, in
     /// analog mode (the digital input buffer would otherwise clamp the sample).
     ConfigurePhasePins,
     /// Program + calibrate the injected group: the two phase-current ranks plus the battery rank
     /// when the plan carries `board.battery.pin` ([`injected_ranks`]), 7.5-cycle sampling,
-    /// left-aligned, the gate timer's CH3 trigger, scan mode, EOIC interrupt enabled.
+    /// left-aligned, the gate timer's trigger, scan mode, EOIC interrupt enabled. On the two-motor
+    /// image ADC0 and ADC1 in inserted parallel mode instead, one rank per motor
+    /// ([`parallel_channels`]), and ADC2's battery conversion (`specs/twelve-fet.md` sections 5.2
+    /// and 5.4).
     ConfigureInjectedGroup,
     /// Start the counter. Safe while disarmed: outputs do not reach the pins until MOE is set.
     StartCounter,
@@ -1771,11 +1831,34 @@ pub mod hw {
         PwmChannelConfig, PwmConfig, TimerTriggerLink, TrgoSource,
     };
     use hal::interrupt;
-    use hal::{
-        clock, irq, Chip, InjectedAdcController, InjectedHandle, InputGroup, PeriphLabel, PinAf,
-        PinId, PwmHandle, PwmTimer, TriggeredAdc,
-    };
+    use hal::{clock, irq, Chip, InputGroup, PeriphLabel, PinAf, PinId, PwmHandle, PwmTimer};
+    #[cfg(not(feature = "gd32f103rc"))]
+    use hal::{InjectedAdcController, InjectedHandle, TriggeredAdc};
     use heapless::Vec;
+
+    /// The period ISR's ADC surface: ADC0's injected group on a one-motor image; ADC0 and ADC1 in
+    /// inserted parallel mode on the two-motor image (`specs/twelve-fet.md` section 5.2). The same
+    /// four calls on both: clear the end-of-conversion flag (both converters' on the RC), re-assert
+    /// ADC0's trigger enable, poll ADC0's flag, and [`read_samples`].
+    #[cfg(not(feature = "gd32f103rc"))]
+    type PeriodAdc = InjectedHandle;
+    #[cfg(feature = "gd32f103rc")]
+    type PeriodAdc = hal::InjectedParallelHandle;
+
+    /// The samples in motor order, motor `m`'s pair at `2m` and `2m + 1`: ADC0's four injected
+    /// data registers on a one-motor image (its pair at ranks 0 and 1, the battery at 2); on the
+    /// RC, ADC0's and ADC1's `IDATA0` and `IDATA1` mapped by [`parallel_samples`].
+    #[inline(always)]
+    fn read_samples(adc: &PeriodAdc) -> [u16; 4] {
+        #[cfg(not(feature = "gd32f103rc"))]
+        {
+            adc.read_injected()
+        }
+        #[cfg(feature = "gd32f103rc")]
+        {
+            parallel_samples(adc.read_ranks::<2>())
+        }
+    }
 
     /// The PWM period: `commutation::ARR`, the crate that owns the constant (the stock 16 kHz
     /// centre-aligned contract at the fleet's 72 MHz timer clock).
@@ -1845,16 +1928,22 @@ pub mod hw {
     /// inserted-group value on every phase-current channel.
     const SAMPLE_TIME_7P5: u8 = 1;
     /// The regular sample-time code for 239.5 ADC cycles (`ADC_SAMPLETIME_239POINT5`), the
-    /// two-motor image's battery conversion on ADC1.
+    /// two-motor image's battery conversion on ADC2.
     #[cfg(feature = "gd32f103rc")]
     const SAMPLE_TIME_239P5: u8 = 7;
+    /// The ADCs [`BringUpStep::EnableAdcClock`] clocks: ADC0, and on the two-motor image ADC1 (the
+    /// parallel pair's second converter) and ADC2 (the battery).
+    #[cfg(not(feature = "gd32f103rc"))]
+    const ADCS: [PeriphLabel; 1] = [PeriphLabel::Adc0];
+    #[cfg(feature = "gd32f103rc")]
+    const ADCS: [PeriphLabel; 3] = [PeriphLabel::Adc0, PeriphLabel::Adc1, PeriphLabel::Adc2];
 
     /// Everything the period ISR touches, built once at bring-up. The ISR is its SOLE accessor
     /// after installation (the main thread installs it before the vector is unmasked and never
     /// looks at it again), which is what makes the `static mut` sound.
     struct MotorRuntime {
         pwm: PwmHandle,
-        injected: InjectedHandle,
+        injected: PeriodAdc,
         halls: InputGroup,
         commutator: Commutator,
         /// The bring-up-row facts this motor was configured with ([`BootFixed`]): written once by
@@ -2065,23 +2154,21 @@ pub mod hw {
         }
     }
 
-    /// ADC1, the two-motor image's battery converter (`specs/twelve-fet.md` section 5.4; the
+    /// ADC2, the two-motor image's battery converter (`specs/twelve-fet.md` section 5.4; the
     /// GD32F103RC's image, the one image with two motors and the HAL's split regular conversion), once
     /// [`battery_bring_up`] has configured and calibrated it. Main-thread only: written at boot,
     /// read by the 250 Hz task.
     #[cfg(feature = "gd32f103rc")]
     static mut BATTERY_ADC: Option<hal::Adc> = None;
 
-    /// Bring ADC1 up for the battery: its clock, one regular channel `channel` at 239.5 cycles
-    /// (the divider's source impedance), software-triggered, calibrated. Free mode: nothing writes
-    /// `SYNCM`. A refusal leaves no converter, and the battery word stays 0 (UNKNOWN).
+    /// Bring ADC2 up for the battery: one regular channel `channel` at 239.5 cycles (the
+    /// divider's source impedance), software-triggered, calibrated, and the first conversion
+    /// started. ADC2 is outside the parallel pair and runs on its own. Its clock is
+    /// [`BringUpStep::EnableAdcClock`]'s. A refusal leaves no converter, and the battery word
+    /// stays 0 (UNKNOWN).
     #[cfg(feature = "gd32f103rc")]
     fn battery_bring_up(chip: &Chip, channel: u8) {
-        let Ok(rcu) = chip.rcu_base() else { return };
-        if clock::enable_adc(rcu, chip.clock(), PeriphLabel::Adc1).is_err() {
-            return;
-        }
-        let Ok(adc) = chip.adc_instance(PeriphLabel::Adc1) else {
+        let Ok(adc) = chip.adc_instance(PeriphLabel::Adc2) else {
             return;
         };
         adc.configure_single(channel, SAMPLE_TIME_239P5);
@@ -2108,7 +2195,7 @@ pub mod hw {
         }
     }
 
-    /// The 250 Hz pass's battery start, at its end: the next conversion, 21 us of ADC1 that the
+    /// The 250 Hz pass's battery start, at its end: the next conversion, 21 us of ADC2 that the
     /// next pass reads. Nothing on a one-motor image.
     #[inline]
     pub fn battery_start() {
@@ -2156,9 +2243,9 @@ pub mod hw {
     /// ([`Motor::sense_low_side`], section 5.5).
     /// `vbatt` is the stored battery-sense input with its ADC channel. On a one-motor image `Some`
     /// adds the battery rank to the injected group (rank 2, after the two phase ranks); on the
-    /// two-motor image the four phase ranks fill the group and the battery is ADC1's regular
-    /// conversion ([`battery_start`], section 5.4). Either way its pin goes to analog mode with
-    /// the phase pins.
+    /// two-motor image the pairs fill both parallel converters' ranks and the battery is ADC2's
+    /// regular conversion ([`battery_start`], section 5.4). Either way its pin goes to analog mode
+    /// with the phase pins.
     ///
     /// The method, the limit, the direction and the align offset are the arm row's, which the
     /// boot installs right after this through the same install every arm uses
@@ -2340,8 +2427,9 @@ pub mod hw {
                 }
                 BringUpStep::EnableAdcClock => {
                     let rcu = chip.rcu_base().map_err(|_| failed(step))?;
-                    clock::enable_adc(rcu, chip.clock(), PeriphLabel::Adc0)
-                        .map_err(|_| failed(step))?;
+                    for adc in ADCS {
+                        clock::enable_adc(rcu, chip.clock(), adc).map_err(|_| failed(step))?;
+                    }
                 }
                 BringUpStep::ConfigurePhasePins => {
                     // The battery-sense pin rides with the phase pins: every analog input this
@@ -2359,26 +2447,50 @@ pub mod hw {
                     }
                 }
                 BringUpStep::ConfigureInjectedGroup => {
-                    // Motor 0's pair, motor 1's after it, and the battery where the group carries
-                    // it (one motor: rank 2; two motors: ADC1's, section 5.4).
+                    // Motor 0's pair, and motor 1's after it on the two-motor image.
                     let first = [phase[0][2], phase[1][2]];
                     let pairs = match m1.filter(|_| COUNT > 1) {
                         Some((_, s, _)) => [first, [s.pins[0][2], s.pins[1][2]]],
                         None => [first; 2],
                     };
                     let n = if COUNT > 1 && m1.is_some() { 2 } else { 1 };
-                    let vbatt_rank = vbatt.filter(|_| COUNT == 1).map(|v| v[2]);
+                    // One motor: ADC0's injected group, the pair at ranks 0 and 1 and the battery
+                    // at rank 2.
+                    #[cfg(not(feature = "gd32f103rc"))]
                     let handle = InjectedAdcController::new()
                         .configure(
                             chip,
-                            &injected_config(&injected_ranks(&pairs[..n], vbatt_rank), timer_label),
+                            &injected_config(
+                                &injected_ranks(&pairs[..n], vbatt.map(|v| v[2])),
+                                timer_label,
+                            ),
                         )
                         .map_err(|_| failed(step))?;
-                    injected = Some(handle);
+                    // Two motors (section 5.2): ADC0 and ADC1 in inserted parallel mode, rank `m`
+                    // motor `m`'s pair, its first sensed phase on ADC0 and its second on ADC1;
+                    // then the battery on ADC2 (section 5.4).
                     #[cfg(feature = "gd32f103rc")]
-                    if let Some(v) = vbatt {
-                        battery_bring_up(chip, v[2]);
-                    }
+                    let handle = {
+                        let [adc0, adc1] = parallel_channels(&pairs[..n]);
+                        let mut secondary = Vec::new();
+                        for &ch in &adc1 {
+                            // Cannot overflow: at most `COUNT` channels into a capacity-4 vector.
+                            let _ = secondary.push(ch);
+                        }
+                        let cfg = hal::config::InjectedParallelConfig {
+                            primary: injected_config(&adc0, timer_label),
+                            secondary,
+                        };
+                        let handle = chip
+                            .dual_adc()
+                            .configure_inserted_parallel(chip, &cfg)
+                            .map_err(|_| failed(step))?;
+                        if let Some(v) = vbatt {
+                            battery_bring_up(chip, v[2]);
+                        }
+                        handle
+                    };
+                    injected = Some(handle);
                 }
                 BringUpStep::StartCounter => {
                     // TIMER0 alone: TIMER7 starts on TIMER0's first trigger (section 5.1 step 5).
@@ -2529,7 +2641,7 @@ pub mod hw {
         m: &Motor,
         sense: &Sense,
         timer: PwmTimer,
-        inj: InjectedHandle,
+        inj: PeriodAdc,
         (accepted, offsets, cal_bits): (Option<PhaseOffsets>, (u16, u16), u32),
         noise_floor: u16,
         period_hz: u32,
@@ -2595,15 +2707,11 @@ pub mod hw {
                 causes: cal_bits,
             });
         }
-        // The sample hold's threshold for THIS motor (`specs/foc-torque.md` section 14): motor 0's
-        // from the staged `motor.dead_time` the timer was just configured with; motor 1's from
-        // where its later ranks sample (`specs/twelve-fet.md` section 5.2). Stored once, here; the
-        // knob keeps whatever a bench session writes over it after.
-        let threshold = if i == 0 {
-            hold_compare_max(m.dead_time)
-        } else {
-            MOTOR_1_HOLD_COMPARE
-        };
+        // The sample hold's threshold for THIS motor (`specs/foc-torque.md` section 14): the bound
+        // of the rank its pair converts in (`specs/twelve-fet.md` section 5.2) at the staged
+        // `motor.dead_time` its timer was just configured with. Stored once, here; the knob keeps
+        // whatever a bench session writes over it after.
+        let threshold = hold_compare_max(sample_rank(i), m.dead_time);
         FOC_HOLD_COMPARE[i].store(threshold as u32, Ordering::Relaxed);
         OBS_STATE[i].store(
             pack_obs_state(0, [false; 3], method.to_u8(), base_flags),
@@ -2625,7 +2733,7 @@ pub mod hw {
     /// A successful confirm deliberately leaves EOIC SET: the period vector is unmasked two steps
     /// later, so the flag simply makes the first ISR entry immediate, and that ISR clears it as its
     /// first act.
-    fn confirm_trigger_start(injected: &InjectedHandle) -> bool {
+    fn confirm_trigger_start(injected: &PeriodAdc) -> bool {
         (0..TRIGGER_START_ATTEMPTS).any(|_| await_conversion(injected))
     }
 
@@ -2637,7 +2745,7 @@ pub mod hw {
     ///
     /// Leaves the flag SET on success, which is what the callers want: the confirm hands it to the
     /// next calibration read, and the last calibration read hands it to the first ISR entry.
-    fn await_conversion(injected: &InjectedHandle) -> bool {
+    fn await_conversion(injected: &PeriodAdc) -> bool {
         injected.clear_eoic();
         injected.reassert_trigger_enable();
         let mut spins = TRIGGER_START_SPINS;
@@ -2660,13 +2768,13 @@ pub mod hw {
     /// Every motor's pair from the same conversions: motor `m`'s ranks are `2m` and `2m + 1`
     /// (`specs/twelve-fet.md` section 5.5). A motor not up reads ranks the group does not convert;
     /// its block is never used.
-    fn measure_block(injected: &InjectedHandle) -> Option<[CalBlock; COUNT]> {
+    fn measure_block(injected: &PeriodAdc) -> Option<[CalBlock; COUNT]> {
         let mut sums = [[0u32; 2]; COUNT];
         for _ in 0..CAL_SAMPLES {
             if !await_conversion(injected) {
                 return None;
             }
-            let s = injected.read_injected();
+            let s = read_samples(injected);
             let (ranks, _) = s.as_chunks::<2>();
             for (sum, rank) in sums.iter_mut().zip(ranks) {
                 sum[0] = commutation::foc::cal_accumulate(sum[0], rank[0]);
@@ -2689,7 +2797,7 @@ pub mod hw {
     ///
     /// The bridge is quiet or holds its low sides on, as the caller set it (`current.sense`,
     /// section 5.5); no high side is on while this runs.
-    fn measure_offsets(injected: &InjectedHandle) -> Option<[CalVerdict; COUNT]> {
+    fn measure_offsets(injected: &PeriodAdc) -> Option<[CalVerdict; COUNT]> {
         for _ in 0..CAL_SETTLE_CONVERSIONS {
             if !await_conversion(injected) {
                 return None;
@@ -2725,8 +2833,8 @@ pub mod hw {
     /// mismatch rather than a board state: the fleet's parts carry at most two advanced timers.
     ///
     /// A `Timer7` gate set is the 12-FET's motor 1 (`specs/twelve-fet.md` section 5): its timer
-    /// follows TIMER0 ([`BringUpStep::FollowTimer0`]) and its ranks ride ADC0's one injected group,
-    /// which TIMER0 triggers. ADC0's injected selector has no TIMER7 TRGO slot; `ETSIC = 6` selects
+    /// follows TIMER0 ([`BringUpStep::FollowTimer0`]) and its pair is rank 1 of ADC0 and ADC1's
+    /// inserted parallel groups, which TIMER0 triggers. ADC0's injected selector has no TIMER7 TRGO slot; `ETSIC = 6` selects
     /// TIMER7_CH3 when `AFIO_PCF0.ADC0_ETRGINS_REMAP` is set on high-density parts (GD32F10x User
     /// Manual Rev2.3, Table 7-4), and this design uses neither.
     fn gate_timer_label(timer: u8) -> Option<PeriphLabel> {
@@ -2798,9 +2906,10 @@ pub mod hw {
         }
     }
 
-    /// The injected-group configuration over [`injected_ranks`]: two slots, three with the battery
-    /// rank on a one-motor image, or the two-motor image's four phase ranks. 7.5 cycles on every
-    /// rank.
+    /// ADC0's injected-group configuration over `ranks`: [`injected_ranks`]' two slots, three with
+    /// the battery rank, on a one-motor image; on the two-motor image ADC0's half of the parallel
+    /// pair ([`parallel_channels`]), one rank per motor, whose sample times ADC1 takes. 7.5 cycles on
+    /// every rank.
     fn injected_config(ranks: &[u8], trigger_timer: PeriphLabel) -> InjectedAdcConfig {
         let mut chans: Vec<InjectedChannel, 4> = Vec::new();
         for &channel in ranks.iter() {
@@ -2858,13 +2967,13 @@ pub mod hw {
         // no two of them can be live at once. A later reader deciding whether that critical section
         // is necessary should start from the install's own doc comment, not from this line.
         let motors = unsafe { &mut *addr_of_mut!(MOTOR) };
-        // Motor 0 owns the injected group and TIMER0's trigger: motor 1 is up only with it.
+        // Motor 0 owns the injected groups and TIMER0's trigger: motor 1 is up only with it.
         let Some(m0) = motors[0].as_mut() else {
             return;
         };
-        // FIRST: clear the injected end-of-conversion flag. It is a level source into the NVIC and
-        // reading IDATAx does not clear it, so this is what makes the vector fire once per period
-        // instead of re-entering forever.
+        // FIRST: clear the injected end-of-conversion flag (on the RC both parallel converters'). It
+        // is a level source into the NVIC and reading IDATAx does not clear it, so this is what
+        // makes the vector fire once per period instead of re-entering forever.
         m0.injected.clear_eoic();
         // THEN re-assert the injected group's external-trigger enable, stock parity: stock's
         // per-period op is exactly this pair (clear EOIC, `ADC_CTL1 |= 0x8000`), which is what
@@ -2873,11 +2982,11 @@ pub mod hw {
         // POR race, since a group that never converts never reaches this line.
         m0.injected.reassert_trigger_enable();
 
-        let samples = m0.injected.read_injected();
+        let samples = read_samples(&m0.injected);
         // The battery rank's count (rank 2 on a one-motor image), reduced once to 12 bits and
         // handed to the 250 Hz task. Not in this period's decision; the ISR owns it only because it
         // owns the ADC. With no battery rank configured IDATA2 is never written and reads its
-        // reset 0. The two-motor image's battery is ADC1's, read by the 250 Hz task itself.
+        // reset 0. The two-motor image's battery is ADC2's, read by the 250 Hz task itself.
         if COUNT == 1 {
             VBATT_RAW.store((samples[2] >> 3) as u32, Ordering::Relaxed);
         }
@@ -4368,19 +4477,19 @@ mod tests {
     #[test]
     fn the_hold_threshold_is_derived_from_the_sampling_instant() {
         // The offroad pair's staged dead time (28 DTG codes of two ticks): 2200 + 12 - 216 - 56.
-        assert_eq!(hold_compare_max(28), 1_940);
+        assert_eq!(hold_compare_max(0, 28), 1_940);
         // Spelled from the constants, so a moved trigger or a changed allowance moves it.
         let opens = TRIGGER_COMPARE as u32 + ADC_TRIGGER_LATENCY_CLOCKS * ADC_CLOCK_DIV;
         let settle = SHUNT_SETTLE_NS * (board::GATE_TIMER_HZ / 1_000_000) / 1_000;
         assert_eq!(opens, 2_212);
         assert_eq!(settle, 216);
         assert_eq!(
-            hold_compare_max(28) as u32,
+            hold_compare_max(0, 28) as u32,
             opens - settle - 28 * board::DEAD_TIME_DTS_DIV
         );
         // Two counts per DTG code: the 6-FET board's 25 sits six higher.
-        assert_eq!(hold_compare_max(25), 1_946);
-        assert_eq!(hold_compare_max(0), 1_996);
+        assert_eq!(hold_compare_max(0, 25), 1_946);
+        assert_eq!(hold_compare_max(0, 0), 1_996);
         // Until the bring-up derives it the knob holds the period itself, which no compare exceeds.
         assert_eq!(
             FOC_HOLD_COMPARE[0].load(Ordering::Relaxed),
@@ -4520,7 +4629,7 @@ mod tests {
     #[test]
     fn the_svpwm_bands_above_the_threshold_at_the_radius() {
         use commutation::foc::{circular_limit, park_inverse, svpwm, CIRC_THRESH};
-        let thr = hold_compare_max(28);
+        let thr = hold_compare_max(0, 28);
         let radius = (CIRC_THRESH as f64).sqrt() as i16; // 32,111
         let sweep = |mag: i16| {
             let (mut max, mut above, mut both, mut n) = (0u16, [0u32; 3], 0u32, 0u32);
@@ -5182,14 +5291,35 @@ mod tests {
     // The 12-FET's second motor (`specs/twelve-fet.md` sections 5.2 to 5.5, 12.1)
     // ---------------------------------------------------------------------------------------
 
-    /// Two motors' ranks: motor 0's pair, then motor 1's, and no battery rank (it is ADC1's).
+    /// The inserted parallel ranks for two motors (section 5.2): rank 0 is motor 0's pair (PC4 on
+    /// ADC0, PC5 on ADC1: channels 14, 15), rank 1 motor 1's (PA0 on ADC0, PC3 on ADC1: 0, 13).
+    /// Motor 0 alone is one rank on each.
     #[test]
-    fn two_motors_convert_their_pairs_in_motor_order() {
+    fn two_motors_convert_one_pair_per_rank_across_both_adcs() {
+        let [adc0, adc1] = parallel_channels(&[[14, 15], [0, 13]]);
         assert_eq!(
-            injected_ranks(&[[14, 15], [0, 13]], None).as_slice(),
-            &[14, 15, 0, 13]
+            adc0.as_slice(),
+            &[14, 0],
+            "ADC0: each motor's first sensed phase"
         );
-        assert_eq!(injected_ranks(&[[0, 8]], Some(4)).as_slice(), &[0, 8, 4]);
+        assert_eq!(adc1.as_slice(), &[15, 13], "ADC1: each motor's second");
+        let [adc0, adc1] = parallel_channels(&[[14, 15]]);
+        assert_eq!((adc0.as_slice(), adc1.as_slice()), (&[14][..], &[15][..]));
+        assert_eq!((sample_rank(0), sample_rank(1)), (0, 1));
+    }
+
+    /// The four samples go back to the motors in that order: rank `m`'s ADC0 and ADC1 data are
+    /// motor `m`'s first and second sensed phase, at `2m` and `2m + 1`, where the period ISR and
+    /// the calibration read each motor's pair.
+    #[test]
+    fn the_parallel_samples_map_back_to_the_motors() {
+        let ranks = [[0x1110, 0x2220], [0x3330, 0x4440]];
+        let s = parallel_samples(ranks);
+        assert_eq!(s, [0x1110, 0x2220, 0x3330, 0x4440]);
+        for m in 0..2 {
+            let r = sample_rank(m) as usize;
+            assert_eq!([s[2 * m], s[2 * m + 1]], ranks[r], "motor {m}");
+        }
     }
 
     /// The B and C pair maps to Clarke's `(ia, ib)` as `ia = -(ib + ic)`: the same currents read
@@ -5232,13 +5362,30 @@ mod tests {
         );
     }
 
-    /// Motor 1's hold threshold is the end of rank 3's aperture less 3 ticks (section 5.2's
-    /// table): 1,880, below motor 0's at the 12-FET's dead time.
+    /// The hold threshold per rank (section 5.2's sampling instants): 1,932 for rank 0 and 2,052
+    /// for rank 1 at the 12-FET's DTG 32, each the settle bound, which is the tighter of a rank's
+    /// two bounds at every DTG code; motor 0 takes rank 0's and motor 1 rank 1's.
     #[test]
-    fn motor_1_holds_above_1880() {
-        assert_eq!(MOTOR_1_HOLD_COMPARE, 1_880);
-        assert!(MOTOR_1_HOLD_COMPARE < hold_compare_max(32));
-        assert_eq!(hold_compare_max(32), 1_932, "section 5.2: 1,932 at DTG 32");
+    fn each_motor_holds_above_its_ranks_settle_bound() {
+        assert_eq!(hold_compare_max(0, 32), 1_932, "rank 0 at DTG 32");
+        assert_eq!(hold_compare_max(1, 32), 2_052, "rank 1 at DTG 32");
+        assert_eq!(hold_compare_max(sample_rank(0), 32), 1_932, "motor 0");
+        assert_eq!(hold_compare_max(sample_rank(1), 32), 2_052, "motor 1");
+        // The down-count bounds: the apertures end at 2,243 and 2,123 on the down count, less 3.
+        assert_eq!((rank_down_bound(0), rank_down_bound(1)), (2_240, 2_120));
+        let settle = SHUNT_SETTLE_NS * (board::GATE_TIMER_HZ / 1_000_000) / 1_000;
+        for rank in 0..2u8 {
+            for dtg in 0..=u8::MAX {
+                let dead = dtg as u32 * board::DEAD_TIME_DTS_DIV;
+                let bound = 2_212 + 120 * rank as u32 - settle - dead;
+                assert_eq!(
+                    hold_compare_max(rank, dtg) as u32,
+                    bound,
+                    "rank {rank} DTG {dtg}"
+                );
+                assert!(bound <= rank_down_bound(rank), "rank {rank} DTG {dtg}");
+            }
+        }
     }
 
     /// `FollowTimer0` comes after the timers are configured (their `UPG` resets the counter the
