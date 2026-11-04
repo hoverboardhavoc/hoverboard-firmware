@@ -919,3 +919,293 @@ fn the_published_words_pack_as_the_spec_lays_them_out() {
     );
     assert_eq!(TRACK_SOURCE, 1 << 9);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The circle form (S4)
+// ---------------------------------------------------------------------------------------------
+
+/// The circle form's parameters on the plant: the flux linkage word `flux_uvs`, the shift `shift`,
+/// and S1's other defaults with the dead-time compensation on.
+fn circle_params(flux_uvs: i16, shift: i16) -> ObserverParams {
+    ObserverParams::derive(
+        [240, 500, flux_uvs, 0],
+        [2730, 1820, 64, 243, 0, shift, 1],
+        PLANT_CAL_A as u16,
+        56,
+        Direction::Reverse,
+    )
+}
+
+/// One period of a circle run, as [`run_circle`] records it.
+#[derive(Clone, Copy, Debug)]
+struct CirclePeriod {
+    /// The observer's angle less the plant's q axis, degrees, wrapped to a half turn.
+    err: f64,
+    /// The magnet flux's magnitude, microvolt-seconds.
+    mag: f64,
+}
+
+/// As [`run_observer`], per period, for `periods` periods at `hz` and `iq_ref`; `kick` runs on the
+/// observer after `at` periods (a state perturbation).
+fn run_circle(
+    hz: f64,
+    iq_ref: i32,
+    p: &ObserverParams,
+    periods: usize,
+    at: usize,
+    kick: impl Fn(&mut FluxObserver),
+) -> Vec<CirclePeriod> {
+    let mut st = FocState::new(
+        PhaseOffsets::try_new(0x7FB8, 0x7DAE).unwrap(),
+        DutyOrder::DIRECT,
+        28_500,
+    );
+    let mut plant = Plant::new(hz, PLANT_R, PLANT_DEAD);
+    let mut obs = FluxObserver::new();
+    let kv = plant_kv();
+    let mut out = Vec::new();
+    for n in 0..periods {
+        if n == at {
+            kick(&mut obs);
+        }
+        let i = plant.sense();
+        let theta = plant.theta_q();
+        let prev = st.applied();
+        let next = foc_step(&mut st, theta, i, iq_ref, true, false);
+        let angle = obs.step(
+            p,
+            &ObserverInput {
+                v: (prev.alpha, prev.beta),
+                i,
+                theta,
+                kv,
+                speed: 0,
+                hall_fault: false,
+                drive: true,
+            },
+        );
+        let c = clarke(i.0, i.1);
+        let la = ((c.alpha as i64 * p.l_q as i64) >> 16) as f64;
+        let lb = ((c.beta as i64 * p.l_q as i64) >> 16) as f64;
+        let (a, b) = obs.psi();
+        let mag = ((a as f64 - la).powi(2) + (b as f64 - lb).powi(2)).sqrt() / 16.0;
+        let err = (angle.wrapping_sub(theta) as i16) as f64 * DEG;
+        out.push(CirclePeriod { err, mag });
+        plant.step(next);
+    }
+    out
+}
+
+/// Milliseconds from period `from` to the last period whose `bad` holds (0 when none does): the
+/// time the run took to settle for good, since every later period is good.
+fn settled_ms(r: &[CirclePeriod], from: usize, bad: impl Fn(&CirclePeriod) -> bool) -> f64 {
+    let last = r
+        .iter()
+        .enumerate()
+        .skip(from)
+        .filter(|(_, x)| bad(x))
+        .map(|(n, _)| n + 1)
+        .last()
+        .unwrap_or(from);
+    (last - from) as f64 / 16.0
+}
+
+/// A second of periods: long enough that a run settled in its first quarter has stayed settled.
+const SECOND: usize = 16_000;
+
+/// The circle form's plant speeds, and how long each takes to settle from a zero state at shift
+/// 6, with a margin over the plant's figures (19, 11 and 13 ms from 50 Hz up, 149 ms at 20 Hz):
+/// the correction is radial, so an offset of the flux centre is removed only as the rotor turns it
+/// through the radial direction, which is slow at 20 Hz.
+const CIRCLE_SWEEP: [(f64, f64); 4] = [(20.0, 175.0), (50.0, 25.0), (100.0, 25.0), (150.0, 25.0)];
+
+/// **The circle form from a zero state** (`specs/flux-observer.md`, "S4: the driving observer",
+/// host tests), `flux_uvs` the plant's 21,000 at shift 6, at each speed of the plant's sweep: the
+/// magnitude reaches the circle (within 3 percent, for good) and the angle error settles under 2
+/// degrees with no lead (every period after), inside [`CIRCLE_SWEEP`]'s times.
+#[test]
+fn the_circle_form_settles_on_the_rotor_with_no_lead() {
+    let p = circle_params(21_000, 6);
+    for (hz, limit) in CIRCLE_SWEEP {
+        let r = run_circle(hz, 600, &p, SECOND, usize::MAX, |_| {});
+        let mag = settled_ms(&r, 0, |x| (x.mag / (PLANT_FLUX * 1e6) - 1.0).abs() >= 0.03);
+        let angle = settled_ms(&r, 0, |x| x.err.abs() >= 2.0);
+        let tail = r[SECOND / 2..]
+            .iter()
+            .map(|x| x.err.abs())
+            .fold(0.0, f64::max);
+        println!(
+            "circle, {hz:5.0} Hz from zero: magnitude in 3 percent after {mag:5.1} ms, error \
+             under 2 degrees after {angle:5.1} ms, the last half second's worst {tail:4.2} deg"
+        );
+        assert!(mag <= limit, "{hz} Hz: magnitude {mag} ms");
+        assert!(angle <= limit, "{hz} Hz: angle {angle} ms");
+    }
+}
+
+/// **The circle form from a state 30 degrees off**: the settled flux turned by 30 degrees, which
+/// leaves its magnitude on the circle and its centre off the origin; the error decays under 2
+/// degrees for good inside [`CIRCLE_SWEEP`]'s times (the plant's: 18, 12 and 11 ms from 50 Hz up,
+/// 103 ms at 20 Hz).
+#[test]
+fn the_circle_form_recovers_from_a_state_30_degrees_off() {
+    let p = circle_params(21_000, 6);
+    let at = SECOND / 2;
+    for (hz, limit) in CIRCLE_SWEEP {
+        let r = run_circle(hz, 600, &p, at + SECOND / 2, at, |o| {
+            let (c, s) = (30f64.to_radians().cos(), 30f64.to_radians().sin());
+            let (a, b) = (o.psi_a as f64, o.psi_b as f64);
+            o.psi_a = (a * c - b * s).round() as i32;
+            o.psi_b = (a * s + b * c).round() as i32;
+        });
+        let kicked = r[at].err;
+        let t = settled_ms(&r, at, |x| x.err.abs() >= 2.0);
+        println!(
+            "circle, {hz:5.0} Hz: kicked to {kicked:6.1} deg, under 2 degrees after {t:5.1} ms"
+        );
+        assert!(
+            kicked.abs() > 25.0,
+            "{hz} Hz: the kick moved the angle {kicked}"
+        );
+        assert!(t <= limit, "{hz} Hz: {t} ms");
+    }
+}
+
+/// **A wrong `flux_uvs`** (10 percent low and high against the plant's 21,000): the error mean
+/// takes the sign of the word's error (ahead with the word low, behind with it high), shrinks as
+/// the speed rises, and moves under half a degree with the current. This is the plant's answer,
+/// not the spec's prediction (which had it move with current and not with speed): the voltage
+/// model holds the magnitude near the true linkage at speed, and the correction, a fixed fraction
+/// a period, turns the angle by less of a revolution the faster the rotor turns.
+#[test]
+fn a_wrong_flux_linkage_reads_as_an_error_that_falls_with_speed() {
+    let mean_err = |flux_uvs: i16, hz: f64, iq_ref: i32| {
+        let r = run_circle(
+            hz,
+            iq_ref,
+            &circle_params(flux_uvs, 6),
+            SECOND,
+            usize::MAX,
+            |_| {},
+        );
+        let w = &r[SECOND * 3 / 4..];
+        let m = w.iter().map(|x| x.err).sum::<f64>() / w.len() as f64;
+        let mag = w.iter().map(|x| x.mag).sum::<f64>() / w.len() as f64;
+        println!(
+            "flux_uvs {flux_uvs}, {hz:4.0} Hz, iq_ref {iq_ref:4}: error mean {m:6.2} deg, \
+             magnitude {mag:6.0} uV.s"
+        );
+        m
+    };
+    for (flux_uvs, sign) in [(18_900i16, 1.0), (23_100, -1.0)] {
+        let by_speed: Vec<f64> = [50.0, 100.0]
+            .iter()
+            .map(|&hz| mean_err(flux_uvs, hz, 1200) * sign)
+            .collect();
+        assert!(by_speed[0] > 2.0, "{flux_uvs}: {by_speed:?}");
+        assert!(by_speed[1] > 1.0, "{flux_uvs}: {by_speed:?}");
+        assert!(by_speed[1] < by_speed[0] * 0.75, "{flux_uvs}: {by_speed:?}");
+        let by_current: Vec<f64> = [600, 1200, 2400]
+            .iter()
+            .map(|&iq| mean_err(flux_uvs, 50.0, iq))
+            .collect();
+        let spread = by_current.iter().fold(f64::MIN, |a, &b| a.max(b))
+            - by_current.iter().fold(f64::MAX, |a, &b| a.min(b));
+        assert!(spread < 0.5, "{flux_uvs}: {by_current:?}");
+    }
+    // The right word reads no error at the same points.
+    for hz in [50.0, 100.0] {
+        assert!(mean_err(21_000, hz, 1200).abs() < 0.5);
+    }
+}
+
+/// **The lead table**: all zero with the circle (no leak to lead), S1's with the leak; and the
+/// circle form's verdict error and source angle carry none at any speed.
+#[test]
+fn the_lead_table_is_zero_with_the_circle_and_s1s_with_the_leak() {
+    assert_eq!(circle_params(21_000, 10).lead, [0; BINS]);
+    assert_eq!(circle_params(0, 10).lead, lead_table(10));
+    assert_eq!(circle_params(0, 12).lead, lead_table(12));
+    let p = circle_params(21_000, 6);
+    let mut obs = FluxObserver::new();
+    for n in 0..200i32 {
+        let angle = obs.step(
+            &p,
+            &ObserverInput {
+                v: ((n * 37 % 4000 - 2000) as i16, (n * 91 % 4000 - 2000) as i16),
+                i: (100, -50),
+                theta: 0,
+                kv: 40_000,
+                speed: 5,
+                hall_fault: false,
+                drive: true,
+            },
+        );
+        assert_eq!(obs.lead, 0);
+        assert_eq!(obs.source_angle(&p), angle);
+    }
+}
+
+/// **The install**: `lam2` and `circle_k` from the word, the shift clamped as S1's, 0 for a zero
+/// or negative word (the leaky form, every other parameter as S1 derives it); and the gain is
+/// the one the spec's time constant asks for: at rest with no voltage, a magnitude 1 percent over
+/// the circle falls to `1/e` of its excess in `2^shift / 2` periods.
+#[test]
+fn the_install_computes_the_circle_gain_and_clamps_the_shift() {
+    let lam = (21_000 * 16) >> 8;
+    assert_eq!(lam, 1_312);
+    let p = circle_params(21_000, 6);
+    assert_eq!((p.lam2, p.circle_k), (lam * lam, (1 << 29) / (lam * lam)));
+    assert_eq!(p.circle_k, 311);
+    let q = circle_params(21_000, 40);
+    assert_eq!((q.leak_shift, q.lam2, q.circle_k), (14, p.lam2, p.circle_k));
+    assert_eq!(circle_params(21_000, 2).leak_shift, 6);
+    // The largest word and the smallest.
+    let big = circle_params(i16::MAX, 14);
+    assert_eq!((big.lam2, big.circle_k), (2_047 * 2_047, 128));
+    let small = circle_params(1, 6);
+    assert_eq!((small.lam2, small.circle_k), (1, 1 << 29));
+    for w in [0, -21_000] {
+        let s1 = circle_params(w, 10);
+        assert_eq!((s1.lam2, s1.circle_k), (0, 0));
+        assert_eq!(s1, plant_params_with_lead());
+    }
+    // The decay at rest.
+    // Two shifts where the correction near the circle is many LSB a period: at the top of the
+    // range it is under one (`pm e / 2^14`), and the floor of the shift leaves a one-LSB inward
+    // pull, as S1's leak does at the same shift.
+    for shift in [6i16, 8] {
+        let p = circle_params(21_000, shift);
+        let lsb = PLANT_FLUX * 1e6 * 16.0;
+        let mut obs = FluxObserver::new();
+        obs.psi_a = (1.01 * lsb) as i32;
+        let x = ObserverInput {
+            v: (0, 0),
+            i: (0, 0),
+            theta: 0,
+            kv: plant_kv(),
+            speed: 0,
+            hall_fault: false,
+            drive: true,
+        };
+        let tau = 1usize << (shift - 1);
+        for _ in 0..tau {
+            obs.step(&p, &x);
+        }
+        let excess = (obs.psi().0 as f64 / lsb - 1.0) / 0.01;
+        println!("shift {shift}: the excess after {tau} periods is {excess:.3} of itself");
+        assert!((excess - (-1f64).exp()).abs() < 0.03, "{excess}");
+        assert_eq!(obs.psi().1, 0, "the correction is radial");
+    }
+}
+
+/// S1's parameters on the plant at shift 10, the lead table kept.
+fn plant_params_with_lead() -> ObserverParams {
+    ObserverParams::derive(
+        [240, 500, 0, 0],
+        [2730, 1820, 64, 243, 0, 10, 1],
+        PLANT_CAL_A as u16,
+        56,
+        Direction::Reverse,
+    )
+}

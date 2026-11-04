@@ -3,6 +3,11 @@
 //! per-window verdict that says whether it agreed with the halls, and the per-speed-bin table that
 //! says from what speed it did.
 //!
+//! The same observer has a second form, the one that drives (`specs/flux-observer.md`, "S4: the
+//! driving observer"): with the flux linkage word (`motors.<i>.observer.model[2]`, `flux_uvs`)
+//! nonzero, the leak is replaced by a correction toward the circle of that linkage (Ortega's
+//! observer), and the lead table is zero. With the word at 0 the observer is S1's, bit for bit.
+//!
 //! Everything here is pure: the period ISR (`firmware::motor`) hands in the applied voltage vector
 //! ([`crate::foc::FocApplied`]), the conditioned current pair, the bus scale and the front end's
 //! facts, and publishes what [`FluxObserver::close`] returns. The parameters arrive pre-scaled
@@ -154,8 +159,15 @@ pub struct ObserverParams {
     /// The dead time over the period against the voltage scale, Q16: the per-phase drop is
     /// `kv * dt_q >> 16` millivolts.
     pub dt_q: i32,
-    /// The leak, `psi -= psi >> leak_shift` a period.
+    /// The leak, `psi -= psi >> leak_shift` a period, in the leaky form; in the circle form the
+    /// correction's time constant, which [`ObserverParams::circle_k`] carries.
     pub leak_shift: u8,
+    /// The flux circle's squared radius in the coarse unit of the correction (`flux_uvs * 16 >>
+    /// 8`, squared, at least 1), or 0 in the leaky form.
+    pub lam2: i32,
+    /// The circle's reciprocal, `2^29 / lam2`, or 0: nonzero selects the circle form
+    /// (`specs/flux-observer.md`, "S4: the driving observer").
+    pub circle_k: i32,
     /// Whether the dead-time compensation runs.
     pub dt_comp: bool,
     /// The tracked window's largest `|mean|`, angle units.
@@ -179,6 +191,8 @@ pub struct ObserverParams {
 pub const MODEL_R_MOHM: usize = 0;
 /// See [`MODEL_R_MOHM`].
 pub const MODEL_L_UH: usize = 1;
+/// See [`MODEL_R_MOHM`]: the flux linkage, microvolt-seconds; nonzero selects the circle form.
+pub const MODEL_FLUX_UVS: usize = 2;
 /// `motors.<i>.observer.shadow`'s indices.
 pub const SHADOW_BAND: usize = 0;
 /// See [`SHADOW_BAND`].
@@ -202,8 +216,13 @@ impl ObserverParams {
     /// [`ObserverParams::quarter`].
     ///
     /// Every word is clamped into its range here, so a hand-poked flash value cannot reach the
-    /// ISR: negative `R` and `L` read as 0, the leak shift as 6..=14, the ratio as 0..=256, a
-    /// minimum window count as at least 1, a calibration as at least 1.
+    /// ISR: negative `R`, `L` and flux linkage read as 0, the leak shift as 6..=14, the ratio as
+    /// 0..=256, a minimum window count as at least 1, a calibration as at least 1.
+    ///
+    /// The form (`specs/flux-observer.md`, "S4: the driving observer"): a flux linkage of 0 is
+    /// S1's leaky instrument, with the lead table; a nonzero one is the correction toward its
+    /// circle, [`ObserverParams::lam2`] and [`ObserverParams::circle_k`] set and the lead table
+    /// all zero (there is no leak to lead).
     pub fn derive(
         model: [i16; 4],
         shadow: [i16; 7],
@@ -218,18 +237,35 @@ impl ObserverParams {
         let r_q = model[MODEL_R_MOHM].max(0) as u32 * 65_536 / cal;
         let l_q = (model[MODEL_L_UH].max(0) as u32 * 65_536 / cal).saturating_mul(16);
         let dt_q = KV_DEN as u32 * dead_ticks.min(u16::MAX as u32) / (2 * ARR as u32);
+        // The circle: the linkage in flux LSB (16 a microvolt-second) shifted to the coarse unit
+        // the step squares in, at most 2,047, so `lam2` is under 2^22 and `circle_k` at least
+        // 128 at every word (311 at 21,000 uV.s).
+        let flux = model[MODEL_FLUX_UVS].max(0) as u32;
+        let (lam2, circle_k) = if flux == 0 {
+            (0, 0)
+        } else {
+            let lam = ((flux * 16) >> 8).max(1);
+            let lam2 = lam * lam;
+            (lam2 as i32, ((1u32 << 29) / lam2) as i32)
+        };
         ObserverParams {
             r_q: r_q.min(i32::MAX as u32) as i32,
             l_q: l_q.min(i32::MAX as u32) as i32,
             dt_q: dt_q as i32,
             leak_shift: leak as u8,
+            lam2,
+            circle_k,
             dt_comp: shadow[SHADOW_DT_COMP] != 0,
             band: shadow[SHADOW_BAND].max(0) as u16,
             spread: shadow[SHADOW_SPREAD].max(0) as u16,
             offset: shadow[SHADOW_OFFSET] as u16,
             min_windows: shadow[SHADOW_MIN_WINDOWS].max(1) as u16,
             ratio: shadow[SHADOW_RATIO].clamp(0, RATIO_ONE) as u16,
-            lead: lead_table(leak),
+            lead: if circle_k != 0 {
+                [0; BINS]
+            } else {
+                lead_table(leak)
+            },
             quarter: match direction {
                 Direction::Reverse => ANGLE_90,
                 Direction::Forward => 0u16.wrapping_sub(ANGLE_90),
@@ -419,16 +455,26 @@ impl FluxObserver {
         let shift = p.leak_shift as u32;
         let ra = ((i.alpha as i64 * p.r_q as i64) >> 16) as i32;
         let rb = ((i.beta as i64 * p.r_q as i64) >> 16) as i32;
+        let la = ((i.alpha as i64 * p.l_q as i64) >> 16) as i32;
+        let lb = ((i.beta as i64 * p.l_q as i64) >> 16) as i32;
+        // What bounds the integrator, taken off it: S1's leak, or the correction toward the flux
+        // circle with its sign turned (`specs/flux-observer.md`, "S4: the driving observer").
+        let (ka, kb) = if p.circle_k != 0 {
+            circle_pull(p, self.psi_a.wrapping_sub(la), self.psi_b.wrapping_sub(lb))
+        } else {
+            (
+                self.psi_a.wrapping_shr(shift),
+                self.psi_b.wrapping_shr(shift),
+            )
+        };
         self.psi_a = self
             .psi_a
             .wrapping_add(va.wrapping_sub(ra))
-            .wrapping_sub(self.psi_a.wrapping_shr(shift));
+            .wrapping_sub(ka);
         self.psi_b = self
             .psi_b
             .wrapping_add(vb.wrapping_sub(rb))
-            .wrapping_sub(self.psi_b.wrapping_shr(shift));
-        let la = ((i.alpha as i64 * p.l_q as i64) >> 16) as i32;
-        let lb = ((i.beta as i64 * p.l_q as i64) >> 16) as i32;
+            .wrapping_sub(kb);
         let pm_a = self.psi_a.wrapping_sub(la) >> 4;
         let pm_b = self.psi_b.wrapping_sub(lb) >> 4;
         // Textbook beta is the stock one negated; from the flux (d) to q is the motor's quarter
@@ -510,6 +556,29 @@ impl FluxObserver {
     }
 }
 
+/// The circle correction of one period (`specs/flux-observer.md`, "S4: the driving observer"),
+/// returned with its sign turned (the step takes it off the flux, as it takes the leak), from the
+/// magnet flux `(pm_a, pm_b)` before this period's increment, flux LSB: each component moves
+/// along itself by `pm * e / 2^leak_shift`, where `e = (lam2 - |m|^2) / lam2` is the circle
+/// error normalised and `m` is `pm >> 8`, so linearised a magnitude error decays by `2 /
+/// 2^leak_shift` of itself a period.
+///
+/// All `i32` (the M0 parts have no 64-bit multiply, and the MM32 size build's hot window has no
+/// room for the calls). The coarse copies are clamped to the `i16` range, so the squares' sum
+/// fits; the clamp only ever reads an estimate over 25 times the circle as smaller than it is,
+/// which still pulls it in. `e` is clamped at -2 (an estimate over 1.73 times the circle moves in
+/// by `2 / 2^leak_shift` of itself a period), so `e` in Q29 fits. It is carried in Q14 into the
+/// product with `m`, and the shift back is `14 - 8 + leak_shift`.
+#[inline(always)]
+fn circle_pull(p: &ObserverParams, pm_a: i32, pm_b: i32) -> (i32, i32) {
+    let ma = (pm_a >> 8).clamp(-(i16::MAX as i32), i16::MAX as i32);
+    let mb = (pm_b >> 8).clamp(-(i16::MAX as i32), i16::MAX as i32);
+    let err = (p.lam2 - (ma * ma + mb * mb)).max(-2 * p.lam2);
+    let e = (err * p.circle_k) >> 15;
+    let shift = p.leak_shift as u32 + 6;
+    ((ma * -e) >> shift, (mb * -e) >> shift)
+}
+
 /// The speed bin of a latched speed: its magnitude, the last bin holding 15 and above.
 #[inline(always)]
 pub fn bin(speed: i32) -> usize {
@@ -566,8 +635,9 @@ impl TrackTable {
     }
 
     /// The lock bin over the table ([`lock_bin`]). Run in the period ISR at every window close,
-    /// so placed with it.
-    #[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
+    /// once per 64 periods, and placed outside `.hotcode`: the circle form's step took the MM32
+    /// size build's hot window past its end, and a loop of fifteen bins once a window is the
+    /// cheapest code there to run from the waited flash.
     #[inline(never)]
     pub fn lock_bin(&self, min_windows: u16, ratio: u16) -> u8 {
         lock_bin(|k| self.word(k), min_windows, ratio)

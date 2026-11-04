@@ -33,7 +33,8 @@ pub type Stored = [Words; motor::COUNT];
 
 /// The range of each word, the tune lane's seam: a `TUNE_WRITE` outside it is refused, and a
 /// stored value outside it is clamped on the way in. `None` is a word the tune lane does not take
-/// (`flux_uvs` and the spare, which nothing reads in S1).
+/// (`flux_uvs`, which selects the observer's form and is written with `board set`, and the
+/// spare).
 const RANGE: [Option<(i16, i16)>; WORDS] = [
     // model: r_mohm, l_uh, flux_uvs, spare
     Some((0, i16::MAX)),
