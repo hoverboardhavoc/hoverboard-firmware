@@ -125,7 +125,8 @@ async fn main(spawner: Spawner) {
     // Wi-Fi and BLE together need more heap than BLE alone; the RAM the second-stage bootloader
     // used is free once the app runs.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
-    esp_alloc::heap_allocator!(size: 72 * 1024);
+    // 62 KiB: 10 KiB of the 72 this region had went to the image buffer (`part::IMAGE_BUFFER`).
+    esp_alloc::heap_allocator!(size: 62 * 1024);
 
     let timg0 = TimerGroup::new(p.TIMG0);
     let sw_int = esp_hal::interrupt::software::SoftwareInterruptControl::new(p.SW_INTERRUPT);

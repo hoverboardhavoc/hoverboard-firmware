@@ -522,8 +522,9 @@ jobs:
       # from this job's figures.
       #
       # 2026-11-02: the 12-FET's mainboard-gd32f103rc (specs/twelve-fet.md section 3.2). Its chip has
-      # 258,048 B below the store, but the bridge flashes from a 63,488 B RAM buffer, so that is its
-      # ceiling: an image past it can be flashed only over a wired probe.
+      # 258,048 B below the store, but the bridge flashes from a RAM buffer, so that is its
+      # ceiling: an image past it can be flashed only over a wired probe. 2026-11-04: the buffer
+      # grew to 73,728 B (bridge/core/src/part.rs, IMAGE_BUFFER) for the tones.
       - name: Assert release flashed-span ceiling (upper size gate)
         run: |
           for chip in gd32f103c8 gd32f130c8 gd32f103rc; do
@@ -531,7 +532,7 @@ jobs:
           echo "mainboard-$chip release flashed span = ${span} B (.bin)"
           ceiling=62000
           hard=63488
-          if [ "$chip" = gd32f103rc ]; then ceiling=63488; fi
+          if [ "$chip" = gd32f103rc ]; then ceiling=73728; hard=73728; fi
           # Derived, never written down twice: the previous message hardcoded a headroom figure that
           # went stale the moment the ceiling moved, and said 1,988 B when the truth was 7,488 B.
           headroom=$((hard - ceiling))
