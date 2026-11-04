@@ -272,6 +272,9 @@ pub struct ArmValues {
     pub current_limit_ma: [u32; motor::COUNT],
     /// `store::MOTOR_CURRENT_CAL` (0x4C) per motor, stock current counts per amp.
     pub current_cal: [u16; motor::COUNT],
+    /// `store::MOTOR_PEAK_TRIP_PERIODS` (0x59) per motor: the peak trip's count, `0` = off
+    /// (`specs/optional-protections.md` section 3.1).
+    pub peak_trip_periods: [u8; motor::COUNT],
     /// `store::IMU_AXIS_SIGN` (0x15), indices 0..2 = `[x, y, z]`, applied to the accelerometer
     /// and the gyro alike (`imu::Config::staged`).
     pub imu_sign: [i32; 3],
@@ -297,8 +300,9 @@ pub struct ArmValues {
 /// read is infallible (`Store::get` returns the registered default for a missing record), so this
 /// cannot fail and a virgin board re-derives exactly the defaults the boot path used.
 ///
-/// The four wheel keys a motor's install consumes (`MOTOR_CURRENT_CAL`, `MOTOR_CURRENT_LIMIT`,
-/// `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET`) are read at every motor index below `motor::COUNT`;
+/// The five wheel keys a motor's install consumes (`MOTOR_CURRENT_CAL`, `MOTOR_CURRENT_LIMIT`,
+/// `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET`, `MOTOR_PEAK_TRIP_PERIODS`) are read at every motor
+/// index below `motor::COUNT`;
 /// `CONTROL_SIDE` stays at index 0, its one consumer being the balance law's
 /// (`specs/twelve-fet.md` section 5.7).
 /// Every key [`read_arm_values`] resolves, as ONE row: exactly the registered keys whose effect is
@@ -341,18 +345,19 @@ pub const ARM_ROW: [store::Key; ARM_ROW_LEN] = {
     row
 };
 
-/// The four wheel fields a motor's arm-time install consumes, read at every motor's index.
-const MOTOR_ARM_IDS: [u8; 4] = [
+/// The five wheel fields a motor's arm-time install consumes, read at every motor's index.
+const MOTOR_ARM_IDS: [u8; 5] = [
     store::MOTOR_CURRENT_CAL.id(),
     store::MOTOR_CURRENT_LIMIT.id(),
     store::MOTOR_DIRECTION.id(),
     store::MOTOR_ALIGN_OFFSET.id(),
+    store::MOTOR_PEAK_TRIP_PERIODS.id(),
 ];
 
 const ARM_ROW_LEN: usize = ARM_ROW_BASE.len() + MOTOR_ARM_IDS.len() * (motor::COUNT - 1);
 
 /// The registry's arm-effect keys, in registry order (motor 0's at index 0).
-const ARM_ROW_BASE: [store::Key; 23] = [
+const ARM_ROW_BASE: [store::Key; 24] = [
     store::IMU_AXIS_SIGN.at(0).key(),
     store::IMU_AXIS_SIGN.at(1).key(),
     store::IMU_AXIS_SIGN.at(2).key(),
@@ -376,6 +381,7 @@ const ARM_ROW_BASE: [store::Key; 23] = [
     store::MOTOR_DIRECTION.at(0).key(),
     store::CONTROL_SIDE.at(0).key(),
     store::MOTOR_ALIGN_OFFSET.at(0).key(),
+    store::MOTOR_PEAK_TRIP_PERIODS.at(0).key(),
 ];
 
 pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
@@ -395,6 +401,9 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             store::MOTOR_CURRENT_LIMIT.at(m as u8).default()
         }),
         current_cal: core::array::from_fn(|m| store::MOTOR_CURRENT_CAL.at(m as u8).default()),
+        peak_trip_periods: core::array::from_fn(|m| {
+            store::MOTOR_PEAK_TRIP_PERIODS.at(m as u8).default()
+        }),
         imu_sign: [
             store::IMU_AXIS_SIGN.at(0).default(),
             store::IMU_AXIS_SIGN.at(1).default(),
@@ -447,6 +456,11 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
         } else if k.field_id == store::MOTOR_CURRENT_CAL.id() {
             if let Some(slot) = v.current_cal.get_mut(k.index as usize) {
                 *slot = store::scalar_or_default(store::MOTOR_CURRENT_CAL.at(k.index), tag, b);
+            }
+        } else if k.field_id == store::MOTOR_PEAK_TRIP_PERIODS.id() {
+            if let Some(slot) = v.peak_trip_periods.get_mut(k.index as usize) {
+                *slot =
+                    store::scalar_or_default(store::MOTOR_PEAK_TRIP_PERIODS.at(k.index), tag, b);
             }
         } else if k == store::CONTROL_RIDER_REQUIRED.key() {
             v.rider_required_byte = store::scalar_or_default(store::CONTROL_RIDER_REQUIRED, tag, b);
@@ -528,6 +542,7 @@ pub fn rederive(
                 values.align_offset_byte[m],
                 values.current_limit_ma[m],
                 values.current_cal[m],
+                values.peak_trip_periods[m],
                 boot[m],
             )
         }),
@@ -1251,6 +1266,7 @@ mod tests {
             s.set(store::CONTROL_SIDE.at(0), 1).unwrap();
             s.set(store::MOTOR_CURRENT_LIMIT.at(0), 7_500).unwrap();
             s.set(store::MOTOR_CURRENT_CAL.at(0), 300).unwrap();
+            s.set(store::MOTOR_PEAK_TRIP_PERIODS.at(0), 2).unwrap();
             for (i, sign) in [1i32, -1, 1].into_iter().enumerate() {
                 s.set(store::IMU_AXIS_SIGN.at(i as u8), sign).unwrap();
             }
@@ -1288,6 +1304,7 @@ mod tests {
                 side_byte: 1,
                 current_limit_ma: limit,
                 current_cal: cal,
+                peak_trip_periods: at0(d.peak_trip_periods, 2),
                 imu_sign: [1, -1, 1],
                 imu_roles: [1, 3],
                 rider_required_byte: 0,
@@ -1366,7 +1383,7 @@ mod tests {
     }
 
     /// The field ids of the arm row, as [`read_arm_values`] reads them.
-    const ROW_IDS: [u8; 16] = [
+    const ROW_IDS: [u8; 17] = [
         0x15, // IMU_AXIS_SIGN
         0x16, // IMU_AXIS_ROLE
         0x1E, // CONTROL_LEADER
@@ -1383,11 +1400,12 @@ mod tests {
         0x4F, // MOTOR_DIRECTION
         0x50, // CONTROL_SIDE
         0x51, // MOTOR_ALIGN_OFFSET
+        0x59, // MOTOR_PEAK_TRIP_PERIODS
     ];
 
     /// `specs/machine-settings.md` section 9, test 1: [`ARM_ROW`] is exactly the registered keys
     /// whose effect is arm, so the row cannot drift from the registry's attribute, and [`ROW_IDS`]
-    /// is its ids; then, on a two-motor image, the four install keys at each further motor's index
+    /// is its ids; then, on a two-motor image, the five install keys at each further motor's index
     /// (`specs/twelve-fet.md` section 5.7).
     #[test]
     fn the_arm_row_is_the_registrys_arm_effect_keys() {
@@ -1402,6 +1420,7 @@ mod tests {
                 store::MOTOR_CURRENT_LIMIT.at(m).key(),
                 store::MOTOR_DIRECTION.at(m).key(),
                 store::MOTOR_ALIGN_OFFSET.at(m).key(),
+                store::MOTOR_PEAK_TRIP_PERIODS.at(m).key(),
             ] {
                 arm.push(f);
             }
@@ -1472,6 +1491,7 @@ mod tests {
             side_byte: 0,
             current_limit_ma: [10_000; motor::COUNT],
             current_cal: [455; motor::COUNT],
+            peak_trip_periods: [1; motor::COUNT],
             imu_sign: sign,
             imu_roles: roles,
             rider_required_byte: 1,
@@ -1509,6 +1529,7 @@ mod tests {
             side_byte: 0,
             current_limit_ma: [12_000; motor::COUNT],
             current_cal: [455; motor::COUNT],
+            peak_trip_periods: [1; motor::COUNT],
             // Deliberately a reflection: with no IMU it is never staged, so it cannot refuse.
             imu_sign: [1, 1, -1],
             imu_roles: [2, 2],
@@ -1558,6 +1579,7 @@ mod tests {
             side_byte: 0,
             current_limit_ma: [10_000; motor::COUNT],
             current_cal: [455; motor::COUNT],
+            peak_trip_periods: [1; motor::COUNT],
             imu_sign: GOOD_SIGN,
             imu_roles: GOOD_ROLES,
             rider_required_byte: 1,
@@ -1764,7 +1786,7 @@ mod tests {
     /// [`ARM_ROW`]'s ids, so a field added to the row without its name here fails.
     #[test]
     fn the_arm_row_function_is_the_only_reader_of_the_arm_row() {
-        let handles: [(&str, u8); 16] = [
+        let handles: [(&str, u8); 17] = [
             ("IMU_AXIS_SIGN", store::IMU_AXIS_SIGN.id()),
             ("IMU_AXIS_ROLE", store::IMU_AXIS_ROLE.id()),
             ("CONTROL_LEADER", store::CONTROL_LEADER.id()),
@@ -1781,6 +1803,10 @@ mod tests {
             ("MOTOR_DIRECTION", store::MOTOR_DIRECTION.id()),
             ("CONTROL_SIDE", store::CONTROL_SIDE.id()),
             ("MOTOR_ALIGN_OFFSET", store::MOTOR_ALIGN_OFFSET.id()),
+            (
+                "MOTOR_PEAK_TRIP_PERIODS",
+                store::MOTOR_PEAK_TRIP_PERIODS.id(),
+            ),
         ];
         let mut ids: std::vec::Vec<u8> = ARM_ROW_BASE.iter().map(|k| k.field_id).collect();
         ids.dedup();

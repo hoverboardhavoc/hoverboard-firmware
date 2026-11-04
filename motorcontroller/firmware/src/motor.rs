@@ -712,8 +712,14 @@ pub struct CurrentVerdict {
 pub struct CurrentLimit {
     limit: i16,
     hard_trip: i16,
+    /// The peak trip's count (`store::MOTOR_PEAK_TRIP_PERIODS`, `specs/optional-protections.md`
+    /// section 3.1): consecutive readings at or above `hard_trip` that trip, `0` = the peak trip
+    /// off.
+    peak_trip_periods: u8,
     /// Consecutive over-limit periods.
     over_run: u32,
+    /// Consecutive readings at or above `hard_trip`.
+    peak_run: u8,
     /// This over-limit episode has already tripped.
     tripped: bool,
     /// Trips so far this boot.
@@ -739,12 +745,15 @@ pub struct CurrentLimit {
 }
 
 impl CurrentLimit {
-    /// A limit of `limit_counts` (see [`limit_counts`]), no history.
-    pub const fn new(limit_counts: i16) -> Self {
+    /// A limit of `limit_counts` (see [`limit_counts`]) and a peak trip of `peak_trip_periods`
+    /// consecutive readings (`0` = off), no history.
+    pub const fn new(limit_counts: i16, peak_trip_periods: u8) -> Self {
         CurrentLimit {
             limit: limit_counts,
             hard_trip: hard_trip_counts(limit_counts),
+            peak_trip_periods,
             over_run: 0,
+            peak_run: 0,
             tripped: false,
             trips: 0,
             peak: 0,
@@ -760,10 +769,11 @@ impl CurrentLimit {
     ///
     /// This type holds two kinds of thing, and the arm-time re-read moves exactly one of them:
     ///
-    /// - **configuration**: `limit` and `hard_trip`, which ARE the value row (the stored milliamp
-    ///   limit converted through [`limit_counts`] against the stored per-board calibration). They
-    ///   are replaced here, the hard trip through [`hard_trip_counts`] so that arithmetic keeps its
-    ///   single owner exactly as in [`CurrentLimit::new`].
+    /// - **configuration**: `limit`, `hard_trip` and `peak_trip_periods`, which ARE the value row
+    ///   (the stored milliamp limit converted through [`limit_counts`] against the stored per-board
+    ///   calibration, and the stored peak trip count). They are replaced here, the hard trip
+    ///   through [`hard_trip_counts`] so that arithmetic keeps its single owner exactly as in
+    ///   [`CurrentLimit::new`].
     /// - **observation**: `trips`, `peak`, the three sums and `chopped`, which are NOT. What makes
     ///   `trips` boot-cumulative is its own field doc ("trips so far this boot") and
     ///   [`OVER_CURRENT_TRIPS`]'s (the same words, with the ISR its sole writer), published into
@@ -774,23 +784,27 @@ impl CurrentLimit {
     ///   So they survive. (The spec's "append-only, offset-preserving" rule governs field OFFSETS
     ///   in that block, not counter semantics, so it is not the authority here.)
     ///
-    /// The EPISODE state (`over_run`, `tripped`) is reset, which is neither of those: it is the
+    /// The EPISODE state (`over_run`, `peak_run`, `tripped`) is reset, which is neither of those:
+    /// it is the
     /// in-flight judgement of one over-limit run against the limit that has just been replaced, so
     /// carrying it would suppress or mis-date the first trip under the new limit. Resetting it is
     /// free of consequence here because the bridge is disarmed for the whole arm sequence (MOE is
     /// its last step), so no episode can be genuinely in flight.
-    pub fn reconfigure(&mut self, limit_counts: i16) {
+    pub fn reconfigure(&mut self, limit_counts: i16, peak_trip_periods: u8) {
         self.limit = limit_counts;
         self.hard_trip = hard_trip_counts(limit_counts);
+        self.peak_trip_periods = peak_trip_periods;
         self.over_run = 0;
+        self.peak_run = 0;
         self.tripped = false;
     }
 
     /// Fold one period's two conditioned phase currents in. The magnitude is
     /// [`phase_magnitude`]`(ia, ib)`, folded here so the window has one owner. The chop is
-    /// `mag > limit` (not `>=`), on this period's magnitude, unfiltered. The trip is
-    /// `mag >= hard_trip_counts` or the [`OVER_CURRENT_TRIP_PERIODS`]th consecutive over-limit
-    /// period.
+    /// `mag > limit` (not `>=`), on this period's magnitude, unfiltered. The trip is the
+    /// `peak_trip_periods`th consecutive reading at or above [`hard_trip_counts`] (never, at a
+    /// count of 0), or the [`OVER_CURRENT_TRIP_PERIODS`]th consecutive over-limit period
+    /// (`specs/optional-protections.md` section 3.1).
     #[inline(always)]
     pub fn step(&mut self, ia: i16, ib: i16) -> CurrentVerdict {
         let mag = phase_magnitude(ia, ib);
@@ -804,6 +818,7 @@ impl CurrentLimit {
         self.sum_b += ib as i32;
         if mag <= self.limit {
             self.over_run = 0;
+            self.peak_run = 0;
             self.tripped = false;
             return CurrentVerdict {
                 chop: false,
@@ -812,8 +827,13 @@ impl CurrentLimit {
         }
         self.chopped = self.chopped.saturating_add(1);
         self.over_run = self.over_run.saturating_add(1);
-        let trip =
-            !self.tripped && (mag >= self.hard_trip || self.over_run >= OVER_CURRENT_TRIP_PERIODS);
+        self.peak_run = if mag >= self.hard_trip {
+            self.peak_run.saturating_add(1)
+        } else {
+            0
+        };
+        let peak = self.peak_trip_periods != 0 && self.peak_run >= self.peak_trip_periods;
+        let trip = !self.tripped && (peak || self.over_run >= OVER_CURRENT_TRIP_PERIODS);
         if trip {
             self.tripped = true;
             self.trips = self.trips.wrapping_add(1);
@@ -823,7 +843,8 @@ impl CurrentLimit {
 
     /// A period with no reading (`specs/twelve-fet.md` section 5.6: both sensed legs off, or the
     /// bridge disarmed, on a `low_side_on` motor): no chop, no trip, and nothing else moves. The
-    /// over-limit run and the episode's tripped state stay as they were, so a sustained
+    /// over-limit run, the peak run and the episode's tripped state stay as they were, so a
+    /// sustained
     /// over-current whose chops float every other period still reaches
     /// [`OVER_CURRENT_TRIP_PERIODS`] over the driven ones; the window adds nothing to its sums or
     /// its peak, so its mean still divides by the 64 periods with this one at 0.
@@ -1677,6 +1698,10 @@ pub struct Rederived {
     /// zeroed one into the install. Carrying the count means the installed value set structurally
     /// CANNOT restart an observation ([`CurrentLimit::reconfigure`] is what applies it).
     pub limit_counts: i16,
+    /// The peak trip's count as stored (`store::MOTOR_PEAK_TRIP_PERIODS`,
+    /// `specs/optional-protections.md` section 3.1), installed with the limit through
+    /// [`CurrentLimit::reconfigure`].
+    pub peak_trip: u8,
     /// Fresh per-mode records for the running method ([`method_records`]), installed through
     /// `commutation::Commutator::switch_method` so the shared rotor front end survives. A FOC
     /// record carries the arm's current-reference full scale, [`full_scale_counts`] of
@@ -1700,9 +1725,10 @@ pub struct Rederived {
 
 /// Re-derive the motor's VALUE row from freshly read store values plus the boot-fixed decode facts.
 ///
-/// Pure: it validates and converts, and it touches no peripheral and no static. The five inputs
-/// are the five value-row motor fields (`MOTOR_METHOD`, `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET`,
-/// `MOTOR_CURRENT_LIMIT`, `MOTOR_CURRENT_CAL`); everything else the ISR's record holds comes from
+/// Pure: it validates and converts, and it touches no peripheral and no static. The six inputs
+/// are the six value-row motor fields (`MOTOR_METHOD`, `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET`,
+/// `MOTOR_CURRENT_LIMIT`, `MOTOR_CURRENT_CAL`, `MOTOR_PEAK_TRIP_PERIODS`); everything else the
+/// ISR's record holds comes from
 /// `boot` or is left alone. So the value row stays twelve fields wide: `motor.noise_floor` is read
 /// once, at boot.
 ///
@@ -1740,12 +1766,14 @@ pub struct Rederived {
 /// calibration was refused, cannot reach a running motor: [`FAULT_INIT_CAL`] is a
 /// [`motor_fault_level`] producer, so that board does not arm. That is why [`Rederived`] still
 /// carries no fault word; the demotion is visible in the method byte it installs.
+#[allow(clippy::too_many_arguments)]
 pub fn rederive(
     method_byte: u8,
     direction_byte: u8,
     align_offset_byte: u8,
     current_limit_ma: u32,
     current_cal: u16,
+    peak_trip_periods: u8,
     boot: BootFixed,
 ) -> Rederived {
     let decode =
@@ -1757,6 +1785,7 @@ pub fn rederive(
     Rederived {
         method: records.method().to_u8(),
         limit_counts: limit,
+        peak_trip: peak_trip_periods,
         records,
         decode,
         method_fault: method_fault_bits(requested, boot),
@@ -2134,7 +2163,7 @@ pub mod hw {
             for (slot, r) in motors.iter_mut().zip(r) {
                 if let Some(m) = slot.as_mut() {
                     m.method = r.method;
-                    m.current.reconfigure(r.limit_counts);
+                    m.current.reconfigure(r.limit_counts, r.peak_trip);
                     m.commutator.switch_method(r.records, r.decode);
                     m.faults = (m.faults & !FAULT_METHOD) | r.method_fault;
                 }
@@ -2701,7 +2730,7 @@ pub mod hw {
                 last_seq: DEMAND_SEQ.load(Ordering::Relaxed),
                 faults: init_faults,
                 offsets,
-                current: CurrentLimit::new(limit),
+                current: CurrentLimit::new(limit, store::MOTOR_PEAK_TRIP_PERIODS.default()),
                 hold: SampleHold::new(),
                 coasted: 0,
                 causes: cal_bits,
@@ -3597,6 +3626,7 @@ mod tests {
                         align_offset_byte,
                         10_000,
                         CAL,
+                        1,
                         boot,
                     );
                     assert_eq!(
@@ -3632,7 +3662,7 @@ mod tests {
                     "byte {byte}"
                 );
                 // ...and the re-derivation publishes that same method, not the request.
-                let r = rederive(byte, 0, 2, 10_000, CAL, boot);
+                let r = rederive(byte, 0, 2, 10_000, CAL, 1, boot);
                 assert_eq!(r.method, records.method().to_u8(), "byte {byte}");
                 assert_eq!(r.records.method(), records.method(), "byte {byte}");
                 // The observation block carries it in the method byte the bench reads.
@@ -3716,7 +3746,7 @@ mod tests {
             other => panic!("an accepted board runs the FOC it asked for, got {other:?}"),
         };
         // The fleet defaults: 4,550 - 2,100 = 2,450 counts, 5.4 A at 455 counts per amp.
-        let r = rederive(2, 0, 2, 10_000, CAL, boot_accepted());
+        let r = rederive(2, 0, 2, 10_000, CAL, 1, boot_accepted());
         assert_eq!(r.limit_counts, 4_550);
         assert_eq!(full_scale_counts(r.limit_counts, FLOOR), 2_450);
         assert_eq!(scale(r), 2_450, "the FOC records carry it");
@@ -3724,21 +3754,21 @@ mod tests {
         // Each of the three inputs moves it, through its one owner: the limit (17,800 mA is the
         // spec's 13.2 A reference), the calibration, and the boot-read floor.
         assert_eq!(
-            scale(rederive(2, 0, 2, 17_800, CAL, boot_accepted())),
+            scale(rederive(2, 0, 2, 17_800, CAL, 1, boot_accepted())),
             5_999
         );
         assert_eq!(
-            scale(rederive(2, 0, 2, 10_000, 800, boot_accepted())),
+            scale(rederive(2, 0, 2, 10_000, 800, 1, boot_accepted())),
             8_000 - 2_100
         );
         let quiet = BootFixed {
             noise_floor: 1_500,
             ..boot_accepted()
         };
-        assert_eq!(scale(rederive(2, 0, 2, 10_000, CAL, quiet)), 3_050);
+        assert_eq!(scale(rederive(2, 0, 2, 10_000, CAL, 1, quiet)), 3_050);
         // Floored at zero when the limit sits AT the floor (a request under the floor is clamped up
         // to it): the board can hold no current above its noise, so the reference is zero.
-        let r = rederive(2, 0, 2, 1, CAL, boot_accepted());
+        let r = rederive(2, 0, 2, 1, CAL, 1, boot_accepted());
         assert_eq!(r.limit_counts, noise_floor_counts(FLOOR));
         assert_eq!(scale(r), 0);
         // The function itself, at the window's ends and past them (a pair `limit_counts` cannot
@@ -3751,7 +3781,7 @@ mod tests {
         assert_eq!(full_scale_counts(i16::MIN, u16::MAX), 0);
         // The demotion rule and its fault are unchanged: no accepted zeros, a FOC request runs
         // six-step and raises FAULT_METHOD.
-        let r = rederive(2, 0, 2, 10_000, CAL, BOOT);
+        let r = rederive(2, 0, 2, 10_000, CAL, 1, BOOT);
         assert_eq!(r.method, commutation::CommutationMethod::SixStep.to_u8());
         assert!(matches!(r.records, MethodState::SixStep(_)));
         assert_eq!(
@@ -3772,7 +3802,7 @@ mod tests {
         // The re-derivation carries the COUNT (see `Rederived::limit_counts`), and the count is
         // `limit_counts`'s, so a changed calibration moves it...
         let at = |ma: u32, cal: u16| {
-            rederive(0, 0, 2, ma, cal, BOOT).limit_counts == limit_counts(ma, cal, FLOOR)
+            rederive(0, 0, 2, ma, cal, 1, BOOT).limit_counts == limit_counts(ma, cal, FLOOR)
         };
         assert_ne!(
             limit_counts(20_000, 200, FLOOR),
@@ -3790,19 +3820,19 @@ mod tests {
         // calibration outside the seam clamps into it, and an unbounded request ceilings at
         // MAX_LIMIT_COUNTS.
         assert_eq!(
-            rederive(0, 0, 2, 1, 455, BOOT).limit_counts,
+            rederive(0, 0, 2, 1, 455, 1, BOOT).limit_counts,
             noise_floor_counts(FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, 2, 20_000, 0, BOOT).limit_counts,
+            rederive(0, 0, 2, 20_000, 0, 1, BOOT).limit_counts,
             limit_counts(20_000, CURRENT_CAL_MIN, FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, 2, 20_000, u16::MAX, BOOT).limit_counts,
+            rederive(0, 0, 2, 20_000, u16::MAX, 1, BOOT).limit_counts,
             limit_counts(20_000, CURRENT_CAL_MAX, FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, 2, u32::MAX, 455, BOOT).limit_counts,
+            rederive(0, 0, 2, u32::MAX, 455, 1, BOOT).limit_counts,
             MAX_LIMIT_COUNTS
         );
         // The floor the arm uses is the runtime's, not the registered default: a board brought up
@@ -3813,7 +3843,7 @@ mod tests {
                 ..BOOT
             };
             assert_eq!(
-                rederive(0, 0, 2, 1, 455, boot).limit_counts,
+                rederive(0, 0, 2, 1, 455, 1, boot).limit_counts,
                 noise_floor_counts(floor),
                 "floor {floor}"
             );
@@ -3821,10 +3851,10 @@ mod tests {
         // And the count the re-derivation carries IS the limit in force once installed: a record
         // reconfigured to it behaves exactly as one built with it (the install's own seam below).
         for (ma, cal) in [(10_000u32, 455u16), (20_000, 200), (1, 455)] {
-            let counts = rederive(0, 0, 2, ma, cal, BOOT).limit_counts;
-            let mut reconfigured = CurrentLimit::new(noise_floor_counts(FLOOR));
-            reconfigured.reconfigure(counts);
-            let fresh = CurrentLimit::new(counts);
+            let counts = rederive(0, 0, 2, ma, cal, 1, BOOT).limit_counts;
+            let mut reconfigured = CurrentLimit::new(noise_floor_counts(FLOOR), 1);
+            reconfigured.reconfigure(counts, 1);
+            let fresh = CurrentLimit::new(counts, 1);
             assert_eq!(reconfigured, fresh, "ma {ma}, cal {cal}");
         }
     }
@@ -3837,13 +3867,13 @@ mod tests {
     #[test]
     fn a_reconfigured_limit_keeps_its_trip_count_and_takes_the_new_limit() {
         let lim = 4_000i16;
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         // A hard trip, so there is a count and a window to preserve.
         assert!(c.step(hard_trip_counts(lim), 0).trip);
         assert_eq!(c.trips(), 1);
         // Re-arm with a different limit.
         let fresh = 8_000i16;
-        c.reconfigure(fresh);
+        c.reconfigure(fresh, 1);
         assert_eq!(
             c.trips(),
             1,
@@ -3890,14 +3920,14 @@ mod tests {
     #[test]
     fn the_over_current_relatch_survives_an_arm() {
         let lim = 4_000i16;
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         // The run before the arm: a short trips once, and the ISR publishes 1.
         assert!(c.step(hard_trip_counts(lim), 0).trip);
         let published_before = c.trips();
         assert_eq!(published_before, 1);
         // The arm: the value row is re-derived and installed (same limit here, since the operator
         // changed something else), and the bridge was disarmed for the whole sequence.
-        c.reconfigure(lim);
+        c.reconfigure(lim, 1);
         // The first period after the arm, with the short still there.
         let v = c.step(hard_trip_counts(lim), 0);
         assert!(v.trip, "the first period after the arm re-trips");
@@ -3915,7 +3945,7 @@ mod tests {
     #[test]
     fn a_reconfigure_mid_episode_does_not_suppress_the_next_trip() {
         let lim = 4_000i16;
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         // Mid-episode: over the limit and already tripped, with no clean period to re-arm it.
         assert!(c.step(hard_trip_counts(lim), 0).trip);
         assert!(
@@ -3923,7 +3953,7 @@ mod tests {
             "same episode, one trip"
         );
         assert_eq!(c.trips(), 1);
-        c.reconfigure(lim);
+        c.reconfigure(lim, 1);
         // The same magnitude now counts as a NEW episode's trip.
         assert!(
             c.step(hard_trip_counts(lim), 0).trip,
@@ -3949,7 +3979,7 @@ mod tests {
                 // select their own arms, which `each_method_requested_yields_its_own_records`
                 // covers; here the decode facts are the subject.
                 for byte in (0..=u8::MAX).filter(|b| !matches!(b, 1 | 2)) {
-                    let r = rederive(byte, direction_byte, align_offset, 10_000, 455, BOOT);
+                    let r = rederive(byte, direction_byte, align_offset, 10_000, 455, 1, BOOT);
                     assert_eq!(r.decode.direction(), direction, "byte {byte}");
                     assert_eq!(
                         r.method,
@@ -4471,7 +4501,7 @@ mod tests {
     /// The staged limit every hold test below judges against: the fleet defaults, 4,550 counts,
     /// a hard trip at 9,100.
     fn limit() -> CurrentLimit {
-        CurrentLimit::new(limit_counts(10_000, CAL, FLOOR))
+        CurrentLimit::new(limit_counts(10_000, CAL, FLOOR), 1)
     }
 
     #[test]
@@ -4856,7 +4886,7 @@ mod tests {
     #[test]
     fn the_chop_is_strictly_over_the_limit() {
         let lim = limit_counts(10_000, CAL, FLOOR);
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         assert!(!c.step(lim, 0).chop, "AT the limit drives");
         assert!(c.step(lim + 1, 0).chop, "one count over floats");
         assert!(
@@ -4872,14 +4902,14 @@ mod tests {
     fn the_trip_fires_at_the_hard_magnitude() {
         let lim = limit_counts(2_000, CAL, FLOOR);
         let hard = hard_trip_counts(lim);
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         let v = c.step(hard - 1, 0);
         assert!(
             v.chop && !v.trip,
             "over the limit, under the hard trip: chop only"
         );
         assert_eq!(c.trips(), 0);
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         let v = c.step(hard, 0);
         assert!(
             v.chop && v.trip,
@@ -4894,7 +4924,7 @@ mod tests {
     fn the_trip_fires_at_64_consecutive_over_limit_periods() {
         let lim = limit_counts(2_000, CAL, FLOOR);
         let over = lim + 1;
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
             assert!(!c.step(over, 0).trip);
         }
@@ -4903,7 +4933,7 @@ mod tests {
         assert_eq!(c.trips(), 1);
 
         // One clean period resets the run.
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         for _ in 0..OVER_CURRENT_TRIP_PERIODS - 1 {
             c.step(over, 0);
         }
@@ -4920,7 +4950,7 @@ mod tests {
     fn a_trip_counts_once_per_over_limit_episode() {
         let lim = limit_counts(2_000, CAL, FLOOR);
         let hard = hard_trip_counts(lim);
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         assert!(c.step(hard, 0).trip);
         for _ in 0..200 {
             let v = c.step(hard, 0);
@@ -4931,6 +4961,107 @@ mod tests {
         c.step(0, 0);
         assert!(c.step(hard, 0).trip, "a clean period re-arms it");
         assert_eq!(c.trips(), 2);
+    }
+
+    /// The peak trip's count (`specs/optional-protections.md` section 3.1, 9.1): at 2, one reading
+    /// at the hard magnitude chops without a trip and the second in a row trips; a passed period
+    /// between two keeps the run; an under-limit reading, or an over-limit one under the hard
+    /// magnitude, resets it.
+    #[test]
+    fn a_peak_trip_count_of_two_trips_on_the_second_reading_in_a_row() {
+        let lim = limit_counts(2_000, CAL, FLOOR);
+        let hard = hard_trip_counts(lim);
+        let mut c = CurrentLimit::new(lim, 2);
+        let v = c.step(hard, 0);
+        assert!(v.chop && !v.trip, "the first reading chops only");
+        assert!(c.step(hard, 0).trip, "the second in a row trips");
+        assert_eq!(c.trips(), 1);
+
+        // A pass between two readings keeps the run: the 12-FET's glitch period chops, and the
+        // next sample of a `low_side_on` motor is no reading.
+        let mut c = CurrentLimit::new(lim, 2);
+        assert!(!c.step(hard, 0).trip);
+        assert_eq!(
+            c.pass(),
+            CurrentVerdict {
+                chop: false,
+                trip: false
+            }
+        );
+        assert!(c.step(hard, 0).trip, "the pass kept the run");
+
+        // An under-limit reading resets it, and so does an over-limit one under the hard magnitude.
+        for reset in [0, lim, hard - 1] {
+            let mut c = CurrentLimit::new(lim, 2);
+            assert!(!c.step(hard, 0).trip);
+            assert!(!c.step(reset, 0).trip, "reset reading {reset}");
+            assert!(!c.step(hard, 0).trip, "the run restarted after {reset}");
+            assert!(c.step(hard, 0).trip);
+        }
+    }
+
+    /// At a count of 0 the peak trip is off and the sustained trip stays: readings at the hard
+    /// magnitude chop every period and trip on the 64th, as any over-limit run does.
+    #[test]
+    fn a_peak_trip_count_of_zero_leaves_the_sustained_trip() {
+        let lim = limit_counts(2_000, CAL, FLOOR);
+        let hard = hard_trip_counts(lim);
+        let mut c = CurrentLimit::new(lim, 0);
+        for k in 1..OVER_CURRENT_TRIP_PERIODS {
+            let v = c.step(hard, 0);
+            assert!(v.chop && !v.trip, "period {k}");
+        }
+        assert!(c.step(hard, 0).trip, "the 64th over-limit period trips");
+        assert_eq!(c.trips(), 1);
+        // A glitch of one reading, then clean: never a trip.
+        let mut c = CurrentLimit::new(lim, 0);
+        for _ in 0..1_000 {
+            assert!(!c.step(i16::MAX, 0).trip);
+            assert!(!c.step(0, 0).trip);
+        }
+        assert_eq!(c.trips(), 0);
+    }
+
+    /// `reconfigure` installs the count and resets the peak run with the rest of the episode.
+    #[test]
+    fn a_reconfigure_installs_the_count_and_resets_the_peak_run() {
+        let lim = limit_counts(2_000, CAL, FLOOR);
+        let hard = hard_trip_counts(lim);
+        let mut c = CurrentLimit::new(lim, 3);
+        assert!(!c.step(hard, 0).trip);
+        assert!(!c.step(hard, 0).trip);
+        c.reconfigure(lim, 3);
+        assert!(!c.step(hard, 0).trip, "the run restarted at the arm");
+        assert!(!c.step(hard, 0).trip);
+        assert!(
+            c.step(hard, 0).trip,
+            "the third reading after the arm trips"
+        );
+        c.reconfigure(lim, 1);
+        c.step(0, 0);
+        assert!(c.step(hard, 0).trip, "the installed count is 1");
+        // The arm row carries the stored count to the install unchanged.
+        assert_eq!(rederive(0, 0, 2, 2_000, CAL, 7, BOOT).peak_trip, 7);
+    }
+
+    /// The episode rule holds at every count: one trip per over-limit episode, re-armed by a clean
+    /// period, whichever condition fired it.
+    #[test]
+    fn a_trip_counts_once_per_episode_at_every_peak_count() {
+        let lim = limit_counts(2_000, CAL, FLOOR);
+        let hard = hard_trip_counts(lim);
+        for count in [0u8, 1, 2, 5, 63] {
+            let mut c = CurrentLimit::new(lim, count);
+            for _ in 0..3 {
+                let mut trips = 0;
+                for _ in 0..200 {
+                    trips += c.step(hard, 0).trip as u32;
+                }
+                assert_eq!(trips, 1, "count {count}: one trip per episode");
+                c.step(0, 0);
+            }
+            assert_eq!(c.trips(), 3, "count {count}");
+        }
     }
 
     /// The sample rule's predicate (`specs/twelve-fet.md` section 5.6): an `any_state` motor
@@ -4976,7 +5107,7 @@ mod tests {
     #[test]
     fn a_passed_period_moves_nothing() {
         let lim = limit_counts(2_000, CAL, FLOOR);
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         for mag in [lim + 1, 30, lim + 9] {
             c.step(mag, 0);
         }
@@ -4994,8 +5125,8 @@ mod tests {
     fn passed_periods_leave_the_driven_verdicts_and_the_run_trip() {
         let lim = limit_counts(2_000, CAL, FLOOR);
         let over = lim + 1;
-        let mut alone = CurrentLimit::new(lim);
-        let mut mixed = CurrentLimit::new(lim);
+        let mut alone = CurrentLimit::new(lim, 1);
+        let mut mixed = CurrentLimit::new(lim, 1);
         let mut tripped_at = None;
         for k in 0..OVER_CURRENT_TRIP_PERIODS {
             let a = alone.step(over, 0);
@@ -5009,7 +5140,7 @@ mod tests {
         assert_eq!(tripped_at, Some(OVER_CURRENT_TRIP_PERIODS));
         assert_eq!(alone, mixed);
 
-        let mut zeroed = CurrentLimit::new(lim);
+        let mut zeroed = CurrentLimit::new(lim, 1);
         for _ in 0..4 * OVER_CURRENT_TRIP_PERIODS {
             zeroed.step(over, 0);
             zeroed.step(0, 0);
@@ -5022,7 +5153,7 @@ mod tests {
     #[test]
     fn the_window_peak_and_its_restart() {
         let lim = limit_counts(1_000, CAL, FLOOR);
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         for mag in [10, 500, lim + 5, 30, lim + 1] {
             c.step(mag, 0);
         }
@@ -5050,7 +5181,7 @@ mod tests {
     #[test]
     fn the_window_mean_is_the_average_of_its_periods() {
         let lim = limit_counts(1_000, CAL, FLOOR);
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         // A full window of one constant magnitude: the mean IS that magnitude, which is the
         // property a wrong shift breaks first (a shift of 5 would read 2x, of 7 half).
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
@@ -5082,7 +5213,7 @@ mod tests {
     /// either: a whole window at the magnitude ceiling.
     #[test]
     fn a_window_at_the_magnitude_ceiling_does_not_overflow_the_mean() {
-        let mut c = CurrentLimit::new(MAX_LIMIT_COUNTS);
+        let mut c = CurrentLimit::new(MAX_LIMIT_COUNTS, 1);
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
             c.step(i16::MAX, 0);
         }
@@ -5095,7 +5226,7 @@ mod tests {
     /// this type, and a window closed twice yields nothing the second time.
     #[test]
     fn one_call_closes_the_whole_window() {
-        let mut c = CurrentLimit::new(limit_counts(1_000, CAL, FLOOR));
+        let mut c = CurrentLimit::new(limit_counts(1_000, CAL, FLOOR), 1);
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
             c.step(640, 0);
         }
@@ -5126,13 +5257,13 @@ mod tests {
             (hard_trip_counts(lim), -3),
             (i16::MIN, i16::MIN),
         ] {
-            let mut by_pair = CurrentLimit::new(lim);
-            let mut by_mag = CurrentLimit::new(lim);
+            let mut by_pair = CurrentLimit::new(lim, 1);
+            let mut by_mag = CurrentLimit::new(lim, 1);
             let mag = phase_magnitude(ia, ib);
             assert_eq!(by_pair.step(ia, ib), by_mag.step(mag, 0), "({ia}, {ib})");
             assert_eq!(by_pair.take_window().0 & 0xFFFF, mag as u16 as u32);
         }
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         assert!(c.step(half, half).chop, "the third phase chops");
     }
 
@@ -5142,7 +5273,7 @@ mod tests {
     #[test]
     fn the_window_carries_the_two_phase_means() {
         let lim = limit_counts(10_000, CAL, FLOOR);
-        let mut c = CurrentLimit::new(lim);
+        let mut c = CurrentLimit::new(lim, 1);
         for _ in 0..PERIODS_PER_TICK_NOMINAL {
             c.step(300, -120);
         }
@@ -5263,7 +5394,7 @@ mod tests {
     /// hall and calibration bits of that word, so no bit a trip could set is folded.
     #[test]
     fn a_trip_does_not_reach_the_motor_fault_level() {
-        let mut c = CurrentLimit::new(limit_counts(1_000, CAL, FLOOR));
+        let mut c = CurrentLimit::new(limit_counts(1_000, CAL, FLOOR), 1);
         assert!(c.step(i16::MAX, 0).trip);
         let producers = FAULT_HALL | FAULT_INIT_CAL;
         for bit in 0..32 {

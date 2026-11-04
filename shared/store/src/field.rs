@@ -555,6 +555,14 @@ pub const MOTOR_PHASE_C: PinField = PinField::new(0x57, Type::PinAdc);
 /// side conducts (the 12-FET), so the zeros are measured with the low sides on and a sample whose
 /// leg was off is not a reading.
 pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x58, 0);
+/// The peak trip's count, per motor (`specs/optional-protections.md` section 3.1): the number of
+/// consecutive phase-current readings at or above twice the soft limit that trip the hard
+/// over-current fault. `1` (the default) trips on the first such reading; `2` on the second in a
+/// row; `0` turns the peak trip off, while the sustained trip (64 consecutive over-limit periods,
+/// `firmware::motor::OVER_CURRENT_TRIP_PERIODS`) stays on. 0 to 63: every reading at twice the
+/// limit is also over it, so a run of 64 is the sustained trip already. In the arm row beside
+/// [`MOTOR_CURRENT_LIMIT`], installed through `CurrentLimit::reconfigure` at every arm.
+pub const MOTOR_PEAK_TRIP_PERIODS: Field<u8> = Field::new(0x59, 1);
 /// The power-button sense pin (`specs/board-model.md` `power.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
@@ -1087,6 +1095,7 @@ field_ids! {
     0x56, // MOTOR_GATE_REMAP
     0x57, // MOTOR_PHASE_C
     0x58, // MOTOR_CURRENT_SENSE
+    0x59, // MOTOR_PEAK_TRIP_PERIODS
 }
 
 #[cfg(feature = "test-fields")]
@@ -1158,6 +1167,7 @@ field_ids! {
     0x56, // MOTOR_GATE_REMAP
     0x57, // MOTOR_PHASE_C
     0x58, // MOTOR_CURRENT_SENSE
+    0x59, // MOTOR_PEAK_TRIP_PERIODS
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1244,10 +1254,10 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 67 + 19;
+pub const REGISTRY_LEN: usize = 68 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 69 + 19;
+pub const REGISTRY_LEN: usize = 70 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1481,6 +1491,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_GATE_REMAP.entry(Boot),
     MOTOR_PHASE_C.entry(Boot),
     MOTOR_CURRENT_SENSE.entry(Boot),
+    MOTOR_PEAK_TRIP_PERIODS.entry(Arm),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY, Client),
     #[cfg(feature = "test-fields")]
@@ -1780,6 +1791,11 @@ pub mod names {
         FieldName::motor(MOTOR_GATE_REMAP, "gate.remap", Kind::Int),
         FieldName::pin(MOTOR_PHASE_C, "current.phase_c", Index::Motor),
         FieldName::motor(MOTOR_CURRENT_SENSE, "current.sense", SENSE),
+        FieldName::motor(
+            MOTOR_PEAK_TRIP_PERIODS,
+            "current.peak_trip_periods",
+            Kind::Int,
+        ),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -1861,6 +1877,9 @@ pub mod names {
         every(CONTROL_SIDE.id(), 0, 1),
         // `align_offset`: six sectors.
         every(MOTOR_ALIGN_OFFSET.id(), 0, 5),
+        // `current.peak_trip_periods`: a run of 64 is the sustained trip already
+        // (`firmware::motor::OVER_CURRENT_TRIP_PERIODS`).
+        every(MOTOR_PEAK_TRIP_PERIODS.id(), 0, 63),
         // Calibration. `imu.gyro_bias`, raw counts: the sensor's i16 word.
         every(IMU_GYRO_BIAS.id(), -32767, 32767),
         // `attitude.level_trim`, centidegrees: a half turn either way.
@@ -2221,6 +2240,7 @@ mod registry_tests {
             (0x56, MOTOR_GATE_REMAP.id()),
             (0x57, MOTOR_PHASE_C.id()),
             (0x58, MOTOR_CURRENT_SENSE.id()),
+            (0x59, MOTOR_PEAK_TRIP_PERIODS.id()),
         ];
         for (want, got) in map {
             assert_eq!(want, got);
@@ -2346,6 +2366,7 @@ mod registry_tests {
                 (0x4F, 0),
                 (0x50, 0),
                 (0x51, 0),
+                (0x59, 0),
             ]
         );
         // Everything else is read at boot.

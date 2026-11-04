@@ -959,5 +959,24 @@
     "scope": "wheel",
     "effect": "boot",
     "board_owned": false
+  },
+  {
+    "id": 89,
+    "path": "current.peak_trip_periods",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "ranges": [
+      {
+        "range": [
+          0,
+          63
+        ]
+      }
+    ],
+    "scope": "wheel",
+    "effect": "arm",
+    "board_owned": false
   }
 ]
