@@ -363,6 +363,11 @@ pub struct Drive {
     value: i16,
     /// `INPUTS.buttons` while driving: power, and the observer request with `--observer`.
     buttons: u8,
+    /// `--observer-after`: the observer request joins `buttons` once the run has been going this
+    /// long, so the request lands on a wheel the halls have already brought to speed and the
+    /// observer has converged on (`specs/flux-observer.md`, "S4, first slice": at rest its angle
+    /// is noise). `None` with `--observer` sets it from the first frame.
+    observer_after: Option<Duration>,
     next_drive: Duration,
     next_inputs: Duration,
 }
@@ -372,6 +377,18 @@ impl Drive {
     /// observer source request, `specs/flux-observer.md`, "S4, first slice") in every `INPUTS`
     /// while driving; the stop frames clear it with the power bit.
     pub fn new(src: u8, wheels: Vec<Wheel>, value: i16, observer: bool) -> Self {
+        Self::with_observer_after(src, wheels, value, observer, None)
+    }
+
+    /// [`Drive::new`] with the observer request delayed by `after` (`--observer-after`), which
+    /// implies the request.
+    pub fn with_observer_after(
+        src: u8,
+        wheels: Vec<Wheel>,
+        value: i16,
+        observer: bool,
+        after: Option<Duration>,
+    ) -> Self {
         let mut nodes: Vec<u8> = Vec::new();
         for w in &wheels {
             if !nodes.contains(&w.node) {
@@ -383,7 +400,13 @@ impl Drive {
             wheels,
             nodes,
             value,
-            buttons: Inputs::BUTTON_POWER | if observer { Inputs::BUTTON_OBSERVER } else { 0 },
+            buttons: Inputs::BUTTON_POWER
+                | if observer && after.is_none() {
+                    Inputs::BUTTON_OBSERVER
+                } else {
+                    0
+                },
+            observer_after: if observer { after } else { None },
             next_drive: Duration::ZERO,
             next_inputs: Duration::ZERO,
         }
@@ -398,6 +421,9 @@ impl Drive {
     /// the cadence from `at`, rather than bursting the missed ones.
     pub fn due(&mut self, at: Duration) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
+        if self.observer_after.is_some_and(|d| at >= d) {
+            self.buttons |= Inputs::BUTTON_OBSERVER;
+        }
         if at >= self.next_inputs {
             let i = Inputs {
                 buttons: self.buttons,

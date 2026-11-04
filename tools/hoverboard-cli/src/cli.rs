@@ -240,6 +240,10 @@ pub enum Command {
         /// driving, so the bench presses the app's OBS button without the phone
         /// (`specs/flux-observer.md`, "S4, first slice").
         observer: bool,
+        /// `--observer-after <secs>`: the request joins the `INPUTS` only this many seconds into
+        /// the run, once the halls have the wheel at speed and the observer has converged (at
+        /// rest its angle is noise); implies `--observer`.
+        observer_after: Option<u64>,
     },
     /// `board trace` (`specs/flux-observer.md`, "Two instruments read it"): the `FOC_TRACE`
     /// subscription, a line a frame, and the CSV.
@@ -328,7 +332,7 @@ pub const USAGE: &str =
   machine apply <file> [--map <uid>=<board>]... [--force]
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
   machine diff [--replace] [<file>] [--map <uid>=<board>]... [--force]
-  machine watch <secs> [<board>...] [--json] | drive <value> <secs> [<board>[:<motor>]...] [--observer]
+  machine watch <secs> [<board>...] [--json] | drive <value> <secs> [<board>[:<motor>]...] [--observer | --observer-after <secs>]
   machine update <bundle> [--yes]
   bridge info <bridge> | update <bridge> <bundle|bin> [--yes] [--no-confirm]
   bridge install <bundle|image> [<file>...] [--yes]
@@ -349,7 +353,14 @@ const FLAGS: &[&str] = &[
 ];
 /// The command options that take a value.
 const VALUED: &[&str] = &[
-    "--secs", "--from", "--map", "--hz", "--image", "--motor", "--csv",
+    "--secs",
+    "--from",
+    "--map",
+    "--hz",
+    "--image",
+    "--motor",
+    "--csv",
+    "--observer-after",
 ];
 
 /// The command's own options, as given.
@@ -363,6 +374,7 @@ struct Opts<'a> {
     maps: Vec<&'a str>,
     motor: Option<&'a str>,
     csv: Option<&'a str>,
+    observer_after: Option<&'a str>,
 }
 
 impl Opts<'_> {
@@ -382,7 +394,8 @@ impl Opts<'_> {
             .chain(self.image.map(|_| "--image"))
             .chain(self.maps.iter().map(|_| "--map"))
             .chain(self.motor.map(|_| "--motor"))
-            .chain(self.csv.map(|_| "--csv"));
+            .chain(self.csv.map(|_| "--csv"))
+            .chain(self.observer_after.map(|_| "--observer-after"));
         given.into_iter().all(|o| allowed.contains(&o))
     }
 }
@@ -426,6 +439,7 @@ pub fn parse(args: &[String]) -> (bool, Result<Invocation, String>) {
                     "--from" => opts.from = Some(v),
                     "--image" => opts.image = Some(v),
                     "--motor" => opts.motor = Some(v),
+                    "--observer-after" => opts.observer_after = Some(v),
                     "--csv" => opts.csv = Some(v),
                     _ => opts.maps.push(v),
                 },
@@ -607,14 +621,15 @@ fn command(pos: &[&str], o: &Opts) -> Result<Command, String> {
             }
         }
         ["machine", "drive", value, secs, targets @ ..] => {
-            ok(&["--observer"])?;
+            ok(&["--observer", "--observer-after"])?;
             Command::Drive {
                 value: value
                     .parse()
                     .map_err(|_| format!("not a drive value (-32768..32767): {value}"))?,
                 secs: parse_secs(secs)?,
                 targets: owned(targets),
-                observer: o.has("--observer"),
+                observer: o.has("--observer") || o.observer_after.is_some(),
+                observer_after: o.observer_after.map(parse_secs).transpose()?,
             }
         }
         _ => return usage(),
@@ -1015,6 +1030,7 @@ mod tests {
                     secs: 2,
                     targets: Vec::new(),
                     observer: false,
+                    observer_after: None,
                 },
             ),
             (
@@ -1025,6 +1041,18 @@ mod tests {
                     secs: 10,
                     targets: vec![s("offroad-master:0")],
                     observer: true,
+                    observer_after: None,
+                },
+            ),
+            (
+                "drive",
+                "machine drive 2500 20 0x03 --observer-after 8",
+                Command::Drive {
+                    value: 2500,
+                    secs: 20,
+                    targets: vec![s("0x03")],
+                    observer: true,
+                    observer_after: Some(8),
                 },
             ),
             (

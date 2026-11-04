@@ -648,3 +648,40 @@ fn the_binary_watches_over_tcp_and_sends_nothing_after_the_attach() {
         Some(Opcode::NodeHello)
     );
 }
+
+/// `machine drive --observer-after N` (`specs/flux-observer.md`, "S4, first slice"): the request
+/// is absent from the `INPUTS` before N seconds and present from the first `INPUTS` at or after.
+#[test]
+fn drive_observer_after_joins_the_inputs_only_once_the_delay_has_passed() {
+    use std::time::Duration;
+    let mut d = Drive::with_observer_after(
+        0x88,
+        vec![w(0x01, 0)],
+        2500,
+        true,
+        Some(Duration::from_secs(8)),
+    );
+    let bit = |frames: &[Vec<u8>]| -> Vec<bool> {
+        frames
+            .iter()
+            .filter_map(|f| {
+                let (op, _, payload) = parts(f);
+                (op == OP_INPUTS).then(|| Inputs::decode(&payload).unwrap().observer_request())
+            })
+            .collect()
+    };
+    let early = bit(&d.due(Duration::ZERO));
+    assert_eq!(early, vec![false], "no request before the delay");
+    let before = bit(&d.due(Duration::from_millis(7_900)));
+    assert!(before.iter().all(|b| !b), "still none just before it");
+    // The next `INPUTS` falls due 500 ms after the last one (7.9 s), so the first carrying the
+    // request is the one at or after 8.4 s.
+    let at = bit(&d.due(Duration::from_millis(8_400)));
+    assert_eq!(
+        at,
+        vec![true],
+        "the request joins with the first INPUTS after the delay"
+    );
+    let after = bit(&d.due(Duration::from_secs(9)));
+    assert_eq!(after, vec![true], "and stays");
+}
