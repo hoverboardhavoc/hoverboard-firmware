@@ -317,6 +317,12 @@ pub struct FluxObserver {
     /// between the last sample and this one.
     v_prev: (i16, i16),
     angle: u16,
+    /// The lead the last step subtracted from the error (the bin's leak lead, signed by the
+    /// direction of rotation), kept so the driving angle carries the same correction as the
+    /// verdict: the raw integrator leads the flux by `atan(f_c / f)`, 18 degrees at the ceiling
+    /// and 44 at bin 5, and a wheel driven from the raw angle ran at the wrong speed and
+    /// oscillated (bench 2026-11-04, S4 test 1).
+    lead: u16,
     theta: u16,
     sum: i32,
     max: i16,
@@ -342,6 +348,7 @@ impl FluxObserver {
             psi_b: 0,
             v_prev: (0, 0),
             angle: 0,
+            lead: 0,
             theta: 0,
             sum: 0,
             max: i16::MIN,
@@ -365,7 +372,7 @@ impl FluxObserver {
     /// interpolation. No second `atan2`.
     #[inline(always)]
     pub fn source_angle(&self, p: &ObserverParams) -> u16 {
-        self.angle.wrapping_sub(p.offset)
+        self.angle.wrapping_sub(p.offset).wrapping_sub(self.lead)
     }
 
     /// The flux, 1/16 microvolt-second, stock frame.
@@ -438,6 +445,7 @@ impl FluxObserver {
         } else {
             lead
         };
+        self.lead = lead;
         let e = angle
             .wrapping_sub(x.theta)
             .wrapping_sub(p.offset)
