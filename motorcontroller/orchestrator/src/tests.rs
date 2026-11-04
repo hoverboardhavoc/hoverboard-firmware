@@ -1771,6 +1771,83 @@ fn an_over_current_trip_latches_motor_0_and_clears_on_the_off_pass() {
 }
 
 #[test]
+fn a_break_level_latches_either_motor_in_run_and_re_latches_while_it_stays() {
+    // `specs/optional-protections.md` sections 3.3 and 9.1: the firmware sets each break-enabled
+    // motor's `ext_trip` to its timer's break flag every pass. A set level latches in RUN and takes
+    // the board out of RUN on either motor's latch; the OFF pass clears the latch; a level that
+    // stays set re-latches on the next RUN pass.
+    for (m, ev) in [(0usize, EV_LATCH_A), (1, EV_LATCH_B)] {
+        let mut s = fresh();
+        hold_power(&mut s);
+        let t = run_ticks(&mut s, 3);
+        assert_eq!(t.mode_byte, Mode::Run.as_byte());
+        s.set_ext_trip(m, true);
+        let t = control_task(&mut s, None, 1);
+        assert!(s.latches[m].is_latched(), "motor {m}: latched in RUN");
+        assert!(
+            !s.latches[1 - m].is_latched(),
+            "motor {m}: the other motor's latch"
+        );
+        assert_eq!(
+            t.mode_byte,
+            Mode::Shutdown.as_byte(),
+            "motor {m}: out of RUN"
+        );
+        assert_ne!(u16::from(s.obs().event_levels) & ev, 0, "motor {m}");
+        assert_eq!(
+            s.motor_fault, 0,
+            "the latch is the route, not the motor-side level"
+        );
+        // SHUTDOWN lands in OFF, which clears the latch and its level.
+        let t = control_task(&mut s, None, 1);
+        assert_eq!(t.mode_byte, Mode::Off.as_byte());
+        assert!(
+            !s.latches[m].is_latched(),
+            "motor {m}: cleared on the OFF pass"
+        );
+        assert_eq!(
+            s.latches[m].ext_trip, 0,
+            "the OFF pass clears the level too"
+        );
+        // Released: the board walks back to RUN and stays there.
+        s.set_ext_trip(m, false);
+        let t = run_ticks(&mut s, 4);
+        assert_eq!(
+            t.mode_byte,
+            Mode::Run.as_byte(),
+            "motor {m}: re-armed after release"
+        );
+        assert!(!s.latches[m].is_latched());
+    }
+    // A level that stays set: the firmware writes it every pass, so the first RUN pass after each
+    // OFF pass latches again (the latch task runs on the mode the previous pass left) and the
+    // board never holds RUN for a second pass.
+    let mut s = fresh();
+    hold_power(&mut s);
+    run_ticks(&mut s, 3);
+    s.set_ext_trip(0, true);
+    control_task(&mut s, None, 1);
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    let (mut prev_run, mut shutdowns) = (false, 0);
+    for _ in 0..16 {
+        s.set_ext_trip(0, true);
+        let t = control_task(&mut s, None, 1);
+        let run = t.mode_byte == Mode::Run.as_byte();
+        assert!(!(prev_run && run), "RUN held with the level set");
+        prev_run = run;
+        shutdowns += (t.mode_byte == Mode::Shutdown.as_byte()) as u32;
+    }
+    assert!(shutdowns >= 2, "the held level re-latched on each RUN pass");
+    // Outside RUN a set level latches nothing (the latch task is gated on RUN).
+    let mut s = fresh();
+    s.set_ext_trip(0, true);
+    let t = control_task(&mut s, None, 1);
+    assert_eq!(t.mode_byte, Mode::Off.as_byte());
+    assert!(!s.latches[0].is_latched());
+}
+
+#[test]
 fn an_over_current_raised_while_not_running_latches_nothing() {
     // The latch task is gated on RUN (`running_enable`), and an OFF pass clears the whole latch,
     // mailbox included: a code raised while OFF (a disarmed board's ISR still evaluates every
