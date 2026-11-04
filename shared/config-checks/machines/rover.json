@@ -150,6 +150,7 @@
             "dead_time": 28,
             "timer": 0
           },
+          "direction": "forward",
           "side": "left",
           "align_offset": 1
         }
