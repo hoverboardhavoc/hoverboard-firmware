@@ -3691,21 +3691,6 @@ pub mod hw {
             .commutator
             .step(levels, (ia, ib), demand, !coast, hold || rail, obs_angle);
         let (duties, enables) = out.to_duties_enables();
-        if let Some(before) = applied_before {
-            let front = &m.commutator.front().comm;
-            m.observer.step(
-                &m.obs_params,
-                &ObserverInput {
-                    v: (before.alpha, before.beta),
-                    i: (ia, ib),
-                    theta: m.commutator.theta(),
-                    kv,
-                    speed: front.speed,
-                    hall_fault: front.hall_fault,
-                    drive: !coast,
-                },
-            );
-        }
         // Flag, for the coming period, the sensed phases these duties drive above the threshold
         // (section 14, step 13 of the chain): decided on the duties as computed, since a coasted
         // period floats every leg and its sample is not a shunt reading either way.
@@ -3740,6 +3725,26 @@ pub mod hw {
             enables
         };
         m.sample_enables = applied_enables;
+        // The observer steps AFTER the duties and enables are written: its cycles are then off
+        // the period's critical path, where they pushed the duty write past the timer's load
+        // point on some periods and that period's duty landed a period late, a torque tick
+        // (offroad 2026-11-04: clicks on the halls with the observer in shadow, none on the
+        // base image, no period skipped). Its inputs are this period's, read before the step.
+        if let Some(before) = applied_before {
+            let front = &m.commutator.front().comm;
+            m.observer.step(
+                &m.obs_params,
+                &ObserverInput {
+                    v: (before.alpha, before.beta),
+                    i: (ia, ib),
+                    theta: m.commutator.theta(),
+                    kv,
+                    speed: front.speed,
+                    hall_fault: front.hall_fault,
+                    drive: !coast,
+                },
+            );
+        }
         // Re-arm the ADC trigger compare so the next period samples at the same instant: motor 0's
         // timer, TIMER0, carries the trigger for the board.
         if i == 0 {
