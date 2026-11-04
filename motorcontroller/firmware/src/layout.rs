@@ -144,6 +144,9 @@ pub struct Layout {
     /// The buzzer (`specs/tones.md` section 2): the stored pin, `None` (absent and silent) when none
     /// is stored.
     pub buzzer: Option<Pin>,
+    /// The battery gauge's LEDs, green, orange and red (`specs/battery-gauge.md` section 4): each
+    /// stored pin, `None` (absent and dark) when not stored.
+    pub leds: [Option<Pin>; 3],
 }
 
 /// The slots of the pass: one per key it reads, in [`KEYS`] order. One group of wheel keys per
@@ -166,9 +169,11 @@ const LINK: usize = BOARD + 9;
 const IMU_MODEL: usize = LINK + 4 * store::LINKS as usize;
 /// The buzzer's pin (`specs/tones.md` section 2), after `imu.model`.
 const BUZZER: usize = IMU_MODEL + 1;
-/// `active_high`, after the buzzer, read for the break inputs' polarity where the image reads them
+/// The LEDs green, orange and red (`specs/battery-gauge.md` section 4), after the buzzer.
+const LEDS: usize = BUZZER + 1;
+/// `active_high`, after the LEDs, read for the break inputs' polarity where the image reads them
 /// (two motors, [`WHEEL`]'s rule).
-const POLARITY: usize = BUZZER + 1;
+const POLARITY: usize = LEDS + 3;
 /// How many board keys the pass reads.
 const BOARD_N: usize = if COUNT > 1 { POLARITY + 1 } else { POLARITY } - BOARD;
 
@@ -212,6 +217,9 @@ const BOARD_KEYS: [(Key, Type); POLARITY + 1 - BOARD] = [
     (store::LINK_REMAP.at(1).key(), Type::U8),
     (store::IMU_MODEL.key(), Type::U8),
     pin(store::BOARD_BUZZER),
+    pin(store::LED_GREEN),
+    pin(store::LED_ORANGE),
+    pin(store::LED_RED),
     (store::BOARD_INPUT_POLARITY.key(), Type::U8),
 ];
 
@@ -394,6 +402,7 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
         imu,
         imu_model,
         buzzer: p(BUZZER),
+        leds: [p(LEDS), p(LEDS + 1), p(LEDS + 2)],
     }
 }
 
@@ -442,6 +451,7 @@ mod tests {
     fn nothing_stored_is_nothing_at_all() {
         let l = with(|_| {});
         assert_eq!(l.buzzer, None, "no buzzer until stored");
+        assert_eq!(l.leds, [None; 3], "no LED until stored");
         assert_eq!(
             (
                 l.self_hold,
@@ -705,6 +715,24 @@ mod tests {
             s.erase_value(store::BOARD_BUZZER.key()).unwrap();
         });
         assert_eq!(l.buzzer, None);
+    }
+
+    /// Each LED as stored, in green, orange, red order, and absent once un-stored: the rover's
+    /// three (PA15, PB3, PB4), then the 12-FET's green alone (PB2).
+    #[test]
+    fn the_leds_are_their_stored_pins_or_absent() {
+        let l = with(|s| {
+            set(s, store::LED_GREEN.key(), Value::Pin([0, 15]));
+            set(s, store::LED_ORANGE.key(), Value::Pin([1, 3]));
+            set(s, store::LED_RED.key(), Value::Pin([1, 4]));
+        });
+        assert_eq!(l.leds, [Some([0, 15]), Some([1, 3]), Some([1, 4])]);
+        let l = with(|s| {
+            set(s, store::LED_GREEN.key(), Value::Pin([1, 2]));
+            set(s, store::LED_RED.key(), Value::Pin([1, 4]));
+            s.erase_value(store::LED_RED.key()).unwrap();
+        });
+        assert_eq!(l.leds, [Some([1, 2]), None, None]);
     }
 
     /// The pass reads exactly the registry's pin keys, the groups' instance and remap keys and the

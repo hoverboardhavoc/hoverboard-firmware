@@ -1,0 +1,49 @@
+# Mode: final_state. Expected end state:
+#   GPIOB CTL0 = 0x44433444 (PB3, PB4 output push-pull 50 MHz)
+#   GPIOA CTL1 = 0x34444444 (PA15 output push-pull 50 MHz)
+#   AFIO PCF0  = 0x02000000: SWJ_CFG = 0b010 (JTAG-DP off, SW-DP on)
+# ignore RCU: the HAL enables each port clock as part of the setup; the vendor body enables only
+# AFIO.
+#
+# hal_writes: the HAL writes PCF0 once for the three pins. The first JTAG pin configures the field
+# and the other two find it configured (motorcontroller/hal/src/afio.rs, set_swj_sw_only). The
+# count is the HAL's own: the vendor's SWJ call writes PCF0 twice (it clears the field, then
+# writes it), so no ordered mode against the vendor trace can state it.
+description = """
+The GPIO output setup of the three GD32F10x pins that reset as JTAG pins, PB3 (JTDO), PA15 (JTDI)
+and PB4 (NJTRST), in the order the battery gauge's LEDs come up on the rover
+(specs/battery-gauge.md section 4): a JTAG pin ignores its GPIO mode until AFIO_PCF0.SWJ_CFG frees
+it, so the output setup frees the JTAG pins first, keeping SW-DP on PA13 and PA14.
+
+Vendor: rcu_periph_clock_enable(RCU_AF); gpio_pin_remap_config(GPIO_SWJ_SWDPENABLE_REMAP, ENABLE);
+        gpio_init(OUT_PP, 50MHZ) on PB3, PA15, PB4.
+HAL: chip.pin(PB3 / PA15 / PB4).into_push_pull_output().
+"""
+family = "gd32f10x"
+mode = "final_state"
+ignore = ["<RCU_BASE>"]
+
+[hal_writes]
+"<AFIO_BASE>+0x04" = 1
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_AF);
+    gpio_pin_remap_config(GPIO_SWJ_SWDPENABLE_REMAP, ENABLE);
+    gpio_init(GPIOB, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+    gpio_init(GPIOA, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_15);
+    gpio_init(GPIOB, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_4);
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, PinId};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        for (port, pin) in [(1, 3), (0, 15), (1, 4)] {
+            let _ = chip.pin(PinId { port, pin }).into_push_pull_output();
+        }
+    }
+'''

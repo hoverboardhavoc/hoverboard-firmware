@@ -524,7 +524,8 @@ pub const BOARD_SELF_HOLD: PinField = PinField::new(0x06, Type::Pin);
 pub const BOARD_BATTERY_PIN: PinField = PinField::new(0x07, Type::PinAdc);
 /// Buzzer pin.
 pub const BOARD_BUZZER: PinField = PinField::new(0x08, Type::Pin);
-/// Indicator LEDs.
+/// Indicator LEDs: the battery gauge (`specs/battery-gauge.md`), boot-read. A board without an
+/// LED of a colour leaves its pin unstored.
 pub const LED_GREEN: PinField = PinField::new(0x09, Type::Pin);
 pub const LED_ORANGE: PinField = PinField::new(0x0A, Type::Pin);
 pub const LED_RED: PinField = PinField::new(0x0B, Type::Pin);
@@ -1555,12 +1556,12 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     WIFI_TX_POWER.entry(Boot),
     BOARD_SELF_HOLD.entry(Boot),
     BOARD_BATTERY_PIN.entry(Boot),
-    // The buzzer's own bring-up reads its pin once (`specs/tones.md` section 2); no firmware
-    // reader drives the LEDs yet: client only until one does.
+    // The buzzer's own bring-up reads its pin once (`specs/tones.md` section 2), and the battery
+    // gauge's bring-up reads the LEDs' (`specs/battery-gauge.md` section 4).
     BOARD_BUZZER.entry(Boot),
-    LED_GREEN.entry(Client),
-    LED_ORANGE.entry(Client),
-    LED_RED.entry(Client),
+    LED_GREEN.entry(Boot),
+    LED_ORANGE.entry(Boot),
+    LED_RED.entry(Boot),
     PAD_A.entry(Boot),
     PAD_B.entry(Boot),
     BOARD_BUTTON.entry(Boot),
@@ -2573,22 +2574,14 @@ mod registry_tests {
         );
         assert_eq!(
             with(Effect::Client),
-            [
-                (0x09, 0),
-                (0x0A, 0),
-                (0x0B, 0),
-                (0x24, 0),
-                (0x25, 0),
-                (0x52, 0),
-                (0x53, 0),
-            ]
-            .into_iter()
-            .chain(
-                [(0xFD, 0), (0xFE, 0)]
-                    .into_iter()
-                    .filter(|_| cfg!(feature = "test-fields"))
-            )
-            .collect::<Vec<_>>()
+            [(0x24, 0), (0x25, 0), (0x52, 0), (0x53, 0)]
+                .into_iter()
+                .chain(
+                    [(0xFD, 0), (0xFE, 0)]
+                        .into_iter()
+                        .filter(|_| cfg!(feature = "test-fields"))
+                )
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             with(Effect::Arm),
@@ -2620,6 +2613,10 @@ mod registry_tests {
                 (0x5A, 0),
             ]
         );
+        // The battery gauge's LEDs are read at boot (`specs/battery-gauge.md` section 4).
+        for f in [LED_GREEN, LED_ORANGE, LED_RED] {
+            assert_eq!(lookup(f.id()).unwrap().effect, Effect::Boot);
+        }
         // Everything else is read at boot.
         for r in REGISTRY.iter() {
             let classed = [Effect::Live, Effect::Client, Effect::Arm].contains(&r.effect);

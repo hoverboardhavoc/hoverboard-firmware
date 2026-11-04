@@ -12,3 +12,6 @@ d01e2db    mainboard-mm32spin05   232   0         0           current.sense and 
 3b82f46    mainboard-gd32f103c8   1264  400       64          the buzzer's tone step, the player and the battery alarm (tones.md 1, 2, 4)
 3b82f46    mainboard-gd32f130c8   1432  400       64          the buzzer's tone step, the player and the battery alarm (tones.md 1, 2, 4)
 3b82f46    mainboard-mm32spin05   1184  232       64          the buzzer's tone step, the player and the battery alarm (tones.md 1, 2, 4)
+e8179578   mainboard-gd32f103c8   600   40        44          the battery gauge, its LED pins and the JTAG pins' release (battery-gauge.md 4)
+e8179578   mainboard-gd32f130c8   488   40        40          the battery gauge and its LED pins (battery-gauge.md 4)
+e8179578   mainboard-mm32spin05   728   120       40          the battery gauge and its LED pins (battery-gauge.md 4)

@@ -261,9 +261,10 @@ object Fields {
     val BOARD_BATTERY_PIN = pin(0x07, Type.PinAdc)
     /** The buzzer: read once at boot by its own bring-up (`specs/tones.md` section 2). */
     val BOARD_BUZZER = pin(0x08, Type.Pin)
-    val LED_GREEN = pin(0x09, Type.Pin, effect = Effect.CLIENT)
-    val LED_ORANGE = pin(0x0A, Type.Pin, effect = Effect.CLIENT)
-    val LED_RED = pin(0x0B, Type.Pin, effect = Effect.CLIENT)
+    /** The LEDs: the battery gauge, read once at boot (`specs/battery-gauge.md` section 4). */
+    val LED_GREEN = pin(0x09, Type.Pin)
+    val LED_ORANGE = pin(0x0A, Type.Pin)
+    val LED_RED = pin(0x0B, Type.Pin)
 
     /**
      * The foot pads. Absent by default, for [BOARD_BATTERY_PIN]'s reason one step further on: the pins are
