@@ -2,8 +2,9 @@
 //! The GD32 ADC: one register model for the regular and injected groups on every GD32 this HAL
 //! drives (`gd32f10x_adc.h` and `gd32f1x0_adc.h` give the same offsets and bits). The `f10x` and
 //! `f1x0` models of [`crate::adc`] differ only in the sync mode: the F10x ADC0 carries `CTL0.SYNCM`
-//! and a second instance to pair with, so `DualAdc` and `Chip::dual_adc` exist on the `f10x` model
-//! and are absent from the F1x0 build (specs/hal.md, section 4.1).
+//! and a second instance to pair with, so `DualAdc` and `Chip::dual_adc` (regular parallel, and
+//! inserted parallel with `InjectedParallelHandle`) exist on the `f10x` model and are absent from
+//! the F1x0 build (specs/hal.md, section 4.1).
 //!
 //! | reg      | offset | fields the HAL programs                                              |
 //! |----------|--------|----------------------------------------------------------------------|
@@ -20,12 +21,14 @@
 //!
 //! The regular group runs two ways: polled ([`Adc::read_channel`]) and split
 //! ([`Adc::start_regular`], then [`Adc::regular_result`] on a later pass), the second for a
-//! conversion the caller does not wait for (the 12-FET's battery on ADC1, `twelve-fet.md` section
+//! conversion the caller does not wait for (the 12-FET's battery on ADC2, `twelve-fet.md` section
 //! 5.4).
 
 use super::{InjectedAdcController, TriggeredAdc, ADC0_BASE, ADC_TIMEOUT};
 use crate::addr::PeriphLabel;
 use crate::chip::Chip;
+#[cfg(hal_adc = "f10x")]
+use crate::config::InjectedParallelConfig;
 use crate::config::{InjectedAdcConfig, InjectedChannel, TimerTriggerLink, MAX_INJECTED_CHANNELS};
 #[cfg(hal_adc = "f10x")]
 use crate::descriptor::DESCRIPTOR;
@@ -411,6 +414,161 @@ impl DualAdc {
         self.secondary
             .configure_single(secondary_channel, sample_time);
         SYNCM_REGULAR_PARALLEL.apply(self.primary.base);
+    }
+
+    /// ADC0 and ADC1 in inserted parallel mode (GD32F10x User Manual Rev2.3 section 11.5.3): ADC0's
+    /// injected group as `cfg.primary` describes it, brought up as
+    /// [`InjectedAdcController::configure`] brings it up (its timer trigger, the end-of-conversion
+    /// interrupt, calibrated), then ADC1's group with `cfg.secondary`'s channels at the primary's
+    /// sample times and alignment, calibrated, and last ADC0's `SYNCM` to inserted parallel.
+    ///
+    /// ADC1 is the sync-mode slave: its inserted trigger is the software one with the trigger
+    /// enable set ("the slave ADC must be configured as triggered by the software in order to
+    /// prevent false triggers to start unwanted conversion. However, the external trigger must be
+    /// enabled for ADC master and ADC slave", section 11.5), and its end-of-conversion interrupt
+    /// stays off, so ADC0's flag is the period vector's one source. `SYNCM` is written after both
+    /// groups are configured ("we must disable sync mode before any configuration change",
+    /// `ADC_CTL0`).
+    ///
+    /// Refused before any register access: everything [`InjectedAdcController::configure`]
+    /// refuses, a primary that is not `Adc0`, a secondary whose length is not the primary's, an
+    /// ADC1 channel past 15 (16 and 17 are ADC0's internal channels), and a rank with one channel
+    /// on both ADCs (the manual's note 1) (`AdcError::Other`). [`AdcError::Timeout`] if a
+    /// calibration does not finish. Both ADC clocks must already be on.
+    pub fn configure_inserted_parallel(
+        &self,
+        chip: &Chip,
+        cfg: &InjectedParallelConfig,
+    ) -> Result<InjectedParallelHandle, BringUpError> {
+        if !secondary_fits(cfg) {
+            return Err(AdcError::Other.into());
+        }
+        let primary = InjectedAdcController::new().configure(chip, &cfg.primary)?;
+        let base = self.secondary.base;
+        for f in secondary_fields(cfg).into_iter().flatten() {
+            f.apply(base);
+        }
+        self.secondary.calibrate()?;
+        ADC_ON.apply(base);
+        SYNCM_INSERTED_PARALLEL.apply(self.primary.base);
+        Ok(InjectedParallelHandle {
+            primary,
+            secondary: InjectedHandle::new(base),
+        })
+    }
+}
+
+/// `SYNCM = 5`, inserted parallel only (`ADC_DAUL_INSERTED_PARALLEL`): ADC0's inserted trigger
+/// starts ADC1's inserted group at the same instant; the regular groups run free.
+#[cfg(hal_adc = "f10x")]
+const SYNCM_INSERTED_PARALLEL: Field = Field {
+    offset: CTL0,
+    mask: 0xF << 16,
+    value: 5 << 16,
+};
+
+/// `ETSIC = 7`: no hardware trigger for the inserted group (`ADC0_1_2_EXTTRIG_INSERTED_NONE`), the
+/// sync-mode slave's.
+#[cfg(hal_adc = "f10x")]
+const ETSIC_SOFTWARE: u32 = 0b111;
+
+/// ADC1's highest channel: 16 and 17 are ADC0's (`TSVREN`, "channel 16 and 17 enable of ADC0").
+#[cfg(hal_adc = "f10x")]
+const MAX_SECONDARY_CHANNEL: u8 = 15;
+
+/// Whether `cfg`'s secondary can pair with its primary: the primary is ADC0, one ADC1 channel per
+/// primary rank, none past [`MAX_SECONDARY_CHANNEL`], and no rank converting one channel on both.
+#[cfg(hal_adc = "f10x")]
+fn secondary_fits(cfg: &InjectedParallelConfig) -> bool {
+    cfg.primary.adc == PeriphLabel::Adc0
+        && cfg.secondary.len() == cfg.primary.channels.len()
+        && cfg
+            .secondary
+            .iter()
+            .zip(&cfg.primary.channels)
+            .all(|(&s, p)| s <= MAX_SECONDARY_CHANNEL && s != p.channel)
+}
+
+/// ADC1's group before its calibration, in order: the rank sequence, each rank's sample time (the
+/// primary's at that rank), scan mode for more than one rank with the end-of-conversion interrupt
+/// clear, the primary's alignment with the software trigger and its enable, then `ADCON`.
+#[cfg(hal_adc = "f10x")]
+fn secondary_fields(cfg: &InjectedParallelConfig) -> [Option<Field>; MAX_INJECTED_CHANNELS + 4] {
+    let mut chans: heapless::Vec<InjectedChannel, MAX_INJECTED_CHANNELS> = heapless::Vec::new();
+    for (&channel, p) in cfg.secondary.iter().zip(&cfg.primary.channels) {
+        // Cannot overflow: the secondary is as long as the primary, at most four.
+        let _ = chans.push(InjectedChannel {
+            channel,
+            sample_time: p.sample_time,
+        });
+    }
+    let mut out = [None; MAX_INJECTED_CHANNELS + 4];
+    out[0] = Some(injected_sequence(&chans));
+    for (slot, c) in out[1..=MAX_INJECTED_CHANNELS].iter_mut().zip(&chans) {
+        *slot = sample_time(c.channel, c.sample_time);
+    }
+    let sm = if chans.len() > 1 { CTL0_SM } else { 0 };
+    out[MAX_INJECTED_CHANNELS + 1] = Some(Field {
+        offset: CTL0,
+        mask: CTL0_SM | CTL0_EOICIE,
+        value: sm,
+    });
+    out[MAX_INJECTED_CHANNELS + 2] = Some(injected_ctl1(
+        cfg.primary.left_aligned,
+        false,
+        ETSIC_SOFTWARE,
+    ));
+    out[MAX_INJECTED_CHANNELS + 3] = Some(ADC_ON);
+    out
+}
+
+/// The period ISR's surface over ADC0 and ADC1 in inserted parallel mode, resolved once at
+/// bring-up ([`DualAdc::configure_inserted_parallel`]).
+#[cfg(hal_adc = "f10x")]
+#[derive(Debug, Clone, Copy)]
+pub struct InjectedParallelHandle {
+    primary: InjectedHandle,
+    secondary: InjectedHandle,
+}
+
+#[cfg(hal_adc = "f10x")]
+impl InjectedParallelHandle {
+    /// Clear both ADCs' injected end-of-conversion flags (`STAT.EOIC`), ADC0's first (the period
+    /// vector's source, [`InjectedHandle::clear_eoic`]).
+    #[inline]
+    pub fn clear_eoic(&self) {
+        self.primary.clear_eoic();
+        self.secondary.clear_eoic();
+    }
+
+    /// Set ADC0's injected trigger enable again ([`InjectedHandle::reassert_trigger_enable`]).
+    /// ADC1's stays as the bring-up set it: its trigger is ADC0's.
+    #[inline]
+    pub fn reassert_trigger_enable(&self) {
+        self.primary.reassert_trigger_enable();
+    }
+
+    /// Whether ADC0's injected group has completed a conversion since its flag was last cleared.
+    /// Both groups end together: the same trigger, the same ranks' sample times.
+    #[inline]
+    pub fn eoic(&self) -> bool {
+        self.primary.eoic()
+    }
+
+    /// The first `N` ranks, each as `[ADC0's IDATAr, ADC1's IDATAr]` (as converted, alignment
+    /// included), in rank order. A rank past the configured length reads whatever its registers
+    /// hold.
+    #[inline]
+    pub fn read_ranks<const N: usize>(&self) -> [[u16; 2]; N] {
+        const { assert!(N <= MAX_INJECTED_CHANNELS) };
+        let mut out = [[0u16; 2]; N];
+        for (r, slot) in out.iter_mut().enumerate() {
+            *slot = [
+                self.primary.idata[r].read() as u16,
+                self.secondary.idata[r].read() as u16,
+            ];
+        }
+        out
     }
 }
 
@@ -822,5 +980,100 @@ mod tests {
             (d.primary.base, d.secondary.base),
             (0x4001_2400, 0x4001_2800)
         );
+    }
+
+    /// The 12-FET's pairs in inserted parallel mode (twelve-fet.md section 5.2): rank 0 motor 0's
+    /// (PC4 on ADC0, PC5 on ADC1: channels 14, 15), rank 1 motor 1's (PA0, PC3: 0, 13).
+    #[cfg(hal_adc = "f10x")]
+    fn parallel(primary: &[u8], secondary: &[u8]) -> InjectedParallelConfig {
+        InjectedParallelConfig {
+            primary: injected(primary, TimerTriggerLink::Trgo),
+            secondary: secondary.iter().copied().collect(),
+        }
+    }
+
+    #[cfg(hal_adc = "f10x")]
+    fn secondary(cfg: &InjectedParallelConfig) -> Vec<Field> {
+        secondary_fields(cfg).into_iter().flatten().collect()
+    }
+
+    #[cfg(hal_adc = "f10x")]
+    #[test]
+    fn the_inserted_parallel_bring_up_reaches_the_golden_final_state() {
+        let cfg = parallel(&[14, 0], &[15, 13]);
+        assert!(secondary_fits(&cfg));
+        let mut adc0 = injected_fields(&cfg.primary);
+        adc0.push(SYNCM_INSERTED_PARALLEL);
+        let adc0 = fold(&adc0);
+        assert_eq!(
+            adc0[&CTL0], 0x0005_0180,
+            "SYNCM inserted parallel | SM | EOICIE"
+        );
+        assert_eq!(
+            adc0[&ISQ],
+            (1 << 20) | (14 << 10),
+            "IL 1, rank 0 = 14, rank 1 = 0 at 19:15"
+        );
+        assert_eq!(adc0[&SAMPT0], 1 << 12, "channel 14 at 7.5");
+        assert_eq!(adc0[&SAMPT1], 1, "channel 0 at 7.5");
+        assert_eq!(
+            adc0[&CTL1], 0x0000_8801,
+            "ADCON | DAL | ETSIC T0_TRGO | ETEIC"
+        );
+
+        let adc1 = fold(&secondary(&cfg));
+        assert_eq!(adc1[&CTL0], CTL0_SM, "scan, no EOICIE, no SYNCM");
+        assert_eq!(
+            adc1[&ISQ],
+            (1 << 20) | (15 << 10) | (13 << 15),
+            "IL 1, rank 0 = 15, rank 1 = 13"
+        );
+        assert_eq!(adc1[&SAMPT0], (1 << 15) | (1 << 9), "15 and 13 at 7.5");
+        assert_eq!(
+            adc1[&CTL1], 0x0000_F801,
+            "ADCON | DAL | ETSIC software | ETEIC"
+        );
+    }
+
+    /// ADC1 takes each rank's sample time from the primary's same rank, and one rank turns scan
+    /// off on both.
+    #[cfg(hal_adc = "f10x")]
+    #[test]
+    fn the_secondary_samples_for_the_primarys_time_at_each_rank() {
+        let mut cfg = parallel(&[14, 0], &[15, 13]);
+        cfg.primary.channels[1].sample_time = 7;
+        let adc1 = fold(&secondary(&cfg));
+        assert_eq!(adc1[&SAMPT0], (1 << 15) | (7 << 9));
+        let one = fold(&secondary(&parallel(&[14], &[15])));
+        assert_eq!(one[&CTL0], 0);
+        assert_eq!(one[&ISQ], 15 << 15);
+    }
+
+    #[cfg(hal_adc = "f10x")]
+    #[test]
+    fn the_inserted_parallel_bring_up_refuses_before_any_register_access() {
+        // SAFETY: every case below is refused before a register is touched.
+        let chip = unsafe { Chip::steal() };
+        let d = chip.dual_adc();
+        let other = Some(BringUpError::Adc(AdcError::Other));
+        let refused =
+            |cfg: InjectedParallelConfig| d.configure_inserted_parallel(&chip, &cfg).err();
+        // A secondary of another length than the primary.
+        assert_eq!(refused(parallel(&[14, 0], &[15])), other);
+        assert_eq!(refused(parallel(&[14], &[15, 13])), other);
+        // An ADC1 channel past 15, and one channel on both ADCs in one rank.
+        assert_eq!(refused(parallel(&[14, 0], &[16, 13])), other);
+        assert_eq!(refused(parallel(&[14, 0], &[15, 0])), other);
+        // A primary that is not ADC0.
+        let mut not_adc0 = parallel(&[14, 0], &[15, 13]);
+        not_adc0.primary.adc = PeriphLabel::Adc1;
+        assert_eq!(refused(not_adc0), other);
+        // The primary's own refusals.
+        let mut slow = parallel(&[14, 0], &[15, 13]);
+        slow.primary.channels[1].sample_time = 8;
+        assert_eq!(refused(slow), other);
+        let mut t7 = parallel(&[14, 0], &[15, 13]);
+        t7.primary.trigger_timer = PeriphLabel::Timer7;
+        assert_eq!(refused(t7), other);
     }
 }

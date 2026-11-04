@@ -340,3 +340,17 @@ pub struct InjectedAdcConfig {
     pub trigger_link: TimerTriggerLink,
     pub clock_div: AdcClockDiv,
 }
+
+/// ADC0 and ADC1 in inserted parallel mode (the F10x ADC model only; GD32F10x User Manual Rev2.3
+/// section 11.5.3): ADC0's injected group as `primary` describes it, triggered by its timer, and
+/// ADC1's converting with it, rank by rank. `secondary[r]` is ADC1's channel for rank `r`, sampled
+/// at the same instant and for the same sample time as `primary.channels[r]` (the manual's note 2:
+/// exactly the same sampling time on the two channels sampled together).
+#[cfg(hal_adc = "f10x")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectedParallelConfig {
+    /// ADC0's group: its channels, alignment and trigger. `adc` must be `Adc0`.
+    pub primary: InjectedAdcConfig,
+    /// ADC1's channel at each of the primary's ranks, as many as it has.
+    pub secondary: Vec<u8, MAX_INJECTED_CHANNELS>,
+}

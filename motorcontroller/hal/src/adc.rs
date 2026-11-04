@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The ADC: the timer-triggered group the period ISR reads, the regular group's polled single
-//! conversion, and on the F10x the ADC0/ADC1 regular-simultaneous mode.
+//! conversion, and on the F10x the ADC0/ADC1 regular-parallel and inserted-parallel modes.
 //!
 //! Three register models (`hal_adc`), one per build (specs/hal.md, section 3.1):
 //!
 //! - `f10x` and `f1x0` (GD32F10x and GD32F1x0, `adc/gd.rs`): one register model for the regular
-//!   and injected groups; the F10x adds the ADC0/ADC1 sync mode (`DualAdc`).
+//!   and injected groups; the F10x adds the ADC0/ADC1 sync modes (`DualAdc`: regular parallel,
+//!   and inserted parallel with its period handle `InjectedParallelHandle`).
 //! - `mm32` (MM32SPIN05, `adc/mm32.rs`): another register set (`ADCFG`/`ADCR`/`ADCHS`/`ADSTA`, a
 //!   data register per channel, no injected group), whose triggered scan stands in for the
 //!   injected group.
