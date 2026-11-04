@@ -1,0 +1,68 @@
+# Mode: with_polling, narrowed with assert_only to INTF, the register the break flag lives in. INTF
+# (0x10) reads 0x00000081 (BRKIF set, and UPIF beside it, a flag the clear must keep). The clear
+# writes every flag bit but BRKIF (write 0 to clear), so UPIF stays set:
+#   R INTF 0x00000081, W INTF 0xFFFFFF7F
+description = """
+TIMER0's break flag on the GD32F10x (optional-protections.md sections 3.3 and 6.5): the period ISR's
+read of INTF.BRKIF through the PWM handle, and the arming layer's clear of it through the arm gate,
+which leaves the other flags as they are.
+
+Vendor: if timer_flag_get(TIMER0, TIMER_FLAG_BRK) then timer_flag_clear(TIMER0, TIMER_FLAG_BRK).
+HAL: PwmTimer::configure(...) as pwm_bringup_timer0_f10x, then handle().break_flag() and, when
+     set, arm_gate().clear_break_flag().
+"""
+family = "gd32f10x"
+mode = "with_polling"
+assert_only = ["<TIMER0_BASE>+0x10"]
+
+[read_responses]
+"<TIMER0_BASE>+0x10" = 0x0000_0081
+
+[vendor]
+body = '''
+    if(SET == timer_flag_get(TIMER0, TIMER_FLAG_BRK)){
+        timer_flag_clear(TIMER0, TIMER_FLAG_BRK);
+    }
+'''
+
+[hal]
+body = '''
+    use hal::config::{
+        BreakConfig, ClockDiv, OcMode, PwmAlign, PwmChannelConfig, PwmConfig, TrgoSource,
+    };
+    use hal::{Chip, PeriphLabel, PwmTimer};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        // Low side inverted (the vendor's OCN polarity low), both outputs idling high.
+        let pair = || PwmChannelConfig {
+            polarity: true,
+            idle_high: true,
+            idle_high_n: true,
+        };
+        let cfg = PwmConfig {
+            timer: PeriphLabel::Timer0,
+            channels: [pair(), pair(), pair()],
+            period: 2250,
+            prescaler: 0,
+            dead_time: 0x1C,
+            brk: BreakConfig {
+                enabled: false,
+                level: false,
+            },
+            trigger_compare: 2249,
+            align: PwmAlign::Center2,
+            arse: true,
+            trigger_oc_mode: OcMode::Pwm0,
+            trigger_ch_enable: false,
+            crep: 0,
+            ckdiv: ClockDiv::Div2,
+            trgo_src: TrgoSource::Update,
+        };
+        let timer = PwmTimer::configure(&chip, &cfg).unwrap();
+        if timer.handle().break_flag() {
+            timer.arm_gate().clear_break_flag();
+        }
+    }
+'''

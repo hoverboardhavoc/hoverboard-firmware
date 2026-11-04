@@ -22,7 +22,9 @@
 //! The regular group runs two ways: polled ([`Adc::read_channel`]) and split
 //! ([`Adc::start_regular`], then [`Adc::regular_result`] on a later pass), the second for a
 //! conversion the caller does not wait for (the 12-FET's battery on ADC2, `twelve-fet.md` section
-//! 5.4).
+//! 5.4). Beside it, one ADC's injected group can run on a timer trigger with no interrupt of its
+//! own ([`Adc::configure_inserted`]), read without a wait ([`Adc::read_injected_data`]): the
+//! 12-FET's DC-link inputs on ADC2 (`optional-protections.md` section 3.2).
 
 use super::{InjectedAdcController, TriggeredAdc, ADC0_BASE, ADC_TIMEOUT};
 use crate::addr::PeriphLabel;
@@ -216,6 +218,30 @@ pub fn etsic_for_link(cfg: &InjectedAdcConfig) -> Option<u32> {
     })
 }
 
+/// [`Adc::configure_inserted`]'s writes, in order: the rank sequence, each rank's sample time, scan
+/// mode for more than one rank with the end-of-conversion interrupt clear, the alignment with the
+/// trigger select `etsic` and its enable, then `ADCON`.
+fn inserted_fields(
+    cfg: &InjectedAdcConfig,
+    etsic: u32,
+) -> [Option<Field>; MAX_INJECTED_CHANNELS + 4] {
+    let mut out = [None; MAX_INJECTED_CHANNELS + 4];
+    out[0] = Some(injected_sequence(&cfg.channels));
+    for (slot, c) in out[1..=MAX_INJECTED_CHANNELS].iter_mut().zip(&cfg.channels) {
+        *slot = sample_time(c.channel, c.sample_time);
+    }
+    let sm = if cfg.channels.len() > 1 { CTL0_SM } else { 0 };
+    out[MAX_INJECTED_CHANNELS + 1] = Some(Field {
+        offset: CTL0,
+        mask: CTL0_SM | CTL0_EOICIE,
+        value: sm,
+    });
+    let internal = cfg.channels.iter().any(|c| is_internal(c.channel));
+    out[MAX_INJECTED_CHANNELS + 2] = Some(injected_ctl1(cfg.left_aligned, internal, etsic));
+    out[MAX_INJECTED_CHANNELS + 3] = Some(ADC_ON);
+    out
+}
+
 // --- the regular group ----------------------------------------------------------------------------
 
 /// An ADC instance for polled use: the regular group's single conversion, the calibration, and a
@@ -341,6 +367,36 @@ impl Adc {
         let ctl1 = self.reg(CTL1);
         ctl1.clear_bits(CTL1_SWRCST);
         ctl1.set_bits(CTL1_SWRCST);
+    }
+
+    /// Configure the injected group as `cfg` describes it beside whatever the regular group holds,
+    /// on a timer trigger and with no end-of-conversion interrupt, and switch the ADC on: the rank
+    /// sequence and sample times, scan mode for more than one rank (the regular group's one rank
+    /// is unaffected), the alignment, `TSVREN` for an internal channel, the trigger select
+    /// ([`etsic_for_link`]) and its enable, then `ADCON`. The alignment is the ADC's, both groups'.
+    /// No calibration: [`Adc::calibrate`] follows, once, for both groups. Its data registers are
+    /// read with [`Adc::read_injected_data`] without a wait (`optional-protections.md` section
+    /// 6.5: ADC2's DC-link ranks, which the period ISR reads while ADC0's flag paces it).
+    ///
+    /// Refused before any register access: `cfg.adc` not this instance, no ranks, a channel past 17
+    /// or a sample-time code past 7, or a trigger timer the mux has no slot for
+    /// (`AdcError::Other`). The ADC clock must already be on.
+    pub fn configure_inserted(&self, cfg: &InjectedAdcConfig) -> Result<(), AdcError> {
+        let own = crate::descriptor::DESCRIPTOR.addrs.get(cfg.adc) == Some(self.base);
+        if !own
+            || cfg.channels.is_empty()
+            || cfg
+                .channels
+                .iter()
+                .any(|c| c.channel > MAX_CHANNEL || u32::from(c.sample_time) > SAMPT_FIELD)
+        {
+            return Err(AdcError::Other);
+        }
+        let etsic = etsic_for_link(cfg).ok_or(AdcError::Other)?;
+        for f in inserted_fields(cfg, etsic).into_iter().flatten() {
+            f.apply(self.base);
+        }
+        Ok(())
     }
 
     /// Wait for the injected group's end of conversion (`STAT.EOIC`).
@@ -798,6 +854,40 @@ mod tests {
             "IL 1, rank 0 = 4 at 14:10, rank 1 = 5 at 19:15"
         );
         assert_eq!(regs[&CTL1], 0x0000_9801, "ADCON | DAL | ETSIC CH3 | ETEIC");
+    }
+
+    /// ADC2's DC-link ranks beside its regular battery channel (`optional-protections.md` section
+    /// 3.2, the vector `inject_bringup_adc2_dc_link_f10x`): the battery's single conversion, then
+    /// two inserted ranks at 13.5 cycles, right-aligned, on TIMER0's TRGO, scan on and no
+    /// interrupt.
+    #[test]
+    fn the_dc_link_ranks_sit_beside_the_regular_channel() {
+        let mut cfg = injected(&[11, 10], TimerTriggerLink::Trgo);
+        cfg.left_aligned = false;
+        for c in cfg.channels.iter_mut() {
+            c.sample_time = 2;
+        }
+        let mut fields = single(12, 7);
+        fields.extend(
+            inserted_fields(&cfg, etsic_for_link(&cfg).unwrap())
+                .into_iter()
+                .flatten(),
+        );
+        let regs = fold(&fields);
+        assert_eq!(regs[&CTL0], 0x0000_0100, "SM, no EOICIE");
+        assert_eq!(
+            regs[&CTL1], 0x001E_8001,
+            "ADCON | ETEIC | ETSIC T0_TRGO (0) | ETSRC software | ETERC, right-aligned"
+        );
+        assert_eq!(
+            regs[&SAMPT0], 0x0000_01D2,
+            "ch10 and ch11 at 13.5 cycles, ch12 at 239.5"
+        );
+        assert_eq!(
+            regs[&ISQ], 0x0015_2C00,
+            "IL 1, rank 0 = 11 at 14:10, rank 1 = 10 at 19:15"
+        );
+        assert_eq!((regs[&RSQ0], regs[&RSQ2]), (0, 12), "the battery's rank");
     }
 
     #[test]
