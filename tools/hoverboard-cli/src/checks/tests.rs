@@ -327,8 +327,8 @@ fn the_twelve_fet_machine_file_passes_on_the_gd32f103rc() {
     assert_eq!(peak(0), None, "motor 0 keeps the default count");
     assert_eq!(
         peak(1),
-        Some((Type::U8, vec![0])),
-        "motor 1's peak trip is off"
+        Some((Type::U8, vec![2])),
+        "motor 1 trips on two readings in a row"
     );
     assert!(check_leader(&[(0x01, &state)]).is_none());
 }
