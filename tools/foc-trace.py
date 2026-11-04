@@ -225,7 +225,9 @@ def decode(w, cal, frame=None):
         "chopped": (cur >> 16) & 0xFF,
         "trips": (cur >> 24) & 0xFF,
         "ia": ia, "ib": ib, "id": fid, "iq": fiq, "iq_ref": iq_ref, "vq": vq,
-        # The hold word (word 50): held periods per sensed phase, floated periods, the cause byte.
+        # The hold word (word 50): held periods per sensed phase, floated periods, the cause byte
+        # (0x01 disarmed, 0x02 stale, 0x04 chop, 0x08 both held, 0x30 the calibration's block pairs,
+        # 0x40 its refusal, 0x80 the rail skip, specs/optional-protections.md section 6.4).
         "held_a": hold & 0xFF, "held_b": (hold >> 8) & 0xFF, "coasted": (hold >> 16) & 0xFF,
         "cause": (hold >> 24) & 0xFF,
     }

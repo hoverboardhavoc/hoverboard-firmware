@@ -297,6 +297,12 @@ object Fields {
     val MOTOR_PEAK_TRIP_PERIODS = FieldDef(0x59, Type.U8, Value.U8(1), Effect.ARM)
 
     /**
+     * The rail skip's threshold, per motor, a 12-bit ADC count; 0 = off. A period on which a sensed
+     * phase's raw sample reaches it is FOC's held period (`specs/optional-protections.md` 3.4).
+     */
+    val MOTOR_RAIL_SKIP = FieldDef(0x5A, Type.U16, Value.U16(0), Effect.ARM)
+
+    /**
      * What the pack IS: the number of cells in series (`shared/store/src/field.rs`,
      * `BOARD_BATTERY_CELLS`). 0 = not stated, which is the default and is not a guess at eight.
      *
@@ -543,6 +549,7 @@ object Fields {
         "MOTOR_PHASE_C" to MOTOR_PHASE_C,
         "MOTOR_CURRENT_SENSE" to MOTOR_CURRENT_SENSE,
         "MOTOR_PEAK_TRIP_PERIODS" to MOTOR_PEAK_TRIP_PERIODS,
+        "MOTOR_RAIL_SKIP" to MOTOR_RAIL_SKIP,
         "IMU_I2C" to IMU_I2C,
         "IMU_MODEL" to IMU_MODEL,
         "IMU_REMAP" to IMU_REMAP,
@@ -681,6 +688,7 @@ object Fields {
         Range(CONTROL_SIDE.id, null, 0, 1),
         Range(MOTOR_ALIGN_OFFSET.id, null, 0, 5),
         Range(MOTOR_PEAK_TRIP_PERIODS.id, null, 0, 63),
+        Range(MOTOR_RAIL_SKIP.id, null, 0, 4_095),
         Range(IMU_GYRO_BIAS.id, null, -32_767, 32_767),
         Range(ATTITUDE_LEVEL_TRIM.id, null, -18_000, 18_000),
         Range(BOARD_BATTERY_CAL.id, 0, 10_000, 32_000),

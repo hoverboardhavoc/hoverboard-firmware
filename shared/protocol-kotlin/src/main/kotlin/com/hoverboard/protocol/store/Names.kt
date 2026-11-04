@@ -128,6 +128,7 @@ object Names {
         pin(Fields.MOTOR_PHASE_C, "current.phase_c", IndexKind.MOTOR),
         motor(Fields.MOTOR_CURRENT_SENSE, "current.sense", Kind.ENUM, SENSE),
         motor(Fields.MOTOR_PEAK_TRIP_PERIODS, "current.peak_trip_periods"),
+        motor(Fields.MOTOR_RAIL_SKIP, "current.rail_skip"),
     )
 
     /** The row for field [id], or null when the table names none. */

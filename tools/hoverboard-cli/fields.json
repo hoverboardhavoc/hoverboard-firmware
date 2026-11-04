@@ -978,5 +978,24 @@
     "scope": "wheel",
     "effect": "arm",
     "board_owned": false
+  },
+  {
+    "id": 90,
+    "path": "current.rail_skip",
+    "type": "u16",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "ranges": [
+      {
+        "range": [
+          0,
+          4095
+        ]
+      }
+    ],
+    "scope": "wheel",
+    "effect": "arm",
+    "board_owned": false
   }
 ]

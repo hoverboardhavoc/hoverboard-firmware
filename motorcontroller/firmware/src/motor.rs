@@ -1130,6 +1130,26 @@ pub const HOLD_CAL_PAIRS_SHIFT: u32 = 28;
 pub const HOLD_CAL_PAIRS_MASK: u32 = 0b11 << HOLD_CAL_PAIRS_SHIFT;
 /// The offset calibration was refused because its block pairs never agreed (section 15).
 pub const HOLD_CAL_DISAGREED: u32 = 1 << 30;
+/// A period of the window took the rail skip (`specs/optional-protections.md` section 3.4): a
+/// sensed phase's raw sample was at or above `current.rail_skip`, so FOC held its d-q pair.
+pub const HOLD_CAUSE_RAIL: u32 = 1 << 31;
+
+/// The rail skip's threshold in the injected word's unit: the stored 12-bit count
+/// (`store::MOTOR_RAIL_SKIP`) shifted left by 3, the left-aligned datum's position (RM0008
+/// Figure 31), so the period ISR compares raw words with no shift of its own. `0` stays `0`, off.
+/// The 12-FET's 3,848 is 30,784 (`0x7840`).
+#[inline]
+pub const fn rail_threshold(rail_skip: u16) -> u16 {
+    (rail_skip & 0x0FFF) << 3
+}
+
+/// Whether this period takes the rail skip (`specs/optional-protections.md` section 3.4): the
+/// threshold is on and a sensed phase that is a reading this period ([`sensed_readings`]) has its
+/// raw left-aligned sample at or above it. A phase the sample rule took as 0 is not tested.
+#[inline(always)]
+pub fn rail_skip(threshold: u16, raw: [u16; 2], read: [bool; 2]) -> bool {
+    threshold != 0 && ((read[0] && raw[0] >= threshold) || (read[1] && raw[1] >= threshold))
+}
 
 /// The cause bits of one floated period, from the three inputs [`coast_posture`] took.
 #[inline(always)]
@@ -1702,6 +1722,9 @@ pub struct Rederived {
     /// `specs/optional-protections.md` section 3.1), installed with the limit through
     /// [`CurrentLimit::reconfigure`].
     pub peak_trip: u8,
+    /// The rail skip's threshold in the injected word's unit ([`rail_threshold`] of the stored
+    /// `store::MOTOR_RAIL_SKIP`, `specs/optional-protections.md` section 3.4), `0` = off.
+    pub rail: u16,
     /// Fresh per-mode records for the running method ([`method_records`]), installed through
     /// `commutation::Commutator::switch_method` so the shared rotor front end survives. A FOC
     /// record carries the arm's current-reference full scale, [`full_scale_counts`] of
@@ -1725,10 +1748,10 @@ pub struct Rederived {
 
 /// Re-derive the motor's VALUE row from freshly read store values plus the boot-fixed decode facts.
 ///
-/// Pure: it validates and converts, and it touches no peripheral and no static. The six inputs
-/// are the six value-row motor fields (`MOTOR_METHOD`, `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET`,
-/// `MOTOR_CURRENT_LIMIT`, `MOTOR_CURRENT_CAL`, `MOTOR_PEAK_TRIP_PERIODS`); everything else the
-/// ISR's record holds comes from
+/// Pure: it validates and converts, and it touches no peripheral and no static. The seven inputs
+/// are the seven value-row motor fields (`MOTOR_METHOD`, `MOTOR_DIRECTION`, `MOTOR_ALIGN_OFFSET`,
+/// `MOTOR_CURRENT_LIMIT`, `MOTOR_CURRENT_CAL`, `MOTOR_PEAK_TRIP_PERIODS`, `MOTOR_RAIL_SKIP`);
+/// everything else the ISR's record holds comes from
 /// `boot` or is left alone. So the value row stays twelve fields wide: `motor.noise_floor` is read
 /// once, at boot.
 ///
@@ -1774,6 +1797,7 @@ pub fn rederive(
     current_limit_ma: u32,
     current_cal: u16,
     peak_trip_periods: u8,
+    rail_skip: u16,
     boot: BootFixed,
 ) -> Rederived {
     let decode =
@@ -1786,6 +1810,7 @@ pub fn rederive(
         method: records.method().to_u8(),
         limit_counts: limit,
         peak_trip: peak_trip_periods,
+        rail: rail_threshold(rail_skip),
         records,
         decode,
         method_fault: method_fault_bits(requested, boot),
@@ -2011,6 +2036,9 @@ pub mod hw {
         /// The sample hold (`specs/foc-torque.md` section 14): the flags armed from the duties
         /// this ISR wrote last period, the last fresh pair, the per-phase run, the window's counts.
         hold: SampleHold,
+        /// The rail skip's threshold in the injected word's unit ([`rail_threshold`], `0` = off),
+        /// installed with the value row at every arm (`specs/optional-protections.md` section 3.4).
+        rail_skip: u16,
         /// Periods of the open window the bridge was floated ([`coast_posture`]), for word 50.
         coasted: u8,
         /// The cause bits the open window's floated periods raised ([`coast_causes`]), plus the
@@ -2073,11 +2101,11 @@ pub mod hw {
     }
 
     /// Install an arm-time re-derivation into the period ISR's record: the method byte, the current
-    /// limit, and the per-mode records with the drive direction through
-    /// `Commutator::switch_method`. `false` on a board with no runtime (which is unarmable anyway,
-    /// so the arm is refused).
+    /// limit with the peak trip's count, the rail skip's threshold, and the per-mode records with
+    /// the drive direction through `Commutator::switch_method`. `false` on a board with no runtime
+    /// (which is unarmable anyway, so the arm is refused).
     ///
-    /// **Those three fields and the method fault bit, nothing else.** It does not touch `offsets`,
+    /// **Those four fields and the method fault bit, nothing else.** It does not touch `offsets`,
     /// `base_flags`, [`FAULT`] or [`OBS_CAL`], and of `faults` only [`FAULT_METHOD`], which the ISR
     /// publishes into [`FAULT`] at its next period. The limit
     /// goes in through [`CurrentLimit::reconfigure`] rather than as a built record, so the
@@ -2164,6 +2192,7 @@ pub mod hw {
                 if let Some(m) = slot.as_mut() {
                     m.method = r.method;
                     m.current.reconfigure(r.limit_counts, r.peak_trip);
+                    m.rail_skip = r.rail;
                     m.commutator.switch_method(r.records, r.decode);
                     m.faults = (m.faults & !FAULT_METHOD) | r.method_fault;
                 }
@@ -2732,6 +2761,7 @@ pub mod hw {
                 offsets,
                 current: CurrentLimit::new(limit, store::MOTOR_PEAK_TRIP_PERIODS.default()),
                 hold: SampleHold::new(),
+                rail_skip: rail_threshold(store::MOTOR_RAIL_SKIP.default()),
                 coasted: 0,
                 causes: cal_bits,
             });
@@ -3053,6 +3083,11 @@ pub mod hw {
         // ISR wrote last period keeps its last fresh value, so neither the limit below nor the
         // arm sees the transient a shunt reads when its leg's low side is barely on.
         let (sensed, hold) = m.hold.apply(ia, ib);
+        // The rail skip (`specs/optional-protections.md` section 3.4): a reading whose raw sample is
+        // at the threshold makes this FOC's held period. The current limit below still takes the
+        // pair as it is, so the chop and both trips see a rail-sized current.
+        let rail = rail_skip(m.rail_skip, raw, read);
+        m.causes |= if rail { HOLD_CAUSE_RAIL } else { 0 };
         // The sensed pair as Clarke's `(ia, ib)`: itself for A and B, `ia = -(ib + ic)` for B and C
         // (`specs/twelve-fet.md` section 5.3). A one-motor image senses A and B only.
         let (ia, ib) = clarke_pair(sensed, COUNT > 1 && m.bc);
@@ -3090,7 +3125,9 @@ pub mod hw {
         m.coasted = m.coasted.wrapping_add(coast as u8);
         m.causes |= coast_causes(armed, stale, current.chop);
 
-        let out = m.commutator.step(levels, (ia, ib), demand, !coast, hold);
+        let out = m
+            .commutator
+            .step(levels, (ia, ib), demand, !coast, hold || rail);
         let (duties, enables) = out.to_duties_enables();
         // Flag, for the coming period, the sensed phases these duties drive above the threshold
         // (section 14, step 13 of the chain): decided on the duties as computed, since a coasted
@@ -3627,6 +3664,7 @@ mod tests {
                         10_000,
                         CAL,
                         1,
+                        0,
                         boot,
                     );
                     assert_eq!(
@@ -3662,7 +3700,7 @@ mod tests {
                     "byte {byte}"
                 );
                 // ...and the re-derivation publishes that same method, not the request.
-                let r = rederive(byte, 0, 2, 10_000, CAL, 1, boot);
+                let r = rederive(byte, 0, 2, 10_000, CAL, 1, 0, boot);
                 assert_eq!(r.method, records.method().to_u8(), "byte {byte}");
                 assert_eq!(r.records.method(), records.method(), "byte {byte}");
                 // The observation block carries it in the method byte the bench reads.
@@ -3746,7 +3784,7 @@ mod tests {
             other => panic!("an accepted board runs the FOC it asked for, got {other:?}"),
         };
         // The fleet defaults: 4,550 - 2,100 = 2,450 counts, 5.4 A at 455 counts per amp.
-        let r = rederive(2, 0, 2, 10_000, CAL, 1, boot_accepted());
+        let r = rederive(2, 0, 2, 10_000, CAL, 1, 0, boot_accepted());
         assert_eq!(r.limit_counts, 4_550);
         assert_eq!(full_scale_counts(r.limit_counts, FLOOR), 2_450);
         assert_eq!(scale(r), 2_450, "the FOC records carry it");
@@ -3754,21 +3792,21 @@ mod tests {
         // Each of the three inputs moves it, through its one owner: the limit (17,800 mA is the
         // spec's 13.2 A reference), the calibration, and the boot-read floor.
         assert_eq!(
-            scale(rederive(2, 0, 2, 17_800, CAL, 1, boot_accepted())),
+            scale(rederive(2, 0, 2, 17_800, CAL, 1, 0, boot_accepted())),
             5_999
         );
         assert_eq!(
-            scale(rederive(2, 0, 2, 10_000, 800, 1, boot_accepted())),
+            scale(rederive(2, 0, 2, 10_000, 800, 1, 0, boot_accepted())),
             8_000 - 2_100
         );
         let quiet = BootFixed {
             noise_floor: 1_500,
             ..boot_accepted()
         };
-        assert_eq!(scale(rederive(2, 0, 2, 10_000, CAL, 1, quiet)), 3_050);
+        assert_eq!(scale(rederive(2, 0, 2, 10_000, CAL, 1, 0, quiet)), 3_050);
         // Floored at zero when the limit sits AT the floor (a request under the floor is clamped up
         // to it): the board can hold no current above its noise, so the reference is zero.
-        let r = rederive(2, 0, 2, 1, CAL, 1, boot_accepted());
+        let r = rederive(2, 0, 2, 1, CAL, 1, 0, boot_accepted());
         assert_eq!(r.limit_counts, noise_floor_counts(FLOOR));
         assert_eq!(scale(r), 0);
         // The function itself, at the window's ends and past them (a pair `limit_counts` cannot
@@ -3781,7 +3819,7 @@ mod tests {
         assert_eq!(full_scale_counts(i16::MIN, u16::MAX), 0);
         // The demotion rule and its fault are unchanged: no accepted zeros, a FOC request runs
         // six-step and raises FAULT_METHOD.
-        let r = rederive(2, 0, 2, 10_000, CAL, 1, BOOT);
+        let r = rederive(2, 0, 2, 10_000, CAL, 1, 0, BOOT);
         assert_eq!(r.method, commutation::CommutationMethod::SixStep.to_u8());
         assert!(matches!(r.records, MethodState::SixStep(_)));
         assert_eq!(
@@ -3802,7 +3840,7 @@ mod tests {
         // The re-derivation carries the COUNT (see `Rederived::limit_counts`), and the count is
         // `limit_counts`'s, so a changed calibration moves it...
         let at = |ma: u32, cal: u16| {
-            rederive(0, 0, 2, ma, cal, 1, BOOT).limit_counts == limit_counts(ma, cal, FLOOR)
+            rederive(0, 0, 2, ma, cal, 1, 0, BOOT).limit_counts == limit_counts(ma, cal, FLOOR)
         };
         assert_ne!(
             limit_counts(20_000, 200, FLOOR),
@@ -3820,19 +3858,19 @@ mod tests {
         // calibration outside the seam clamps into it, and an unbounded request ceilings at
         // MAX_LIMIT_COUNTS.
         assert_eq!(
-            rederive(0, 0, 2, 1, 455, 1, BOOT).limit_counts,
+            rederive(0, 0, 2, 1, 455, 1, 0, BOOT).limit_counts,
             noise_floor_counts(FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, 2, 20_000, 0, 1, BOOT).limit_counts,
+            rederive(0, 0, 2, 20_000, 0, 1, 0, BOOT).limit_counts,
             limit_counts(20_000, CURRENT_CAL_MIN, FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, 2, 20_000, u16::MAX, 1, BOOT).limit_counts,
+            rederive(0, 0, 2, 20_000, u16::MAX, 1, 0, BOOT).limit_counts,
             limit_counts(20_000, CURRENT_CAL_MAX, FLOOR)
         );
         assert_eq!(
-            rederive(0, 0, 2, u32::MAX, 455, 1, BOOT).limit_counts,
+            rederive(0, 0, 2, u32::MAX, 455, 1, 0, BOOT).limit_counts,
             MAX_LIMIT_COUNTS
         );
         // The floor the arm uses is the runtime's, not the registered default: a board brought up
@@ -3843,7 +3881,7 @@ mod tests {
                 ..BOOT
             };
             assert_eq!(
-                rederive(0, 0, 2, 1, 455, 1, boot).limit_counts,
+                rederive(0, 0, 2, 1, 455, 1, 0, boot).limit_counts,
                 noise_floor_counts(floor),
                 "floor {floor}"
             );
@@ -3851,7 +3889,7 @@ mod tests {
         // And the count the re-derivation carries IS the limit in force once installed: a record
         // reconfigured to it behaves exactly as one built with it (the install's own seam below).
         for (ma, cal) in [(10_000u32, 455u16), (20_000, 200), (1, 455)] {
-            let counts = rederive(0, 0, 2, ma, cal, 1, BOOT).limit_counts;
+            let counts = rederive(0, 0, 2, ma, cal, 1, 0, BOOT).limit_counts;
             let mut reconfigured = CurrentLimit::new(noise_floor_counts(FLOOR), 1);
             reconfigured.reconfigure(counts, 1);
             let fresh = CurrentLimit::new(counts, 1);
@@ -3979,7 +4017,7 @@ mod tests {
                 // select their own arms, which `each_method_requested_yields_its_own_records`
                 // covers; here the decode facts are the subject.
                 for byte in (0..=u8::MAX).filter(|b| !matches!(b, 1 | 2)) {
-                    let r = rederive(byte, direction_byte, align_offset, 10_000, 455, 1, BOOT);
+                    let r = rederive(byte, direction_byte, align_offset, 10_000, 455, 1, 0, BOOT);
                     assert_eq!(r.decode.direction(), direction, "byte {byte}");
                     assert_eq!(
                         r.method,
@@ -5041,7 +5079,7 @@ mod tests {
         c.step(0, 0);
         assert!(c.step(hard, 0).trip, "the installed count is 1");
         // The arm row carries the stored count to the install unchanged.
-        assert_eq!(rederive(0, 0, 2, 2_000, CAL, 7, BOOT).peak_trip, 7);
+        assert_eq!(rederive(0, 0, 2, 2_000, CAL, 7, 0, BOOT).peak_trip, 7);
     }
 
     /// The episode rule holds at every count: one trip per over-limit episode, re-armed by a clean
@@ -5062,6 +5100,55 @@ mod tests {
             }
             assert_eq!(c.trips(), 3, "count {count}");
         }
+    }
+
+    /// The rail skip (`specs/optional-protections.md` sections 3.4 and 9.1): the left-aligned
+    /// threshold is the stored count shifted left by 3; a reading at the threshold takes the skip,
+    /// one under it does not; threshold 0 never skips; a phase the sample rule took as 0 is not
+    /// tested; and the current limit takes the railed sample as it is, tripping on it at count 1.
+    #[test]
+    fn the_rail_skip_is_a_held_period_for_foc_and_never_for_the_limit() {
+        assert_eq!(rail_threshold(3_848), 30_784);
+        assert_eq!(rail_threshold(3_848), 0x7840);
+        assert_eq!(rail_threshold(0), 0);
+        assert_eq!(rail_threshold(4_095), 4_095 << 3);
+        let t = rail_threshold(3_848);
+        let both = [true; 2];
+        assert!(rail_skip(t, [t, 0], both), "phase a at the threshold");
+        assert!(rail_skip(t, [0, t], both), "phase b at the threshold");
+        assert!(rail_skip(t, [u16::MAX, u16::MAX], both));
+        assert!(!rail_skip(t, [t - 1, t - 1], both), "under it on both");
+        for raw in [[0, 0], [t, t], [u16::MAX, u16::MAX]] {
+            assert!(!rail_skip(0, raw, both), "threshold 0 never skips");
+        }
+        assert!(
+            !rail_skip(t, [t, 0], [false, true]),
+            "a phase taken as 0 is not tested"
+        );
+        assert!(!rail_skip(t, [0, t], [true, false]));
+        assert!(!rail_skip(t, [t, t], [false, false]));
+        // The limit's input is the conditioned sample from the same raw word: at the top rail it is
+        // a large current, which the limit chops and, at the default count, trips on.
+        // A zero of 2,000 LSB in the offset's unit (twice the left-aligned word).
+        let offset: u16 = 2 * (2_000 << 3);
+        let ia = commutation::foc::current_from_adc(offset, 0xFFF8);
+        let lim = limit_counts(10_000, CAL, FLOOR);
+        assert!(
+            phase_magnitude(ia, 0) >= hard_trip_counts(lim),
+            "a railed sample reads {ia}"
+        );
+        let mut c = CurrentLimit::new(lim, 1);
+        let v = c.step(ia, 0);
+        assert!(v.chop && v.trip, "the limit sees the raw rail current");
+        // The hold word carries the skip in bit 31, above the calibration bits.
+        assert_eq!(pack_foc_hold([0, 0], 0, HOLD_CAUSE_RAIL) >> 24, 0x80);
+        assert_eq!(
+            HOLD_CAUSE_RAIL & (HOLD_CAL_PAIRS_MASK | HOLD_CAL_DISAGREED | 0x0F00_0000),
+            0
+        );
+        // The arm row carries the stored count to the install as the left-aligned threshold.
+        assert_eq!(rederive(0, 0, 2, 2_000, CAL, 1, 3_848, BOOT).rail, 30_784);
+        assert_eq!(rederive(0, 0, 2, 2_000, CAL, 1, 0, BOOT).rail, 0);
     }
 
     /// The sample rule's predicate (`specs/twelve-fet.md` section 5.6): an `any_state` motor

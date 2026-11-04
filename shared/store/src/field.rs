@@ -563,6 +563,13 @@ pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x58, 0);
 /// limit is also over it, so a run of 64 is the sustained trip already. In the arm row beside
 /// [`MOTOR_CURRENT_LIMIT`], installed through `CurrentLimit::reconfigure` at every arm.
 pub const MOTOR_PEAK_TRIP_PERIODS: Field<u8> = Field::new(0x59, 1);
+/// The rail skip's threshold, per motor, a 12-bit ADC count (`specs/optional-protections.md`
+/// section 3.4): a period on which a sensed phase's raw sample is at or above it is FOC's held
+/// period (its PIs act on the stored d-q pair), while the current limit still takes the sample as
+/// it is. `0` (the default) turns it off; the 12-FET stores 3,848, the stock's. An amplifier-swing
+/// fact of the board, so stored rather than compiled. In the arm row; the firmware compares the
+/// left-aligned injected word against it shifted left by 3.
+pub const MOTOR_RAIL_SKIP: Field<u16> = Field::new(0x5A, 0);
 /// The power-button sense pin (`specs/board-model.md` `power.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
@@ -1096,6 +1103,7 @@ field_ids! {
     0x57, // MOTOR_PHASE_C
     0x58, // MOTOR_CURRENT_SENSE
     0x59, // MOTOR_PEAK_TRIP_PERIODS
+    0x5A, // MOTOR_RAIL_SKIP
 }
 
 #[cfg(feature = "test-fields")]
@@ -1168,6 +1176,7 @@ field_ids! {
     0x57, // MOTOR_PHASE_C
     0x58, // MOTOR_CURRENT_SENSE
     0x59, // MOTOR_PEAK_TRIP_PERIODS
+    0x5A, // MOTOR_RAIL_SKIP
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1254,10 +1263,10 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 68 + 19;
+pub const REGISTRY_LEN: usize = 69 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 70 + 19;
+pub const REGISTRY_LEN: usize = 71 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1492,6 +1501,7 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_PHASE_C.entry(Boot),
     MOTOR_CURRENT_SENSE.entry(Boot),
     MOTOR_PEAK_TRIP_PERIODS.entry(Arm),
+    MOTOR_RAIL_SKIP.entry(Arm),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY, Client),
     #[cfg(feature = "test-fields")]
@@ -1796,6 +1806,7 @@ pub mod names {
             "current.peak_trip_periods",
             Kind::Int,
         ),
+        FieldName::motor(MOTOR_RAIL_SKIP, "current.rail_skip", Kind::Int),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -1880,6 +1891,8 @@ pub mod names {
         // `current.peak_trip_periods`: a run of 64 is the sustained trip already
         // (`firmware::motor::OVER_CURRENT_TRIP_PERIODS`).
         every(MOTOR_PEAK_TRIP_PERIODS.id(), 0, 63),
+        // `current.rail_skip`: a 12-bit ADC count, 0 = off.
+        every(MOTOR_RAIL_SKIP.id(), 0, 4_095),
         // Calibration. `imu.gyro_bias`, raw counts: the sensor's i16 word.
         every(IMU_GYRO_BIAS.id(), -32767, 32767),
         // `attitude.level_trim`, centidegrees: a half turn either way.
@@ -2241,6 +2254,7 @@ mod registry_tests {
             (0x57, MOTOR_PHASE_C.id()),
             (0x58, MOTOR_CURRENT_SENSE.id()),
             (0x59, MOTOR_PEAK_TRIP_PERIODS.id()),
+            (0x5A, MOTOR_RAIL_SKIP.id()),
         ];
         for (want, got) in map {
             assert_eq!(want, got);
@@ -2367,6 +2381,7 @@ mod registry_tests {
                 (0x50, 0),
                 (0x51, 0),
                 (0x59, 0),
+                (0x5A, 0),
             ]
         );
         // Everything else is read at boot.
