@@ -14,6 +14,7 @@ const START_CFG: SfConfig = SfConfig {
     speed_max: 80,
     speed_slew: 41,
     pos_clamp: 45,
+    turn: TurnConfig::OFF,
 };
 /// The nominal pack the torque scale is quoted at (assumption A1), the divisor torque mode pins.
 const NOMINAL: i16 = NOMINAL_SCALE;
@@ -64,7 +65,7 @@ fn the_pass_records_each_term_as_a_word_on_its_own() {
         speed_max: 0,
         ..START_CFG
     };
-    let w = sf_step(&cfg, &inp, &mut st);
+    let (w, _) = sf_step(&cfg, &inp, &mut st);
     let t = terms(
         st.live,
         inp.pitch_word,
@@ -130,7 +131,7 @@ fn the_products_at_their_bounds_do_not_overflow() {
 #[test]
 fn a_forward_lean_gives_a_forward_word() {
     let mut st = SfState::default();
-    let w = sf_step(
+    let (w, _) = sf_step(
         &START_CFG,
         &SfInputs {
             pitch_word: -500,
@@ -139,7 +140,7 @@ fn a_forward_lean_gives_a_forward_word() {
         &mut st,
     );
     assert!(w < 0, "forward lean, forward torque: {w}");
-    let w = sf_step(
+    let (w, _) = sf_step(
         &START_CFG,
         &SfInputs {
             pitch_rate: -10_000,
@@ -174,7 +175,7 @@ fn a_forward_push_gives_negative_position_and_speed_terms() {
     let t = terms(START, 0, 0, st.pos_err, st.v_ref - st.v_filt);
     assert!(t[2] < 0 && t[3] < 0, "term_x and term_v negative: {t:?}");
     assert!(
-        sf_step(&cfg, &pushed, &mut st) < 0,
+        sf_step(&cfg, &pushed, &mut st).0 < 0,
         "a forward word: forward torque tips the body back"
     );
 }
@@ -420,7 +421,7 @@ fn the_speed_error_clamps() {
         ..SfState::default()
     };
     // At the clamp, term_v is gv * 32 * 4096 / 256, and the filter's own term does not exceed it.
-    let w = sf_step(
+    let (w, _) = sf_step(
         &SfConfig {
             gains: [0, 0, 0, 10],
             ..SfConfig::default()
@@ -611,13 +612,14 @@ impl Rover {
             value,
             scale: NOMINAL,
             in_run: cfg_in_run,
+            ..SfInputs::default()
         }
     }
 
     /// One tick: read, the law, the torque the word asks for, the plant. Returns the word.
     fn tick(&mut self, cfg: &SfConfig, value: i16, force: f64) -> i16 {
         let inp = self.inputs(true, value);
-        let w = sf_step(cfg, &inp, &mut self.st);
+        let (w, _) = sf_step(cfg, &inp, &mut self.st);
         // Assumption A1: a numerator count is 15.2 / 28500 * 3900 / 2960 N.m, and the word is the
         // numerator times 3900 / scale; torque is negative-word forward.
         let tau = -(w as f64) * NOMINAL as f64 / 3900.0 * (15.2 / 28500.0 * 3900.0 / 2960.0);

@@ -1301,8 +1301,9 @@ fn end_to_end_both_modes_drive_the_shared_fsm_on_the_28500_contract() {
         speed_max: 0,
         speed_slew: 41,
         pos_clamp: 45,
+        turn: crate::sf::TurnConfig::OFF,
     };
-    let w = crate::sf::sf_step(
+    let (w, _) = crate::sf::sf_step(
         &cfg,
         &crate::sf::SfInputs {
             pitch_word: 100,

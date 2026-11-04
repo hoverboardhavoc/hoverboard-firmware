@@ -189,6 +189,25 @@ class RustSourceDriftTest {
         findAll(text, pattern, what).single()
 
     /**
+     * The body of `pub mod <name> { ... }` in [text], braces counted, failing loudly when absent.
+     * `control::config` declares the same constant names in more than one area module (`sf` and
+     * `turn` each have a `GAINS`, a `RAMP_CAPS` and a reference row), so a pin on one of them
+     * reads it inside its own module rather than wherever it first matches.
+     */
+    private fun rustModule(text: String, name: String): String {
+        val head = Regex("""^pub mod $name \{""", RegexOption.MULTILINE).find(text)
+        checkNotNull(head) { "no `pub mod $name {` in the Rust source; update this drift test" }
+        var depth = 0
+        for (i in head.range.last until text.length) {
+            when (text[i]) {
+                '{' -> depth++
+                '}' -> if (--depth == 0) return text.substring(head.range.last + 1, i)
+            }
+        }
+        error("`pub mod $name {` is not closed")
+    }
+
+    /**
      * [findAll] plus the check [findAll] cannot make: that the pattern read EVERY item in the
      * region, not merely one of them.
      *
@@ -1233,9 +1252,10 @@ class RustSourceDriftTest {
             check(defaults.size == declared) { "$name declares $declared indices but lists ${defaults.size} defaults" }
             return id to defaults
         }
+        val sfMod = rustModule(config, "sf")
         // `pub const NAME: [i16; N] = [a, b];`, at the top level or inside `pub mod sf`.
-        fun row(name: String): List<Int> = findOne(
-            config,
+        fun row(name: String, text: String = config): List<Int> = findOne(
+            text,
             """^\s*pub const $name: \[i16; [\w:]+\] = \[([^\]]+)\];""",
             name,
         ).groupValues[1].split(",").map { literal(name, it.trim().replace("_", ""), "seam row") }
@@ -1252,7 +1272,7 @@ class RustSourceDriftTest {
         assertEquals(Gains.COUNT, defGains.size)
         val gainCount = literal(
             "GAINS",
-            findOne(config, """^\s*pub const GAINS: usize = (\d+);""", "GAINS").groupValues[1],
+            findOne(sfMod, """^\s*pub const GAINS: usize = (\d+);""", "GAINS").groupValues[1],
             "gain count",
         )
         assertEquals(gainCount, Gains.COUNT, "control::config::sf::GAINS drifted")
@@ -1261,9 +1281,9 @@ class RustSourceDriftTest {
         assertEquals(idRef, Gains.CONTROL_REFERENCE, "CONTROL_REFERENCE id drifted")
         assertEquals(id("REFERENCE_FIELD"), Gains.CONTROL_REFERENCE, "control::REFERENCE_FIELD drifted")
         assertEquals(defRef, Gains.REFERENCE_DEFAULT, "the reference defaults drifted")
-        assertEquals(row("REFERENCE_DEFAULT"), Gains.REFERENCE_DEFAULT, "REFERENCE_DEFAULT drifted")
-        assertEquals(row("REFERENCE_MIN"), Gains.REFERENCE_MINIMA, "REFERENCE_MIN drifted")
-        assertEquals(row("REFERENCE_MAX"), Gains.REFERENCE_MAXIMA, "REFERENCE_MAX drifted")
+        assertEquals(row("REFERENCE_DEFAULT", sfMod), Gains.REFERENCE_DEFAULT, "REFERENCE_DEFAULT drifted")
+        assertEquals(row("REFERENCE_MIN", sfMod), Gains.REFERENCE_MINIMA, "REFERENCE_MIN drifted")
+        assertEquals(row("REFERENCE_MAX", sfMod), Gains.REFERENCE_MAXIMA, "REFERENCE_MAX drifted")
 
         val min = findOne(config, """^pub const GAIN_MIN: i16 = ([^;]+);""", "GAIN_MIN").groupValues[1]
         assertEquals(literal("GAIN_MIN", min, "gain minimum"), Gains.MIN, "the tune seam's minimum drifted")
@@ -1301,15 +1321,17 @@ class RustSourceDriftTest {
     fun theGainRampCapsAgreeWithTheRustSource() {
         val config = rust("motorcontroller/control/src/config.rs")
         val caps = findOne(
-            config,
+            rustModule(config, "sf"),
             """^\s+pub const RAMP_CAPS: \[i16; GAINS\] = \[([^\]]+)\];""",
             "RAMP_CAPS",
         ).groupValues[1].split(",").map { literal("RAMP_CAPS", it.trim(), "ramp cap") }
         assertEquals(caps, Gains.Ramp.CAPS, "RAMP_CAPS drifted")
         // The law applies them as a symmetric clamp of the step toward the shadow, every RUN pass.
+        val sf = rust("motorcontroller/control/src/sf.rs")
+        findOne(sf, """ramp_by\(live, target, RAMP_CAPS\)""", "the ramp's caps")
         findOne(
-            rust("motorcontroller/control/src/sf.rs"),
-            """\(l \+ clamp_sym\(target\[i\] as i32 - l, RAMP_CAPS\[i\] as i32\)\) as i16""",
+            sf,
+            """\(l \+ clamp_sym\(target\[i\] as i32 - l, caps\[i\] as i32\)\) as i16""",
             "the ramp step",
         )
 

@@ -650,3 +650,52 @@ pub mod sf {
     /// 0.01 count per tick, 0.72 m/s^2.
     pub const REFERENCE_DEFAULT: [i16; REFERENCE_WORDS] = [0, 41];
 }
+
+/// The differential half of the balance law (`specs/heading-hold.md`, `crate::sf`): the heading
+/// hold's units, bounds and defaults. OURS, the common half's shape ([`sf`]) on the wheel
+/// DIFFERENCE; every constant is a unit choice or a derived bound.
+pub mod turn {
+    /// Index order of the three differential gains (`store::CONTROL_TURN_GAINS`, 0x2C): heading,
+    /// heading rate, stick feedforward.
+    pub const GAINS: usize = 3;
+
+    /// The divisor of each term (section 2's units table): `gh` per edge of a 1/[`super::sf::POS_Q`]-edge
+    /// heading error, `ghv` per sixteenth of a count of a 1/[`super::sf::Q`]-count rate error,
+    /// `gff` per sixteenth of a count of the reference rate. The common half's `gx` and `gv`
+    /// divisors, so one numerator count is the same torque in both halves.
+    pub const TERM_DIV: [i64; GAINS] = [super::sf::POS_Q as i64, 256, 256];
+
+    /// The compiled inclusive upper bound of each gain (section 6): `gx`'s and `gv`'s default
+    /// maxima, `gv`'s again for `gff`. Compiled and not a stored row like 0x28, because
+    /// `turn_max` bounds the differential's output whatever the gain, so a stored maximum would be
+    /// a second bound on the same thing. The lower bound is [`super::GAIN_MIN`].
+    pub const GAIN_MAX: [i16; GAINS] = [2000, 10000, 10000];
+
+    /// The gain row's defaults, which are also `store::CONTROL_TURN_GAINS`'s (the store's tests
+    /// pin the two): no loop and no feedforward.
+    pub const GAINS_DEFAULT: [i16; GAINS] = [0, 0, 0];
+
+    /// The live gain ramp's per-pass step cap toward the shadow, per gain (section 6), `gx`'s and
+    /// `gv`'s: at a 45-edge heading error, one count of rate error and one count of reference
+    /// rate, at a battery word of 2400 or more, one pass moves the differential by at most
+    /// `1 * 45 * 1.625 + 2 * 16 * 1.625 = 125` counts plus truncations, inside the 250-count
+    /// [`super::ramp::SLEW_LIMIT`].
+    pub const RAMP_CAPS: [i16; GAINS] = [1, 1, 1];
+
+    /// How many words the turn reference row carries (`store::CONTROL_TURN_REFERENCE`, 0x2D):
+    /// `0 = rate_max`, `1 = rate_slew`.
+    pub const REFERENCE_WORDS: usize = 2;
+
+    /// The turn reference row's compiled bounds, the common reference's ([`super::sf::REFERENCE_MIN`],
+    /// [`super::sf::REFERENCE_MAX`]) for the same reasons: `rate_max` 0 is a dead steer axis and
+    /// a machine holding its heading, `rate_slew` 1 keeps a staged `rate_max` from sitting dead
+    /// behind a zero rate, and `rate_max` 512 puts the full-stick target on the rate error's
+    /// clamp ([`super::sf::E_V_CLAMP`]).
+    pub const REFERENCE_MIN: [i16; REFERENCE_WORDS] = super::sf::REFERENCE_MIN;
+    /// See [`REFERENCE_MIN`].
+    pub const REFERENCE_MAX: [i16; REFERENCE_WORDS] = super::sf::REFERENCE_MAX;
+
+    /// The turn reference row's defaults, which are also `store::CONTROL_TURN_REFERENCE`'s:
+    /// `rate_max` 0 keeps the steer axis dead until staged; `rate_slew` 41, the common half's.
+    pub const REFERENCE_DEFAULT: [i16; REFERENCE_WORDS] = [0, 41];
+}

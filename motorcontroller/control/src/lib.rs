@@ -13,7 +13,8 @@
 //! - [`config`]   The gain shadow and the tune lane's allowlist, plus the fixed contract
 //!   constants.
 //! - [`sf`]       The four-term state-feedback balance law, its reference and the side mirror
-//!   [`wheel_forward`].
+//!   [`wheel_forward`], with its differential half, the rigid leader's heading hold
+//!   (`specs/heading-hold.md`).
 //! - [`drive`]    The rigid frame's turn input and steering split.
 //! - [`gating`]   The engagement machine's gating/pickup input: the conditioned up-axis accel
 //!   channel (Section 7's `> 500` / `< 0` cell, producer recovered).
@@ -50,7 +51,7 @@ pub use fsm::{fsm_step, tilt_cutout, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};
 pub use mode::{select_mode, ControlDispatch, ControlMode, Frame, ModeSelection, Producer};
-pub use sf::{sf_step, wheel_forward, SfConfig, SfInputs, SfState};
+pub use sf::{sf_step, wheel_forward, SfConfig, SfInputs, SfState, TurnConfig};
 pub use throttle::{throttle_tick, ThrottleConfig, ThrottleOutput, ThrottleState};
 
 #[cfg(test)]

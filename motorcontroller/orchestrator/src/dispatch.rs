@@ -535,6 +535,7 @@ fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> 
         speed_max,
         speed_slew,
         pos_clamp: state.ctl.pos_clamp,
+        turn: control::TurnConfig::OFF,
     };
     let inp = SfInputs {
         pitch_word: state.block.pitch_word,
@@ -548,8 +549,11 @@ fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> 
         // nominal pack while it is a current.
         scale: law_scale(state.block.battery, state.block.torque_is_current),
         in_run: run && state.ctl.fsm.sub_state == SubState::Run,
+        peer_rate_q12: 0,
+        steer: 0,
+        leader: false,
     };
-    let word = sf_step(&cfg, &inp, &mut state.ctl.sf);
+    let (word, _) = sf_step(&cfg, &inp, &mut state.ctl.sf);
 
     // The rigid LEADER's partner gate (`specs/rover-one-imu.md` sections 2 and 6): the leader
     // engages only while a fresh peer cyclic says the peer is the rigid FOLLOWER and not a second

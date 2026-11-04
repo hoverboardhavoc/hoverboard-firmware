@@ -13,10 +13,17 @@
 //! positive. A forward push gives a NEGATIVE position and speed term, forward torque, which tips
 //! the body back so the pitch term then drives it back: the inverted pendulum's non-minimum-phase
 //! response, and the sign the LQR produces.
+//!
+//! **The differential half** (`specs/heading-hold.md`) runs in the same pass on the rigid LEADER:
+//! the same two position latches folded as a DIFFERENCE are the machine's heading, and a heading
+//! error, a heading-rate error and a stick feedforward make the differential torque the steering
+//! split ([`crate::wheel_split`]) adds to one wheel and takes from the other. Its signs are RIGHT
+//! TURN POSITIVE, the stick's and the split's, so its gains are positive too (section 2).
 
 use crate::config::sf::{
     E_V_CLAMP, FILT_DIV, GAINS, HALF_EDGE, POS_Q, RAMP_CAPS, RAW_NUMERATOR, STICK_DIV, TERM_DIV,
 };
+use crate::config::turn;
 use crate::helpers::clamp_sym;
 use base::TORQUE_FULL_SCALE;
 
@@ -94,6 +101,17 @@ pub struct SfInputs {
     pub scale: i16,
     /// The engagement machine is in RUN (sub-state 3) this pass.
     pub in_run: bool,
+    /// The peer wheel's period-based rate (`CyclicState::wheel_rate`, `LinkInbox::peer_wheel_rate`),
+    /// 1/4096 count in the SENDER's counter sense, unscaled: the differential half's heading rate
+    /// (`specs/heading-hold.md` section 3). The last accepted frame's word, so it updates at the
+    /// peer's 125 Hz.
+    pub peer_rate_q12: i32,
+    /// The effective `DRIVE_CMD.steer`, `+-32767`, positive RIGHT, already neutral once stale.
+    pub steer: i16,
+    /// This board is the rigid LEADER, the one producer whose output is split into two wheels
+    /// (`specs/heading-hold.md` section 5). False on the pivoting producer: the differential half
+    /// forms nothing there and its cells stay zero.
+    pub leader: bool,
 }
 
 /// The configuration the law runs at: the shadow's gain row (`CONTROL_SF_GAINS`, 0x27), the
@@ -109,6 +127,37 @@ pub struct SfConfig {
     pub speed_slew: i16,
     /// Edges; 0 disables the position term.
     pub pos_clamp: i16,
+    /// The differential half's configuration (`specs/heading-hold.md` section 6).
+    pub turn: TurnConfig,
+}
+
+/// The differential half's configuration: the shadow's turn gain row (`CONTROL_TURN_GAINS`, 0x2C),
+/// the turn reference row (`CONTROL_TURN_REFERENCE`, 0x2D) and the clamp row
+/// (`CONTROL_TURN_CLAMP`, 0x2E, through `control::turn::clamp`). The ranges are the seams'
+/// (`specs/heading-hold.md` section 6); the arithmetic here holds for any non-negative `i16`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TurnConfig {
+    /// `[gh, ghv, gff]`, the targets the live turn gains ramp toward in RUN.
+    pub gains: [i16; turn::GAINS],
+    /// Sixteenths of a count per wheel at full stick; 0 is a dead steer axis.
+    pub rate_max: i16,
+    /// 1/4096 count per tick.
+    pub rate_slew: i16,
+    /// Word counts, the differential's authority; 0 is no differential at all.
+    pub turn_max: i16,
+    /// Edges; 0 disables the heading term.
+    pub head_clamp: i16,
+}
+
+impl TurnConfig {
+    /// The inert configuration, every word 0: no differential whatever else is staged.
+    pub const OFF: TurnConfig = TurnConfig {
+        gains: [0; turn::GAINS],
+        rate_max: 0,
+        rate_slew: 0,
+        turn_max: 0,
+        head_clamp: 0,
+    };
 }
 
 /// The law's carries. The reference cells are zeroed on every tick the engagement machine is not
@@ -129,6 +178,19 @@ pub struct SfState {
     /// through [`word`] on its own, so in the output's unit and clamped at its full scale. The
     /// observation's (section 8); live on every pass, armed or not.
     pub terms: [i16; GAINS],
+    /// Filtered heading rate, half the left wheel's forward rate less the right's, 1/4096 count,
+    /// right turn positive (`specs/heading-hold.md` section 3). A measurement: never reset.
+    pub vh_filt: i32,
+    /// The slewed heading-rate reference, 1/4096 count. RUN on a leader only.
+    pub v_href: i32,
+    /// The heading ERROR `H_ref - H`, 1/20480 edge. RUN on a leader only.
+    pub head_err: i32,
+    /// The live turn gains `[gh, ghv, gff]`: the shadow's outside RUN, stepping toward it inside.
+    pub turn_live: [i16; turn::GAINS],
+    /// This pass's heading and heading-rate terms as torque words (`term_h`, `term_hv`), each
+    /// through [`word`] on its own: the observation's word 52 (section 8). Live on every leader
+    /// pass, armed or not; 0 on the pivoting producer.
+    pub turn_terms: [i16; 2],
     own_prev: i32,
     peer_prev: i32,
 }
@@ -148,6 +210,25 @@ const _: () = {
     assert!(
         pos_max <= i32::MAX as i64,
         "the clamped position error fits i32"
+    );
+};
+
+// The differential half's three products at its widest inputs (`specs/heading-hold.md` section
+// 2): every gain and the heading clamp at `i16::MAX`, the rate error at its clamp and the
+// reference at the full-stick target of the widest `rate_max`. The sum times 3900 fits `i64`, and
+// the clamped heading error fits `i32`.
+const _: () = {
+    let g = i16::MAX as i64;
+    let head_max = i16::MAX as i64 * POS_Q as i64;
+    let v_href_max = 32767 * i16::MAX as i64 / STICK_DIV as i64;
+    let sum = g * head_max + g * E_V_CLAMP as i64 + g * v_href_max;
+    assert!(
+        sum <= i64::MAX / RAW_NUMERATOR as i64,
+        "the differential's numer * 3900 fits i64"
+    );
+    assert!(
+        head_max <= i32::MAX as i64,
+        "the clamped heading error fits i32"
     );
 };
 
@@ -172,12 +253,30 @@ pub fn word(numer: i64, scale: i16) -> i16 {
     ) as i16
 }
 
+/// The differential half's three terms in numerator counts (`specs/heading-hold.md` section 2),
+/// `[term_h, term_hv, term_ff]`, each truncated toward zero once, as [`terms`] does.
+pub fn turn_terms(g: [i16; turn::GAINS], head_err: i32, e_hv: i32, v_href: i32) -> [i64; 3] {
+    let s = [head_err as i64, e_hv as i64, v_href as i64];
+    core::array::from_fn(|i| g[i] as i64 * s[i] / turn::TERM_DIV[i])
+}
+
 /// One pass of the live gain ramp (section 6): each gain steps toward the shadow's by at most its
 /// [`RAMP_CAPS`] entry, so a tuning write in RUN reaches the torque at a bounded rate per pass.
 pub fn ramp(live: [i16; GAINS], target: [i16; GAINS]) -> [i16; GAINS] {
+    ramp_by(live, target, RAMP_CAPS)
+}
+
+/// The turn gains' ramp (`specs/heading-hold.md` section 6): [`ramp`]'s rule at
+/// [`turn::RAMP_CAPS`].
+pub fn turn_ramp(live: [i16; turn::GAINS], target: [i16; turn::GAINS]) -> [i16; turn::GAINS] {
+    ramp_by(live, target, turn::RAMP_CAPS)
+}
+
+/// Each of `live` stepped toward `target` by at most its `caps` entry.
+fn ramp_by<const N: usize>(live: [i16; N], target: [i16; N], caps: [i16; N]) -> [i16; N] {
     core::array::from_fn(|i| {
         let l = live[i] as i32;
-        (l + clamp_sym(target[i] as i32 - l, RAMP_CAPS[i] as i32)) as i16
+        (l + clamp_sym(target[i] as i32 - l, caps[i] as i32)) as i16
     })
 }
 
@@ -193,16 +292,19 @@ fn clamp_sym64(v: i64, lim: i64) -> i64 {
     }
 }
 
-/// One 250 Hz pass: the fold, the filter, the gain ramp, the reference, the law. Returns the torque
-/// word, negative forward.
-pub fn sf_step(cfg: &SfConfig, inp: &SfInputs, st: &mut SfState) -> i16 {
+/// One 250 Hz pass: the fold, the filters, the gain ramps, the references, the law. Returns the
+/// torque word, negative forward, and the differential (`specs/heading-hold.md` section 2), word
+/// counts, positive turning RIGHT, bounded by `turn_max`: the steering split's input on a leader
+/// and 0 everywhere else.
+pub fn sf_step(cfg: &SfConfig, inp: &SfInputs, st: &mut SfState) -> (i16, i32) {
     // The fold: twice the mean wheel motion this tick, in half-edges. The mean cancels a turn's
-    // differential by construction (section 3).
+    // differential by construction (section 3). The same two deltas differenced are twice the
+    // heading change (`specs/heading-hold.md` section 3), which cancels straight motion.
     let own = wheel_forward(inp.wheel_pos, inp.role_right);
     let peer = wheel_forward(inp.peer_pos, !inp.role_right);
-    let dx2 = own
-        .wrapping_sub(st.own_prev)
-        .wrapping_add(peer.wrapping_sub(st.peer_prev));
+    let d_own = own.wrapping_sub(st.own_prev);
+    let d_peer = peer.wrapping_sub(st.peer_prev);
+    let dx2 = d_own.wrapping_add(d_peer);
     st.own_prev = own;
     st.peer_prev = peer;
 
@@ -228,8 +330,77 @@ pub fn sf_step(cfg: &SfConfig, inp: &SfInputs, st: &mut SfState) -> i16 {
 
     let t = terms(st.live, inp.pitch_word, inp.pitch_rate, st.pos_err, e_v);
     st.terms = core::array::from_fn(|i| word(t[i], inp.scale));
-    word(t[0] + t[1] + t[2] + t[3], inp.scale)
+    let w = word(t[0] + t[1] + t[2] + t[3], inp.scale);
+
+    let v_peer = wheel_forward(inp.peer_rate_q12, !inp.role_right);
+    (w, turn_step(&cfg.turn, inp, st, d_own, d_peer, v, v_peer))
+}
+
+/// The differential half (`specs/heading-hold.md` sections 2 to 4), from this tick's forward
+/// position deltas and forward rates of the two wheels. LEFT and RIGHT are chosen by
+/// `role_right`: the heading is half the left wheel's forward travel less the right's, so a right
+/// turn grows it.
+fn turn_step(
+    cfg: &TurnConfig,
+    inp: &SfInputs,
+    st: &mut SfState,
+    d_own: i32,
+    d_peer: i32,
+    v_own: i32,
+    v_peer: i32,
+) -> i32 {
+    let (dh2, v_l, v_r) = if inp.role_right {
+        (d_peer.wrapping_sub(d_own), v_peer, v_own)
+    } else {
+        (d_own.wrapping_sub(d_peer), v_own, v_peer)
+    };
+    // Half the difference in `i64`, so no pair of `i32` rates can overflow it; the half always
+    // fits back.
+    let v_h = ((v_l as i64 - v_r as i64) / 2) as i32;
+    st.vh_filt += (v_h - st.vh_filt) / FILT_DIV;
+
+    if !inp.leader {
+        // The pivoting producer: no split, so no differential (section 5). The cells hold zero.
+        st.turn_live = cfg.gains;
+        st.v_href = 0;
+        st.head_err = 0;
+        st.turn_terms = [0; 2];
+        return 0;
+    }
+
+    st.turn_live = if inp.in_run {
+        turn_ramp(st.turn_live, cfg.gains)
+    } else {
+        cfg.gains
+    };
+
+    if inp.in_run {
+        let target = inp.steer as i32 * cfg.rate_max as i32 / STICK_DIV;
+        st.v_href += clamp_sym(target - st.v_href, cfg.rate_slew as i32);
+        let h = st.head_err as i64 + st.v_href as i64 - dh2 as i64 * HALF_EDGE as i64;
+        st.head_err = clamp_sym64(h, cfg.head_clamp as i64 * POS_Q as i64) as i32;
+    } else {
+        st.v_href = 0;
+        st.head_err = 0;
+    }
+    let e_hv = clamp_sym(st.v_href - st.vh_filt, E_V_CLAMP);
+
+    let t = turn_terms(st.turn_live, st.head_err, e_hv, st.v_href);
+    st.turn_terms = [word(t[0], inp.scale), word(t[1], inp.scale)];
+    // Applied in RUN only: outside it the engagement machine's setpoint is 0, and a nonzero
+    // differential split around a zero would pivot an unengaged machine (section 4, "Armed but
+    // not engaged"). The terms above stay live for the disarmed sign gate.
+    if !inp.in_run || inp.scale == 0 {
+        return 0;
+    }
+    let lim = cfg.turn_max as i64;
+    clamp_sym64(
+        ((t[0] + t[1] + t[2]) * RAW_NUMERATOR as i64).wrapping_div(inp.scale as i64),
+        if lim < 0 { 0 } else { lim },
+    ) as i32
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod turn_tests;
