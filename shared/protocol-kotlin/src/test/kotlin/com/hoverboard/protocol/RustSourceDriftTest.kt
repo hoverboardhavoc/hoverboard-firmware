@@ -25,10 +25,14 @@ import com.hoverboard.protocol.linkctl.OP_INPUTS
 import com.hoverboard.protocol.board.BoardStatus
 import com.hoverboard.protocol.board.CurrentLimit
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
+import com.hoverboard.protocol.pincap.ADC0
+import com.hoverboard.protocol.pincap.ADC1
+import com.hoverboard.protocol.pincap.ADC2
 import com.hoverboard.protocol.pincap.AdcInput
 import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.pincap.Func
 import com.hoverboard.protocol.pincap.FuncKind
+import com.hoverboard.protocol.pincap.Inputs as PinInputs
 import com.hoverboard.protocol.pincap.Phase
 import com.hoverboard.protocol.pincap.Route
 import com.hoverboard.protocol.pincap.SWD
@@ -2286,7 +2290,7 @@ class RustSourceDriftTest {
         )
         val ids = Fields.ALL.mapValues { it.value.id } + Fields.INDEXED.mapValues { it.value.id }
         fun labels(const: String): Pair<Names.Kind, List<Pair<Int, String>>> {
-            val m = findOne(field, """^\s*const\s+$const\s*:\s*Kind\s*=\s*Kind::(Enum|Bits)\(&\[(.*?)\]\);""", "the Kind `$const`")
+            val m = findOne(field, """^\s*const\s+$const\s*:\s*Kind\s*=\s*Kind::(Enum|Bits)\(&\[([\s\S]*?)\]\);""", "the Kind `$const`")
             val pairs = Regex("""\(\s*(\d+)\s*,\s*"([^"]+)"\s*\)""").findAll(m.groupValues[2])
                 .map { it.groupValues[1].toInt() to it.groupValues[2] }.toList()
             return (if (m.groupValues[1] == "Enum") Names.Kind.ENUM else Names.Kind.BITS) to pairs
@@ -2396,9 +2400,11 @@ class RustSourceDriftTest {
 
     /**
      * The pin tables ([com.hoverboard.protocol.pincap]), against `motorcontroller/hal/src/pincap.rs`:
-     * the chips by name, which of them remap, and each chip's bonding, routes, ADC inputs and sense
-     * pairs, in order, both ways; and the SWD pair. Every `route(`, `adc(` and sense pair in a table
-     * is read or the gate fails, so a route added to the Rust is a route the app's checks know.
+     * the chips by name, which of them remap, and each chip's bonding, routes, ADC inputs (with the
+     * converters each feeds), sense pairs and protection inputs, in order, both ways; and the SWD
+     * pair. Every `route(`, `adc(` and sense pair in a table is read or the gate fails, so a route
+     * added to the Rust is a route the app's checks know. An ADC map built by a `const fn` (the
+     * GD32's `gd32_adc`) is read through the function's body with its arguments substituted.
      */
     @Test
     fun thePinTablesAgreeWithTheRustSource() {
@@ -2423,9 +2429,30 @@ class RustSourceDriftTest {
 
         fun constBlock(name: String): String {
             val m = findOne(pincap, """^const\s+$name\s*:\s*[^=]+=\s*""", "the const `$name`")
+            // A const built by a `const fn` call: the function's body, each parameter replaced by
+            // its argument.
+            val call = Regex("""^(\w+)\(([^()]*)\);""").find(pincap.substring(m.range.last + 1))
+            if (call != null) {
+                val fn = call.groupValues[1]
+                val head = findOne(pincap, """^const fn $fn\(([^)]*)\)[^{]*\{""", "the const fn `$fn`")
+                val params = head.groupValues[1].split(",").map { it.substringBefore(":").trim() }.filter { it.isNotEmpty() }
+                val args = call.groupValues[2].split(",").map { it.trim() }
+                assertEquals(params.size, args.size, "`$name`'s call of `$fn`")
+                var body = pincap.substring(head.range.last + 1, pincap.indexOf("\n}", head.range.last))
+                for ((p, a) in params.zip(args)) body = body.replace(Regex("""\b$p\b"""), a)
+                return body
+            }
             val close = if (pincap[m.range.last + 1] == '[') "\n];" else "\n};"
             return pincap.substring(m.range.last + 1, pincap.indexOf(close, m.range.last))
         }
+        // The converter bits an ADC input's `adcs` is spelt with (`ADC0 | ADC1`).
+        val adcBits = findAll(pincap, """^pub const (ADC\d): u8 = 1 << (\d+);""", "pincap's ADC bits")
+            .associate { it.groupValues[1] to (1 shl it.groupValues[2].toInt()) }
+        assertEquals(mapOf("ADC0" to ADC0, "ADC1" to ADC1, "ADC2" to ADC2), adcBits, "pincap's ADC bits drifted")
+        fun adcs(expr: String): Int = expr.split("|").map { it.trim() }
+            .fold(0) { acc, bit -> acc or checkNotNull(adcBits[bit]) { "`$bit` in an ADC input's converters is no ADC bit" } }
+        val inputFields = fields(pincap, "Inputs").map { it.first }
+        assertEquals(listOf("dc_link", "brk"), inputFields, "pincap::Inputs' fields drifted")
         fun list(table: String, member: String): String {
             val ref = Regex("""$member:\s*&(\w+)\s*,""").find(table)
             if (ref != null) return constBlock(ref.groupValues[1])
@@ -2442,6 +2469,7 @@ class RustSourceDriftTest {
                 "Rx" -> Func(FuncKind.RX, n[0])
                 "Scl" -> Func(FuncKind.SCL, n[0])
                 "Sda" -> Func(FuncKind.SDA, n[0])
+                "Break" -> Func(FuncKind.BREAK, n[0])
                 else -> error("pincap::Func::$kind is not mirrored")
             }
         }
@@ -2457,8 +2485,10 @@ class RustSourceDriftTest {
             assertEquals(Regex("""\broute\(""").findAll(routeText).count(), routes.size, "${chip.id}: a route this gate does not read")
             assertEquals(routes, chip.table.routes, "${chip.id}'s routes drifted")
             val adcText = list(table, "adc")
-            val adc = Regex("""\badc\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)""").findAll(adcText)
-                .map { AdcInput(it.groupValues[1].toInt(), it.groupValues[2].toInt(), it.groupValues[3].toInt()) }
+            val adc = Regex("""\badc\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\w\s|]+)\)""").findAll(adcText)
+                .map {
+                    AdcInput(it.groupValues[1].toInt(), it.groupValues[2].toInt(), it.groupValues[3].toInt(), adcs(it.groupValues[4]))
+                }
                 .toList()
             assertEquals(Regex("""\badc\(""").findAll(adcText).count(), adc.size, "${chip.id}: an ADC input this gate does not read")
             assertEquals(adc, chip.table.adc, "${chip.id}'s ADC inputs drifted")
@@ -2468,6 +2498,15 @@ class RustSourceDriftTest {
                 .toList()
             assertEquals(Regex("""\[""").findAll(pairText).count(), pairs.size, "${chip.id}: a sense pair this gate does not read")
             assertEquals(pairs, chip.table.sensePairs, "${chip.id}'s sense pairs drifted")
+            val inputsRef = Regex("""inputs:\s*(\w+)\s*,""").find(table)
+            val inputText = if (inputsRef != null) {
+                constBlock(inputsRef.groupValues[1])
+            } else {
+                findOne(table, """inputs:\s*Inputs\s*\{([^}]*)\}""", "${chip.id}'s inputs").groupValues[1]
+            }
+            val inputs = Regex("""(\w+):\s*(true|false)""").findAll(inputText).associate { it.groupValues[1] to it.groupValues[2].toBoolean() }
+            assertEquals(inputFields.toSet(), inputs.keys, "${chip.id}: an input this gate does not read")
+            assertEquals(PinInputs(checkNotNull(inputs["dc_link"]), checkNotNull(inputs["brk"])), chip.table.inputs, "${chip.id}'s inputs drifted")
         }
         val swd = findOne(pincap, """^pub const SWD: \[\(u8, u8\); 2\] = \[(.*)\];""", "pincap::SWD").groupValues[1]
         assertEquals(

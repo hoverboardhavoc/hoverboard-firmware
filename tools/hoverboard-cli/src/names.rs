@@ -987,9 +987,9 @@ mod tests {
         let rider = row_of(k(0x22, 0));
         assert_eq!(to_json(rider, Type::U8.tag(), &[2]), json!(2));
         let high = row_of(k(0x19, 0));
-        assert_eq!(to_json(high, Type::U8.tag(), &[0b1001]), json!(9));
+        assert_eq!(to_json(high, Type::U8.tag(), &[0b10_0001]), json!(33));
         // Writing them back is the table's own check, which --force lets through.
-        for (key, v) in [(k(0x20, 0), 7), (k(0x22, 0), 2), (k(0x19, 0), 9)] {
+        for (key, v) in [(k(0x20, 0), 7), (k(0x22, 0), 2), (k(0x19, 0), 33)] {
             let (bytes, p) = encode(key, Type::U8, &json!(v)).unwrap();
             assert_eq!(bytes, Some(vec![v as u8]));
             assert_eq!(p.len(), 1, "{}", path_of(key));
@@ -1024,7 +1024,8 @@ mod tests {
         );
         assert_eq!(
             stop(k(0x19, 0), json!(["power.button", "pads.c"])),
-            "active_high: unknown bit \"pads.c\" (power.button, pads.a, pads.b)"
+            "active_high: unknown bit \"pads.c\" (power.button, pads.a, pads.b, \
+             motors[0].gate.break.pin, motors[1].gate.break.pin)"
         );
         assert_eq!(stop(k(0x02, 0), json!(5)), "device.name: a string, not 5");
     }

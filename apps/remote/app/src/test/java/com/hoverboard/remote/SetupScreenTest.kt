@@ -158,9 +158,10 @@ class SetupScreenTest {
      */
     @Test
     fun everyWritableRowSaysItIsReadOnlyWhileArmed() {
-        show(setupState(board = 0x01, values = stored), armed = true)
+        val state = setupState(board = 0x01, values = stored)
+        show(state, armed = true)
 
-        val writable = SetupFields.ALL.count { it.takesEffect != null && !it.advanced }
+        val writable = state.rows.count { it.takesEffect != null && !it.advanced }
         val said = compose.onAllNodes(hasText(s(R.string.setup_row_armed))).fetchSemanticsNodes().size
         assertEquals(writable, said)
         val readOnly = setupRowTag(SetupFields.NODE_ADDRESS.key)

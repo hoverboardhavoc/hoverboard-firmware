@@ -14,16 +14,22 @@
           "hall": { "a": {"port":"C","pin":10}, "b": {"port":"C","pin":11}, "c": {"port":"C","pin":12} },
           "gate": { "timer": 0, "remap": 0, "dead_time": 32,
             "hi_a": {"port":"A","pin":8},  "hi_b": {"port":"A","pin":9},  "hi_c": {"port":"A","pin":10},
-            "lo_a": {"port":"B","pin":13}, "lo_b": {"port":"B","pin":14}, "lo_c": {"port":"B","pin":15} },
+            "lo_a": {"port":"B","pin":13}, "lo_b": {"port":"B","pin":14}, "lo_c": {"port":"B","pin":15},
+            "break": { "pin": {"port":"B","pin":12}, "enable": false } },
           "current": { "limit": 10000, "sense": "low_side_on",
-            "phase_b": {"port":"C","pin":4,"adc":14}, "phase_c": {"port":"C","pin":5,"adc":15} } },
+            "phase_b": {"port":"C","pin":4,"adc":14}, "phase_c": {"port":"C","pin":5,"adc":15},
+            "rail_skip": 3848,
+            "dc_link": { "pin": {"port":"C","pin":1,"adc":11}, "limit": 0 } } },
         { "side": "left", "align_offset": 1, "pole_pairs": 15,
           "hall": { "a": {"port":"B","pin":5}, "b": {"port":"B","pin":6}, "c": {"port":"B","pin":7} },
           "gate": { "timer": 7, "dead_time": 32,
             "hi_a": {"port":"C","pin":6}, "hi_b": {"port":"C","pin":7}, "hi_c": {"port":"C","pin":8},
-            "lo_a": {"port":"A","pin":7}, "lo_b": {"port":"B","pin":0}, "lo_c": {"port":"B","pin":1} },
+            "lo_a": {"port":"A","pin":7}, "lo_b": {"port":"B","pin":0}, "lo_c": {"port":"B","pin":1},
+            "break": { "pin": {"port":"A","pin":6}, "enable": false } },
           "current": { "limit": 10000, "sense": "low_side_on",
-            "phase_a": {"port":"A","pin":0,"adc":0}, "phase_b": {"port":"C","pin":3,"adc":13} } }
+            "phase_a": {"port":"A","pin":0,"adc":0}, "phase_b": {"port":"C","pin":3,"adc":13},
+            "peak_trip_periods": 0, "rail_skip": 3848,
+            "dc_link": { "pin": {"port":"C","pin":0,"adc":10}, "limit": 0 } } }
       ]
     }
   }

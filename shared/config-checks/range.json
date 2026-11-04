@@ -75,5 +75,86 @@
       }
     },
     "refused": null
+  },
+  {
+    "name": "a peak trip count of 64, which is the sustained trip",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "peak_trip_periods": 64
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.peak_trip_periods"
+  },
+  {
+    "name": "a peak trip count of 0 and the stock's rail skip",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "peak_trip_periods": 0,
+            "rail_skip": 3848,
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "C",
+              "pin": 3,
+              "adc": 13
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "a DC-link limit past the request cap",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "dc_link": {
+              "pin": {
+                "port": "C",
+                "pin": 1,
+                "adc": 11
+              },
+              "limit": 200000
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.dc_link.limit"
+  },
+  {
+    "name": "a DC-link scale under the calibration band",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "dc_link": {
+              "pin": {
+                "port": "C",
+                "pin": 1,
+                "adc": 11
+              },
+              "cal": 50
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.dc_link.cal"
   }
 ]

@@ -74,6 +74,24 @@ class PinPickerTest {
         )
     }
 
+    /**
+     * `specs/optional-protections.md` section 5.2: a DC-link input is offered only on a pin that
+     * feeds ADC2 (PA0-3 and PC0-3 on the GD32F103RC), and a break input on its timer's break pin.
+     */
+    @Test
+    fun theProtectionInputsOfferTheirOwnPins() {
+        val dcLink = offered(Fields.MOTOR_DC_LINK_PIN, Chip.GD32F103RC, 0)
+        val adc2 = (0..3).map { Value.PinAdc(0, it, it) } + (0..3).map { Value.PinAdc(2, it, 10 + it) }
+        assertEquals(adc2, dcLink)
+        assertEquals(emptyList<Value>(), offered(Fields.MOTOR_DC_LINK_PIN, Chip.GD32F103C8, 0), "no ADC2 on the C8")
+        assertEquals(
+            listOf(Value.PinAf(0, 6, 0), Value.PinAf(1, 12, 0)),
+            offered(Fields.MOTOR_BREAK_PIN, Chip.GD32F103RC, 1),
+            "TIMER7's PA6 and TIMER0's PB12",
+        )
+        assertEquals(emptyList<Value>(), offered(Fields.MOTOR_BREAK_PIN, Chip.GD32F130C8, 0))
+    }
+
     @Test
     fun aSlotThatHoldsNoPinOffersNothing() {
         for (def in listOf(Fields.IMU_I2C, Fields.MOTOR_DEAD_TIME, Fields.MOTOR_CURRENT_CAL)) {

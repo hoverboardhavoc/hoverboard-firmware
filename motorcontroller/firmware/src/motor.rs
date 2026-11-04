@@ -895,6 +895,134 @@ impl CurrentLimit {
 }
 
 // -------------------------------------------------------------------------------------------
+// The DC-link limit (pure; `specs/optional-protections.md` section 3.2), the two-motor image's
+// -------------------------------------------------------------------------------------------
+
+/// The DC-link reading's window sum per motor: 16 times the mean of the 64 conversions of the
+/// motor's ADC2 inserted rank the window saw (`sum >> 2`), right-aligned, the phase offsets' unit.
+/// Written by the period ISR at each window boundary, its sole writer; read by the 250 Hz task.
+/// Stays 0 on a motor with no `current.dc_link.pin`.
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static DC_LINK_SUM: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
+/// Observation, packed by [`DcLinkLimit::step`]: the DC-link reading (`DC_LINK_SUM - zero`,
+/// saturated to `i16`, motoring positive) in bits 0..15 and the derate factor (0 to 32,768) in
+/// 16..31. Written by the 250 Hz task, its sole writer, on a motor with a DC-link pin.
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_DC_LINK: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
+
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+/// The derate factor at full, `1.0` in Q15: the demand word passes unchanged.
+pub const DERATE_FULL: u16 = 32_768;
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+/// The derate's fall per 250 Hz pass over the limit: full to 0 in 64 passes, 256 ms, the stock's
+/// Vq step rate.
+pub const DERATE_FALL: u16 = 512;
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+/// The derate's rise per pass under the limit: 0 to full in 256 passes, 1.02 s.
+pub const DERATE_RISE: u16 = 128;
+
+/// One motor's DC-link limit (`specs/optional-protections.md` section 3.2): the boot's measured
+/// zero, the limit in counts and the derate factor the 250 Hz task steps. Built once at bring-up
+/// ([`dc_link_verdict`]) and owned by the 250 Hz task after it; the period ISR only sums.
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DcLinkLimit {
+    /// The measured zero, in [`DC_LINK_SUM`]'s unit (16 times the raw 12-bit count).
+    zero: u16,
+    /// The limit in the same unit, `0` = no derate (the limit off, or its zero refused).
+    limit: u32,
+    /// The derate factor, Q15, `0..=`[`DERATE_FULL`].
+    factor: u16,
+}
+
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+impl DcLinkLimit {
+    /// A chain with zero `zero` and limit `limit` counts, the factor at full.
+    pub const fn new(zero: u16, limit: u32) -> Self {
+        DcLinkLimit {
+            zero,
+            limit,
+            factor: DERATE_FULL,
+        }
+    }
+
+    /// One 250 Hz pass on the window sum `sum` ([`DC_LINK_SUM`]): the reading is `sum - zero`
+    /// (motoring positive), and with a limit the factor falls by [`DERATE_FALL`] while the
+    /// reading is over it and rises by [`DERATE_RISE`] otherwise, so only motoring current is
+    /// limited. Returns the [`OBS_DC_LINK`] word.
+    pub fn step(&mut self, sum: u32) -> u32 {
+        let reading = sum as i32 - self.zero as i32;
+        if self.limit != 0 {
+            self.factor = if reading > self.limit as i32 {
+                self.factor.saturating_sub(DERATE_FALL)
+            } else {
+                (self.factor + DERATE_RISE).min(DERATE_FULL)
+            };
+        }
+        let r = reading.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        (r as u16 as u32) | ((self.factor as u32) << 16)
+    }
+
+    /// The arm's reset: the factor back to full.
+    pub fn reset_derate(&mut self) {
+        self.factor = DERATE_FULL;
+    }
+
+    /// The demand word through the derate: `demand * factor / 32,768`, exact at full and
+    /// symmetric in sign (the division truncates toward zero, where a shift would round the
+    /// negative half away from it).
+    pub fn scale(&self, demand: i16) -> i16 {
+        (demand as i32 * self.factor as i32 / DERATE_FULL as i32) as i16
+    }
+}
+
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+/// The bring-up's verdict on a motor's DC-link chain (`specs/optional-protections.md` section
+/// 3.2), for a motor that stores `current.dc_link.pin`: its measured zero (`None` when no
+/// conversion was measured), `current.dc_link.limit` in milliamps and `current.dc_link.cal`.
+///
+/// The zero is accepted inside the phase zeros' window (`commutation::foc::offset_in_window`, the
+/// one owner). The chain is built whenever a zero was measured, so its reading is published with
+/// the limit off and before it is calibrated; it derates only with a limit and an accepted zero,
+/// the limit converted by `board::limit::request_counts` (no noise-floor clamp: it is compared
+/// with a 64-period mean). A refused or missing zero on a motor with a limit raises
+/// [`FAULT_INIT_CAL`], so the motor does not arm; with the limit 0 it raises nothing.
+pub fn dc_link_verdict(zero: Option<u16>, limit_ma: u32, cal: u16) -> (Option<DcLinkLimit>, u32) {
+    let fault = if limit_ma != 0 { FAULT_INIT_CAL } else { 0 };
+    match zero {
+        Some(z) if commutation::foc::offset_in_window(z) => (
+            Some(DcLinkLimit::new(
+                z,
+                board::limit::request_counts(limit_ma, cal),
+            )),
+            0,
+        ),
+        Some(z) => (Some(DcLinkLimit::new(z, 0)), fault),
+        None => (None, fault),
+    }
+}
+
+#[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+/// The DC-link zero from the calibration's sums (`specs/optional-protections.md` section 3.2):
+/// `sum` of `n` right-aligned conversions of the motor's rank, in the phase offsets' unit (16 times
+/// the mean). `None` with no conversion.
+pub fn dc_link_zero(sum: u32, n: u32) -> Option<u16> {
+    (n > 0).then(|| (sum as u64 * 16 / n as u64) as u16)
+}
+
+/// Whether the period's bridge is treated as armed (`specs/optional-protections.md` section 3.3):
+/// the arming layer's state, unless a break-enabled timer's break flag is set, which takes the
+/// period as disarmed for every motor (the coast posture, no `low_side_on` sample a reading, the
+/// hold word's disarmed cause), since a break clears that timer's MOE in hardware while the arming
+/// layer still reads armed.
+#[inline(always)]
+pub fn period_armed(armed: bool, broken: bool) -> bool {
+    armed && !broken
+}
+
+// -------------------------------------------------------------------------------------------
 // The sampling instant, and the sample hold at the voltage ceiling (`specs/foc-torque.md`,
 // section 14)
 // -------------------------------------------------------------------------------------------
@@ -1587,6 +1715,11 @@ pub fn method_fault_bits(requested: commutation::CommutationMethod, boot: BootFi
 /// floor NOT carried at all would leave the arm path inventing one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BootFixed {
+    /// This motor's DC-link chain ([`dc_link_verdict`]), `None` without `current.dc_link.pin` or
+    /// a measured zero. The two-motor image's alone; the 250 Hz task takes it at boot and owns its
+    /// derate from there (`specs/optional-protections.md` section 3.2).
+    #[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+    pub dc_link: Option<DcLinkLimit>,
     /// This board's staged phase-current noise floor as STORED (`store::MOTOR_NOISE_FLOOR`, 0x6B,
     /// read at the brought-up motor's index). Raw, because [`noise_floor_counts`] owns the band and
     /// a second clamp here would be a second place for it to drift from.
@@ -1608,6 +1741,20 @@ pub struct BootFixed {
     /// re-taken. A board with no phase-current group never builds a `BootFixed` at all
     /// ([`MotorSkip::NoCurrentSense`]), which is how `current_sense = 0` reaches this gate.
     pub accepted_offsets: Option<commutation::foc::PhaseOffsets>,
+}
+
+/// What the boot reads from the store for one motor's bring-up beside its layout
+/// (`crate::layout::Motor`): the values the bring-up consumes that are not pins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootRead {
+    /// `store::MOTOR_NOISE_FLOOR` (0x4D), raw ([`BootFixed::noise_floor`]).
+    pub noise_floor: u16,
+    /// `store::MOTOR_DC_LINK_CAL` (0x5C), counts per amp, raw ([`dc_link_verdict`]).
+    #[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+    pub dc_link_cal: u16,
+    /// `store::MOTOR_DC_LINK_LIMIT` (0x5D), milliamps, `0` = off.
+    #[cfg(any(feature = "gd32f103rc", not(target_os = "none")))]
+    pub dc_link_limit: u32,
 }
 
 /// The drive direction as the commutation crate names it: `reversed` is the decoded
@@ -1985,6 +2132,11 @@ pub mod hw {
     /// two-motor image's battery conversion on ADC2.
     #[cfg(feature = "gd32f103rc")]
     const SAMPLE_TIME_239P5: u8 = 7;
+    /// The inserted sample-time code for 13.5 ADC cycles (`ADC_SAMPLETIME_13POINT5`), the DC-link
+    /// ranks on ADC2: not 1.5 or 7.5 with ADC2's regular group in use (GD32F10x User Manual Rev2.3
+    /// section 11.4.4, `specs/optional-protections.md` section 3.2).
+    #[cfg(feature = "gd32f103rc")]
+    const SAMPLE_TIME_13P5: u8 = 2;
     /// The ADCs [`BringUpStep::EnableAdcClock`] clocks: ADC0, and on the two-motor image ADC1 (the
     /// parallel pair's second converter) and ADC2 (the battery).
     #[cfg(not(feature = "gd32f103rc"))]
@@ -2039,6 +2191,17 @@ pub mod hw {
         /// The rail skip's threshold in the injected word's unit ([`rail_threshold`], `0` = off),
         /// installed with the value row at every arm (`specs/optional-protections.md` section 3.4).
         rail_skip: u16,
+        /// This motor's DC-link rank: ADC2 and the inserted rank its `current.dc_link.pin`
+        /// converts in, `None` without the pin (`specs/optional-protections.md` section 3.2).
+        #[cfg(feature = "gd32f103rc")]
+        dc: Option<(hal::Adc, u8)>,
+        /// The open window's sum of the DC rank's conversions, for [`DC_LINK_SUM`].
+        #[cfg(feature = "gd32f103rc")]
+        dc_sum: u32,
+        /// The gate timer's break input is enabled (`BRKEN`): the period ISR reads its break flag
+        /// (`specs/optional-protections.md` section 3.3).
+        #[cfg(feature = "gd32f103rc")]
+        brk: bool,
         /// Periods of the open window the bridge was floated ([`coast_posture`]), for word 50.
         coasted: u8,
         /// The cause bits the open window's floated periods raised ([`coast_causes`]), plus the
@@ -2079,6 +2242,26 @@ pub mod hw {
     ///
     /// One per motor, by index.
     static mut TIMER: [Option<PwmTimer>; COUNT] = [None; COUNT];
+
+    /// Which motors' gate timers have their break input enabled (`BRKEN`,
+    /// `specs/optional-protections.md` section 3.3). Written once by the bring-up on the boot
+    /// thread; read afterwards by the 250 Hz task alone ([`break_flags`]).
+    #[cfg(feature = "gd32f103rc")]
+    static mut BREAK_ENABLED: [bool; COUNT] = [false; COUNT];
+
+    /// Each motor's gate-timer break flag (`INTF.BRKIF`), `None` for a motor whose break input is
+    /// not enabled: the 250 Hz task's input to `OrchestratorState::set_ext_trip`, and the set of
+    /// timers whose flag the OFF pass clears (`specs/optional-protections.md` section 6.2).
+    #[cfg(feature = "gd32f103rc")]
+    pub fn break_flags() -> [Option<bool>; COUNT] {
+        // SAFETY: read-only access to statics written once on the boot thread, from the 250 Hz
+        // task, their only reader.
+        let (timers, enabled) = unsafe { (&*addr_of_mut!(TIMER), &*addr_of_mut!(BREAK_ENABLED)) };
+        core::array::from_fn(|i| match (timers[i], enabled[i]) {
+            (Some(t), true) => Some(t.handle().break_flag()),
+            _ => None,
+        })
+    }
 
     /// The bring-up-row facts this motor was configured with, or `None` on a board with no
     /// runtime. The arm path hands them to [`rederive`] so an arm-time rebuild converts the limit
@@ -2219,22 +2402,50 @@ pub mod hw {
     #[cfg(feature = "gd32f103rc")]
     static mut BATTERY_ADC: Option<hal::Adc> = None;
 
-    /// Bring ADC2 up for the battery: one regular channel `channel` at 239.5 cycles (the
-    /// divider's source impedance), software-triggered, calibrated, and the first conversion
-    /// started. ADC2 is outside the parallel pair and runs on its own. Its clock is
-    /// [`BringUpStep::EnableAdcClock`]'s. A refusal leaves no converter, and the battery word
-    /// stays 0 (UNKNOWN).
+    /// Bring ADC2 up for the battery and the DC-link inputs (`specs/twelve-fet.md` section 5.4,
+    /// `specs/optional-protections.md` section 3.2): the battery as one regular channel `battery`
+    /// at 239.5 cycles (the divider's source impedance), software-triggered; the DC-link channels
+    /// `dc` as its inserted ranks in motor order at 13.5 cycles on TIMER0's TRGO, the trigger ADC0
+    /// and ADC1 take, right-aligned like the battery; one calibration for both groups; then the
+    /// first battery conversion started. ADC2 is outside the parallel pair and runs on its own.
+    /// Its clock is [`BringUpStep::EnableAdcClock`]'s. Returns ADC2 when its inserted group is
+    /// configured, for the period ISR's reads. A refusal leaves no converter: the battery word
+    /// stays 0 (UNKNOWN) and no DC-link rank converts.
     #[cfg(feature = "gd32f103rc")]
-    fn battery_bring_up(chip: &Chip, channel: u8) {
-        let Ok(adc) = chip.adc_instance(PeriphLabel::Adc2) else {
-            return;
+    fn adc2_bring_up(chip: &Chip, battery: Option<u8>, dc: &[u8]) -> Option<hal::Adc> {
+        if battery.is_none() && dc.is_empty() {
+            return None;
+        }
+        let adc = chip.adc_instance(PeriphLabel::Adc2).ok()?;
+        if let Some(channel) = battery {
+            adc.configure_single(channel, SAMPLE_TIME_239P5);
+        }
+        let inserted = !dc.is_empty() && {
+            let mut channels = Vec::new();
+            for &channel in dc {
+                // Cannot overflow: at most `COUNT` channels into a capacity-4 vector.
+                let _ = channels.push(InjectedChannel {
+                    channel,
+                    sample_time: SAMPLE_TIME_13P5,
+                });
+            }
+            let cfg = InjectedAdcConfig {
+                adc: PeriphLabel::Adc2,
+                channels,
+                left_aligned: false,
+                trigger_timer: PeriphLabel::Timer0,
+                trigger_link: TimerTriggerLink::Trgo,
+                clock_div: ADC_CLOCK_DIV_ENUM,
+            };
+            adc.configure_inserted(&cfg).is_ok()
         };
-        adc.configure_single(channel, SAMPLE_TIME_239P5);
-        if adc.calibrate().is_ok() {
+        adc.calibrate().ok()?;
+        if battery.is_some() {
             // SAFETY: the one write, on the boot thread, before the scheduler exists.
             unsafe { *addr_of_mut!(BATTERY_ADC) = Some(adc) };
             adc.start_regular();
         }
+        inserted.then_some(adc)
     }
 
     /// The 250 Hz pass's battery read, at its start: the conversion [`battery_start`] began at the
@@ -2293,9 +2504,10 @@ pub mod hw {
     ///
     /// `period_hz` is the rate this bring-up's period ISR will run at ([`period_isr_hz`] of the
     /// configured timer clock). The commutator's hall debounce window is derived from it.
-    /// `noise_floor` is the boot-read `MOTOR_NOISE_FLOOR` at each motor's index, the one input to
-    /// the limit conversion that is BOOT-read: it rides [`BootFixed`] from here so every install
-    /// converts against one floor.
+    /// `boot_read` is each motor's boot-read values ([`BootRead`]): the `MOTOR_NOISE_FLOOR` at its
+    /// index, the one input to the limit conversion that is BOOT-read, which rides [`BootFixed`]
+    /// from here so every install converts against one floor; and on the two-motor image the
+    /// DC-link scale and limit the calibration's DC verdict takes ([`dc_link_verdict`]).
     /// `cal_moe` is the arming layer's calibration MOE (`crate::arm::hw::calibration_moe`), which
     /// [`BringUpStep::CalibratePhaseOffsets`] calls for a motor stored `low_side_on` alone
     /// ([`Motor::sense_low_side`], section 5.5).
@@ -2314,7 +2526,7 @@ pub mod hw {
         motors: &[Option<Motor>; COUNT],
         vbatt: Option<Pin3>,
         period_hz: u32,
-        noise_floor: [u16; COUNT],
+        boot_read: [BootRead; COUNT],
         cal_moe: fn(&PwmTimer, bool),
     ) -> [Result<MotorRuntimeSummary, MotorSkip>; COUNT] {
         // Motor 1's outcome, which the bring-up writes as it goes (a two-motor image only).
@@ -2324,7 +2536,7 @@ pub mod hw {
             motors,
             vbatt,
             period_hz,
-            noise_floor,
+            boot_read,
             cal_moe,
             &mut second,
         );
@@ -2346,7 +2558,7 @@ pub mod hw {
         motors: &[Option<Motor>; COUNT],
         vbatt: Option<Pin3>,
         period_hz: u32,
-        noise_floor: [u16; COUNT],
+        boot_read: [BootRead; COUNT],
         cal_moe: fn(&PwmTimer, bool),
         second: &mut Result<MotorRuntimeSummary, MotorSkip>,
     ) -> Result<MotorRuntimeSummary, MotorSkip> {
@@ -2404,6 +2616,14 @@ pub mod hw {
         // bits (section 7).
         let mut cal: [(Option<PhaseOffsets>, (u16, u16), u32); COUNT] = [(None, (0, 0), 0); COUNT];
         let mut calibrated = false;
+        // The DC-link chain (`specs/optional-protections.md` section 3.2): ADC2 once its inserted
+        // group is up, each motor's rank in it, and the calibration's zero for each.
+        #[cfg(feature = "gd32f103rc")]
+        let mut dc_adc: Option<hal::Adc> = None;
+        #[cfg(feature = "gd32f103rc")]
+        let mut dc_rank: [Option<u8>; COUNT] = [None; COUNT];
+        #[cfg(feature = "gd32f103rc")]
+        let mut dc_zero: [Option<u16>; COUNT] = [None; COUNT];
 
         for step in BRING_UP_STEPS {
             let failed = |s: BringUpStep| MotorSkip::StepFailed(s);
@@ -2427,12 +2647,12 @@ pub mod hw {
                 }
                 BringUpStep::ConfigureTimer => {
                     timer = Some(
-                        PwmTimer::configure(chip, &timer_config(m.dead_time, timer_label))
+                        PwmTimer::configure(chip, &timer_config(&m, timer_label))
                             .map_err(|_| failed(step))?,
                     );
                     if COUNT > 1 {
                         if let Some((m1m, _, l)) = m1 {
-                            match PwmTimer::configure(chip, &timer_config(m1m.dead_time, l)) {
+                            match PwmTimer::configure(chip, &timer_config(&m1m, l)) {
                                 Ok(t) => timer1 = Some(t),
                                 Err(_) => drop_m1(&mut m1),
                             }
@@ -2503,6 +2723,18 @@ pub mod hw {
                             pin: *pin,
                         });
                     }
+                    // The protection inputs (`specs/optional-protections.md` section 5.1), read on
+                    // the two-motor image alone: a DC-link pin analog, a break pin a floating
+                    // input, the stock's mode.
+                    #[cfg(feature = "gd32f103rc")]
+                    for mm in core::iter::once(&m).chain(m1.as_ref().map(|(m1m, _, _)| m1m)) {
+                        if let Some([port, pin, _]) = mm.dc_link {
+                            chip.analog_pin(PinId { port, pin });
+                        }
+                        if let Some([port, pin, _]) = mm.brk {
+                            chip.pin(PinId { port, pin }).into_floating_input();
+                        }
+                    }
                 }
                 BringUpStep::ConfigureInjectedGroup => {
                     // Motor 0's pair, and motor 1's after it on the two-motor image.
@@ -2543,9 +2775,20 @@ pub mod hw {
                             .dual_adc()
                             .configure_inserted_parallel(chip, &cfg)
                             .map_err(|_| failed(step))?;
-                        if let Some(v) = vbatt {
-                            battery_bring_up(chip, v[2]);
+                        // The DC-link ranks in motor order, motor `m`'s at its position among the
+                        // motors that store a pin (`specs/optional-protections.md` section 3.2).
+                        let mut dc_chans: Vec<u8, COUNT> = Vec::new();
+                        for (i, mm) in core::iter::once(Some(&m))
+                            .chain(core::iter::once(m1.as_ref().map(|(m1m, _, _)| m1m)))
+                            .enumerate()
+                        {
+                            if let Some([_, _, ch]) = mm.and_then(|mm| mm.dc_link) {
+                                dc_rank[i] = Some(dc_chans.len() as u8);
+                                // Cannot overflow: one per motor.
+                                let _ = dc_chans.push(ch);
+                            }
                         }
+                        dc_adc = adc2_bring_up(chip, vbatt.map(|v| v[2]), &dc_chans);
                         handle
                     };
                     injected = Some(handle);
@@ -2596,8 +2839,27 @@ pub mod hw {
                         }
                     };
                     hold(true);
-                    let measured = measure_offsets(&inj);
+                    // The DC ranks are summed from the same conversions as the phase blocks; one
+                    // zero per motor over every block measured.
+                    #[cfg(feature = "gd32f103rc")]
+                    let mut dc_sums = ([0u32; COUNT], 0u32);
+                    let mut each = || {
+                        #[cfg(feature = "gd32f103rc")]
+                        if let Some(adc) = dc_adc {
+                            for (sum, rank) in dc_sums.0.iter_mut().zip(dc_rank) {
+                                if let Some(r) = rank {
+                                    *sum += u32::from(adc.read_injected_data(r));
+                                }
+                            }
+                            dc_sums.1 += 1;
+                        }
+                    };
+                    let measured = measure_offsets(&inj, &mut each);
                     hold(false);
+                    #[cfg(feature = "gd32f103rc")]
+                    for ((z, sum), rank) in dc_zero.iter_mut().zip(dc_sums.0).zip(dc_rank) {
+                        *z = rank.and(dc_link_zero(sum, dc_sums.1));
+                    }
                     if let Some(verdicts) = measured {
                         for (i, (c, verdict)) in cal.iter_mut().zip(verdicts).enumerate() {
                             // The pair published and the pair the ISR reads currents against:
@@ -2631,6 +2893,20 @@ pub mod hw {
                     let (Some(t), Some(inj), true) = (timer, injected, calibrated) else {
                         return Err(failed(step));
                     };
+                    #[cfg(feature = "gd32f103rc")]
+                    let protect = |i: usize, mm: &Motor| Protect {
+                        dc: dc_adc.zip(dc_rank[i]),
+                        dc_link: mm.dc_link.map(|_| {
+                            dc_link_verdict(
+                                dc_zero[i],
+                                boot_read[i].dc_link_limit,
+                                boot_read[i].dc_link_cal,
+                            )
+                        }),
+                        brk: break_config(mm).enabled,
+                    };
+                    #[cfg(not(feature = "gd32f103rc"))]
+                    let protect = |_: usize, _: &Motor| Protect;
                     install(
                         chip,
                         0,
@@ -2639,7 +2915,8 @@ pub mod hw {
                         t,
                         inj,
                         cal[0],
-                        noise_floor[0],
+                        boot_read[0].noise_floor,
+                        protect(0, &m),
                         period_hz,
                         requested,
                     );
@@ -2654,7 +2931,8 @@ pub mod hw {
                                 t1,
                                 inj,
                                 cal[i],
-                                noise_floor[i],
+                                boot_read[i].noise_floor,
+                                protect(i, &m1m),
                                 period_hz,
                                 requested,
                             );
@@ -2688,6 +2966,21 @@ pub mod hw {
         }
     }
 
+    /// A motor's protections as the bring-up configured them (`specs/optional-protections.md`
+    /// sections 3.2 and 3.3), for [`install`]: its DC-link rank, its DC-link verdict (`None`
+    /// without the pin) and whether its break input is enabled. The two-motor image's; a unit
+    /// elsewhere.
+    #[cfg(feature = "gd32f103rc")]
+    #[derive(Clone, Copy)]
+    struct Protect {
+        dc: Option<(hal::Adc, u8)>,
+        dc_link: Option<(Option<DcLinkLimit>, u32)>,
+        brk: bool,
+    }
+    #[cfg(not(feature = "gd32f103rc"))]
+    #[derive(Clone, Copy)]
+    struct Protect;
+
     /// [`BringUpStep::SelectMethodAndInstall`] for motor `i`: build its records and install the
     /// runtime the ISR reads, with its published words. `#[inline(always)]`: one call per motor
     /// the image drives, so a one-motor image carries the body once, where it was.
@@ -2702,6 +2995,7 @@ pub mod hw {
         inj: PeriodAdc,
         (accepted, offsets, cal_bits): (Option<PhaseOffsets>, (u16, u16), u32),
         noise_floor: u16,
+        protect: Protect,
         period_hz: u32,
         requested: commutation::CommutationMethod,
     ) {
@@ -2709,9 +3003,15 @@ pub mod hw {
         // The boot-fixed facts, kept on the runtime so the arm-time re-derivation rebuilds the
         // records from the SAME floor and accepted zeros rather than re-measuring the bridge
         // (`specs/integration.md`, the arm-time re-read).
+        #[cfg(feature = "gd32f103rc")]
+        let (dc_link, dc_fault) = protect.dc_link.unwrap_or((None, 0));
+        #[cfg(not(feature = "gd32f103rc"))]
+        let (Protect, dc_fault) = (protect, 0);
         let boot = BootFixed {
             noise_floor,
             accepted_offsets: accepted,
+            #[cfg(feature = "gd32f103rc")]
+            dc_link,
         };
         // Forward, offset 0, and the floor's limit until the arm row's install.
         let decode = commutation::sixstep::SixStep::new(commutation::Direction::Forward, 0);
@@ -2738,7 +3038,9 @@ pub mod hw {
         // init fault the ISR did not know about would be erased on the first entry. Seeding it
         // keeps the ISR the sole writer of `FAULT` after the unmask while still carrying a fault
         // raised before it.
-        let init_faults = init_fault_bits(cal);
+        // A motor whose DC-link limit cannot be enforced (its zero refused) does not drive either
+        // (`specs/optional-protections.md` section 3.2).
+        let init_faults = init_fault_bits(cal) | dc_fault;
         FAULT[i].store(init_faults, Ordering::Relaxed);
         // SAFETY: the one write per motor, on the boot thread, BEFORE the period vector is
         // unmasked (the next step), so no ISR can observe it half-built.
@@ -2762,6 +3064,12 @@ pub mod hw {
                 current: CurrentLimit::new(limit, store::MOTOR_PEAK_TRIP_PERIODS.default()),
                 hold: SampleHold::new(),
                 rail_skip: rail_threshold(store::MOTOR_RAIL_SKIP.default()),
+                #[cfg(feature = "gd32f103rc")]
+                dc: protect.dc,
+                #[cfg(feature = "gd32f103rc")]
+                dc_sum: 0,
+                #[cfg(feature = "gd32f103rc")]
+                brk: protect.brk,
                 coasted: 0,
                 causes: cal_bits,
             });
@@ -2770,6 +3078,12 @@ pub mod hw {
         // of the rank its pair converts in (`specs/twelve-fet.md` section 5.2) at the staged
         // `motor.dead_time` its timer was just configured with. Stored once, here; the knob keeps
         // whatever a bench session writes over it after.
+        #[cfg(feature = "gd32f103rc")]
+        // SAFETY: the one write per motor, on the boot thread, before the scheduler exists and
+        // therefore before the 250 Hz reader does.
+        unsafe {
+            (*addr_of_mut!(BREAK_ENABLED))[i] = protect.brk;
+        }
         let threshold = hold_compare_max(sample_rank(i), m.dead_time);
         FOC_HOLD_COMPARE[i].store(threshold as u32, Ordering::Relaxed);
         OBS_STATE[i].store(
@@ -2827,12 +3141,15 @@ pub mod hw {
     /// Every motor's pair from the same conversions: motor `m`'s ranks are `2m` and `2m + 1`
     /// (`specs/twelve-fet.md` section 5.5). A motor not up reads ranks the group does not convert;
     /// its block is never used.
-    fn measure_block(injected: &PeriodAdc) -> Option<[CalBlock; COUNT]> {
+    /// `each` runs after every counted conversion: the two-motor image's DC-link ranks are summed
+    /// from the same conversions there (`specs/optional-protections.md` section 3.2).
+    fn measure_block(injected: &PeriodAdc, each: &mut impl FnMut()) -> Option<[CalBlock; COUNT]> {
         let mut sums = [[0u32; 2]; COUNT];
         for _ in 0..CAL_SAMPLES {
             if !await_conversion(injected) {
                 return None;
             }
+            each();
             let s = read_samples(injected);
             let (ranks, _) = s.as_chunks::<2>();
             for (sum, rank) in sums.iter_mut().zip(ranks) {
@@ -2856,7 +3173,10 @@ pub mod hw {
     ///
     /// The bridge is quiet or holds its low sides on, as the caller set it (`current.sense`,
     /// section 5.5); no high side is on while this runs.
-    fn measure_offsets(injected: &PeriodAdc) -> Option<[CalVerdict; COUNT]> {
+    fn measure_offsets(
+        injected: &PeriodAdc,
+        each: &mut impl FnMut(),
+    ) -> Option<[CalVerdict; COUNT]> {
         for _ in 0..CAL_SETTLE_CONVERSIONS {
             if !await_conversion(injected) {
                 return None;
@@ -2865,7 +3185,7 @@ pub mod hw {
         let mut blocks: [[CalBlock; CAL_BLOCKS]; COUNT] = [[(0, 0); CAL_BLOCKS]; COUNT];
         let mut verdicts = [CalVerdict::Again; COUNT];
         for n in 0..CAL_BLOCKS {
-            let block = measure_block(injected)?;
+            let block = measure_block(injected, each)?;
             let mut decided = true;
             for ((v, b), mb) in verdicts.iter_mut().zip(blocks.iter_mut()).zip(block) {
                 if *v == CalVerdict::Again {
@@ -2908,7 +3228,7 @@ pub mod hw {
     /// `plan-hotpath-readiness.md` section 1's reference column, so the step list and the stage-2
     /// golden agree by construction). `timer` is the label [`gate_timer_label`] derived from this
     /// motor's validated gate set, never a literal.
-    fn timer_config(dead_time: u8, timer: PeriphLabel) -> PwmConfig {
+    fn timer_config(m: &Motor, timer: PeriphLabel) -> PwmConfig {
         let ch = |_: usize| PwmChannelConfig {
             // The complementary (low) side is inverted, active-low: the reference's polarity.
             polarity: true,
@@ -2925,13 +3245,10 @@ pub mod hw {
             // `period_isr_hz` derives that rate from these same two constants.
             prescaler: PRESCALER,
             // Per-board data, never a crate constant (`specs/commutation.md`).
-            dead_time,
-            // Stock parity: the hardware break input is deliberately disabled (over-current
-            // protection is software's, out of scope here; the bench current limit is the cap).
-            brk: BreakConfig {
-                enabled: false,
-                level: false,
-            },
+            dead_time: m.dead_time,
+            // The hardware break input, enabled only where the motor stores its pin and its switch
+            // (`specs/optional-protections.md` section 3.3); elsewhere disabled.
+            brk: break_config(m),
             trigger_compare: TRIGGER_COMPARE,
             // Delta 1: centre-aligned mode 1 (CAM = 01).
             align: PwmAlign::Center1,
@@ -2962,6 +3279,16 @@ pub mod hw {
             // works while disarmed where the CH3 channel link (ADC ETSIC = 001, what stock uses)
             // produces nothing: that one rides the channel OUTPUT, which MOE gates.
             trgo_src: TrgoSource::Ch3Compare,
+        }
+    }
+
+    /// A motor's break configuration (`specs/optional-protections.md` sections 3.3 and 6.3):
+    /// enabled when its `gate.break.pin` and `gate.break.enable` are both stored, at its
+    /// `active_high` bit's level. The bring-up configures the pin; `BRKEN` follows from this.
+    fn break_config(m: &Motor) -> BreakConfig {
+        BreakConfig {
+            enabled: m.brk.is_some() && m.brk_enable,
+            level: m.brk_high,
         }
     }
 
@@ -3026,6 +3353,13 @@ pub mod hw {
         // no two of them can be live at once. A later reader deciding whether that critical section
         // is necessary should start from the install's own doc comment, not from this line.
         let motors = unsafe { &mut *addr_of_mut!(MOTOR) };
+        // The break flags (`specs/optional-protections.md` section 3.3): a break on either
+        // break-enabled timer takes this period as disarmed for every motor's body.
+        #[cfg(feature = "gd32f103rc")]
+        let broken = motors.iter().flatten().any(|m| m.brk && m.pwm.break_flag());
+        #[cfg(not(feature = "gd32f103rc"))]
+        let broken = false;
+        let armed = period_armed(crate::arm::hw::armed(), broken);
         // Motor 0 owns the injected groups and TIMER0's trigger: motor 1 is up only with it.
         let Some(m0) = motors[0].as_mut() else {
             return;
@@ -3050,11 +3384,11 @@ pub mod hw {
             VBATT_RAW.store((samples[2] >> 3) as u32, Ordering::Relaxed);
         }
         // Motor `i`'s sensed pair is ranks `2i` and `2i + 1`.
-        motor_period(m0, 0, [samples[0], samples[1]]);
+        motor_period(m0, 0, [samples[0], samples[1]], armed);
         for (k, slot) in motors[1..].iter_mut().enumerate() {
             let i = k + 1;
             if let Some(m) = slot.as_mut() {
-                motor_period(m, i, [samples[2 * i], samples[2 * i + 1]]);
+                motor_period(m, i, [samples[2 * i], samples[2 * i + 1]], armed);
             }
         }
     }
@@ -3065,7 +3399,7 @@ pub mod hw {
     /// motor, so the hot window carries no call. Every motor reads the one demand sequence and the
     /// one arm state (section 5.6), so a stalled 250 Hz task coasts both.
     #[inline(always)]
-    fn motor_period(m: &mut MotorRuntime, i: usize, raw: [u16; 2]) {
+    fn motor_period(m: &mut MotorRuntime, i: usize, raw: [u16; 2], armed: bool) {
         // The two conditioned phase currents, this period, from the same two samples (the stock
         // unit, against the bring-up's measured zeros): the current limit's input, and the FOC
         // arm's, which takes this pair rather than computing it a second time. Where FOC runs the
@@ -3075,7 +3409,6 @@ pub mod hw {
         // The sample rule (`specs/twelve-fet.md` section 5.6): on a `low_side_on` motor a sensed
         // phase whose leg was off for this sample, or any while disarmed, reads the phase voltage,
         // so it is taken as 0, its true current; with neither a reading the limit is passed.
-        let armed = crate::arm::hw::armed();
         let read = sensed_readings(m.low_side, armed, m.sample_enables, m.bc);
         let ia = if read[0] { ia } else { 0 };
         let ib = if read[1] { ib } else { 0 };
@@ -3100,6 +3433,12 @@ pub mod hw {
         };
         if current.trip {
             OVER_CURRENT_TRIPS[i].store(m.current.trips(), Ordering::Relaxed);
+        }
+        // The DC sample into the window's sum (`specs/optional-protections.md` section 3.2): ADC2's
+        // rank converted on this period's trigger, read without a wait.
+        #[cfg(feature = "gd32f103rc")]
+        if let Some((adc, rank)) = m.dc {
+            m.dc_sum += u32::from(adc.read_injected_data(rank));
         }
         let code = m.halls.read();
         let levels = [code & 1, (code >> 1) & 1, (code >> 2) & 1];
@@ -3200,6 +3539,12 @@ pub mod hw {
             let causes = m.causes | if both { HOLD_CAUSE_BOTH_HELD } else { 0 };
             OBS_FOC_HOLD[i].store(pack_foc_hold(held, m.coasted, causes), Ordering::Relaxed);
             m.coasted = 0;
+            // The DC-link window: 16 times its mean (64 conversions, `sum >> 2`).
+            #[cfg(feature = "gd32f103rc")]
+            if m.dc.is_some() {
+                DC_LINK_SUM[i].store(m.dc_sum >> 2, Ordering::Relaxed);
+                m.dc_sum = 0;
+            }
             m.causes &= HOLD_CAL_PAIRS_MASK | HOLD_CAL_DISAGREED;
         }
         // The front end's words, borrowed after the window branch: closing the FOC window takes
@@ -3761,6 +4106,7 @@ mod tests {
     const BOOT: BootFixed = BootFixed {
         noise_floor: FLOOR,
         accepted_offsets: None,
+        dc_link: None,
     };
 
     /// A six-step decode as an arm would have re-read it: Forward, align offset 2.
@@ -5149,6 +5495,152 @@ mod tests {
         // The arm row carries the stored count to the install as the left-aligned threshold.
         assert_eq!(rederive(0, 0, 2, 2_000, CAL, 1, 3_848, BOOT).rail, 30_784);
         assert_eq!(rederive(0, 0, 2, 2_000, CAL, 1, 0, BOOT).rail, 0);
+    }
+
+    /// The DC-link derate (`specs/optional-protections.md` sections 3.2 and 9.1): over the limit
+    /// the factor falls 512 a pass to 0, under it rises 128 to 32,768; the arm resets it; a
+    /// reading under the zero (regenerated current) is under the limit; the limit 0 never derates;
+    /// the observation word is the saturated reading and the factor.
+    #[test]
+    fn the_dc_link_derate_falls_and_rises_at_the_stocks_rates() {
+        let zero = 1_960 * 16;
+        let limit = board::limit::request_counts(14_000, 800);
+        let factor = |w: u32| (w >> 16) as u16;
+        let reading = |w: u32| w as u16 as i16;
+        let mut d = DcLinkLimit::new(zero, limit);
+        let over = zero as u32 + limit + 1;
+        let mut passes = 0;
+        let mut w = d.step(over);
+        while factor(w) != 0 {
+            passes += 1;
+            assert_eq!(factor(w), DERATE_FULL - passes * DERATE_FALL);
+            w = d.step(over);
+        }
+        assert_eq!(passes + 1, 64, "full to 0 in 64 passes");
+        assert_eq!(reading(w), limit as i16 + 1);
+        assert_eq!(factor(d.step(over)), 0, "it stays at 0");
+        // At the limit is not over it, and a rise takes 256 passes to full.
+        let at = zero as u32 + limit;
+        for k in 1..=256u32 {
+            assert_eq!(
+                factor(d.step(at)) as u32,
+                (k * DERATE_RISE as u32).min(32_768)
+            );
+        }
+        assert_eq!(factor(d.step(at)), DERATE_FULL, "it stays at full");
+        // Regenerated current reads below the zero, which is under the limit: no derate.
+        let mut d = DcLinkLimit::new(zero, limit);
+        let w = d.step(0);
+        assert_eq!((reading(w), factor(w)), (-(zero as i16), DERATE_FULL));
+        // A reading past the word saturates.
+        let w = DcLinkLimit::new(0, 0).step(100_000);
+        assert_eq!(reading(w), i16::MAX, "saturated");
+        // The arm resets the factor.
+        let mut d = DcLinkLimit::new(zero, limit);
+        for _ in 0..10 {
+            d.step(over);
+        }
+        assert!(factor(d.step(over)) < DERATE_FULL);
+        d.reset_derate();
+        assert_eq!(factor(d.step(at)), DERATE_FULL);
+        // The limit 0 publishes the reading and never derates.
+        let mut d = DcLinkLimit::new(zero, 0);
+        let w = d.step(u32::from(zero) + 5_000);
+        assert_eq!((reading(w), factor(w)), (5_000, DERATE_FULL));
+    }
+
+    /// The derate's scaling of the demand word: exact at full, symmetric in sign, 0 at 0.
+    #[test]
+    fn the_derated_demand_is_exact_at_full_and_symmetric_in_sign() {
+        let mut d = DcLinkLimit::new(0, 1);
+        for demand in [i16::MIN + 1, -28_500, -3, -1, 0, 1, 3, 28_500, i16::MAX] {
+            assert_eq!(d.scale(demand), demand, "full passes {demand} unchanged");
+        }
+        // Half: 16,384 after 32 passes over the limit.
+        for _ in 0..32 {
+            d.step(2);
+        }
+        for demand in [1i16, 3, 28_500, 28_501] {
+            assert_eq!(d.scale(-demand), -d.scale(demand), "{demand}");
+        }
+        assert_eq!(d.scale(28_500), 14_250);
+        assert_eq!(d.scale(3), 1);
+        for _ in 0..32 {
+            d.step(2);
+        }
+        assert_eq!(d.scale(28_500), 0, "at 0 the word is 0");
+        assert_eq!(d.scale(-28_500), 0);
+    }
+
+    /// The bring-up's DC-link verdict: a zero inside the phase zeros' window builds a derating
+    /// chain at `request_counts` of the limit; a refused or missing zero raises `FAULT_INIT_CAL`
+    /// with the limit set and nothing with the limit 0, and a refused zero still publishes its
+    /// reading with no derate.
+    #[test]
+    fn a_refused_dc_zero_faults_the_motor_only_with_its_limit_set() {
+        let good = 1_964 * 16;
+        assert!(commutation::foc::offset_in_window(good));
+        let (dc, fault) = dc_link_verdict(Some(good), 14_000, 800);
+        assert_eq!(fault, 0);
+        assert_eq!(
+            dc,
+            Some(DcLinkLimit::new(
+                good,
+                board::limit::request_counts(14_000, 800)
+            ))
+        );
+        assert_eq!(board::limit::request_counts(14_000, 800), 11_200);
+        // The scale clamps into the calibration band, as `current.cal`'s does.
+        assert_eq!(
+            dc_link_verdict(Some(good), 14_000, 5_000).0,
+            Some(DcLinkLimit::new(
+                good,
+                board::limit::request_counts(14_000, CURRENT_CAL_MAX)
+            ))
+        );
+        // Outside the window on either side: the init fault with the limit, nothing without.
+        for refused in [1_874 * 16, 2_157 * 16] {
+            assert!(!commutation::foc::offset_in_window(refused));
+            let (dc, fault) = dc_link_verdict(Some(refused), 14_000, 800);
+            assert_eq!(fault, FAULT_INIT_CAL);
+            assert_eq!(
+                dc,
+                Some(DcLinkLimit::new(refused, 0)),
+                "no derate on a refused zero"
+            );
+            assert_eq!(
+                dc_link_verdict(Some(refused), 0, 800),
+                (Some(DcLinkLimit::new(refused, 0)), 0)
+            );
+        }
+        assert_eq!(dc_link_verdict(None, 14_000, 800), (None, FAULT_INIT_CAL));
+        assert_eq!(dc_link_verdict(None, 0, 800), (None, 0));
+        // The zero is 16 times the mean of the right-aligned conversions, the phase offsets' unit.
+        assert_eq!(dc_link_zero(1_964 * 4_096, 4_096), Some(good));
+        assert_eq!(dc_link_zero(1_964 * 3 * 4_096, 3 * 4_096), Some(good));
+        assert_eq!(dc_link_zero(0, 0), None);
+    }
+
+    /// A break on either timer floats both motors and passes their limits
+    /// (`specs/optional-protections.md` sections 3.3 and 9.1): the period is taken as disarmed,
+    /// so the coast posture holds whatever the other inputs say, and a `low_side_on` motor's
+    /// samples are no reading.
+    #[test]
+    fn a_set_break_flag_takes_the_period_as_disarmed_for_every_motor() {
+        assert!(period_armed(true, false));
+        assert!(!period_armed(true, true));
+        assert!(!period_armed(false, true));
+        assert!(!period_armed(false, false));
+        let armed = period_armed(true, true);
+        for bc in [false, true] {
+            assert!(coast_posture(armed, false, false), "floated");
+            assert_eq!(
+                sensed_readings(true, armed, [true; 3], bc),
+                [false; 2],
+                "passed"
+            );
+        }
+        assert_eq!(coast_causes(armed, false, false), HOLD_CAUSE_DISARMED);
     }
 
     /// The sample rule's predicate (`specs/twelve-fet.md` section 5.6): an `any_state` motor

@@ -11,6 +11,7 @@ import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
 import com.hoverboard.remote.model.LayoutEditor
+import com.hoverboard.remote.model.LayoutGroup
 import com.hoverboard.remote.model.LayoutRows
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
@@ -160,6 +161,48 @@ class LayoutModelTest {
             } else {
                 assertNull(rig.state.notice)
                 assertEquals(listOf(Fields.MOTOR_PHASE_B.key(0), Fields.MOTOR_PHASE_C.key(0)), rig.written)
+            }
+        }
+    }
+
+    /**
+     * The protection inputs (`specs/optional-protections.md` section 5.2): their rows show only on
+     * the GD32F103RC, whose image reads them, and not while the part is unknown.
+     */
+    @Test
+    fun theProtectionInputRowsShowOnTheRcAlone() {
+        val inputs = setOf(Fields.MOTOR_DC_LINK_PIN, Fields.MOTOR_BREAK_PIN)
+        for (part in listOf(null) + Chip.entries) {
+            for (m in 0 until Fields.MOTORS) {
+                val shown = LayoutRows.of(LayoutGroup.MOTOR, m, part).map { it.slot.def }
+                    .filter { it in inputs }.toSet()
+                assertEquals("$part motor $m", if (part == Chip.GD32F103RC) inputs else emptySet(), shown)
+            }
+        }
+        val phaseA = LayoutRows.of(LayoutGroup.MOTOR, 0, null).any { it.slot.def == Fields.MOTOR_PHASE_A }
+        assertTrue("the phase pins show everywhere", phaseA)
+    }
+
+    /**
+     * The `adc` check's ADC2 rule (`shared/config-checks/adc.json`): a DC-link pin on PC4, which
+     * feeds ADC0 and ADC1 only, is refused on the RC; on PC1 it is written.
+     */
+    @Test
+    fun aDcLinkPinOffAdc2IsRefusedAndOneOnItWritten() = runTest {
+        for ((pin, refused) in listOf(Value.PinAdc(2, 4, 14) to true, Value.PinAdc(2, 1, 11) to false)) {
+            val rig = layoutRig(BOARD, chip = ChipTag.F103RC)
+            rig.stage(Fields.MOTOR_DC_LINK_PIN, pin, motor = 0)
+            rig.model.apply()
+            runCurrent()
+
+            if (refused) {
+                val notice = rig.state.notice as LayoutNotice.CheckRefused
+                assertEquals(Check.ADC, notice.refusal.check)
+                assertEquals(Fields.MOTOR_DC_LINK_PIN.key(0), notice.refusal.key)
+                assertEquals(emptyList<Any>(), rig.written)
+            } else {
+                assertNull(rig.state.notice)
+                assertEquals(listOf(Fields.MOTOR_DC_LINK_PIN.key(0)), rig.written)
             }
         }
     }

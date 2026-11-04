@@ -282,9 +282,27 @@ data class BoardSetup(
      * also has motor 1's `control.side` read into [values], at index 1.
      */
     val motors: Int? = null,
+    /**
+     * The keys of each driven motor's protection inputs (`Checks.protectionInputKeys`: the DC-link
+     * pin, the break pin and the phase pins) that this board stores, a key it does not store
+     * absent; null until read. Which protection rows Setup shows rests on them ([shows]).
+     */
+    val protectionInputs: Map<Key, Value>? = null,
 ) {
     /** Whether any field's write is queued or in flight. */
     val writing: Boolean get() = writes.values.any { it.sending }
+
+    /**
+     * Whether Setup shows [field] for this board (`specs/optional-protections.md` section 7): a
+     * per-motor row ([SetupField.motor]) only for a motor the board drives, and a protection setting
+     * with an input only beside that input ([Checks.storesProtectionInput]), which is hidden until
+     * the inputs are read. Every other row always.
+     */
+    fun shows(field: SetupField): Boolean {
+        val m = field.motor ?: return true
+        if (m >= (motors ?: 1)) return false
+        return Checks.storesProtectionInput(field.key, protectionInputs ?: emptyMap()) != false
+    }
 
     /** Motor [motor]'s ride facts, every one null while unread. */
     fun factsOf(motor: Int): MotorFacts = motorFacts[motor] ?: MotorFacts()
@@ -404,6 +422,7 @@ data class BoardSetup(
         rearm = null,
         reboot = null,
         motors = null,
+        protectionInputs = null,
     )
 }
 
@@ -479,8 +498,11 @@ data class SetupState(
     /** The target node's class, or null while it is unread. */
     val currentClass: Int? get() = board?.let { nodeAt(it)?.nodeClass }
 
-    /** The rows the screen shows for the target node ([SetupFields.rowsFor]). */
-    val rows: List<SetupField> get() = SetupFields.rowsFor(currentClass)
+    /**
+     * The rows the screen shows for the target node: [SetupFields.rowsFor] its class, less those the
+     * board does not show ([BoardSetup.shows]).
+     */
+    val rows: List<SetupField> get() = SetupFields.rowsFor(currentClass).filter { current.shows(it) }
 
     /** The node at [address]'s state, empty for a node this session has not touched. */
     fun setupOf(address: Int): BoardSetup = boards[address] ?: BoardSetup()
@@ -1174,6 +1196,22 @@ class SetupModel(
             record(board, field.key, r)
         }
         if (SetupFields.IMU_MODEL in rows) readImuBus(board)
+        if (rows.any { it.motor != null }) readProtectionInputs(board)
+    }
+
+    /**
+     * Read each driven motor's protection inputs into [BoardSetup.protectionInputs]: a key the board
+     * answers with its default is not stored. Any other answer leaves the inputs unread, which hides
+     * the rows that need one.
+     */
+    private suspend fun readProtectionInputs(board: Int) {
+        val stored = mutableMapOf<Key, Value>()
+        for (key in motorsOf(board).flatMap { Checks.protectionInputKeys(it) }) {
+            if (board !in _state.value.addresses) return
+            val r = awaitSlot { transport.readConfig(key, board) } as? ReadValue ?: return
+            if (!r.isDefault) stored[key] = r.value
+        }
+        update(board) { it.copy(protectionInputs = stored) }
     }
 
     /**

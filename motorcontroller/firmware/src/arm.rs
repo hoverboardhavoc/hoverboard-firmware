@@ -647,7 +647,29 @@ pub mod hw {
         // SAFETY: the one write per motor, on the boot thread, before the scheduler exists and
         // therefore before any control task can read it.
         if let Some(g) = unsafe { (*addr_of_mut!(GATE)).get_mut(motor) } {
-            *g = Some(timer.arm_gate());
+            let gate = timer.arm_gate();
+            // A break flag the bring-up left set (`specs/optional-protections.md` section 6.3),
+            // cleared before the first 250 Hz pass reads it: the bridge has not been armed, so no
+            // period has yet taken it as a break.
+            #[cfg(feature = "gd32f103rc")]
+            gate.clear_break_flag();
+            *g = Some(gate);
+        }
+    }
+
+    /// Clear the break flag (`INTF.BRKIF`) of each motor `which` names whose gate is installed
+    /// (`specs/optional-protections.md` section 3.3): the 250 Hz task's call on a pass whose
+    /// resulting mode is OFF, for its break-enabled motors. MOE stays this module's; the flag's
+    /// clear goes through the gate this module alone holds.
+    #[cfg(feature = "gd32f103rc")]
+    pub fn clear_break_flags(which: [bool; motor::COUNT]) {
+        // SAFETY: read-only access to a static written once on the boot thread; the 250 Hz
+        // control task is the only reader.
+        let gates = unsafe { &*addr_of_mut!(GATE) };
+        for (g, on) in gates.iter().zip(which) {
+            if let (Some(g), true) = (g, on) {
+                g.clear_break_flag();
+            }
         }
     }
 
@@ -1245,6 +1267,7 @@ mod tests {
     const BOOT: motor::BootFixed = motor::BootFixed {
         noise_floor: store::MOTOR_NOISE_FLOOR.default(),
         accepted_offsets: None,
+        dc_link: None,
     };
 
     /// **`control.leader` is read stored and unstored** (`specs/rigid-leader.md` section 9): an

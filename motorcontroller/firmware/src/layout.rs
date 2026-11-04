@@ -44,6 +44,18 @@ pub struct Motor {
     pub sense_low_side: bool,
     /// The sensed phase pair with their ADC channels, `None` when the motor has no current sense.
     pub phase: Option<Sense>,
+    /// The DC-link current input with its ADC channel (`current.dc_link.pin`,
+    /// `specs/optional-protections.md` section 5.1), `None` when not stored. Read by the two-motor
+    /// image alone (the `phase_c` precedent); always `None` on the others.
+    pub dc_link: Option<Pin3>,
+    /// The gate timer's break input (`gate.break.pin`), `None` when not stored or on a one-motor
+    /// image.
+    pub brk: Option<Pin3>,
+    /// `gate.break.enable`: the bring-up sets `BRKEN` when this and [`Motor::brk`] are both set.
+    pub brk_enable: bool,
+    /// The break input's active level, `active_high` bit `3 + motor` (`specs/optional-protections.md`
+    /// section 3.3): `true` = active high, `false` (the default) = active low.
+    pub brk_high: bool,
 }
 
 /// Which two of the three phases a motor's shunts sense (`specs/twelve-fet.md` section 5.3).
@@ -149,8 +161,11 @@ const IMU_REMAP: usize = BOARD + 8;
 const LINK: usize = BOARD + 9;
 /// `imu.model`, after the links.
 const IMU_MODEL: usize = LINK + 4 * store::LINKS as usize;
+/// `active_high`, after `imu.model`, read for the break inputs' polarity where the image reads them
+/// (two motors, [`WHEEL`]'s rule).
+const POLARITY: usize = IMU_MODEL + 1;
 /// How many board keys the pass reads.
-const BOARD_N: usize = IMU_MODEL + 1 - BOARD;
+const BOARD_N: usize = if COUNT > 1 { POLARITY + 1 } else { POLARITY } - BOARD;
 
 /// Within a motor's group: the halls, the gates, the gate timer, its remap, the dead time, the
 /// phase-sense kind, the phase pins.
@@ -161,13 +176,18 @@ const GATE_REMAP: usize = 10;
 const DEAD_TIME: usize = 11;
 const SENSE: usize = 12;
 const PHASE: usize = 13;
-/// A motor's group: every wheel key, with `phase_c` only where the image reads it, which is where
-/// it drives two motors (`specs/twelve-fet.md` section 5.3: the one-motor images do not carry it).
-const WHEEL: usize = if COUNT > 1 { 16 } else { 15 };
+/// The DC-link input, the break input and its switch, after `phase_c`.
+const DC_LINK: usize = 16;
+const BREAK: usize = 17;
+const BREAK_ENABLE: usize = 18;
+/// A motor's group: every wheel key, with `phase_c`, the DC-link input and the break input only
+/// where the image reads them, which is where it drives two motors (`specs/twelve-fet.md` section
+/// 5.3, `specs/optional-protections.md` section 5.1: the one-motor images do not carry them).
+const WHEEL: usize = if COUNT > 1 { 19 } else { 15 };
 const N: usize = BOARD + BOARD_N;
 
-/// The board's keys of the pass, slots `BOARD..N`.
-const BOARD_KEYS: [(Key, Type); BOARD_N] = [
+/// The board's keys, in slot order from `BOARD`; the pass takes the first [`BOARD_N`] of them.
+const BOARD_KEYS: [(Key, Type); POLARITY + 1 - BOARD] = [
     pin(store::BOARD_SELF_HOLD),
     pin(store::BOARD_BATTERY_PIN),
     pin(store::BOARD_BUTTON),
@@ -186,11 +206,12 @@ const BOARD_KEYS: [(Key, Type); BOARD_N] = [
     (store::LINK_USART.at(1).key(), Type::U8),
     (store::LINK_REMAP.at(1).key(), Type::U8),
     (store::IMU_MODEL.key(), Type::U8),
+    (store::BOARD_INPUT_POLARITY.key(), Type::U8),
 ];
 
 /// One motor's wheel keys at index 0, in group order; the pass takes the first [`WHEEL`] of them
 /// at each motor's index.
-const WHEEL_KEYS: [(Key, Type); 16] = [
+const WHEEL_KEYS: [(Key, Type); 19] = [
     pin(store::MOTOR_HALL_A),
     pin(store::MOTOR_HALL_B),
     pin(store::MOTOR_HALL_C),
@@ -207,6 +228,9 @@ const WHEEL_KEYS: [(Key, Type); 16] = [
     pin(store::MOTOR_PHASE_A),
     pin(store::MOTOR_PHASE_B),
     pin(store::MOTOR_PHASE_C),
+    pin(store::MOTOR_DC_LINK_PIN),
+    pin(store::MOTOR_BREAK_PIN),
+    (store::MOTOR_BREAK_ENABLE.key(), Type::U8),
 ];
 
 /// The keys of the pass, slot by slot, and the type each must be stored as: [`WHEEL_KEYS`] at each
@@ -293,6 +317,14 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
     let p3 = |i: usize| -> Option<Pin3> { slots[i].stored.then_some(slots[i].b) };
     let byte = |i: usize| -> Option<u8> { slots[i].stored.then_some(slots[i].b[0]) };
 
+    // The break inputs' polarity, read only where the image reads the break inputs.
+    let polarity = if BOARD_N > POLARITY - BOARD {
+        byte(POLARITY).unwrap_or(store::BOARD_INPUT_POLARITY.default())
+    } else {
+        0
+    };
+    // A two-motor image's keys past `phase_c`; `None` on a one-motor image, which reads none.
+    let wide = |i: usize| if WHEEL > i { Some(i) } else { None };
     let motor = |m: usize| -> Option<Motor> {
         let at = WHEEL * m;
         Some(Motor {
@@ -318,6 +350,10 @@ pub fn read<F: Flash>(s: &Store<F>) -> Layout {
                     None
                 },
             ),
+            dc_link: wide(DC_LINK).and_then(|i| p3(at + i)),
+            brk: wide(BREAK).and_then(|i| p3(at + i)),
+            brk_enable: wide(BREAK_ENABLE).and_then(|i| byte(at + i)) == Some(1),
+            brk_high: wide(BREAK).is_some() && polarity & (1 << (3 + m)) != 0,
         })
     };
     let mut motors = [None; COUNT];
@@ -554,6 +590,48 @@ mod tests {
         );
     }
 
+    /// The 12-FET's protection inputs (`specs/optional-protections.md` sections 5.1 and 9.1): on
+    /// the two-motor image the DC-link pin, the break pin, its switch and its `active_high` bit
+    /// read into each motor; absent ones read `None` and off; the switch without the pin still
+    /// reads (the bring-up needs both).
+    #[test]
+    fn the_protection_inputs_read_into_each_motor() {
+        let m0 = |l: Layout| l.motors[0].unwrap();
+        let l = with(stage_motor);
+        let m = m0(l);
+        assert_eq!(
+            (m.dc_link, m.brk, m.brk_enable, m.brk_high),
+            (None, None, false, false),
+            "nothing stored is nothing at all"
+        );
+        let l = with(|s| {
+            stage_motor(s);
+            set(s, store::MOTOR_DC_LINK_PIN.key(), Value::PinAdc([2, 1, 11]));
+            set(s, store::MOTOR_BREAK_PIN.key(), Value::PinAf([1, 12, 0]));
+            s.set(store::MOTOR_BREAK_ENABLE, 1).unwrap();
+            set(
+                s,
+                store::MOTOR_DC_LINK_PIN.at(1).key(),
+                Value::PinAdc([2, 0, 10]),
+            );
+            s.set(store::BOARD_INPUT_POLARITY, 0b1_0110).unwrap();
+        });
+        let m = m0(l);
+        assert_eq!(m.dc_link, Some([2, 1, 11]));
+        assert_eq!(m.brk, Some([1, 12, 0]));
+        assert!(m.brk_enable);
+        assert!(!m.brk_high, "bit 3 clear: motor 0's break is active low");
+        // Motor 1's keys are its own; it has no motor here, so its group is read but not built.
+        assert_eq!(l.motors[1], None);
+        let l = with(|s| {
+            stage_motor(s);
+            s.set(store::MOTOR_BREAK_ENABLE, 1).unwrap();
+            s.set(store::BOARD_INPUT_POLARITY, 0b1110).unwrap();
+        });
+        let m = m0(l);
+        assert_eq!((m.brk, m.brk_enable, m.brk_high), (None, true, true));
+    }
+
     /// Current sense is fitted when exactly two phase pins are stored, and A with C is no pair.
     #[test]
     fn three_phase_pins_or_a_and_c_are_no_current_sense() {
@@ -618,7 +696,15 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.kind, Type::Pin | Type::PinAf | Type::PinAdc))
             .filter(|e| e.effect == store::Effect::Boot)
-            .filter(|e| COUNT > 1 || e.field_id != store::MOTOR_PHASE_C.id())
+            .filter(|e| {
+                COUNT > 1
+                    || ![
+                        store::MOTOR_PHASE_C.id(),
+                        store::MOTOR_DC_LINK_PIN.id(),
+                        store::MOTOR_BREAK_PIN.id(),
+                    ]
+                    .contains(&e.field_id)
+            })
             .map(|e| e.key());
         let others = [
             store::MOTOR_GATE_TIMER.at(0).key(),
@@ -650,15 +736,25 @@ mod tests {
             assert!(KEYS.iter().any(|(key, _)| key == k), "{k:?} not in KEYS");
             assert!(KEY_LIST.contains(k), "{k:?} not in the pass's filter");
         }
+        // Two motors also read each break switch and the polarity word.
+        let wide = if COUNT > 1 { COUNT + 1 } else { 0 };
         assert_eq!(
             KEY_LIST.len(),
-            want.len() + 2 * COUNT,
-            "only these, the dead time and the phase-sense kind"
+            want.len() + 2 * COUNT + wide,
+            "only these, the dead time, the phase-sense kind and, on two motors, the break switch \
+             and active_high"
         );
         for m in 0..COUNT as u8 {
             assert!(KEY_LIST.contains(&store::MOTOR_DEAD_TIME.at(m).key()));
             assert!(KEY_LIST.contains(&store::MOTOR_CURRENT_SENSE.at(m).key()));
+            if COUNT > 1 {
+                assert!(KEY_LIST.contains(&store::MOTOR_BREAK_ENABLE.at(m).key()));
+            }
         }
+        assert_eq!(
+            KEY_LIST.contains(&store::BOARD_INPUT_POLARITY.key()),
+            COUNT > 1
+        );
         for (k, t) in KEYS {
             let d = store::lookup_key(k).unwrap();
             assert_eq!(d.kind, t, "{k:?}");

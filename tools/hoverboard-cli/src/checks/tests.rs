@@ -305,7 +305,31 @@ fn the_twelve_fet_machine_file_passes_on_the_gd32f103rc() {
         for ((f, _), want) in SENSE_PHASES.iter().zip(phases) {
             assert_eq!(state.contains_key(&f.at(m).key()), want, "motor {m}");
         }
+        // `specs/optional-protections.md` section 5.3: both protection inputs stored, the break
+        // input off until its driver is known, the DC-link limit off until its scale is measured.
+        for f in [store::MOTOR_DC_LINK_PIN.at(m), store::MOTOR_BREAK_PIN.at(m)] {
+            assert!(
+                state.contains_key(&f.key()),
+                "motor {m}: {}",
+                path_of(f.key())
+            );
+        }
+        let value = |k: Key| state.get(&k).and_then(|(t, b)| int_of(*t, b));
+        assert_eq!(value(store::MOTOR_BREAK_ENABLE.at(m).key()), Some(0));
+        assert_eq!(value(store::MOTOR_DC_LINK_LIMIT.at(m).key()), Some(0));
+        assert_eq!(value(store::MOTOR_RAIL_SKIP.at(m).key()), Some(3_848));
     }
+    let peak = |m: u8| {
+        state
+            .get(&store::MOTOR_PEAK_TRIP_PERIODS.at(m).key())
+            .cloned()
+    };
+    assert_eq!(peak(0), None, "motor 0 keeps the default count");
+    assert_eq!(
+        peak(1),
+        Some((Type::U8, vec![0])),
+        "motor 1's peak trip is off"
+    );
     assert!(check_leader(&[(0x01, &state)]).is_none());
 }
 

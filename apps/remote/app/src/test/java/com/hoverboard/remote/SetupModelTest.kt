@@ -81,14 +81,14 @@ class SetupModelTest {
 
         rig.model.onShown()
         runCurrent()
-        val pass = SetupFields.ALL.map { board to it.key } + SetupModel.IMU_BUS.map { board to it }
+        val pass = setupPass(board)
         assertEquals(rideFacts + pass, rig.transport.reads)
         assertEquals(SetupFields.ALL.associate { it.key to it.def.default }, rig.state.values)
 
         rig.model.onHidden()
         rig.model.onShown()
         runCurrent()
-        val once = SetupFields.ALL.size + SetupModel.IMU_BUS.size + rideFacts.size
+        val once = pass.size + rideFacts.size
         assertEquals(once, rig.transport.reads.size, "a second showing re-read the board")
     }
 
@@ -453,7 +453,7 @@ class SetupModelTest {
         assertTrue(rig.state.writes.isEmpty(), "a write record survived the restart that applied it")
         // The ride facts first (what the arm control states), then the whole screen.
         assertEquals(
-            rideFacts + SetupFields.ALL.map { board to it.key } + SetupModel.IMU_BUS.map { board to it },
+            rideFacts + setupPass(board),
             rig.transport.reads.drop(readsBefore),
             "no re-read after the restart",
         )

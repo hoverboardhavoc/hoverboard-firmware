@@ -1,0 +1,125 @@
+[
+  {
+    "name": "a DC-link limit beside its pin",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "dc_link": {
+              "pin": {
+                "port": "C",
+                "pin": 1,
+                "adc": 11
+              },
+              "limit": 14000
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "the break enabled beside its pin, and a rail skip beside a sensed pair",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "break": {
+              "pin": {
+                "port": "B",
+                "pin": 12
+              },
+              "enable": true
+            }
+          },
+          "current": {
+            "rail_skip": 3848,
+            "phase_a": {
+              "port": "A",
+              "pin": 0,
+              "adc": 0
+            },
+            "phase_b": {
+              "port": "C",
+              "pin": 3,
+              "adc": 13
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "every protection off with no input stored",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "rail_skip": 0,
+            "dc_link": {
+              "limit": 0
+            }
+          },
+          "gate": {
+            "break": {
+              "enable": false
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "a DC-link limit without its pin",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "dc_link": {
+              "limit": 14000
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.dc_link.limit"
+  },
+  {
+    "name": "motor 1's break enabled without its pin",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {},
+        {
+          "gate": {
+            "break": {
+              "enable": true
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[1].gate.break.enable"
+  },
+  {
+    "name": "a rail skip on a motor without a sensed pair",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "rail_skip": 3848
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.rail_skip"
+  }
+]

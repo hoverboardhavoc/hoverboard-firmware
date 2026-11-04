@@ -345,7 +345,9 @@
     "bits": {
       "power.button": 0,
       "pads.a": 1,
-      "pads.b": 2
+      "pads.b": 2,
+      "motors[0].gate.break.pin": 3,
+      "motors[1].gate.break.pin": 4
     },
     "scope": "node",
     "effect": "boot",
@@ -996,6 +998,85 @@
     ],
     "scope": "wheel",
     "effect": "arm",
+    "board_owned": false
+  },
+  {
+    "id": 91,
+    "path": "current.dc_link.pin",
+    "type": "pinadc",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "scope": "wheel",
+    "effect": "boot",
+    "board_owned": false
+  },
+  {
+    "id": 92,
+    "path": "current.dc_link.cal",
+    "type": "u16",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "ranges": [
+      {
+        "range": [
+          100,
+          819
+        ]
+      }
+    ],
+    "scope": "wheel",
+    "effect": "boot",
+    "board_owned": false
+  },
+  {
+    "id": 93,
+    "path": "current.dc_link.limit",
+    "type": "u32",
+    "index": "motor",
+    "count": 2,
+    "kind": "int",
+    "ranges": [
+      {
+        "range": [
+          0,
+          163840
+        ]
+      }
+    ],
+    "scope": "wheel",
+    "effect": "boot",
+    "board_owned": false
+  },
+  {
+    "id": 94,
+    "path": "gate.break.pin",
+    "type": "pinaf",
+    "index": "motor",
+    "count": 2,
+    "kind": "pin",
+    "scope": "wheel",
+    "effect": "boot",
+    "board_owned": false
+  },
+  {
+    "id": 95,
+    "path": "gate.break.enable",
+    "type": "u8",
+    "index": "motor",
+    "count": 2,
+    "kind": "bool",
+    "ranges": [
+      {
+        "range": [
+          0,
+          1
+        ]
+      }
+    ],
+    "scope": "wheel",
+    "effect": "boot",
     "board_owned": false
   }
 ]

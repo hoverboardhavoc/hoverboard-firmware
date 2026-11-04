@@ -1,8 +1,10 @@
 package com.hoverboard.remote
 
+import com.hoverboard.protocol.checks.Checks
 import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Key
 import com.hoverboard.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
@@ -25,10 +27,25 @@ internal class SetupRig(scope: TestScope) {
         // The IMU bus `imu.model` switches on, read for the group check of an `imu.model` write:
         // not stored, as on a board with no IMU staged.
         for (def in listOf(Fields.IMU_SCL_PIN, Fields.IMU_SDA_PIN, Fields.IMU_I2C)) defaults[def.key()] = def.default
+        // The protection inputs, read for which protection rows Setup shows: not stored, as on a
+        // board whose layout has none.
+        for (m in 0 until Fields.MOTORS) {
+            for (key in Checks.protectionInputKeys(m)) {
+                defaults[key] = Fields.ALL.values.first { it.id == key.fieldId }.default
+            }
+        }
     }
     val model = SetupModel(transport, scope.backgroundScope) { armed }
     val state: SetupState get() = model.state.value
 }
+
+/**
+ * The reads of one Setup pass over a one-motor [board] that stores nothing: every row, the IMU bus,
+ * then motor 0's protection inputs.
+ */
+internal fun setupPass(board: Int): List<Pair<Int, Key>> =
+    SetupFields.ALL.map { board to it.key } + SetupModel.IMU_BUS.map { board to it } +
+        Checks.protectionInputKeys(0).map { board to it }
 
 /** A rig attached to [board] (with [others] found by the walk) with the Setup screen shown and its read pass done. */
 @OptIn(ExperimentalCoroutinesApi::class)

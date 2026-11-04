@@ -93,7 +93,8 @@ class SetupFieldsTest {
             SetupFields.CONTROL_FRAME,
             SetupFields.CONTROL_SIDE,
             SetupFields.CONTROL_LEADER,
-        ).map { it.key } + (SetupFields.AXIS_SIGN + SetupFields.AXIS_ROLE + SetupFields.GAIN_MAX).map { it.key }
+        ).map { it.key } + (SetupFields.AXIS_SIGN + SetupFields.AXIS_ROLE + SetupFields.GAIN_MAX).map { it.key } +
+            (SetupFields.PEAK_TRIP + SetupFields.RAIL_SKIP).map { it.key }
         assertEquals(expected.toSet(), armTime)
 
         val boot = SetupFields.ALL.filter { it.takesEffect == Effect.BOOT }.map { it.key }.toSet()
@@ -101,7 +102,8 @@ class SetupFieldsTest {
             SetupFields.DEVICE_NAME,
             SetupFields.MOTOR_DEAD_TIME,
             SetupFields.IMU_MODEL,
-        ).map { it.key } + (SetupFields.LEVEL_TRIM + SetupFields.GYRO_BIAS + SetupFields.VBATT_CAL).map { it.key }
+        ).map { it.key } + (SetupFields.LEVEL_TRIM + SetupFields.GYRO_BIAS + SetupFields.VBATT_CAL).map { it.key } +
+            (SetupFields.DC_LINK_LIMIT + SetupFields.BREAK_ENABLE).map { it.key }
         assertEquals(restartNamed.toSet(), boot)
 
         // The third class, which is not a firmware read class at all: the board stores the pack for

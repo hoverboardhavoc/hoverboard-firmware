@@ -202,6 +202,25 @@ class SharedCheckCasesTest {
         }
     }
 
+    /**
+     * `specs/optional-protections.md` section 9.1: the 12-FET's machine file passes every check on
+     * the GD32F103RC, its protection inputs and settings included, and its stored protection inputs
+     * are refused on a one-motor chip by `protect_chip`.
+     */
+    @Test
+    fun theTwelveFetMachineFilePassesOnTheGd32f103rc() {
+        val top = JsonParser.parseString(File(dir, "machines/EFeru.json").readText()).asJsonObject
+        val machine = JsonObject().apply { add("machine", top.get("machine")) }
+        val (_, entry) = top.getAsJsonObject("boards").entrySet().single()
+        fun board() = read(entry.asJsonObject, read(machine))
+        val state = board().state
+        val inputs = (0 until Fields.MOTORS).flatMap { listOf(Fields.MOTOR_DC_LINK_PIN.key(it), Fields.MOTOR_BREAK_PIN.key(it)) }
+        for (key in inputs) assertTrue(key in state, Names.pathOf(key))
+        assertEquals(emptyList<Refusal>(), refusals(Chip.GD32F103RC, board()))
+        val f130 = Checks.checkPins(Chip.GD32F130C8, state).filter { it.check == Check.PROTECT_CHIP }.map { it.key }
+        assertEquals(inputs, f130)
+    }
+
     @Test
     fun theLeaderRefusalNamesTheBoards() {
         fun board(leader: Boolean) = read(

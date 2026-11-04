@@ -630,6 +630,11 @@ mod firmware {
         /// The period ISR's over-current trip count as of the previous control run: a change
         /// raises the motor-0 fault latch (`specs/motor-integration.md`, "The hard trip").
         last_trips: [u32; motor::COUNT],
+        /// Each motor's DC-link limit and its derate (`specs/optional-protections.md` section
+        /// 3.2), `None` without `current.dc_link.pin`: taken from the bring-up's boot-fixed facts
+        /// once at boot and stepped by this task alone after it.
+        #[cfg(feature = "gd32f103rc")]
+        dc_link: [Option<motor::DcLinkLimit>; motor::COUNT],
     }
 
     /// The shell static. `None` until the boot path builds it (the state is not
@@ -1436,6 +1441,26 @@ mod firmware {
                 shell.orch.raise_over_current(m);
             }
         }
+        // The protections beside the hard trip (`specs/optional-protections.md` section 6.2). The
+        // break: each break-enabled motor's `ext_trip` is its timer's break flag, so a break
+        // latches that motor's fault on this RUN pass. The DC-link limit: each chain's derate
+        // stepped on the window the ISR last closed, and its reading and factor published.
+        #[cfg(feature = "gd32f103rc")]
+        let breaks = motor::hw::break_flags();
+        #[cfg(feature = "gd32f103rc")]
+        {
+            for (m, level) in breaks.iter().enumerate() {
+                if let Some(level) = *level {
+                    shell.orch.set_ext_trip(m, level);
+                }
+            }
+            for (m, dc) in shell.dc_link.iter_mut().enumerate() {
+                if let Some(dc) = dc {
+                    let obs = dc.step(motor::DC_LINK_SUM[m].load(Ordering::Relaxed));
+                    motor::OBS_DC_LINK[m].store(obs, Ordering::Relaxed);
+                }
+            }
+        }
         // The period ISR's speed cell, read ONCE and feeding both of its consumers, so the
         // OFF-inhibit level and the block row cannot disagree about what the wheel did this tick:
         //
@@ -1543,13 +1568,19 @@ mod firmware {
         let obs = shell.orch.obs();
         // The 250 Hz -> 16 kHz handoff (`specs/motor-integration.md`): this task is the SOLE writer
         // of the demand word, and it writes the +-28500 stock-native torque word verbatim (no
-        // rescaling anywhere, `specs/control.md`). The sequence bump is what lets the ISR's
+        // rescaling anywhere, `specs/control.md`), with one exception: on a motor with a DC-link
+        // limit the word is multiplied by its derate factor, exact at full
+        // (`specs/optional-protections.md` section 3.2). The sequence bump is what lets the ISR's
         // freshness guard tell a fresh write from a repeated one, so a demand that happens to
         // repeat its value still counts as fresh.
         //
         // One word per motor, each the orchestrator's setpoint for that motor, all written before
         // the one sequence bump, so the ISR sees both demands of a pass as fresh together.
-        for (word, demand) in motor::DEMAND.iter().zip(out.torque_setpoint) {
+        for (m, (word, demand)) in motor::DEMAND.iter().zip(out.torque_setpoint).enumerate() {
+            #[cfg(feature = "gd32f103rc")]
+            let demand = shell.dc_link[m].map_or(demand, |dc| dc.scale(demand));
+            #[cfg(not(feature = "gd32f103rc"))]
+            let _ = m;
             word.store(demand as i32, Ordering::Relaxed);
         }
         // The Cortex-M0 has no read-modify-write atomics; the control task and the arm sequence
@@ -1573,6 +1604,14 @@ mod firmware {
         arm::hw::enact(out.moe, motor_configured, motor_fault != 0, || {
             re_read_arm_values(shell)
         });
+        // The break's recovery (`specs/optional-protections.md` section 3.3): on a pass that left
+        // the board in OFF, where every latch has just cleared, each break-enabled timer's flag
+        // clears too, through the arming layer. A break input still active sets it again at once,
+        // so the next RUN pass re-latches.
+        #[cfg(feature = "gd32f103rc")]
+        if out.mode_byte == state::Mode::Off.as_byte() {
+            arm::hw::clear_break_flags(breaks.map(|b| b.is_some()));
+        }
         publish_obs(
             &obs,
             shell.boot_count,
@@ -1662,10 +1701,18 @@ mod firmware {
                 b.unwrap_or(motor::BootFixed {
                     noise_floor: 0,
                     accepted_offsets: None,
+                    #[cfg(feature = "gd32f103rc")]
+                    dc_link: None,
                 })
             }),
             bias,
         );
+        // The arm resets each DC-link derate to full (`specs/optional-protections.md` section
+        // 3.2).
+        #[cfg(feature = "gd32f103rc")]
+        for dc in shell.dc_link.iter_mut().flatten() {
+            dc.reset_derate();
+        }
         // Installs each motor that has a runtime, all in one critical section.
         motor::hw::install_rederived(&r.motor);
         if let (Some(dev), Some(cfg)) = (shell.imu.as_mut(), r.imu) {
@@ -1751,6 +1798,8 @@ mod firmware {
                 period_live: false,
                 period_health: motor::PeriodHealth::new(),
                 last_trips: [0; motor::COUNT],
+                #[cfg(feature = "gd32f103rc")]
+                dc_link: [None; motor::COUNT],
             });
         }
     }
@@ -2371,7 +2420,18 @@ mod firmware {
             &layout.motors,
             layout.battery,
             PERIOD_HZ,
-            core::array::from_fn(|m| store.get(store::MOTOR_NOISE_FLOOR.at(m as u8))),
+            core::array::from_fn(|m| {
+                let m = m as u8;
+                motor::BootRead {
+                    noise_floor: store.get(store::MOTOR_NOISE_FLOOR.at(m)),
+                    // The DC-link scale and limit, boot-read beside the floor on the image that
+                    // reads the input (`specs/optional-protections.md` section 4).
+                    #[cfg(feature = "gd32f103rc")]
+                    dc_link_cal: store.get(store::MOTOR_DC_LINK_CAL.at(m)),
+                    #[cfg(feature = "gd32f103rc")]
+                    dc_link_limit: store.get(store::MOTOR_DC_LINK_LIMIT.at(m)),
+                }
+            }),
             arm::hw::calibration_moe,
         );
         for (m, outcome) in outcomes.iter().enumerate() {
@@ -2439,6 +2499,12 @@ mod firmware {
         //     before the tick source exists.
         // SAFETY: the shell was written just above; single-threaded boot, no task exists yet.
         if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
+            // The DC-link chains the bring-up built, before the arm-row function resets their
+            // derates (`specs/optional-protections.md` section 3.2).
+            #[cfg(feature = "gd32f103rc")]
+            {
+                shell.dc_link = motor::hw::boot_fixed().map(|b| b.and_then(|b| b.dc_link));
+            }
             re_read_arm_values(shell);
             // The shadow was built under the compiled maxima; with the stored ones installed, a
             // stored gain above a compiled maximum but within its stored one runs as stored, as it

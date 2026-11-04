@@ -72,5 +72,45 @@
       ]
     },
     "refused": null
+  },
+  {
+    "name": "a DC-link input on PC1, which feeds ADC2",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "dc_link": {
+              "pin": {
+                "port": "C",
+                "pin": 1,
+                "adc": 11
+              }
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "a DC-link input on PC4, which does not feed ADC2",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "dc_link": {
+              "pin": {
+                "port": "C",
+                "pin": 4,
+                "adc": 14
+              }
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.dc_link.pin"
   }
 ]
