@@ -1,0 +1,88 @@
+[
+  {
+    "name": "both inputs on the RC",
+    "chip": "gd32f103rc",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "dc_link": {
+              "pin": {
+                "port": "C",
+                "pin": 1,
+                "adc": 11
+              }
+            }
+          },
+          "gate": {
+            "break": {
+              "pin": {
+                "port": "B",
+                "pin": 12
+              }
+            }
+          }
+        },
+        {
+          "current": {
+            "dc_link": {
+              "pin": {
+                "port": "C",
+                "pin": 0,
+                "adc": 10
+              }
+            }
+          },
+          "gate": {
+            "break": {
+              "pin": {
+                "port": "A",
+                "pin": 6
+              }
+            }
+          }
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "name": "a break pin on the F103C8",
+    "chip": "gd32f103c8",
+    "board": {
+      "motors": [
+        {
+          "gate": {
+            "break": {
+              "pin": {
+                "port": "B",
+                "pin": 12
+              }
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].gate.break.pin"
+  },
+  {
+    "name": "a DC-link pin on the F130C8",
+    "chip": "gd32f130c8",
+    "board": {
+      "motors": [
+        {
+          "current": {
+            "dc_link": {
+              "pin": {
+                "port": "A",
+                "pin": 1,
+                "adc": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].current.dc_link.pin"
+  }
+]

@@ -76,6 +76,7 @@ object Layout {
                 Fields.MOTOR_GATE_TIMER, Fields.MOTOR_GATE_REMAP, Fields.MOTOR_DEAD_TIME,
                 Fields.MOTOR_DIRECTION, Fields.MOTOR_ALIGN_OFFSET, Fields.MOTOR_CURRENT_CAL,
                 Fields.MOTOR_PHASE_A, Fields.MOTOR_PHASE_B, Fields.MOTOR_PHASE_C,
+                Fields.MOTOR_DC_LINK_PIN, Fields.MOTOR_BREAK_PIN,
             )) {
                 add(LayoutSlot(def, m, m))
             }

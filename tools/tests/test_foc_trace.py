@@ -186,6 +186,12 @@ class Decode(unittest.TestCase):
         self.assertNotIn("vq_a", r, "vq is a voltage count, never amps")
         self.assertNotIn("theta", r, "no frame unless asked")
 
+    def test_the_rail_skip_is_the_cause_bytes_top_bit(self):
+        # motor.rs HOLD_CAUSE_RAIL, bit 31 of word 50 (specs/optional-protections.md section 6.4).
+        r = ft.decode(block(hold=0x8000_0000 | (1 << 28)), 455)
+        self.assertEqual(r["cause"], 0x90)
+        self.assertEqual(r["cause"] & 0x80, 0x80)
+
     def test_a_non_foc_board_reads_zero_dq_and_reference(self):
         r = ft.decode(block(method=1, ia=300, ib=-150), 455)
         self.assertEqual((r["ia"], r["ib"]), (300, -150), "word 47 is live in every method")

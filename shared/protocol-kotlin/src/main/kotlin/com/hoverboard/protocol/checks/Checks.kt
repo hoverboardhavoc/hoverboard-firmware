@@ -2,6 +2,7 @@ package com.hoverboard.protocol.checks
 
 import com.hoverboard.protocol.board.CurrentLimit
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
+import com.hoverboard.protocol.pincap.ADC2
 import com.hoverboard.protocol.imu.Orientation
 import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.pincap.Func
@@ -9,7 +10,6 @@ import com.hoverboard.protocol.pincap.FuncKind
 import com.hoverboard.protocol.pincap.Phase
 import com.hoverboard.protocol.pincap.PinTable
 import com.hoverboard.protocol.pincap.SWD
-import com.hoverboard.protocol.store.Effect
 import com.hoverboard.protocol.store.FieldDef
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
@@ -80,7 +80,7 @@ enum class Check(val id: String) {
      */
     MOTOR_TIMER("motor_timer"),
 
-    /** An arm-row or calibration value is in its range. */
+    /** A value with a range-table row (but `wifi.tx_power`) is in its range. */
     RANGE("range"),
 
     /** A motor's current limit converts above its noise floor. */
@@ -91,6 +91,15 @@ enum class Check(val id: String) {
 
     /** A balance machine in the rigid frame has exactly one board set as leader. */
     LEADER("leader"),
+
+    /**
+     * A protection is enabled only on a motor that stores its input
+     * (`specs/optional-protections.md` section 7).
+     */
+    PROTECT_INPUT("protect_input"),
+
+    /** A protection input is stored only on a chip whose image reads it. */
+    PROTECT_CHIP("protect_chip"),
 }
 
 /** A check that refused, the key it names, and why ([msg] starts with the key's path). */
@@ -109,6 +118,12 @@ sealed interface Role {
 
     /** An ADC input. */
     data object Adc : Role
+
+    /**
+     * A DC-link current input: an ADC input on ADC2, whose inserted group converts it
+     * (`specs/optional-protections.md` section 3.2).
+     */
+    data object DcLink : Role
 
     /** A peripheral function [kind], on the timer channel [ch] for a gate. */
     data class Af(val kind: FuncKind, val ch: Int = 0) : Role {
@@ -136,7 +151,9 @@ enum class Periph(val label: String) {
  * remap key. Complete when every pin and the instance are stored, absent when none is. A group
  * with a [switch] (the IMU's `imu.model`) is all or none with the switch: off (0 or not stored),
  * its pins and instance may be stored or not. A group with a [pick] (a motor's phase-current sense)
- * is complete when exactly that many of its pins are stored.
+ * is complete when exactly that many of its pins are stored. A group with a [via] (a motor's break
+ * input) has no instance of its own: its pin is routed on the timer that key names, another
+ * group's instance.
  */
 class Group(
     val pins: List<Pair<PinSlot, Role>>,
@@ -144,6 +161,7 @@ class Group(
     val remap: Key? = null,
     val switch: Key? = null,
     val pick: Int? = null,
+    val via: Key? = null,
 )
 
 /** One pin field at one index: its key and its registered field. */
@@ -171,6 +189,9 @@ object Checks {
      * `specs/twelve-fet.md` section 5.2): TIMER0 triggers the injected ADC group and starts TIMER7.
      */
     private val MOTOR_TIMER: List<Int> = listOf(0, 7)
+
+    /** The gate timer's break input, routed on the motor's gate timer. */
+    private val BREAK: Role = Role.Af(FuncKind.BREAK)
 
     /** Every function a board can configure, by its groups (`checks::groups`). */
     val GROUPS: List<Group> = buildList {
@@ -227,8 +248,73 @@ object Checks {
                 ),
             )
             add(Group(SENSE_PHASES.map { (def, _) -> PinSlot(def, m) to Role.Adc }, pick = 2))
+            add(Group(listOf(PinSlot(Fields.MOTOR_DC_LINK_PIN, m) to Role.DcLink)))
+            add(
+                Group(
+                    listOf(PinSlot(Fields.MOTOR_BREAK_PIN, m) to BREAK),
+                    remap = Fields.MOTOR_GATE_REMAP.key(m),
+                    via = Fields.MOTOR_GATE_TIMER.key(m),
+                ),
+            )
         }
     }
+
+    /**
+     * Whether the chip's image reads a pin of [role] (`checks::image_reads`): a protection input
+     * only where the chip's table says so ([com.hoverboard.protocol.pincap.Inputs]), every other
+     * pin everywhere.
+     */
+    private fun imageReads(t: PinTable, role: Role): Boolean = when (role) {
+        Role.DcLink -> t.inputs.dcLink
+        BREAK -> t.inputs.brk
+        else -> true
+    }
+
+    /**
+     * Whether [chip]'s image reads the pin at [key]: a protection input only where the chip's table
+     * says so, every other key on every chip. A layout editor offers a pin only where it is read.
+     */
+    fun imageReads(chip: Chip, key: Key): Boolean = roleOf(key)?.let { imageReads(chip.table, it) } ?: true
+
+    /**
+     * A protection [setting] and the input it needs on its motor (`checks::check_values`,
+     * `protect_input`): [pick] of the pin fields [inputs] stored, named [input] in a refusal.
+     */
+    private class Protection(
+        val setting: FieldDef,
+        val inputs: List<FieldDef>,
+        val pick: Int,
+        val input: (Int) -> String,
+    ) {
+        fun stored(state: Map<Key, Value>, m: Int): Boolean = inputs.count { it.key(m) in state } == pick
+    }
+
+    /**
+     * The protections with an input (`specs/optional-protections.md` section 7): the DC-link limit
+     * beside its pin, the break input's switch beside its pin, and the rail skip beside a sensed
+     * pair (two of the phase pins, `checks::senses`).
+     */
+    private val PROTECTIONS: List<Protection> = listOf(
+        Protection(Fields.MOTOR_DC_LINK_LIMIT, listOf(Fields.MOTOR_DC_LINK_PIN), 1) {
+            Names.pathOf(Fields.MOTOR_DC_LINK_PIN.key(it))
+        },
+        Protection(Fields.MOTOR_BREAK_ENABLE, listOf(Fields.MOTOR_BREAK_PIN), 1) {
+            Names.pathOf(Fields.MOTOR_BREAK_PIN.key(it))
+        },
+        Protection(Fields.MOTOR_RAIL_SKIP, SENSE_PHASES.map { it.first }, 2) {
+            "a sensed pair (two of motors[$it].current.phase_a to phase_c)"
+        },
+    )
+
+    /**
+     * Whether [state] stores the input the protection setting at [key] needs on motor [Key.index]
+     * (the `protect_input` rule), or null for a key that is no protection setting with an input.
+     */
+    fun storesProtectionInput(key: Key, state: Map<Key, Value>): Boolean? =
+        PROTECTIONS.firstOrNull { it.setting.id == key.fieldId }?.stored(state, key.index)
+
+    /** The pin keys motor [m]'s protection inputs are stored in, each once, in field order. */
+    fun protectionInputKeys(m: Int): List<Key> = PROTECTIONS.flatMap { p -> p.inputs.map { it.key(m) } }.distinct()
 
     /** The role the pin at [key] plays in its group, or null for a key that is no group's pin. */
     fun roleOf(key: Key): Role? =
@@ -343,6 +429,8 @@ object Checks {
         // Each group: complete or absent, and a complete one routed on this chip.
         val instances = mutableMapOf<Pair<Periph, Int>, Key>()
         for (g in GROUPS) {
+            // A protection input the image does not read is `protect_chip`'s alone (below).
+            if (!g.pins.all { (_, role) -> imageReads(t, role) }) continue
             val incomplete = groupRefusal(g, state)
             if (incomplete != null) out += incomplete
             if (incomplete != null || !complete(g, state)) continue
@@ -362,13 +450,15 @@ object Checks {
                     instances[p to inst] = k
                 }
                 n = inst
+            } else {
+                n = g.via?.let { byteOf(state, it) }
             }
             val remap = g.remap?.let { byteOf(state, it) } ?: 0
             for ((slot, role) in g.pins) {
                 val b = pinOf(state, slot) ?: continue
                 val (port, pin) = b[0] to b[1]
                 val at = pinText(port, pin)
-                if (role == Role.Adc) {
+                if (role == Role.Adc || role == Role.DcLink) {
                     val want = t.adcChannel(port, pin)
                     if (want != b[2]) {
                         val msg = if (want != null) {
@@ -377,6 +467,12 @@ object Checks {
                             "$at is not an ADC input on the $name"
                         }
                         out += refusal(Check.ADC, slot.key, msg)
+                    } else if (role == Role.DcLink && !t.feeds(port, pin, ADC2)) {
+                        out += refusal(
+                            Check.ADC,
+                            slot.key,
+                            "$at does not feed ADC2, whose inserted group converts the DC-link inputs",
+                        )
                     }
                     continue
                 }
@@ -453,6 +549,16 @@ object Checks {
                 }
             }
         }
+        // A protection input is stored only where the chip's image reads it
+        // (`specs/optional-protections.md` section 5.2).
+        for (m in 0 until Fields.MOTORS) {
+            for ((def, role) in listOf(Fields.MOTOR_DC_LINK_PIN to Role.DcLink, Fields.MOTOR_BREAK_PIN to BREAK)) {
+                val key = def.key(m)
+                if (key in state && !imageReads(t, role)) {
+                    out += refusal(Check.PROTECT_CHIP, key, "the $name image does not read this input")
+                }
+            }
+        }
         // A remap key is a GD32F10x key.
         if (!chip.remaps) {
             val remaps = listOf(Fields.IMU_REMAP.key()) +
@@ -481,17 +587,14 @@ object Checks {
 
     /**
      * Every check that needs no chip (`checks::check_values`): the range table, each motor's limit
-     * above its noise floor, and the IMU frame.
+     * above its noise floor, each protection's input, and the IMU frame.
      */
     fun checkValues(state: Map<Key, Value>): List<Refusal> {
         val out = mutableListOf<Refusal>()
         for (key in state.keys.sortedWith(compareBy({ it.fieldId }, { it.index }))) {
-            // The arm row and the calibration only: another field's range is the forceable one a
-            // tool's encoding makes (`checks.rs`, `check_values`).
-            val arm = Fields.ALL.values.any { it.id == key.fieldId && it.effect == Effect.ARM } ||
-                Fields.INDEXED.values.any { it.id == key.fieldId && it.effect == Effect.ARM }
-            val boardCheck = arm || key.fieldId in Fields.CALIBRATION
-            if (!boardCheck) continue
+            // Every row but `wifi.tx_power`'s, the forceable one a tool's encoding makes
+            // (`checks.rs`, `check_values`).
+            if (key.fieldId == Fields.WIFI_TX_POWER.id) continue
             val range = Fields.rangeOf(key) ?: continue
             val v = intOf(state.getValue(key)) ?: continue
             if (v !in range) out += refusal(Check.RANGE, key, "$v is outside ${range.first}..${range.last}")
@@ -505,6 +608,17 @@ object Checks {
             val cal = value(Fields.MOTOR_CURRENT_CAL) ?: continue
             val floor = value(Fields.MOTOR_NOISE_FLOOR) ?: continue
             limitFloor(ma, cal, floor)?.let { out += refusal(Check.LIMIT_FLOOR, limit, it) }
+        }
+        // Each protection enabled only beside its input (`specs/optional-protections.md` section 7):
+        // a setting as the write leaves it, 0 where it is not stored (each one's default).
+        for (m in 0 until Fields.MOTORS) {
+            for (p in PROTECTIONS) {
+                val key = p.setting.key(m)
+                val on = state[key]?.let { intOf(it) }?.let { it != 0L } ?: false
+                if (on && !p.stored(state, m)) {
+                    out += refusal(Check.PROTECT_INPUT, key, "enabled without its input, ${p.input(m)}")
+                }
+            }
         }
         val signs = (0 until Fields.IMU_AXIS_SIGN.size).map { i ->
             (state[Key(Fields.IMU_AXIS_SIGN.id, i)] as? Value.I32)?.v ?: 0

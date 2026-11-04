@@ -79,6 +79,9 @@ sealed interface Editor {
  * @param advanced whether the row sits behind ADVANCED (the raw editors the flows replace).
  * @param showDefault whether the row shows its field's default beside the stored value (a bound
  *   whose stock value is the reference point an edit departs from).
+ * @param motor the motor a per-motor row is shown for, which the board shows only while it drives
+ *   that motor and stores the input the row's setting needs (`BoardSetup.shows`); null for a row
+ *   every motor controller shows.
  */
 data class SetupField(
     val def: FieldDef,
@@ -90,6 +93,7 @@ data class SetupField(
     val noteArgs: List<Any> = emptyList(),
     val advanced: Boolean = false,
     val showDefault: Boolean = false,
+    val motor: Int? = null,
 ) {
     val key: Key get() = def.key(index)
 
@@ -192,8 +196,9 @@ private const val U32_MAX = 0xFFFF_FFFFL
 
 /**
  * The Setup screen's rows (`specs/remote-ui.md` sections 3.4 and 3.6a, minus the pin block of 3.5):
- * the hint table over the drift-pinned field mirror. Wheel rows edit motor index 0 only; index 1 is
- * unconsumed by the firmware and hidden, as are the test fields.
+ * the hint table over the drift-pinned field mirror. Wheel rows edit motor index 0 only, but the
+ * optional protections' ([PROTECTIONS]), which are per motor and shown for a motor the board drives;
+ * the test fields are hidden.
  */
 object SetupFields {
     /**
@@ -308,6 +313,68 @@ object SetupFields {
         Fields.MOTOR_CURRENT_LIMIT, 0, R.string.setup_field_current_limit, SetupGroup.DRIVE,
         Editor.Range(Fields.CURRENT_LIMIT_MA), note = R.string.setup_note_current_limit,
     )
+    /**
+     * One row of [def] per motor, beside [MOTOR_CURRENT_LIMIT], each labelled from [labels] (by
+     * motor) and edited over the range table's row for it ([Fields.rangeOf]) unless [editor] says
+     * otherwise.
+     */
+    private fun perMotor(
+        def: FieldDef,
+        labels: List<Int>,
+        @StringRes note: Int,
+        editor: Editor? = null,
+    ): List<SetupField> = labels.also { check(it.size == Fields.MOTORS) }.mapIndexed { m, label ->
+        val range = editor ?: Editor.Range(checkNotNull(Fields.rangeOf(def.key(m))) { "${def.id} has no range" })
+        SetupField(def, m, label, SetupGroup.DRIVE, range, note = note, motor = m)
+    }
+
+    /**
+     * `current.peak_trip_periods`, per motor (`specs/optional-protections.md` section 3.1): how many
+     * consecutive readings at twice the limit trip the motor, 0 = the peak trip off. Every motor
+     * the board drives has one.
+     */
+    val PEAK_TRIP: List<SetupField> = perMotor(
+        Fields.MOTOR_PEAK_TRIP_PERIODS,
+        listOf(R.string.setup_field_peak_trip_0, R.string.setup_field_peak_trip_1),
+        R.string.setup_note_peak_trip,
+    )
+
+    /**
+     * `current.rail_skip`, per motor (`specs/optional-protections.md` section 3.4): shown for a
+     * motor with a sensed pair in its layout, whose samples it judges.
+     */
+    val RAIL_SKIP: List<SetupField> = perMotor(
+        Fields.MOTOR_RAIL_SKIP,
+        listOf(R.string.setup_field_rail_skip_0, R.string.setup_field_rail_skip_1),
+        R.string.setup_note_rail_skip,
+    )
+
+    /**
+     * `current.dc_link.limit`, per motor, milliamps (`specs/optional-protections.md` section 3.2):
+     * shown for a motor with `current.dc_link.pin` in its layout.
+     */
+    val DC_LINK_LIMIT: List<SetupField> = perMotor(
+        Fields.MOTOR_DC_LINK_LIMIT,
+        listOf(R.string.setup_field_dc_link_limit_0, R.string.setup_field_dc_link_limit_1),
+        R.string.setup_note_dc_link_limit,
+    )
+
+    /**
+     * `gate.break.enable`, per motor (`specs/optional-protections.md` section 3.3): shown for a
+     * motor with `gate.break.pin` in its layout.
+     */
+    val BREAK_ENABLE: List<SetupField> = perMotor(
+        Fields.MOTOR_BREAK_ENABLE,
+        listOf(R.string.setup_field_break_enable_0, R.string.setup_field_break_enable_1),
+        R.string.setup_note_break_enable,
+        Editor.Chips(listOf(Choice(0, R.string.setup_choice_off), Choice(1, R.string.setup_choice_on))),
+    )
+
+    /** The optional protections' rows, motor by motor, in screen order. */
+    val PROTECTIONS: List<SetupField> = (0 until Fields.MOTORS).flatMap { m ->
+        listOf(PEAK_TRIP[m], RAIL_SKIP[m], DC_LINK_LIMIT[m], BREAK_ENABLE[m])
+    }
+
     /**
      * `control.frame`, the machine's frame (`specs/remote-ui.md` 3.7a). The Machine section's chips
      * are the primary control, because the value belongs to the machine and goes to both boards;
@@ -540,9 +607,9 @@ object SetupFields {
     val ALL: List<SetupField> = listOf(
         DEVICE_NAME, NODE_ADDRESS,
         CONTROL_MODE, RIDER_REQUIRED, PACK_CELLS, BATTERY_CHEMISTRY, BATTERY_FLOOR, MOTOR_METHOD, MOTOR_DIRECTION,
-        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT, CONTROL_FRAME, CONTROL_SIDE, CONTROL_LEADER,
-        IMU_MODEL,
-    ) + LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
+        MOTOR_ALIGN_OFFSET, MOTOR_DEAD_TIME, MOTOR_CURRENT_LIMIT,
+    ) + PROTECTIONS + listOf(CONTROL_FRAME, CONTROL_SIDE, CONTROL_LEADER, IMU_MODEL) +
+        LEVEL_TRIM + GYRO_BIAS + AXIS_SIGN + AXIS_ROLE + VBATT_CAL + GAIN_MAX
 
     private val byKey: Map<Key, SetupField> = (ALL + DRIVE_BOUNDS).associateBy { it.key }
 

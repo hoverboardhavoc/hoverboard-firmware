@@ -40,7 +40,13 @@ object Names {
     private val SENSE = listOf(0 to "any_state", 1 to "low_side_on")
     private val AXIS = listOf(1 to "x", 2 to "y", 3 to "z")
     private val CHEMISTRY = listOf(0 to "li_ion", 1 to "lev50", 2 to "lto")
-    private val ACTIVE_HIGH = listOf(0 to "power.button", 1 to "pads.a", 2 to "pads.b")
+    private val ACTIVE_HIGH = listOf(
+        0 to "power.button",
+        1 to "pads.a",
+        2 to "pads.b",
+        3 to "motors[0].gate.break.pin",
+        4 to "motors[1].gate.break.pin",
+    )
 
     private fun single(f: FieldDef, path: String, kind: Kind = Kind.INT, labels: List<Pair<Int, String>> = emptyList()) =
         Name(f.id, path, IndexKind.SINGLE, kind, labels)
@@ -127,6 +133,13 @@ object Names {
         motor(Fields.MOTOR_GATE_REMAP, "gate.remap"),
         pin(Fields.MOTOR_PHASE_C, "current.phase_c", IndexKind.MOTOR),
         motor(Fields.MOTOR_CURRENT_SENSE, "current.sense", Kind.ENUM, SENSE),
+        motor(Fields.MOTOR_PEAK_TRIP_PERIODS, "current.peak_trip_periods"),
+        motor(Fields.MOTOR_RAIL_SKIP, "current.rail_skip"),
+        pin(Fields.MOTOR_DC_LINK_PIN, "current.dc_link.pin", IndexKind.MOTOR),
+        motor(Fields.MOTOR_DC_LINK_CAL, "current.dc_link.cal"),
+        motor(Fields.MOTOR_DC_LINK_LIMIT, "current.dc_link.limit"),
+        pin(Fields.MOTOR_BREAK_PIN, "gate.break.pin", IndexKind.MOTOR),
+        motor(Fields.MOTOR_BREAK_ENABLE, "gate.break.enable", Kind.BOOL),
     )
 
     /** The row for field [id], or null when the table names none. */

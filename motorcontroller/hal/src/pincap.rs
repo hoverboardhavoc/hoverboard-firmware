@@ -88,6 +88,8 @@ pub enum Func {
     Scl(u8),
     /// I2C `n`'s data.
     Sda(u8),
+    /// Advanced timer `timer`'s break input (`BRKIN`, `specs/optional-protections.md` section 5.2).
+    Break(u8),
 }
 
 /// One alternate-function route: pin `pin` of port `port` carries `func` when routed by `sel`
@@ -104,7 +106,7 @@ pub struct Route {
     pub sel: u8,
 }
 
-/// One ADC input: pin `pin` of port `port` is ADC0 channel `channel`.
+/// One ADC input: pin `pin` of port `port` is channel `channel` of each converter in `adcs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdcInput {
     /// The port.
@@ -113,6 +115,26 @@ pub struct AdcInput {
     pub pin: u8,
     /// The channel.
     pub channel: u8,
+    /// The converters the pin feeds, a bit each: [`ADC0`], [`ADC1`], [`ADC2`]
+    /// (`specs/optional-protections.md` section 5.2).
+    pub adcs: u8,
+}
+
+/// [`AdcInput::adcs`]'s bit for ADC0 (the MM32SPIN05's one converter, the HAL's ADC0).
+pub const ADC0: u8 = 1 << 0;
+/// [`AdcInput::adcs`]'s bit for ADC1.
+pub const ADC1: u8 = 1 << 1;
+/// [`AdcInput::adcs`]'s bit for ADC2.
+pub const ADC2: u8 = 1 << 2;
+
+/// The inputs a chip's image reads beyond the motor and board groups every image reads
+/// (`specs/optional-protections.md` section 5.2): the protection inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inputs {
+    /// `current.dc_link.pin`, the DC-link current input.
+    pub dc_link: bool,
+    /// `gate.break.pin`, the gate timer's break input.
+    pub brk: bool,
 }
 
 /// A motor phase, as a phase-current sense pin names it (`current.phase_a` to `current.phase_c`).
@@ -140,6 +162,8 @@ pub struct Table {
     /// as injected ranks 0 and 1; the two-motor image also reads B and C. A and C is on no board and
     /// in no table.
     pub sense_pairs: &'static [[Phase; 2]],
+    /// The protection inputs the chip's image reads: the two-motor image's alone.
+    pub inputs: Inputs,
 }
 
 /// The SWD pins, PA13 (SWDIO) and PA14 (SWCLK), as (port, pin): never given to a function, because
@@ -155,11 +179,22 @@ const fn route(port: u8, pin: u8, func: Func, sel: u8) -> Route {
     }
 }
 
-const fn adc(port: u8, pin: u8, channel: u8) -> AdcInput {
-    AdcInput { port, pin, channel }
+const fn adc(port: u8, pin: u8, channel: u8, adcs: u8) -> AdcInput {
+    AdcInput {
+        port,
+        pin,
+        channel,
+        adcs,
+    }
 }
 
-use Func::{Gate, GateN, Rx, Scl, Sda, Tx};
+/// The protection inputs of a one-motor image: none.
+const NO_INPUTS: Inputs = Inputs {
+    dc_link: false,
+    brk: false,
+};
+
+use Func::{Break, Gate, GateN, Rx, Scl, Sda, Tx};
 
 /// The GD32F10x routes every F10x part carries (remap values): TIMER0 at remap 0 on PA8-10 and
 /// PB13-15; USART0 at remap 1 on PB6/PB7 (its default PA9/PA10 are gate pins); USART1 at remap 0
@@ -184,8 +219,10 @@ const F10X_ROUTES: [Route; 16] = [
 ];
 
 /// The GD32F103RC's routes: the F10x ones above, and its second advanced timer, TIMER7, at remap
-/// 0: CH0-2 on PC6-8, CH0N on PA7, CH1N/CH2N on PB0/PB1.
-const F10X_HD_ROUTES: [Route; 22] = [
+/// 0: CH0-2 on PC6-8, CH0N on PA7, CH1N/CH2N on PB0/PB1; and the two break inputs, TIMER0's on
+/// PB12 at remap 0 and TIMER7's on PA6, which has no remap (GD32F103xx Datasheet Rev2.14, Table
+/// 2-7).
+const F10X_HD_ROUTES: [Route; 24] = [
     route(0, 8, Gate(0, 0), 0),
     route(0, 9, Gate(0, 1), 0),
     route(0, 10, Gate(0, 2), 0),
@@ -208,43 +245,62 @@ const F10X_HD_ROUTES: [Route; 22] = [
     route(0, 7, GateN(7, 0), 0),
     route(1, 0, GateN(7, 1), 0),
     route(1, 1, GateN(7, 2), 0),
+    route(1, 12, Break(0), 0),
+    route(0, 6, Break(7), 0),
 ];
 
 /// The GD32 ADC map: PA0-7 are channels 0-7, PB0-1 are 8-9, PC0-5 are 10-15 (a pin the package
-/// does not bond is not an input, which the bonding answers).
-const GD32_ADC: [AdcInput; 16] = [
-    adc(0, 0, 0),
-    adc(0, 1, 1),
-    adc(0, 2, 2),
-    adc(0, 3, 3),
-    adc(0, 4, 4),
-    adc(0, 5, 5),
-    adc(0, 6, 6),
-    adc(0, 7, 7),
-    adc(1, 0, 8),
-    adc(1, 1, 9),
-    adc(2, 0, 10),
-    adc(2, 1, 11),
-    adc(2, 2, 12),
-    adc(2, 3, 13),
-    adc(2, 4, 14),
-    adc(2, 5, 15),
-];
+/// does not bond is not an input, which the bonding answers), each pin feeding the converters in
+/// `adcs` (`ADC012_INx` or `ADC01_INx`, GD32F103xx Datasheet Rev2.14, Table 2-7) where the chip
+/// carries them: `with_adc2` of PA0-3 and PC0-3, the pins that also feed ADC2, and `rest` of the
+/// others. One map, so the channel numbers have one owner whichever converters a part carries.
+const fn gd32_adc(with_adc2: u8, rest: u8) -> [AdcInput; 16] {
+    [
+        adc(0, 0, 0, with_adc2),
+        adc(0, 1, 1, with_adc2),
+        adc(0, 2, 2, with_adc2),
+        adc(0, 3, 3, with_adc2),
+        adc(0, 4, 4, rest),
+        adc(0, 5, 5, rest),
+        adc(0, 6, 6, rest),
+        adc(0, 7, 7, rest),
+        adc(1, 0, 8, rest),
+        adc(1, 1, 9, rest),
+        adc(2, 0, 10, with_adc2),
+        adc(2, 1, 11, with_adc2),
+        adc(2, 2, 12, with_adc2),
+        adc(2, 3, 13, with_adc2),
+        adc(2, 4, 14, rest),
+        adc(2, 5, 15, rest),
+    ]
+}
+
+/// The GD32F103C8's map: ADC0 and ADC1 on every input.
+const GD32F103C8_ADC: [AdcInput; 16] = gd32_adc(ADC0 | ADC1, ADC0 | ADC1);
+/// The GD32F103RC's map: ADC2 as well on PA0-3 and PC0-3.
+const GD32F103RC_ADC: [AdcInput; 16] = gd32_adc(ADC0 | ADC1 | ADC2, ADC0 | ADC1);
+/// The GD32F130C8's map: its one converter, ADC0.
+const GD32F130C8_ADC: [AdcInput; 16] = gd32_adc(ADC0, ADC0);
 
 /// GD32F103C8, LQFP48: PA, PB, PC13-15 and PD0-1 bonded.
 const GD32F103C8: Table = Table {
     bonding: [0xFFFF, 0xFFFF, 0xE000, 0x0003, 0, 0],
     routes: &F10X_ROUTES,
-    adc: &GD32_ADC,
+    adc: &GD32F103C8_ADC,
     sense_pairs: &[[Phase::A, Phase::B]],
+    inputs: NO_INPUTS,
 };
 
 /// GD32F103RC, LQFP64: PA, PB, PC and PD0-2 bonded.
 const GD32F103RC: Table = Table {
     bonding: [0xFFFF, 0xFFFF, 0xFFFF, 0x0007, 0, 0],
     routes: &F10X_HD_ROUTES,
-    adc: &GD32_ADC,
+    adc: &GD32F103RC_ADC,
     sense_pairs: &[[Phase::A, Phase::B], [Phase::B, Phase::C]],
+    inputs: Inputs {
+        dc_link: true,
+        brk: true,
+    },
 };
 
 /// GD32F130C8, LQFP48: PA, PB, PC13-15, PF0-1 and PF6-7 bonded. TIMER0 is AF2 on PA8-10 and
@@ -268,8 +324,9 @@ const GD32F130C8: Table = Table {
         route(1, 10, Scl(1), 1),
         route(1, 11, Sda(1), 1),
     ],
-    adc: &GD32_ADC,
+    adc: &GD32F130C8_ADC,
     sense_pairs: &[[Phase::A, Phase::B]],
+    inputs: NO_INPUTS,
 };
 
 /// MM32SPIN05, LQFP48: PA0-15, PB0-15, PC13-15 and PD0-3 bonded (DS_MM32SPIN05 table 5). TIM1 is
@@ -308,20 +365,21 @@ const MM32SPIN05: Table = Table {
     // DS_MM32SPIN05 table 5, `ADC1_VIN[n]`: PA0-7 = 0-7, PB0-1 = 8-9, PB3 = 10, PB4 = 11. PB7 is
     // `VIN[12]`, whose data register MindMotion's map leaves reserved, so it is not an input here.
     adc: &[
-        adc(0, 0, 0),
-        adc(0, 1, 1),
-        adc(0, 2, 2),
-        adc(0, 3, 3),
-        adc(0, 4, 4),
-        adc(0, 5, 5),
-        adc(0, 6, 6),
-        adc(0, 7, 7),
-        adc(1, 0, 8),
-        adc(1, 1, 9),
-        adc(1, 3, 10),
-        adc(1, 4, 11),
+        adc(0, 0, 0, ADC0),
+        adc(0, 1, 1, ADC0),
+        adc(0, 2, 2, ADC0),
+        adc(0, 3, 3, ADC0),
+        adc(0, 4, 4, ADC0),
+        adc(0, 5, 5, ADC0),
+        adc(0, 6, 6, ADC0),
+        adc(0, 7, 7, ADC0),
+        adc(1, 0, 8, ADC0),
+        adc(1, 1, 9, ADC0),
+        adc(1, 3, 10, ADC0),
+        adc(1, 4, 11, ADC0),
     ],
     sense_pairs: &[[Phase::A, Phase::B]],
+    inputs: NO_INPUTS,
 };
 
 impl Table {
@@ -351,6 +409,16 @@ impl Table {
             .iter()
             .find(|a| a.port == port && a.pin == pin)
             .map(|a| a.channel)
+    }
+
+    /// Whether the pin is an ADC input that feeds every converter in `adcs` ([`ADC0`], [`ADC1`],
+    /// [`ADC2`]).
+    pub fn feeds(&self, port: u8, pin: u8, adcs: u8) -> bool {
+        self.bonded(port, pin)
+            && self
+                .adc
+                .iter()
+                .any(|a| a.port == port && a.pin == pin && a.adcs & adcs == adcs)
     }
 
     /// Whether the chip carries advanced timer `n`: a table routes its outputs exactly when it does.
@@ -477,6 +545,44 @@ mod tests {
             assert!(!t.senses(A, C), "{chip:?}: A and C is on no board");
             assert_eq!(t.senses(B, C), t.has_timer(7), "{chip:?}");
         }
+    }
+
+    /// `specs/optional-protections.md` section 5.2: PC0 to PC3 feed all three converters on the
+    /// GD32F103RC, PC4 and PC5 ADC0 and ADC1 only; no other part feeds ADC2; the break inputs are
+    /// routed on the RC alone, and only its image reads the protection inputs.
+    #[test]
+    fn adc2_and_the_break_inputs_are_the_gd32f103rcs() {
+        let rc = Chip::Gd32f103rc.table();
+        for pin in 0..4 {
+            assert!(rc.feeds(2, pin, ADC0 | ADC1 | ADC2), "PC{pin}");
+            assert!(rc.feeds(0, pin, ADC2), "PA{pin}");
+        }
+        for pin in [4, 5] {
+            assert!(rc.feeds(2, pin, ADC0 | ADC1), "PC{pin}");
+            assert!(!rc.feeds(2, pin, ADC2), "PC{pin}");
+        }
+        assert!(!rc.feeds(1, 0, ADC2), "PB0");
+        assert!(!rc.feeds(1, 2, ADC0), "PB2 is no input");
+        for chip in Chip::ALL {
+            let t = chip.table();
+            let any_adc2 = t.adc.iter().any(|a| t.feeds(a.port, a.pin, ADC2));
+            assert_eq!(any_adc2, chip == Chip::Gd32f103rc, "{chip:?}");
+            assert!(t.adc.iter().all(|a| a.adcs & ADC0 != 0), "{chip:?}");
+            let rc_only = chip == Chip::Gd32f103rc;
+            assert_eq!(
+                t.inputs,
+                Inputs {
+                    dc_link: rc_only,
+                    brk: rc_only
+                },
+                "{chip:?}"
+            );
+            assert_eq!(t.sel(1, 12, Break(0)), rc_only.then_some(0), "{chip:?}");
+            assert_eq!(t.sel(0, 6, Break(7)), rc_only.then_some(0), "{chip:?}");
+        }
+        assert_eq!(Chip::Gd32f103c8.table().adc_channel(0, 1), Some(1));
+        assert!(Chip::Gd32f103c8.table().feeds(0, 1, ADC0 | ADC1));
+        assert!(!Chip::Gd32f130c8.table().feeds(0, 1, ADC1));
     }
 
     #[test]

@@ -555,6 +555,44 @@ pub const MOTOR_PHASE_C: PinField = PinField::new(0x57, Type::PinAdc);
 /// side conducts (the 12-FET), so the zeros are measured with the low sides on and a sample whose
 /// leg was off is not a reading.
 pub const MOTOR_CURRENT_SENSE: Field<u8> = Field::new(0x58, 0);
+/// The peak trip's count, per motor (`specs/optional-protections.md` section 3.1): the number of
+/// consecutive phase-current readings at or above twice the soft limit that trip the hard
+/// over-current fault. `1` (the default) trips on the first such reading; `2` on the second in a
+/// row; `0` turns the peak trip off, while the sustained trip (64 consecutive over-limit periods,
+/// `firmware::motor::OVER_CURRENT_TRIP_PERIODS`) stays on. 0 to 63: every reading at twice the
+/// limit is also over it, so a run of 64 is the sustained trip already. In the arm row beside
+/// [`MOTOR_CURRENT_LIMIT`], installed through `CurrentLimit::reconfigure` at every arm.
+pub const MOTOR_PEAK_TRIP_PERIODS: Field<u8> = Field::new(0x59, 1);
+/// The rail skip's threshold, per motor, a 12-bit ADC count (`specs/optional-protections.md`
+/// section 3.4): a period on which a sensed phase's raw sample is at or above it is FOC's held
+/// period (its PIs act on the stored d-q pair), while the current limit still takes the sample as
+/// it is. `0` (the default) turns it off; the 12-FET stores 3,848, the stock's. An amplifier-swing
+/// fact of the board, so stored rather than compiled. In the arm row; the firmware compares the
+/// left-aligned injected word against it shifted left by 3.
+pub const MOTOR_RAIL_SKIP: Field<u16> = Field::new(0x5A, 0);
+/// The DC-link current input, per motor, with its ADC channel (`specs/optional-protections.md`
+/// sections 3.2 and 5): the bridge's DC-link amplifier output, converted on ADC2's inserted group,
+/// so the pin must feed ADC2 (the `adc` check). Only the GD32F103RC image reads it (`protect_chip`);
+/// absent (the default) means the motor has no DC-link limit.
+pub const MOTOR_DC_LINK_PIN: PinField = PinField::new(0x5B, Type::PinAdc);
+/// The DC-link chain's scale, per motor, stock current counts per amp (16 per 12-bit LSB): EFeru's
+/// 50 LSB per amp times 16, unmeasured on the 12-FET (`specs/optional-protections.md` section
+/// 3.2). A calibration field, clamped into `board::limit`'s 100 to 819 by the conversion as
+/// [`MOTOR_CURRENT_CAL`] is. Boot-read.
+pub const MOTOR_DC_LINK_CAL: Field<u16> = Field::new(0x5C, 800);
+/// The DC-link current limit, per motor, milliamps, `0` = off (the default): over it, the 250 Hz
+/// task derates the motor's demand word (`specs/optional-protections.md` section 3.2). Enabled
+/// only with [`MOTOR_DC_LINK_PIN`] stored (`protect_input`). Boot-read.
+pub const MOTOR_DC_LINK_LIMIT: Field<u32> = Field::new(0x5D, 0);
+/// The gate timer's hardware break input, per motor (`specs/optional-protections.md` sections 3.3
+/// and 5): TIMER0's on `PB12` at remap 0, TIMER7's on `PA6`, routed against the motor's
+/// [`MOTOR_GATE_TIMER`] and [`MOTOR_GATE_REMAP`] (the `remap` check). Its polarity is
+/// [`BOARD_INPUT_POLARITY`]'s bit `3 + motor`. Only the GD32F103RC image reads it.
+pub const MOTOR_BREAK_PIN: PinField = PinField::new(0x5E, Type::PinAf);
+/// The break input's switch, per motor, a bool, `0` (the default) = off: with it set, the bring-up
+/// sets the timer's `BRKEN` and a break latches the motor's fault (`specs/optional-protections.md`
+/// section 3.3). Enabled only with [`MOTOR_BREAK_PIN`] stored (`protect_input`). Boot-read.
+pub const MOTOR_BREAK_ENABLE: Field<u8> = Field::new(0x5F, 0);
 /// The power-button sense pin (`specs/board-model.md` `power.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
@@ -797,8 +835,11 @@ pub const BOARD_BATTERY_CHEMISTRY: Field<u8> = Field::new(0x25, 0);
 
 /// Which electrical level means ASSERTED on each of the board's three discrete input lines, one
 /// bit per line: `b0` button, `b1` pad A, `b2` pad B, a SET bit meaning active high
-/// (`specs/board-model.md`, the field table). Bits 3..7 are reserved and inert: `inputs::asserted`
-/// masks the word to the three lines, so a stray bit cannot quietly acquire a meaning later.
+/// (`specs/board-model.md`, the field table). Bits 3 and 4 are the two motors' break inputs
+/// ([`MOTOR_BREAK_PIN`] at index 0 and 1, `specs/optional-protections.md` section 3.3), clear
+/// meaning active low; the default leaves both clear, the 12-FET's polarity. Bits 5..7 are
+/// reserved and inert: `inputs::asserted` masks the word to the three input lines, so a stray bit
+/// cannot quietly acquire a meaning later.
 ///
 /// **A property of the input wiring fitted, not of the firmware**, and a compiled literal until
 /// now: `motorcontroller/inputs/src/debounce.rs` has always said that "which pin / polarity each line maps
@@ -1087,6 +1128,13 @@ field_ids! {
     0x56, // MOTOR_GATE_REMAP
     0x57, // MOTOR_PHASE_C
     0x58, // MOTOR_CURRENT_SENSE
+    0x59, // MOTOR_PEAK_TRIP_PERIODS
+    0x5A, // MOTOR_RAIL_SKIP
+    0x5B, // MOTOR_DC_LINK_PIN
+    0x5C, // MOTOR_DC_LINK_CAL
+    0x5D, // MOTOR_DC_LINK_LIMIT
+    0x5E, // MOTOR_BREAK_PIN
+    0x5F, // MOTOR_BREAK_ENABLE
 }
 
 #[cfg(feature = "test-fields")]
@@ -1158,6 +1206,13 @@ field_ids! {
     0x56, // MOTOR_GATE_REMAP
     0x57, // MOTOR_PHASE_C
     0x58, // MOTOR_CURRENT_SENSE
+    0x59, // MOTOR_PEAK_TRIP_PERIODS
+    0x5A, // MOTOR_RAIL_SKIP
+    0x5B, // MOTOR_DC_LINK_PIN
+    0x5C, // MOTOR_DC_LINK_CAL
+    0x5D, // MOTOR_DC_LINK_LIMIT
+    0x5E, // MOTOR_BREAK_PIN
+    0x5F, // MOTOR_BREAK_ENABLE
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1244,10 +1299,10 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the gains and their maxima, the
 /// reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 67 + 19;
+pub const REGISTRY_LEN: usize = 74 + 19;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 69 + 19;
+pub const REGISTRY_LEN: usize = 76 + 19;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1481,6 +1536,13 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_GATE_REMAP.entry(Boot),
     MOTOR_PHASE_C.entry(Boot),
     MOTOR_CURRENT_SENSE.entry(Boot),
+    MOTOR_PEAK_TRIP_PERIODS.entry(Arm),
+    MOTOR_RAIL_SKIP.entry(Arm),
+    MOTOR_DC_LINK_PIN.entry(Boot),
+    MOTOR_DC_LINK_CAL.entry(Boot),
+    MOTOR_DC_LINK_LIMIT.entry(Boot),
+    MOTOR_BREAK_PIN.entry(Boot),
+    MOTOR_BREAK_ENABLE.entry(Boot),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY, Client),
     #[cfg(feature = "test-fields")]
@@ -1702,7 +1764,13 @@ pub mod names {
     const SENSE: Kind = Kind::Enum(&[(0, "any_state"), (1, "low_side_on")]);
     /// `active_high`'s bits name the input pins they describe, by path
     /// (`specs/machine-settings.md` section 3.1).
-    const ACTIVE_HIGH: Kind = Kind::Bits(&[(0, "power.button"), (1, "pads.a"), (2, "pads.b")]);
+    const ACTIVE_HIGH: Kind = Kind::Bits(&[
+        (0, "power.button"),
+        (1, "pads.a"),
+        (2, "pads.b"),
+        (3, "motors[0].gate.break.pin"),
+        (4, "motors[1].gate.break.pin"),
+    ]);
 
     /// Every registered field's name (`specs/machine-settings.md` section 3), in id order.
     pub static NAMES: &[FieldName] = &[
@@ -1780,6 +1848,17 @@ pub mod names {
         FieldName::motor(MOTOR_GATE_REMAP, "gate.remap", Kind::Int),
         FieldName::pin(MOTOR_PHASE_C, "current.phase_c", Index::Motor),
         FieldName::motor(MOTOR_CURRENT_SENSE, "current.sense", SENSE),
+        FieldName::motor(
+            MOTOR_PEAK_TRIP_PERIODS,
+            "current.peak_trip_periods",
+            Kind::Int,
+        ),
+        FieldName::motor(MOTOR_RAIL_SKIP, "current.rail_skip", Kind::Int),
+        FieldName::pin(MOTOR_DC_LINK_PIN, "current.dc_link.pin", Index::Motor),
+        FieldName::motor(MOTOR_DC_LINK_CAL, "current.dc_link.cal", Kind::Int),
+        FieldName::motor(MOTOR_DC_LINK_LIMIT, "current.dc_link.limit", Kind::Int),
+        FieldName::pin(MOTOR_BREAK_PIN, "gate.break.pin", Index::Motor),
+        FieldName::motor(MOTOR_BREAK_ENABLE, "gate.break.enable", Kind::Bool),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -1861,6 +1940,16 @@ pub mod names {
         every(CONTROL_SIDE.id(), 0, 1),
         // `align_offset`: six sectors.
         every(MOTOR_ALIGN_OFFSET.id(), 0, 5),
+        // `current.peak_trip_periods`: a run of 64 is the sustained trip already
+        // (`firmware::motor::OVER_CURRENT_TRIP_PERIODS`).
+        every(MOTOR_PEAK_TRIP_PERIODS.id(), 0, 63),
+        // `current.rail_skip`: a 12-bit ADC count, 0 = off.
+        every(MOTOR_RAIL_SKIP.id(), 0, 4_095),
+        // `current.dc_link.limit`, milliamps: `board::limit::LIMIT_REQUEST_CAP_MA`, as
+        // `current.limit`.
+        every(MOTOR_DC_LINK_LIMIT.id(), 0, 163_840),
+        // `gate.break.enable`: a bool.
+        every(MOTOR_BREAK_ENABLE.id(), 0, 1),
         // Calibration. `imu.gyro_bias`, raw counts: the sensor's i16 word.
         every(IMU_GYRO_BIAS.id(), -32767, 32767),
         // `attitude.level_trim`, centidegrees: a half turn either way.
@@ -1871,6 +1960,9 @@ pub mod names {
         at(BOARD_BATTERY_CAL.id(), 1, -500, 500),
         // `current.noise_floor`: `board::limit`'s NOISE_FLOOR_MIN..=MAX_LIMIT_COUNTS.
         every(MOTOR_NOISE_FLOOR.id(), 1_000, 16_383),
+        // `current.dc_link.cal`: `board::limit`'s CURRENT_CAL_MIN..=CURRENT_CAL_MAX, as
+        // `current.cal`.
+        every(MOTOR_DC_LINK_CAL.id(), 100, 819),
         // `wifi.tx_power`: the radio's own range; not a check the app makes.
         every(
             WIFI_TX_POWER.id(),
@@ -1887,6 +1979,7 @@ pub mod names {
         BOARD_BATTERY_CAL.id(),
         MOTOR_CURRENT_CAL.id(),
         MOTOR_NOISE_FLOOR.id(),
+        MOTOR_DC_LINK_CAL.id(),
     ];
 
     /// The range of `key`'s values: the row for its index, else the row for every index.
@@ -2009,8 +2102,10 @@ pub mod names {
             }
         }
 
-        /// The range table covers exactly the arm row, the calibration fields and
-        /// `wifi.tx_power`, each with a lower bound below its upper one, inside its storage type.
+        /// The range table covers exactly the arm row, the calibration fields, the two boot-read
+        /// protection settings (`current.dc_link.limit`, `gate.break.enable`,
+        /// `specs/optional-protections.md` section 4) and `wifi.tx_power`, each with a lower bound
+        /// below its upper one, inside its storage type.
         #[test]
         fn the_range_table_covers_the_arm_row_and_the_calibration() {
             let mut want: Vec<u8> = REGISTRY
@@ -2018,7 +2113,11 @@ pub mod names {
                 .filter(|e| e.effect == Effect::Arm)
                 .map(|e| e.field_id)
                 .chain(CALIBRATION.iter().copied())
-                .chain([WIFI_TX_POWER.id()])
+                .chain([
+                    WIFI_TX_POWER.id(),
+                    MOTOR_DC_LINK_LIMIT.id(),
+                    MOTOR_BREAK_ENABLE.id(),
+                ])
                 .collect();
             want.sort_unstable();
             want.dedup();
@@ -2058,14 +2157,26 @@ pub mod names {
             }
         }
 
-        /// `active_high`'s bit labels are the paths of the pins they describe.
+        /// `active_high`'s bit labels are the paths of the pins they describe: a board pin's
+        /// path, or `motors[i].` and a motor pin's.
         #[test]
         fn active_high_names_input_pin_paths() {
             let Kind::Bits(bits) = by_id(BOARD_INPUT_POLARITY.id()).unwrap().kind else {
                 panic!("active_high is a bits field");
             };
             for (_, path) in bits {
-                let row = NAMES.iter().find(|r| r.path == *path).unwrap();
+                let (index, rest) = match path.strip_prefix("motors[") {
+                    Some(r) => {
+                        let (i, rest) = r.split_once("].").unwrap();
+                        assert!(i.parse::<u8>().unwrap() < MOTORS, "{path}");
+                        (Index::Motor, rest)
+                    }
+                    None => (Index::Single, *path),
+                };
+                let row = NAMES
+                    .iter()
+                    .find(|r| r.path == rest && r.index == index)
+                    .unwrap();
                 assert_eq!(row.kind, Kind::Pin, "{path}");
             }
         }
@@ -2221,6 +2332,13 @@ mod registry_tests {
             (0x56, MOTOR_GATE_REMAP.id()),
             (0x57, MOTOR_PHASE_C.id()),
             (0x58, MOTOR_CURRENT_SENSE.id()),
+            (0x59, MOTOR_PEAK_TRIP_PERIODS.id()),
+            (0x5A, MOTOR_RAIL_SKIP.id()),
+            (0x5B, MOTOR_DC_LINK_PIN.id()),
+            (0x5C, MOTOR_DC_LINK_CAL.id()),
+            (0x5D, MOTOR_DC_LINK_LIMIT.id()),
+            (0x5E, MOTOR_BREAK_PIN.id()),
+            (0x5F, MOTOR_BREAK_ENABLE.id()),
         ];
         for (want, got) in map {
             assert_eq!(want, got);
@@ -2346,6 +2464,8 @@ mod registry_tests {
                 (0x4F, 0),
                 (0x50, 0),
                 (0x51, 0),
+                (0x59, 0),
+                (0x5A, 0),
             ]
         );
         // Everything else is read at boot.

@@ -144,7 +144,7 @@ class SetupNodeTargetTest {
         assertEquals(other, rig.state.board)
         assertEquals(other, rig.state.selectedMotor, "picking a motor controller makes it the one SINGLE drives")
         assertEquals(
-            SetupFields.ALL.map { other to it.key } + SetupModel.IMU_BUS.map { other to it },
+            setupPass(other),
             rig.transport.reads.drop(readsBefore),
         )
         assertEquals(Value.U8(1), rig.state.values[direction], "the other board's own value")
@@ -158,7 +158,7 @@ class SetupNodeTargetTest {
         runCurrent()
         assertEquals(board, rig.state.board)
         assertEquals(setOf(direction), rig.state.writes.keys, "the first board's write record was lost")
-        val pass = SetupFields.ALL.size + SetupModel.IMU_BUS.size
+        val pass = setupPass(board).size
         assertEquals(readsBefore + pass, rig.transport.reads.size, "the first board was read again")
     }
 

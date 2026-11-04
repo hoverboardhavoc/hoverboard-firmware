@@ -67,6 +67,12 @@ control = { path = "../control" }
 # crate is already linked through the orchestrator, which owns the debouncers it feeds; no new
 # bytes, and naming it here keeps the mapping out of this file as three literals.
 inputs = { path = "../inputs" }
+# The mode machine's `Mode`, for the one test the 250 Hz task makes of a pass's resulting mode:
+# the break flags clear on a pass that left the board in OFF (`specs/optional-protections.md`
+# section 3.3), the pass on which the orchestrator clears every latch. Already linked through the
+# orchestrator, which does not re-export it; no new bytes. The arm tests also drive the real
+# machine through it.
+state = { path = "../state" }
 linkctl = { path = "../../shared/linkctl" }
 imu = { path = "../imu" }
 attitude = { path = "../attitude" }
@@ -88,11 +94,6 @@ panic-halt = "1"
 # transitively either way, so this adds no new crate to the graph.
 [dev-dependencies]
 base = { path = "../../shared/base" }
-# The mode machine, for the one arm test that asserts the OFF gate itself opens after a shutdown
-# taken at speed (`motorcontroller/firmware/src/arm.rs`). The claim is "the machine can leave OFF", so the
-# test drives the REAL machine rather than restating its gate. Already in the graph through
-# `orchestrator`, which does not re-export it; host-test only, no bytes in the image.
-state = { path = "../state" }
 
 # The HAL (motorcontroller/hal, specs/hal.md), with the chip the image's feature names. Target-gated:
 # the host build of this crate degrades to an empty `main`, so it never links a HAL.

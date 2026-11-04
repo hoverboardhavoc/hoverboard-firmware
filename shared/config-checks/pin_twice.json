@@ -121,5 +121,30 @@
       ]
     },
     "refused": "motors[0].gate.hi_a"
+  },
+  {
+    "name": "the break input on the latch's PB12",
+    "chip": "gd32f103rc",
+    "board": {
+      "power": {
+        "self_hold": {
+          "port": "B",
+          "pin": 12
+        }
+      },
+      "motors": [
+        {
+          "gate": {
+            "break": {
+              "pin": {
+                "port": "B",
+                "pin": 12
+              }
+            }
+          }
+        }
+      ]
+    },
+    "refused": "motors[0].gate.break.pin"
   }
 ]

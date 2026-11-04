@@ -1,0 +1,76 @@
+# Mode: final_state over ADC2. The calibration polls end at once (CTL1's RSTCLB and CLB are
+# self-clearing in the family table), as regular_bringup_adc2_battery_f10x. The vendor builds CTL1
+# one field at a time and adc_enable writes ADCON only when it is clear; the HAL writes each field
+# once and ADCON twice. End state:
+#   ADC2 CTL0   = 0x00000100 (SM; no EOICIE: ADC0's flag is the period vector's one source)
+#   ADC2 CTL1   = 0x001E8001 (ADCON | ETEIC | ETSIC = TIMER0 TRGO (0) | ETSRC software (7 << 17) |
+#                 ETERC (20)), right-aligned (DAL clear), the last write the CLB command less its
+#                 self-clearing bit
+#   ADC2 SAMPT0 = 0x000001D2 (channels 10 and 11 at 13.5 cycles, channel 12 at 239.5)
+#   ADC2 RSQ0   = 0x00000000 (one regular conversion), RSQ2 = 0x0000000C (rank 0 = channel 12)
+#   ADC2 ISQ    = 0x00152C00 (IL = 1 | rank 0 = 11 at 14:10 | rank 1 = 10 at 19:15)
+description = """
+The 12-FET's DC-link inputs on ADC2's inserted group beside its regular battery conversion
+(optional-protections.md section 3.2): the battery's software-triggered regular conversion of
+channel 12 (PC2) at 239.5 cycles, then two inserted ranks, motor 0's channel 11 (PC1) and motor 1's
+channel 10 (PC0), at 13.5 cycles on ADC2_EXTTRIG_INSERTED_T0_TRGO (the trigger ADC0 and ADC1 take),
+right-aligned like the battery, scan on, no interrupt; ADC on, calibrated. No conversion.
+
+Vendor: regular_bringup_adc2_battery_f10x's regular configuration; adc_special_function_config(SCAN
+        ENABLE); inserted length 2; adc_inserted_channel_config(0, 11, 13.5), (1, 10, 13.5);
+        ADC2_EXTTRIG_INSERTED_T0_TRGO and its enable; adc_enable; adc_calibration_enable.
+HAL: chip.adc_instance(Adc2), configure_single(12, 7), configure_inserted(&InjectedAdcConfig { Adc2,
+     [11, 10] at code 2, right-aligned, Timer0 Trgo, /6 }), calibrate().
+"""
+family = "gd32f10x"
+# ADC2 exists on the GD32F103RC alone; the C8 build refuses it (MissingBase).
+chips = ["gd32f103rc"]
+mode = "final_state"
+assert_only = ["<ADC2_BASE>"]
+
+[vendor]
+body = '''
+    adc_special_function_config(ADC2, ADC_SCAN_MODE, DISABLE);
+    adc_special_function_config(ADC2, ADC_CONTINUOUS_MODE, DISABLE);
+    adc_data_alignment_config(ADC2, ADC_DATAALIGN_RIGHT);
+    adc_channel_length_config(ADC2, ADC_REGULAR_CHANNEL, 1U);
+    adc_regular_channel_config(ADC2, 0U, ADC_CHANNEL_12, ADC_SAMPLETIME_239POINT5);
+    adc_external_trigger_source_config(ADC2, ADC_REGULAR_CHANNEL, ADC0_1_2_EXTTRIG_REGULAR_NONE);
+    adc_external_trigger_config(ADC2, ADC_REGULAR_CHANNEL, ENABLE);
+
+    adc_special_function_config(ADC2, ADC_SCAN_MODE, ENABLE);
+    adc_channel_length_config(ADC2, ADC_INSERTED_CHANNEL, 2U);
+    adc_inserted_channel_config(ADC2, 0U, ADC_CHANNEL_11, ADC_SAMPLETIME_13POINT5);
+    adc_inserted_channel_config(ADC2, 1U, ADC_CHANNEL_10, ADC_SAMPLETIME_13POINT5);
+    adc_external_trigger_source_config(ADC2, ADC_INSERTED_CHANNEL, ADC2_EXTTRIG_INSERTED_T0_TRGO);
+    adc_external_trigger_config(ADC2, ADC_INSERTED_CHANNEL, ENABLE);
+    adc_enable(ADC2);
+    adc_calibration_enable(ADC2);
+'''
+
+[hal]
+body = '''
+    use hal::config::{AdcClockDiv, InjectedAdcConfig, InjectedChannel, TimerTriggerLink};
+    use hal::{Chip, PeriphLabel};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let adc = chip.adc_instance(PeriphLabel::Adc2).unwrap();
+        adc.configure_single(12, 7); // PC2 at 239.5 cycles
+        let mut channels = heapless::Vec::new();
+        for channel in [11, 10] {
+            channels.push(InjectedChannel { channel, sample_time: 2 }).unwrap();
+        }
+        let cfg = InjectedAdcConfig {
+            adc: PeriphLabel::Adc2,
+            channels,
+            left_aligned: false,
+            trigger_timer: PeriphLabel::Timer0,
+            trigger_link: TimerTriggerLink::Trgo,
+            clock_div: AdcClockDiv::Div6,
+        };
+        adc.configure_inserted(&cfg).unwrap();
+        adc.calibrate().unwrap();
+    }
+'''

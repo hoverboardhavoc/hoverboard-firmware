@@ -2,6 +2,7 @@ package com.hoverboard.protocol.board
 
 import com.hoverboard.protocol.checks.Checks
 import com.hoverboard.protocol.checks.Role
+import com.hoverboard.protocol.pincap.ADC2
 import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.pincap.SWD
 import com.hoverboard.protocol.store.Value
@@ -10,7 +11,8 @@ import com.hoverboard.protocol.store.Value
  * The values a client may offer for one layout slot (`specs/remote-ui.md` section 3.5, "THE PIN
  * GRID"), taken from [chip]'s table ([com.hoverboard.protocol.pincap]): every pin the chip bonds,
  * less the SWD pair and the pins another function holds, that can carry the slot's function. A
- * plain pin is any such pin; an ADC input carries its pin's channel; an alternate-function pin
+ * plain pin is any such pin; an ADC input carries its pin's channel (a DC-link input only a pin
+ * that feeds ADC2, whose inserted group converts it); an alternate-function pin
  * carries the AF number of each route the table has for its function (0 on a chip that remaps,
  * whose group's remap key selects the route instead).
  *
@@ -31,6 +33,9 @@ fun candidates(slot: LayoutSlot, fields: BoardFields, chip: Chip): List<Value> {
         when (role) {
             Role.Plain -> listOf(Value.Pin(port, pin))
             Role.Adc -> listOfNotNull(t.adcChannel(port, pin)?.let { Value.PinAdc(port, pin, it) })
+            Role.DcLink -> listOfNotNull(
+                t.adcChannel(port, pin)?.takeIf { t.feeds(port, pin, ADC2) }?.let { Value.PinAdc(port, pin, it) },
+            )
             is Role.Af -> t.routes
                 .filter { it.port == port && it.pin == pin && it.func.kind == role.kind && it.func.ch == role.ch }
                 .map { Value.PinAf(port, pin, if (chip.remaps) 0 else it.sel) }

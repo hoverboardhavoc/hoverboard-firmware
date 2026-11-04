@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use hal::pincap::{Chip, Func, Phase, Table, SWD};
+use hal::pincap::{Chip, Func, Phase, Table, ADC2, SWD};
 use serde_json::Value as Json;
 use store::{Key, PinField, Type, Value};
 
@@ -67,11 +67,16 @@ pub enum Check {
     Frame,
     /// A balance machine in the rigid frame has exactly one board set as leader.
     Leader,
+    /// A protection is enabled only on a motor that stores its input
+    /// (`specs/optional-protections.md` section 7).
+    ProtectInput,
+    /// A protection input is stored only on a chip whose image reads it.
+    ProtectChip,
 }
 
 impl Check {
     /// Every check.
-    pub const ALL: [Check; 18] = [
+    pub const ALL: [Check; 20] = [
         Check::PinExists,
         Check::Swd,
         Check::PinTwice,
@@ -90,6 +95,8 @@ impl Check {
         Check::LimitFloor,
         Check::Frame,
         Check::Leader,
+        Check::ProtectInput,
+        Check::ProtectChip,
     ];
 
     /// The id the shared cases use.
@@ -113,6 +120,8 @@ impl Check {
             Check::LimitFloor => "limit_floor",
             Check::Frame => "frame",
             Check::Leader => "leader",
+            Check::ProtectInput => "protect_input",
+            Check::ProtectChip => "protect_chip",
         }
     }
 }
@@ -138,6 +147,11 @@ enum Role {
     Plain,
     /// An ADC input.
     Adc,
+    /// A DC-link current input: an ADC input on ADC2, whose inserted group converts it
+    /// (`specs/optional-protections.md` section 3.2).
+    DcLink,
+    /// The gate timer's break input.
+    Break,
     /// The gate timer's channel `n` output.
     Hi(u8),
     /// The gate timer's complementary channel `n` output.
@@ -162,7 +176,8 @@ impl Role {
             Role::Rx => Func::Rx(n),
             Role::Scl => Func::Scl(n),
             Role::Sda => Func::Sda(n),
-            Role::Plain | Role::Adc => return None,
+            Role::Break => Func::Break(n),
+            Role::Plain | Role::Adc | Role::DcLink => return None,
         })
     }
 }
@@ -197,13 +212,16 @@ impl Periph {
 /// its remap key. Complete when every pin and the instance are stored, absent when none is. A group
 /// with a `switch` (the IMU's `imu.model`) is all or none with the switch: off (0 or not stored),
 /// its pins and instance may be stored or not. A group with a `pick` (a motor's phase-current
-/// sense) is complete when exactly that many of its pins are stored.
+/// sense) is complete when exactly that many of its pins are stored. A group with a `via` (a
+/// motor's break input) has no instance of its own: its pin is routed on the timer that key names,
+/// another group's instance.
 struct Group {
     pins: Vec<(PinField, Role)>,
     instance: Option<(Key, Periph)>,
     remap: Option<Key>,
     switch: Option<Key>,
     pick: Option<usize>,
+    via: Option<Key>,
 }
 
 impl Group {
@@ -214,6 +232,7 @@ impl Group {
             remap: None,
             switch: None,
             pick: None,
+            via: None,
         }
     }
 }
@@ -239,6 +258,7 @@ fn groups() -> Vec<Group> {
             remap: Some(store::IMU_REMAP.key()),
             switch: Some(store::IMU_MODEL.key()),
             pick: None,
+            via: None,
         },
     ];
     for i in 0..store::LINKS {
@@ -251,6 +271,7 @@ fn groups() -> Vec<Group> {
             remap: Some(store::LINK_REMAP.at(i).key()),
             switch: None,
             pick: None,
+            via: None,
         });
     }
     for m in 0..store::MOTORS {
@@ -264,6 +285,7 @@ fn groups() -> Vec<Group> {
             remap: None,
             switch: None,
             pick: None,
+            via: None,
         });
         g.push(Group {
             pins: vec![
@@ -278,6 +300,7 @@ fn groups() -> Vec<Group> {
             remap: Some(store::MOTOR_GATE_REMAP.at(m).key()),
             switch: None,
             pick: None,
+            via: None,
         });
         g.push(Group {
             pins: SENSE_PHASES
@@ -288,9 +311,38 @@ fn groups() -> Vec<Group> {
             remap: None,
             switch: None,
             pick: Some(2),
+            via: None,
+        });
+        g.push(Group::single(store::MOTOR_DC_LINK_PIN.at(m), Role::DcLink));
+        g.push(Group {
+            pins: vec![(store::MOTOR_BREAK_PIN.at(m), Role::Break)],
+            instance: None,
+            remap: Some(store::MOTOR_GATE_REMAP.at(m).key()),
+            switch: None,
+            pick: None,
+            via: Some(store::MOTOR_GATE_TIMER.at(m).key()),
         });
     }
     g
+}
+
+/// Whether the chip's image reads a pin of `role`: a protection input only where the chip's table
+/// says so (`hal::pincap::Inputs`), every other pin everywhere.
+fn image_reads(t: &Table, role: Role) -> bool {
+    match role {
+        Role::DcLink => t.inputs.dc_link,
+        Role::Break => t.inputs.brk,
+        _ => true,
+    }
+}
+
+/// Whether motor `m` stores a sensed pair: exactly two of its phase pins.
+fn senses(state: &State, m: u8) -> bool {
+    SENSE_PHASES
+        .iter()
+        .filter(|(f, _)| state.contains_key(&f.at(m).key()))
+        .count()
+        == 2
 }
 
 /// A motor's phase-current sense pins with the phase each names, in phase order: a motor senses
@@ -387,6 +439,10 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
     // Each group: complete or absent, and a complete one routed on this chip.
     let mut instances: HashMap<(Periph, u8), Key> = HashMap::new();
     for g in groups() {
+        // A protection input the image does not read is `protect_chip`'s alone (below).
+        if !g.pins.iter().all(|(_, role)| image_reads(t, *role)) {
+            continue;
+        }
         let set: Vec<bool> = g
             .pins
             .iter()
@@ -466,20 +522,26 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
                 }
                 Some(n)
             }
-            _ => None,
+            _ => g.via.and_then(|k| byte_of(state, k)),
         };
         let remap = g.remap.map_or(0, |k| byte_of(state, k).unwrap_or(0));
         for (f, role) in &g.pins {
             let Some(b) = pin_of(state, *f) else { continue };
             let (port, pin) = (b[0], b[1]);
             let at = pin_text(port, pin);
-            if *role == Role::Adc {
+            if matches!(role, Role::Adc | Role::DcLink) {
                 let want = t.adc_channel(port, pin);
                 if want != Some(b[2]) {
                     let msg = match want {
                         Some(c) => format!("{at} is ADC channel {c}, not {}", b[2]),
                         None => format!("{at} is not an ADC input on the {}", chip.name()),
                     };
+                    refuse(&mut out, Check::Adc, f.key(), msg);
+                } else if *role == Role::DcLink && !t.feeds(port, pin, ADC2) {
+                    let msg = format!(
+                        "{at} does not feed ADC2, whose inserted group converts the DC-link \
+                         inputs"
+                    );
                     refuse(&mut out, Check::Adc, f.key(), msg);
                 }
                 continue;
@@ -588,6 +650,23 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
             );
         }
     }
+    // A protection input is stored only where the chip's image reads it
+    // (`specs/optional-protections.md` section 5.2).
+    for m in 0..store::MOTORS {
+        for (f, role) in [
+            (store::MOTOR_DC_LINK_PIN.at(m), Role::DcLink),
+            (store::MOTOR_BREAK_PIN.at(m), Role::Break),
+        ] {
+            if state.contains_key(&f.key()) && !image_reads(t, role) {
+                refuse(
+                    &mut out,
+                    Check::ProtectChip,
+                    f.key(),
+                    format!("the {} image does not read this input", chip.name()),
+                );
+            }
+        }
+    }
     // A remap key is a GD32F10x key.
     if !chip.remaps() {
         let remaps = [store::IMU_REMAP.key()]
@@ -638,14 +717,14 @@ pub fn check_forms(chip: Chip, entries: &[Entry]) -> Vec<Refusal> {
     out
 }
 
-/// Every check that needs no chip: the range table over the arm row and the calibration, each
-/// motor's limit above its noise floor, and the IMU frame. Another field's range (`wifi.tx_power`)
-/// is the forceable one encoding makes.
+/// Every check that needs no chip: the range table over the arm row, the calibration and the
+/// protection settings, each motor's limit above its noise floor, each protection's input, and the
+/// IMU frame. The range table's one other field (`wifi.tx_power`) is the forceable one encoding
+/// makes.
 pub fn check_values(state: &State) -> Vec<Refusal> {
     let mut out = Vec::new();
     for (key, (t, b)) in state {
-        let board_check = store::lookup_key(*key).is_some_and(|d| d.effect == store::Effect::Arm)
-            || store::CALIBRATION.contains(&key.field_id);
+        let board_check = key.field_id != store::WIFI_TX_POWER.id();
         let Some((lo, hi)) = store::range_of(*key).filter(|_| board_check) else {
             continue;
         };
@@ -681,6 +760,42 @@ pub fn check_values(state: &State) -> Vec<Refusal> {
                 key: limit.key(),
                 msg: format!("{}: {why}", path_of(limit.key())),
             });
+        }
+    }
+    // Each protection enabled only beside its input (`specs/optional-protections.md` section 7):
+    // a setting as the write leaves it, 0 where it is not stored (each one's default).
+    for m in 0..store::MOTORS {
+        let set = |k: Key| {
+            state
+                .get(&k)
+                .and_then(|(t, b)| int_of(*t, b))
+                .is_some_and(|v| v != 0)
+        };
+        let checks = [
+            (
+                store::MOTOR_DC_LINK_LIMIT.at(m).key(),
+                state.contains_key(&store::MOTOR_DC_LINK_PIN.at(m).key()),
+                path_of(store::MOTOR_DC_LINK_PIN.at(m).key()),
+            ),
+            (
+                store::MOTOR_BREAK_ENABLE.at(m).key(),
+                state.contains_key(&store::MOTOR_BREAK_PIN.at(m).key()),
+                path_of(store::MOTOR_BREAK_PIN.at(m).key()),
+            ),
+            (
+                store::MOTOR_RAIL_SKIP.at(m).key(),
+                senses(state, m),
+                format!("a sensed pair (two of motors[{m}].current.phase_a to phase_c)"),
+            ),
+        ];
+        for (key, has_input, input) in checks {
+            if set(key) && !has_input {
+                out.push(Refusal {
+                    check: Check::ProtectInput,
+                    key,
+                    msg: format!("{}: enabled without its input, {input}", path_of(key)),
+                });
+            }
         }
     }
     let i32_of = |k: Key| match state.get(&k) {

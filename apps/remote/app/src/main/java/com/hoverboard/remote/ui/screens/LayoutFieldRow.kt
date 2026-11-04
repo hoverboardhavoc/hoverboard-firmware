@@ -93,7 +93,7 @@ internal fun GroupTabs(state: LayoutState, editable: Boolean, actions: LayoutAct
     val tab = tabs[selected]
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (tab.group == LayoutGroup.MOTOR) Caption(R.string.layout_motor_caption)
-        for (row in LayoutRows.of(tab.group, tab.motor)) FieldRow(row, state, editable, actions)
+        for (row in LayoutRows.of(tab.group, tab.motor, state.part)) FieldRow(row, state, editable, actions)
     }
 }
 

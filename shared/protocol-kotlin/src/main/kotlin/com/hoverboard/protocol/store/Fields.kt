@@ -290,6 +290,54 @@ object Fields {
     val MOTOR_CURRENT_SENSE = FieldDef(0x58, Type.U8, Value.U8(0), Effect.BOOT)
 
     /**
+     * The peak trip's count, per motor: consecutive phase-current readings at or above twice the
+     * soft limit that trip; 1 (the default) trips on the first, 0 turns the peak trip off and
+     * leaves the sustained trip (`specs/optional-protections.md` section 3.1). 0 to 63.
+     */
+    val MOTOR_PEAK_TRIP_PERIODS = FieldDef(0x59, Type.U8, Value.U8(1), Effect.ARM)
+
+    /**
+     * The rail skip's threshold, per motor, a 12-bit ADC count; 0 = off. A period on which a sensed
+     * phase's raw sample reaches it is FOC's held period (`specs/optional-protections.md` 3.4).
+     */
+    val MOTOR_RAIL_SKIP = FieldDef(0x5A, Type.U16, Value.U16(0), Effect.ARM)
+
+    /**
+     * The DC-link current input, per motor, with its ADC channel: the pin must feed ADC2, whose
+     * inserted group converts it. Only the GD32F103RC image reads it; absent (the default) means
+     * the motor has no DC-link limit (`specs/optional-protections.md` sections 3.2 and 5).
+     */
+    val MOTOR_DC_LINK_PIN = pin(0x5B, Type.PinAdc)
+
+    /**
+     * The DC-link chain's scale, per motor, stock current counts per amp, clamped into 100 to 819
+     * by the conversion as [MOTOR_CURRENT_CAL] is (`specs/optional-protections.md` section 3.2).
+     */
+    val MOTOR_DC_LINK_CAL = FieldDef(0x5C, Type.U16, Value.U16(800), Effect.BOOT)
+
+    /**
+     * The DC-link current limit, per motor, milliamps, 0 = off (the default): over it, the 250 Hz
+     * task derates the motor's demand. Enabled only with [MOTOR_DC_LINK_PIN] stored
+     * (`specs/optional-protections.md` section 3.2).
+     */
+    val MOTOR_DC_LINK_LIMIT = FieldDef(0x5D, Type.U32, Value.U32(0), Effect.BOOT)
+
+    /**
+     * The gate timer's hardware break input, per motor: TIMER0's on PB12 at remap 0, TIMER7's on
+     * PA6, routed against the motor's [MOTOR_GATE_TIMER] and [MOTOR_GATE_REMAP]. Its polarity is
+     * [BOARD_INPUT_POLARITY]'s bit `3 + motor`. Only the GD32F103RC image reads it
+     * (`specs/optional-protections.md` sections 3.3 and 5).
+     */
+    val MOTOR_BREAK_PIN = pin(0x5E, Type.PinAf)
+
+    /**
+     * The break input's switch, per motor, a bool, 0 (the default) = off: set, a break latches the
+     * motor's fault. Enabled only with [MOTOR_BREAK_PIN] stored (`specs/optional-protections.md`
+     * section 3.3).
+     */
+    val MOTOR_BREAK_ENABLE = FieldDef(0x5F, Type.U8, Value.U8(0), Effect.BOOT)
+
+    /**
      * What the pack IS: the number of cells in series (`shared/store/src/field.rs`,
      * `BOARD_BATTERY_CELLS`). 0 = not stated, which is the default and is not a guess at eight.
      *
@@ -313,8 +361,10 @@ object Fields {
     /**
      * Which electrical level means ASSERTED on the board's three discrete input lines
      * (`shared/store/src/field.rs`, `BOARD_INPUT_POLARITY`): b0 button, b1 pad A, b2 pad B, a set
-     * bit meaning active high. Bits 3..7 are reserved and inert (`motorcontroller/inputs/src/lib.rs`,
-     * `asserted`, masks them).
+     * bit meaning active high. Bits 3 and 4 are the two motors' break inputs ([MOTOR_BREAK_PIN] at
+     * index 0 and 1, `specs/optional-protections.md` section 3.3), clear meaning active low. Bits
+     * 5..7 are reserved and inert (`motorcontroller/inputs/src/lib.rs`, `asserted`, masks the word
+     * to the three input lines).
      *
      * A property of the input wiring fitted, not of the firmware, and a compiled literal until
      * 2026-10-24. The default 0b110 IS the behaviour the firmware held as three literals: the
@@ -535,6 +585,13 @@ object Fields {
         "MOTOR_PHASE_B" to MOTOR_PHASE_B,
         "MOTOR_PHASE_C" to MOTOR_PHASE_C,
         "MOTOR_CURRENT_SENSE" to MOTOR_CURRENT_SENSE,
+        "MOTOR_PEAK_TRIP_PERIODS" to MOTOR_PEAK_TRIP_PERIODS,
+        "MOTOR_RAIL_SKIP" to MOTOR_RAIL_SKIP,
+        "MOTOR_DC_LINK_PIN" to MOTOR_DC_LINK_PIN,
+        "MOTOR_DC_LINK_CAL" to MOTOR_DC_LINK_CAL,
+        "MOTOR_DC_LINK_LIMIT" to MOTOR_DC_LINK_LIMIT,
+        "MOTOR_BREAK_PIN" to MOTOR_BREAK_PIN,
+        "MOTOR_BREAK_ENABLE" to MOTOR_BREAK_ENABLE,
         "IMU_I2C" to IMU_I2C,
         "IMU_MODEL" to IMU_MODEL,
         "IMU_REMAP" to IMU_REMAP,
@@ -650,7 +707,8 @@ object Fields {
 
     /**
      * The range table (`store::RANGES`, `specs/config-read-once.md` section 4): every arm-row and
-     * calibration field's accepted values, and `wifi.tx_power`'s. The app refuses a write outside
+     * calibration field's accepted values, the two boot-read protection settings'
+     * (`specs/optional-protections.md` section 4), and `wifi.tx_power`'s. The app refuses a write outside
      * it, as the CLI does; the firmware applies what is stored. Pinned row for row to the Rust by
      * `RustSourceDriftTest`.
      */
@@ -672,11 +730,16 @@ object Fields {
         Range(MOTOR_DIRECTION.id, null, 0, 1),
         Range(CONTROL_SIDE.id, null, 0, 1),
         Range(MOTOR_ALIGN_OFFSET.id, null, 0, 5),
+        Range(MOTOR_PEAK_TRIP_PERIODS.id, null, 0, 63),
+        Range(MOTOR_RAIL_SKIP.id, null, 0, 4_095),
+        Range(MOTOR_DC_LINK_LIMIT.id, null, 0, 163_840),
+        Range(MOTOR_BREAK_ENABLE.id, null, 0, 1),
         Range(IMU_GYRO_BIAS.id, null, -32_767, 32_767),
         Range(ATTITUDE_LEVEL_TRIM.id, null, -18_000, 18_000),
         Range(BOARD_BATTERY_CAL.id, 0, 10_000, 32_000),
         Range(BOARD_BATTERY_CAL.id, 1, -500, 500),
         Range(MOTOR_NOISE_FLOOR.id, null, 1_000, 16_383),
+        Range(MOTOR_DC_LINK_CAL.id, null, 100, 819),
         Range(WIFI_TX_POWER.id, null, 8, 84),
     )
 
@@ -687,6 +750,7 @@ object Fields {
         BOARD_BATTERY_CAL.id,
         MOTOR_CURRENT_CAL.id,
         MOTOR_NOISE_FLOOR.id,
+        MOTOR_DC_LINK_CAL.id,
     )
 
     /** The range of [key]'s values (`store::range_of`): the row for its index, else the row for every index. */

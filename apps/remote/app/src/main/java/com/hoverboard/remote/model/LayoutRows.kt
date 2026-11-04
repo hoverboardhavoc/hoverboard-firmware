@@ -4,6 +4,8 @@ import androidx.annotation.StringRes
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.board.Layout
 import com.hoverboard.protocol.board.LayoutSlot
+import com.hoverboard.protocol.checks.Checks
+import com.hoverboard.protocol.pincap.Chip
 import com.hoverboard.protocol.store.FieldDef
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.remote.R
@@ -158,12 +160,33 @@ object LayoutRows {
             )
             row(Fields.MOTOR_PHASE_B, m, R.string.layout_field_phase_b, LayoutGroup.MOTOR)
             row(Fields.MOTOR_PHASE_C, m, R.string.layout_field_phase_c, LayoutGroup.MOTOR)
+            row(
+                Fields.MOTOR_DC_LINK_PIN, m, R.string.layout_field_dc_link, LayoutGroup.MOTOR,
+                note = R.string.layout_note_dc_link,
+            )
+            row(
+                Fields.MOTOR_BREAK_PIN, m, R.string.layout_field_break, LayoutGroup.MOTOR,
+                note = R.string.layout_note_break,
+            )
         }
     }
 
-    /** The rows of [group], for [motor] where the group is per-motor. */
-    fun of(group: LayoutGroup, motor: Int? = null): List<LayoutRow> =
-        ALL.filter { it.group == group && (motor == null || it.slot.motor == motor) }
+    /**
+     * The rows of [group], for [motor] where the group is per-motor, that [part] shows ([shown]).
+     */
+    fun of(group: LayoutGroup, motor: Int? = null, part: Chip? = null): List<LayoutRow> =
+        ALL.filter { it.group == group && (motor == null || it.slot.motor == motor) && shown(it, part) }
+
+    /**
+     * Whether [row] is shown for [part]: a pin every chip's image reads always, and one only some
+     * images read (the protection inputs, the GD32F103RC's alone, `specs/optional-protections.md`
+     * section 5.2) only on a part whose image reads it, so not while the part is unknown.
+     */
+    fun shown(row: LayoutRow, part: Chip?): Boolean {
+        val key = row.slot.key
+        if (Chip.entries.all { Checks.imageReads(it, key) }) return true
+        return part != null && Checks.imageReads(part, key)
+    }
 
     /** The row editing [slot], or null when the screen has none. */
     fun forSlot(slot: LayoutSlot): LayoutRow? = ALL.firstOrNull { it.slot.key == slot.key }

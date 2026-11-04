@@ -631,8 +631,9 @@ pub struct OrchestratorState<const M: usize> {
     /// feeds the engagement machine's sub-state (previous tick's, the spec's step order) as
     /// `a_substate`, the per-motor wheel word as `b_motion`, and `running_enable` follows the
     /// mode machine's RUN (the latch task runs on a running system; its 10-minute idle
-    /// count-to-latch is the stock idle timeout). The fast trip producers (over-current codes,
-    /// ext_trip) stay quiescent until the motor era. Cleared whole on any pass whose resulting
+    /// count-to-latch is the stock idle timeout). The fast trip producers are the firmware's: the
+    /// over-current code ([`OrchestratorState::raise_over_current`]) and the break level
+    /// ([`OrchestratorState::set_ext_trip`]). Cleared whole on any pass whose resulting
     /// mode is OFF (the power-cycle analog; the latch contract's downstream co-writer).
     pub latches: [FaultLatch; M],
     /// The mode machine (pipeline step 5): the sole MOE owner.
@@ -944,6 +945,18 @@ impl<const M: usize> OrchestratorState<M> {
     /// second route would give one fact two owners.
     pub fn raise_over_current(&mut self, motor: usize) {
         self.latches[motor].fault_code = state::CODE_OVERCURRENT;
+    }
+
+    /// The hardware break seam (`specs/optional-protections.md` section 3.3): set motor `motor`'s
+    /// `ext_trip` level to its gate timer's break flag. The firmware calls it every pass for each
+    /// motor whose break input is enabled; the latch's tick (pipeline step 4) latches one-way on
+    /// every RUN pass the level is set, which reaches the mode machine as `latch_a` (motor 0) or
+    /// `latch_b` (motor 1), so a break on either timer shuts the board down. The OFF pass clears
+    /// the latch with its level; a break input still active sets the flag, and so the level, again
+    /// on the next pass. A seam, the [`OrchestratorState::raise_over_current`] precedent, so the
+    /// host drives the chain without the timer.
+    pub fn set_ext_trip(&mut self, motor: usize, level: bool) {
+        self.latches[motor].ext_trip = level as u8;
     }
 
     /// The OBS snapshot (pipeline step 9 as data): the firmware copies these into the `CTRL_OBS`
@@ -1343,7 +1356,8 @@ pub fn control_task<const M: usize>(
     // spec's step order) as `a_substate`, the per-motor wheel word as `b_motion`, and
     // `running_enable` following RUN (the latch task runs on a running system; in RUN its
     // HEALTHY predicate is meaningful, and idle-in-RUN counts toward the stock 10-minute
-    // latch). The fast trip inputs (codes, ext_trip) stay quiescent until the motor era.
+    // latch). The fast trip inputs (the over-current code, the break level) are the firmware's,
+    // written before this pass.
     let a_substate = state.ctl.fsm.sub_state as i8;
     let run_enable = (state.mode.mode() == state::Mode::Run) as u8;
     for (i, latch) in state.latches.iter_mut().enumerate() {

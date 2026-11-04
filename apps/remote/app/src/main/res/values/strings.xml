@@ -311,6 +311,14 @@
     <string name="setup_field_align_offset">Align offset</string>
     <string name="setup_field_dead_time">Dead time (raw DTG)</string>
     <string name="setup_field_current_limit">Current limit (mA)</string>
+    <string name="setup_field_peak_trip_0">Motor 0 peak trip count</string>
+    <string name="setup_field_peak_trip_1">Motor 1 peak trip count</string>
+    <string name="setup_field_rail_skip_0">Motor 0 rail skip (12-bit count)</string>
+    <string name="setup_field_rail_skip_1">Motor 1 rail skip (12-bit count)</string>
+    <string name="setup_field_dc_link_limit_0">Motor 0 DC-link limit (mA)</string>
+    <string name="setup_field_dc_link_limit_1">Motor 1 DC-link limit (mA)</string>
+    <string name="setup_field_break_enable_0">Motor 0 break input</string>
+    <string name="setup_field_break_enable_1">Motor 1 break input</string>
     <string name="setup_field_imu_model">IMU model</string>
     <string name="setup_field_control_frame">Frame (both boards must match)</string>
     <string name="setup_field_control_side">Wheel side (this board)</string>
@@ -344,6 +352,8 @@
     <string name="setup_choice_side_right">Right wheel</string>
     <string name="setup_choice_leader_no">Not the leader</string>
     <string name="setup_choice_leader_yes">Leader</string>
+    <string name="setup_choice_off">Off</string>
+    <string name="setup_choice_on">On</string>
 
     <!-- The range a numeric row offers, which is the clamp the firmware applies as it reads the
          value: a word outside it is stored as written and narrowed on the way into the loop. -->
@@ -353,6 +363,10 @@
     <string name="setup_note_walk_owned">Set by the link walk; not editable here.</string>
     <string name="setup_note_motor_method">Six-step and sine both drive the wheel. Field-oriented control drives a current instead of a voltage and has not been proven on a wheel yet; set both boards of a machine to the same method. A board whose current sensing was not calibrated at start-up falls back to six-step.</string>
     <string name="setup_note_dead_time">%1$d DTG ticks or more; a shorter one lets both FETs of a leg conduct.</string>
+    <string name="setup_note_peak_trip">Consecutive phase-current readings at or above twice the limit that trip the motor: 1 trips on the first, 0 turns the peak trip off and leaves the sustained trip.</string>
+    <string name="setup_note_rail_skip">A raw phase sample at or above this 12-bit count holds FOC\'s output for that period; 0 is off. Shown for a motor with a sensed pair in its layout.</string>
+    <string name="setup_note_dc_link_limit">Over this DC-link current the board derates the motor\'s demand; 0 is off. Shown for a motor with a DC-link pin in its layout.</string>
+    <string name="setup_note_break_enable">On, the gate timer\'s break input stops the motor and latches its fault. Shown for a motor with a break pin in its layout.</string>
     <string name="setup_note_current_limit">The firmware converts this through the board\'s own counts per amp, then lowers a limit above what that board\'s sense range can hold, and raises one below its sense noise.</string>
     <string name="setup_note_rider_required">Not required: balance engages without a rider, so arming is the engage act and the frame must be held upright when arming. Any byte but 0 reads as required.</string>
     <string name="setup_note_battery_floor">0 = none. Refuses a balance engage below it, never ends a run.</string>
@@ -575,12 +589,16 @@
     <string name="layout_field_phase_a">Phase A sense</string>
     <string name="layout_field_phase_b">Phase B sense</string>
     <string name="layout_field_phase_c">Phase C sense</string>
+    <string name="layout_field_dc_link">DC-link current sense</string>
+    <string name="layout_field_break">Break input</string>
 
     <string name="layout_note_self_hold">Set from hoverboard-cli when the board is onboarded, not in this app. On battery this pin is what holds the board\'s own power on, so a wrong one powers the board off at boot and only SWD can recover it.</string>
     <string name="layout_note_imu">With a model set: both pins and the I2C instance, and the two pins that instance\'s clock and data. With None fitted the IMU stays off and the pins may stay stored. Apply refuses anything else and names the field.</string>
     <string name="layout_note_gates">All six gates, the gate timer and a dead time at or above the floor, or none, and the six have to be that timer\'s complementary set. Apply refuses anything else and names the field.</string>
     <string name="layout_note_halls">All three halls, or none.</string>
     <string name="layout_note_phase">Phase-current sense is fitted exactly when two of the three pins are set, each with its pin\'s ADC channel. Phase C is read only where the chip drives two motors (the GD32F103RC), and never with phase A.</string>
+    <string name="layout_note_dc_link">The bridge\'s DC-link current amplifier, with its pin\'s ADC channel. The pin has to feed ADC2 (PA0 to PA3, PC0 to PC3), whose inserted group converts it. Set, it lets Setup turn on the DC-link limit.</string>
+    <string name="layout_note_break">The gate timer\'s hardware break input: PB12 for TIMER0, PA6 for TIMER7, on the motor\'s gate timer and remap. Its polarity is active_high bit 3 for motor 0 and bit 4 for motor 1. Set, it lets Setup turn the break on.</string>
     <string name="layout_note_dead_time">%1$d DTG ticks or more once the gates are configured; 0 only with them unset. A shorter one lets both FETs of a leg conduct.</string>
 
     <string name="layout_absent">not set</string>

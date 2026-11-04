@@ -12,15 +12,18 @@
 //!   [`PwmTimer::follow`]) and the counter start. It writes `CCHP` once, with `POEN` clear, and
 //!   never sets `POEN`.
 //! - [`PwmHandle`]: the period ISR's surface: the three duties (`CH0CV`..`CH2CV`), the trigger
-//!   compare (`CH3CV`) and the channel output enables in `CHCTL2`. It holds no `CCHP` accessor.
-//! - [`ArmGate`]: `CCHP.POEN` (the main output enable, MOE) and nothing else. It is the only object
-//!   in the HAL that sets `POEN`, so a bug in the period ISR cannot energise a disarmed bridge.
+//!   compare (`CH3CV`), the channel output enables in `CHCTL2` and a read of the break flag
+//!   (`INTF.BRKIF`). It holds no `CCHP` accessor.
+//! - [`ArmGate`]: `CCHP.POEN` (the main output enable, MOE) and the break flag's clear, nothing
+//!   else. It is the only object in the HAL that sets `POEN`, so a bug in the period ISR cannot
+//!   energise a disarmed bridge.
 //!
 //! | reg      | offset | fields the HAL programs                                             |
 //! |----------|--------|---------------------------------------------------------------------|
 //! | `CTL0`   | `0x00` | CEN(0), DIR(4), CAM(6:5), ARSE(7), CKDIV(9:8)                       |
 //! | `CTL1`   | `0x04` | MMC(6:4), ISOx(8 + 2n), ISOxN(9 + 2n)                               |
 //! | `SMCFG`  | `0x08` | SMC(2:0), TRGS(6:4)                                                 |
+//! | `INTF`   | `0x10` | BRKIF(7), read and cleared (write 0 to clear)                       |
 //! | `SWEVG`  | `0x14` | UPG(0)                                                              |
 //! | `CHCTL0` | `0x18` | CH0 (7:0), CH1 (15:8): MS(1:0), COMSEN(3), COMCTL(6:4)              |
 //! | `CHCTL1` | `0x1C` | CH2 (7:0), CH3 (15:8), as `CHCTL0`                                  |
@@ -43,6 +46,7 @@ use crate::reg::{Field, Reg32};
 const CTL0: u32 = 0x00;
 const CTL1: u32 = 0x04;
 const SMCFG: u32 = 0x08;
+const INTF: u32 = 0x10;
 const SWEVG: u32 = 0x14;
 const CHCTL0: u32 = 0x18;
 const CHCTL1: u32 = 0x1C;
@@ -63,6 +67,10 @@ const CTL0_ARSE: u32 = 1 << 7;
 const CTL0_CKDIV: u32 = 0b11 << 8;
 
 const SWEVG_UPG: u32 = 1 << 0;
+
+/// `INTF.BRKIF`, the break flag: set by the hardware when the break input goes active with
+/// `BRKEN` set (`TIMER_FLAG_BRK`).
+const INTF_BRKIF: u32 = 1 << 7;
 
 /// `SMCFG.SMC`, the slave mode.
 const SMCFG_SMC: u32 = 0b111;
@@ -358,6 +366,8 @@ pub struct PwmHandle {
     trig_cv: Reg32,
     /// `CHCTL2`: the channel output enables.
     chctl2: Reg32,
+    /// `INTF`: the break flag.
+    intf: Reg32,
     /// `CAR`, the bound a duty is checked against.
     period: u16,
 }
@@ -373,6 +383,7 @@ impl PwmHandle {
             ],
             trig_cv: Reg32::new(base, CH3CV),
             chctl2: Reg32::new(base, CHCTL2),
+            intf: Reg32::new(base, INTF),
             period,
         }
     }
@@ -410,6 +421,14 @@ impl PwmHandle {
     pub fn set_channel_outputs(&self, enabled: [bool; MAX_PWM_CHANNELS]) {
         self.chctl2.modify(BRIDGE_ENABLES, output_enables(enabled));
     }
+
+    /// Whether the break flag (`INTF.BRKIF`) is set: the break input went active since the flag
+    /// was last cleared ([`ArmGate::clear_break_flag`]), which cleared `POEN` in hardware
+    /// (`timer_flag_get(TIMER_FLAG_BRK)`).
+    #[inline]
+    pub fn break_flag(&self) -> bool {
+        self.intf.read() & INTF_BRKIF != 0
+    }
 }
 
 // --- the arming gate ----------------------------------------------------------------------------
@@ -420,6 +439,7 @@ impl PwmHandle {
 #[derive(Debug, Clone, Copy)]
 pub struct ArmGate {
     cchp: Reg32,
+    intf: Reg32,
 }
 
 impl ArmGate {
@@ -427,6 +447,7 @@ impl ArmGate {
     fn new(base: u32) -> Self {
         Self {
             cchp: Reg32::new(base, CCHP),
+            intf: Reg32::new(base, INTF),
         }
     }
 
@@ -440,6 +461,16 @@ impl ArmGate {
     #[inline]
     pub fn disarm(&self) {
         self.cchp.modify(CCHP_POEN, 0);
+    }
+
+    /// Clear the break flag (`INTF.BRKIF`, `timer_flag_clear(TIMER_FLAG_BRK)`): a plain write of
+    /// every flag bit but `BRKIF`, since the flags clear on a written 0 and a read-modify-write
+    /// could clear a flag raised between its read and its write. A break input still active sets
+    /// the flag again at once. Here and not on [`PwmHandle`], so the break's recovery stays with
+    /// the arming layer that holds this gate.
+    #[inline]
+    pub fn clear_break_flag(&self) {
+        self.intf.write(!INTF_BRKIF);
     }
 }
 
