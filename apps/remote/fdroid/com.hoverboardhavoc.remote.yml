@@ -1,6 +1,10 @@
+# The F-Droid metadata for the app, as a template. The version lives in one place,
+# apps/remote/app/build.gradle.kts (versionName and versionCode, as literals: F-Droid reads them
+# from that file). tools/fdroid-build.sh fills the @...@ fields from it and from the commit it
+# builds; the copy in fdroiddata carries the same fields filled for the released tag.
 Categories:
-  - Remote Controller
   - Connectivity
+  - Remote Controller
 License: GPL-3.0-or-later
 AuthorName: hoverboardhavoc
 WebSite: https://hoverboardhavoc.com
@@ -13,9 +17,9 @@ RepoType: git
 Repo: https://github.com/hoverboardhavoc/hoverboard-firmware.git
 
 Builds:
-  - versionName: 0.1.0
-    versionCode: 1
-    commit: app-v0.1.0
+  - versionName: '@VERSION_NAME@'
+    versionCode: @VERSION_CODE@
+    commit: '@COMMIT@'
     subdir: apps/remote/app
     gradle:
       - yes
@@ -25,5 +29,5 @@ Builds:
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags ^app-v
-CurrentVersion: 0.1.0
-CurrentVersionCode: 1
+CurrentVersion: '@VERSION_NAME@'
+CurrentVersionCode: @VERSION_CODE@
