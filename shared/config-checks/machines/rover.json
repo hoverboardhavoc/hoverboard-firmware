@@ -22,7 +22,9 @@
       "pos_clamp": 45
     },
     "battery": {
-      "floor": 2400
+      "floor": 2400,
+      "cells": 8,
+      "chemistry": "lev50"
     }
   },
   "boards": {
@@ -35,10 +37,6 @@
           "port": "B",
           "pin": 12
         }
-      },
-      "buzzer": {
-        "port": "B",
-        "pin": 9
       },
       "leds": {
         "green": {
@@ -152,7 +150,9 @@
           },
           "direction": "forward",
           "side": "left",
-          "align_offset": 1
+          "align_offset": 1,
+          "pole_pairs": 15,
+          "wheel_diameter_mm": 165
         }
       ],
       "tone": {
