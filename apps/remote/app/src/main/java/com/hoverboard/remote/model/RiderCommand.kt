@@ -122,10 +122,15 @@ data class RiderCommand private constructor(
      * The rigid frame's leader is the one board that is sent one (`specs/rover-one-imu.md`
      * section 5): it holds the whole machine's common torque and splits the turn out of it
      * itself, so the app states the turn once and mixes nothing. A DISARMED command stays
-     * [DISARMED]: a machine nobody is holding armed turns no more than it drives.
+     * [DISARMED] with its horn kept: a machine nobody is holding armed turns no more than it
+     * drives, and the horn moves nothing (the rover's leader is the board with the buzzer).
      */
     fun withTurn(steer: Int): RiderCommand =
-        if (armed) copy(steer = steer.coerceIn(-DriveCmd.FULL_SCALE, DriveCmd.FULL_SCALE)) else DISARMED
+        if (armed) {
+            copy(steer = steer.coerceIn(-DriveCmd.FULL_SCALE, DriveCmd.FULL_SCALE))
+        } else {
+            DISARMED.withHorn(horn)
+        }
 
     /**
      * This command spelled as L3 PDUs, in the order they go on the wire: the `INPUTS` mirror
