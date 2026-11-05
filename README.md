@@ -1,269 +1,92 @@
 # hoverboard-firmware
 
-> ⚠️ **Work in progress, not properly tested.** Beware of
-> [shoot-through](https://en.wikipedia.org/wiki/Shoot-through): a bug in commutation, dead-time, or the
-> fault/arming state machine can turn both FETs of a phase leg on at once, shorting the battery across the
-> bridge. Bench it on a current-limited supply with the motor disconnected.
+**A configurable firmware for vehicles and robots built on hoverboard motor controllers.** It runs on
+the single board that drives both wheels (the board
+[EFeru's FOC firmware](https://github.com/EFeru/hoverboard-firmware-hack-FOC) targets) and on the
+split boards, one per wheel ([RoboDurden's Gen2](https://github.com/RoboDurden/Hoverboard-Firmware-Hack-Gen2.x)).
 
-**The ambition: one configurable firmware for building vehicles, self-balancing or not, that runs
-across the whole spread of hoverboard mainboards, 12-FET and 6-FET, single and twin/split, with one
-image per MCU.** Build a hoverboard you ride on its foot pads, or a non-balancing machine (a kart, a
-scooter, a robot base) driven by a remote or a throttle: the same image, reconfigured rather than
-recompiled.
+> ⚠️ This firmware switches the motor controller's FETs directly. A bug in commutation, dead-time or the
+> fault and arming logic can cause [shoot-through](https://en.wikipedia.org/wiki/H-bridge#General): both
+> FETs of a phase leg turn on at once and short the battery. Bring a new board up on a current-limited
+> bench supply before it sees a battery. Use it at your own risk: the firmware comes with no warranty.
 
-Everything board-specific except the MCU comes from configuration, not the build: the firmware reads
-the board layout, IMU model, drive mode, and tuning from settings stored on the board, which you
-can change at any time without recompiling or reflashing. The [Status](#status) below says how much of
-this is built.
+![The app and hoverboard-cli reach the vehicle through an ESP32-C3 bridge wired to the mainboard's SWD header](docs/architecture.png)
 
-Every other open hoverboard firmware picks the board at **compile time** (board `#define`s, a per-board
-header, an online build generator). Change the board, swap the IMU, or even move which pin a wire is on, and
-you build a different binary. This one is configured at runtime instead.
-
-## One firmware, two architectures
-
-Two things differ between boards, and they are **independent axes**: the MCU and the board layout.
-
-- **The MCU is chosen by the image.** The fleet spans two genuinely different peripheral architectures,
-  not minor variants of one: an **STM32F103 / GD32F103** class (APB-bus GPIO, the legacy `CRL`/`CRH`
-  config registers) and a **GD32F130** class (AHB-bus GPIO with an explicit alternate-function mux, an
-  ST-style peripheral set). Same Cortex-M3 core, different register model. The firmware is one source
-  built once per chip, on the in-repo HAL (`motorcontroller/hal`): `mainboard-gd32f103c8`,
-  `mainboard-gd32f130c8`, and `mainboard-gd32f103rc` for the 12-FET, whose GD32F103RC drives two
-  motors from one chip (`specs/twelve-fet.md`). The CLI reads the chip on the board and installs the image built for it
-  (`hoverboard-cli board update`), so a board never runs the other chip's register model.
-- **The board layout cannot be detected:** which pins drive the phases, where the halls, IMU, buttons, and
-  LEDs sit, which IMU model is fitted, and whether it is a single mainboard driving both wheels or a split
-  board with one controller per wheel. Every hoverboard firmware needs this; here it is **configuration stored on the board**, written
-  and changed in the field over the board's link, which runs over **UART or SWD** (a phone reaches it
-  over the Bluetooth of the hoverboard bridge on the board's SWD header), from a configurator.
-
-The two axes are orthogonal: the same chip turns up in different layouts, and a split board can be
-either MCU. The combinations multiply, and one configurable image per chip covers them all instead of a
-build per board.
-
-**Mainboards, not sideboards.** The small auxiliary sideboards (LEDs, IMU, inputs, no motor) are the
-same F130 family, but a smaller part: the reference design for them is a GD32F130C6T with **32 KiB of
-flash and 4 KiB of RAM**, where this image needs 57,904 B of flash and links against 8 KiB of RAM. One
-image covering both was an early ambition and it is dropped: the binary is 1.8x the whole of a
-sideboard's flash. A sideboard can still be a node on the board's link, running its own small firmware,
-and this project's link stack is designed for exactly that tree. What it cannot be is another host for
-this image.
-
-Six-step commutation drives a wheel on both an F103 and an F130, under an arming gate
-and a current limit, and a phone drives both wheels of a split pair through the hoverboard bridge on the
-master's SWD header. The
-runtime-config path is wired end to end: settings written from the phone take effect at the next arm. The
-current focus is the balance loop and the machine it is going into (see [Status](#status)).
-
-## Status
-
-Active development, built foundation-up: each piece is host-tested, then brought up on real hardware
-before the next.
-
-Legend: ✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned &nbsp; ❌ abandoned
-
-| Component | | What it is |
-|---|:--:|---|
-| Foundations (`shared/base`) | ✅ | CRC-16/MODBUS, fixed-point conventions, the shared error vocabulary |
-| HAL (`motorcontroller/hal`) | ✅ | one build per chip (GD32F103 / F130): GPIO / USART + DMA / timer / ADC / I2C / SPI, on-chip flash erase/program, each register sequence checked against GigaDevice's peripheral library; commutation spins a wheel on real boards |
-| Config storage (`shared/store`) | ✅ | log-structured key/value config store in flash; host-tested and running on a board |
-| Firmware images (`motorcontroller/firmware`) | ✅ | one image per GD32 part: read and validate the board layout, mount the store, run the 250 Hz control pipeline and the 16 kHz motor ISR |
-| Onboard Bluetooth (the CC2541 module) | ❌ | the AT bring-up and the board's BLE port were proven on real phones and then removed (2026-10-27): the phone's way in is the hoverboard bridge's Bluetooth, and the module is no longer driven |
-| DMA UART (`motorcontroller/hal`) | ✅ | interrupt- and DMA-driven buffered USART receive behind embedded-io adapters; proven on both chip families |
-| Config over Bluetooth | ✅ | a phone (the in-repo Android app) writes a setting into a board's on-board storage over the hoverboard bridge's Bluetooth and the board's SWD mailbox, and reads it back: the runtime-config path end to end (a browser configurator is planned) |
-| IMU + attitude | ✅ | a configurable I2C IMU driver (multiple models, per-board axis map and gyro bias) and the fused pitch/roll filter; both bench boards read their IMU and publish attitude every control tick |
-| Link stack (`shared/link` + `shared/net`) | ✅ | frame format, addressing, discovery, multi-hop forwarding, and the config register protocol wired to the store; framing proven over the inter-board UART and Bluetooth, discovery + config proven over Bluetooth (forwarding is host-tested) |
-| Config over SWD (`shared/swd-mailbox` + `tools/swd-bridge`) | ✅ | a RAM-mailbox link transport: a host sets and reads board config through a debug probe, no UART or radio needed |
-| Board model | ✅ | the per-board pin map (gates, halls, LEDs, timers, IMU bus, button, pads) read from config at boot, validated against the chip's own capability tables, and applied; a layout that would energize the wrong pin is refused rather than driven |
-| Sensing + safety | ✅ | the 250 Hz scheduler, the OFF/INIT/READY/RUN/SHUTDOWN mode machine, fault latches, and the arming gate that is the one place in the image able to energize a bridge; arming, fault escalation and self-shutdown proven on both boards |
-| Foot pads (rider detection) | 🚧 | the pad lines are configurable and debounced, and the rider level they produce is what the mode machine refuses to balance without (you only balance with someone on the board). Proven from the phone's rider mirror; no physical pads are wired to the bench boards yet |
-| Balance control | 🚧 | the PID cascade, the gain schedule and the engagement machine are built and host-tested, and gains tune live from the phone while running. No machine has balanced yet: the frame it is going into is still being built |
-| Motor hot path | ✅ | six-step commutation in a 16 kHz ISR behind the arming gate, with a measured phase-current limit, an over-current trip, and hall-loss and period-liveness faults that shut the bridge down by themselves. Sine and FOC are written and host-validated, but the image folds them to six-step (see [Commutation](#commutation)) |
-| Android app controller | ✅ | drive a board from the phone over Bluetooth: arm, a throttle pad, live gain tuning, and per-board setup. Both wheels of a split pair obey one pad, the slave driven over the inter-board link |
-| Provisioning + auto-detect | 📋 | a fresh board finds its link and is configured over it (deferred until a board is proven working) |
-| Full configurator + flash/backup bridge | 📋 | the complete browser configurator (board layout and tuning) over the board's link, plus an ESP32 bridge for flashing and backup. The Android app already covers setup and tuning; the board-layout editor is designed but not built |
-| ~~Firmware update / bootloader~~ | ❌ | **Abandoned: it does not fit in the flash these boards have.** A bootloader and the config store would leave 47,104 B for the app, and the image is 57,904 B. See [Why there is no bootloader](#why-there-is-no-bootloader) |
-
-
-
-### Why there is no bootloader
-
-Every board in the fleet but one has 64 KiB of flash. The exception is the 12-FET's GD32F103RCT6,
-whose 256 KiB is real (written and read back at `0x0803_F800` on 2026-06-24); its image is still
-limited to 63,488 B, the bridge's flash buffer, and nothing below has been redone for it.
-
-A self-update path needs an immutable bootloader at the bottom of flash, below the app, because it
-has to bring up the Bluetooth module, receive and validate an image, erase and program flash, and
-give feedback through an LED, all without being able to update itself. The design reserved 16 KiB for
-it. With the 2 KiB config store above that, the app slot is 47,104 B:
-
-```
-0x08000000  bootloader (16 KiB, immutable)
-0x08004000  config store (2 KiB)
-0x08004800  app slot (47,104 B)   <- the image needs 57,904 B
-```
-
-The image is 10,800 B too large for that slot, and nothing in reach closes a gap that size. Two
-dedicated shrink rounds have found about 3.6 KiB between them; the measured candidates left are worth
-a few hundred bytes each; and the largest single lever, removing the onboard Bluetooth module's
-support, was spent on 2026-10-27 (5,416 B of flashed span). Even cutting the reservation to the 6 KiB once thought
-achievable leaves the image over the slot, with nothing left to grow into.
-
-So firmware is written over SWD, which is what [Flashing](#flashing) describes, and the configurator
-reaches a board's settings over Bluetooth, UART, or SWD without reflashing it. The bootloader is
-written and host-tested on a branch, including a web tool that flashes over Bluetooth, and it is kept
-for a board with more than 64 KiB of flash rather than for this fleet.
+- **The board is configured, not compiled.** Other hoverboard firmware projects compile the board in
+  through `#define`s, per-board headers or an online build generator. Here the board layout, the
+  IMU, the drive mode and the tuning are settings stored on the board. You change them without
+  rebuilding or reflashing.
+- **Settings decide what the vehicle is:** a balancing hoverboard, a kart, a scooter or a robot base.
+- **FOC, sine and six-step commutation are all in the image.** A setting picks one.
+- **`hoverboard-cli` does the host side.** It flashes boards and bridges, edits settings and drives
+  the wheels.
+- **Flashing needs no debug probe.** Each board is flashed over Wi-Fi through an ESP32-C3 bridge on
+  its SWD header.
+- **An Android app drives and tunes over Bluetooth** through the same bridge.
+- **One bundle file holds every image.** `hoverboard-cli` picks the right one for each chip.
 
 ## Commutation
 
-All three of EFeru's FOC firmware's commutation methods are written and host-validated against
-behaviour fixtures recovered from the stock firmware:
+The image has the three methods of EFeru's FOC firmware, checked on the host against behaviour
+recorded from the stock firmware:
 
-- **Trapezoidal / block commutation**: classic six-step. No current sensor required.
-- **Sinusoidal**: open-loop sine commutation. No current sensor required.
-- **FOC (Field-Oriented Control)**: closed-loop, the highest-quality method. Requires a current
-  sensor.
+- **Six-step** (trapezoidal). It needs no current sensor.
+- **Sine**, open loop. It needs no current sensor.
+- **FOC**, closed loop on a q-axis current reference. It needs a current sensor.
 
-Boards **with** a current sensor can run all three. Boards **without** one run trapezoidal and
-sinusoidal; FOC (and any current or torque based mode that depends on it) is unavailable there.
-
-**The image runs six-step.** `motor.method` is a stored setting, and selecting sine or
-FOC is accepted and then folded back to six-step in the running image, which publishes the method it
-is actually running rather than the one it was asked for. The two are parked deliberately: the
-machine being built does not need them, and a commutation change is the kind of thing that gets
-bench-validated on its own rather than carried along.
+`machine.method` selects the method. FOC on a board without current sensing falls back to six-step
+and raises a fault flag. The board reports the method it actually runs.
 
 ## Configuration
 
-Configuration lives on the board, not in the build:
+A board's layout cannot be detected: which pins drive the phases, where the halls, IMU, buttons and
+LEDs sit, which IMU is fitted, and whether the board drives one wheel or two. This firmware stores it
+on the board with the tuning.
 
-- **One image per MCU, fleet-wide.** The image is built for its chip; the board layout and tuning are
-  config, not a rebuild. (A few features may still be compile-time flags where flash
-  space is tight.)
-- **Config in flash** as a log-structured key/value store: each setting is an appended record with
-  its own header and CRC, the newest record for a key wins, and a key with no record reads the
-  default its field registry declares. A blank or corrupt region therefore reads as defaults rather
-  than failing, and a torn write costs the one record it was writing.
-- **Live editing over the board's link** (Bluetooth, UART, or SWD) to read and write parameters
-  without recompiling or reflashing. Writes are refused while the board is armed, and a changed
-  setting takes effect at the next arm, so nothing is reconfigured under a live bridge.
-
-## Builds
-
-CI builds the motor-controller images and the bridge's on every push to `main` and packs them into
-one firmware bundle (`firmware-<commit>.hbfw`, `specs/firmware-bundle.md`), so you can flash without
-a local toolchain. `hoverboard-cli machine update <bundle>` updates every bridge of a machine and
-the board each one flashes, each through its own bridge. One device at a time:
-`hoverboard-cli board update <board> <bundle>` reads the chip on the board and flashes the image
-built for it, `hoverboard-cli bridge update <bridge> <bundle>` the bridge's app image, and
-`hoverboard-cli bridge install <bundle>` a new bridge over USB. `hoverboard-cli board flash <board>
-<elf>` flashes a development ELF as it is; `hoverboard-cli firmware info <bundle>` lists what the
-bundle holds. The bundle holds `mainboard-gd32f103c8`, `mainboard-gd32f130c8`,
-`mainboard-gd32f103rc`, `bridge-esp32c3` and `bridge-esp32c3-install`.
-
-- **Latest `main` build** (no login): [download `firmware-bundle.zip`](https://nightly.link/hoverboardhavoc/hoverboard-firmware/workflows/ci/main/firmware-bundle.zip)
-  (the bundle from the most recent green `main` build, served by [nightly.link](https://nightly.link)).
-- Or open any commit's run in the [Actions](https://github.com/hoverboardhavoc/hoverboard-firmware/actions)
-  tab and grab the **firmware-bundle** artifact (needs a GitHub login). The **firmware-elfs**
-  artifact holds the unstripped ELFs, by image name, for the tools that read their symbols.
-
-Each build chain is its own folder; run cargo or Gradle from inside it:
-
-| Folder | Builds |
-|---|---|
-| `motorcontroller/` | the GD32 firmware images (`cargo image-f103`, `cargo image-f130`, `cargo image-f103rc`), the HAL, and the test and bench images |
-| `shared/` | the crates the firmware, the bridge and the host tools all link; `shared/protocol-kotlin/` is their Kotlin mirror |
-| `bridge/` | the ESP32-C3 bridge image |
-| `tools/` | the host programs (the CLI, the SWD mailbox bridge, the emulator and hardware runners) beside the scripts |
-| `apps/remote/` | the Android remote app |
-
-## Building and testing
-
-The four Cargo workspaces (`motorcontroller/`, `shared/`, `tools/`, `bridge/`) each carry their own
-`rust-toolchain.toml` and `.cargo/`, so run cargo from inside the workspace. The repository root
-holds no Cargo workspace, and a bare `cargo build` there does nothing.
-
-- **Host test suites: `./tools/host-test.sh`**, from anywhere. It forwards cargo arguments, so
-  `-p store` or a test name works. With no `-p` it runs the motorcontroller suite and then the
-  shared suite; with `-p` it runs the workspace that owns each package. Do not use a bare
-  `cargo test` in `motorcontroller/`: `motorcontroller/.cargo/config.toml` defaults the target to
-  `thumbv7m-none-eabi`, so it compiles the test binaries for the board and silently runs none of
-  them. The script resolves the host triple and passes CI's flags, and CI's host-test job runs the
-  same script.
-- **Shipping images: `cargo image-f103`, `cargo image-f130` and `cargo image-f103rc` in
-  `motorcontroller/`** (`specs/hal.md` section 6). Each is the build-std release build of `firmware`
-  for one chip, on the `hal` crate (`motorcontroller/hal`), whose bytes reach flash
-  (`motorcontroller/.cargo/config.toml` explains why they are aliases and not a config key). The ELFs
-  are `motorcontroller/target/<chip>/thumbv7m-none-eabi/release/firmware`. An F103 board needs the
-  F103 image, an F130 board the F130 image and the 12-FET the RC image: `hoverboard-cli board update`
-  picks it from a bundle by the chip and flash size the board reports, while `board flash` writes an
-  ELF as given and checks no chip.
-- **A local firmware bundle: `./tools/pack-bundle.sh`**, from anywhere. It builds the three board
-  images, the bridge's two images (with espflash 4.6.0) and `hoverboard-cli`, then packs
-  `target/bundle/firmware-<commit>.hbfw`, the same file CI publishes. `--images DIR` packs images
-  that are already built, which is how CI's pack job runs it.
-- **The size gate against main: `tools/size-vs-base.sh <base>`** (`specs/twelve-fet.md` section
-  4.3). Builds the one-motor images at HEAD and at `<base>` and fails if any image's flashed span,
-  `.hotcode` or static RAM grew, printing "byte-identical" or the `nm -S` diff per image. CI's
-  `size-vs-main` job runs it against the merge base with `origin/main`.
-- **The MM32SPIN05 size build: `cargo image-mm32` in `motorcontroller/`** (`specs/hal.md` section 9,
-  step 3). The full mainboard firmware for the MM32SPIN05 (`thumbv6m-none-eabi`), which does not fit
-  its 32 KiB, linked into an oversized measurement region so its size can be read
-  (`motorcontroller/target/mm32spin05/thumbv6m-none-eabi/release/firmware`). It is never flashed:
-  the ELF defines `__image_not_flashable`, `hoverboard-cli` refuses it on every install path and in
-  the packer, and it is not in the bundle. CI's `mm32-size` job builds it and prints its size.
-- **The HAL builds for exactly one chip** (`gd32f103c8`, `gd32f130c8` or `gd32f103rc`), so it,
-  `firmware`, `store-test` and the bench images are left out of the workspace's default members and
-  are always built with `-p <crate> --features <chip>` (or the image aliases). `./tools/host-test.sh` runs the HAL's host tests once per chip.
-- **Golden register traces: `cargo run -p golden-trace -- check` in `tools/`.** It compares the
-  HAL's register accesses for every vector in `tools/golden-trace/vectors/` against the checked-in
-  trace of the same operation through GigaDevice's standard peripheral library, under Unicorn
-  (specs/hal.md, section 8.1). `-- regen --check` rebuilds those vendor traces from
-  `third_party/gd32-spl/` and fails unless they reproduce byte for byte; it, `-- regen` (write them)
-  and `-- trace VECTOR --vendor` need `arm-none-eabi-gcc` from the Arm GNU Toolchain 15.2.Rel1, and
-  every command needs cmake for Unicorn's build. `-- trace VECTOR --chip CHIP` prints one HAL trace.
-
-## Flashing
-
-The firmware is written to the mainboard MCU over SWD, using either a wireless ESP32-C3 debug probe
-or an ST-Link V2 clone. See [docs/flashing.md](docs/flashing.md).
-
-On the shared bench, `tools/flash.sh` and the other bench tools take no lock. Whoever runs bench
-work takes the lock first with `~/dev/hoverboard-bench/bench-lock.sh` (the `hoverboard-bench` repo),
-naming the resource the tool's header gives for its board (`rover`, `offroad`, `mm32`, `probes`, or
-`all`), and releases it after.
-
-## Documentation
-
-See [docs/](docs/) for hardware-facing references:
-
-- [Onboard BLE module](docs/onboard-ble-module.md): the observable interface of the built-in
-  CC2541-class Bluetooth module (AT bring-up, quirks, GATT layout, central integration notes). The
-  firmware no longer drives it; the page stays as the hardware record.
+- **The store** is a log of key/value records in flash, each with its own CRC. The newest record for
+  a key wins, and a missing key reads its default. A blank or corrupt store reads as defaults, and a
+  torn write loses only the record being written.
+- **Settings change over the board's link** (Bluetooth, UART or SWD). The board refuses writes while
+  armed. A change takes effect at the next arm.
 
 ## Licence
 
-**GPL-3.0-or-later.** This program is free software: you can redistribute it and modify it under the
-terms of the GNU General Public License as published by the Free Software Foundation, either version
-3 of the License, or (at your option) any later version. It is distributed in the hope that it will
-be useful, but WITHOUT ANY WARRANTY, without even the implied warranty of MERCHANTABILITY or FITNESS
-FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE), or
-[gnu.org/licenses](https://www.gnu.org/licenses/).
-
-`third_party/gd32-spl/` is GigaDevice's standard peripheral library and ARM's CMSIS headers, under
-their BSD-3-Clause licences ([third_party/gd32-spl/LICENSE](third_party/gd32-spl/LICENSE)); the
-golden-trace harness compiles it and nothing in the firmware links it.
+GPL-3.0-or-later; see [LICENSE](LICENSE). `third_party/gd32-spl/` holds GigaDevice's peripheral
+library and ARM's CMSIS headers under BSD-3-Clause
+([third_party/gd32-spl/LICENSE](third_party/gd32-spl/LICENSE)). Only the golden-trace harness
+compiles it; the firmware does not link it.
 
 ## Prior art
 
-- [NiklasFauth/hoverboard-firmware-hack](https://github.com/NiklasFauth/hoverboard-firmware-hack)
-  (lucysrausch / NiklasFauth): the original hack (trapezoidal commutation).
-- [EFeru/hoverboard-firmware-hack-FOC](https://github.com/EFeru/hoverboard-firmware-hack-FOC)
-  (EmanuelFeru): the FOC standard everyone forks (commutation / sinusoidal / FOC, field weakening,
-  voltage / speed / torque modes).
+- [NiklasFauth/hoverboard-firmware-hack](https://github.com/NiklasFauth/hoverboard-firmware-hack):
+  the original hack, with six-step commutation.
+- [EFeru/hoverboard-firmware-hack-FOC](https://github.com/EFeru/hoverboard-firmware-hack-FOC): the FOC
+  firmware most projects build on.
 - [RoboDurden/hoverboard-firmware-hack-FOC](https://github.com/RoboDurden/hoverboard-firmware-hack-FOC):
-  forks of the above, per-board defines, [online config generator](https://pionierland.de/hoverhack/),
-  C++ rewrite.
+  forks of it with per-board defines and an [online config generator](https://pionierland.de/hoverhack/).
 
-All compile-time configured. This project is the runtime-config alternative.
+## Status
+
+✅ working on hardware &nbsp; 🚧 in progress &nbsp; 📋 planned &nbsp; ❌ abandoned
+
+| Component | | What it does |
+|---|:--:|---|
+| HAL (`motorcontroller/hal`) | ✅ | GPIO, USART with DMA, timers, ADC, I2C, SPI and flash on the GD32F103C8, GD32F130C8 and GD32F103RC, each register sequence checked against GigaDevice's library |
+| Config store (`shared/store`) | ✅ | keeps the settings in flash |
+| Firmware image (`motorcontroller/firmware`) | ✅ | reads the board layout, mounts the store, and runs the 250 Hz control loop and the 16 kHz motor interrupt |
+| Board model | ✅ | reads the pin map from the settings at boot and checks it against the chip; it refuses a layout that would drive the wrong pin |
+| Link stack (`shared/link`, `shared/net`) | ✅ | carries framing, addressing, discovery, forwarding and the settings protocol over the inter-board UART, Bluetooth and SWD |
+| Safety | ✅ | the mode machine, fault latches, and an arming gate that is the only path to energizing the motor bridge |
+| Motor control | ✅ | six-step, sine and FOC torque mode, with a phase-current limit, an over-current trip and hall-loss faults |
+| Single board, dual motor | ✅ | the GD32F103RC board drives both motors from one image |
+| Optional protections | ✅ | a per-motor peak trip, and on the single board the DC-link limit and the timer break input |
+| IMU and attitude | ✅ | a configurable I2C IMU driver and a pitch and roll filter |
+| Balance control | ✅ | a state-feedback controller tuned live from the phone; a rigid-frame rover balances on it and has been ridden outdoors |
+| Foot pads | 🚧 | the pad inputs work; no physical pads are wired yet |
+| Tones | ✅ | the buzzer plays the horn and the battery alarms |
+| Android app (`apps/remote`) | ✅ | arms, drives, tunes the gains, sounds the horn and sets up boards |
+| CLI (`tools/hoverboard-cli`) | ✅ | flashes boards and bridges, reads and writes settings, and drives the wheels, over Wi-Fi, Bluetooth or USB |
+| Hoverboard bridge (`bridge/`) | ✅ | an ESP32-C3 on the SWD header: Bluetooth for the phone, Wi-Fi and USB for the CLI, and the flashing path |
+| Provisioning and auto-detect | 📋 | a fresh board finds its link and is configured over it |
+| ~~Onboard Bluetooth (CC2541)~~ | ❌ | removed; the bridge's Bluetooth replaces it |
+| ~~Full configurator~~ | ❌ | replaced by the CLI |
