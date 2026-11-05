@@ -1487,7 +1487,7 @@ jobs:
       # 8.14 wrapper jar (sha256 7d3a4ac4...df296172, checked against
       # services.gradle.org/distributions/gradle-8.14-wrapper.jar.sha256), so that check passes.
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # --rerun and --no-build-cache are the point of this step, not boilerplate. A plain
       # `./gradlew test` reports `Task :test UP-TO-DATE` on any run where Gradle thinks nothing
@@ -1576,7 +1576,7 @@ jobs:
           java-version: '17'
 
       - name: Set up Gradle 8.14
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.14'
 
@@ -1613,7 +1613,7 @@ jobs:
           java-version: '17'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Build the debug APK and the androidTest APK
         run: |
@@ -1655,7 +1655,7 @@ jobs:
       # the wall clock on a cold runner) and it validates the committed wrapper jar. This wrapper is
       # the same official 8.14 one that module uses.
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Assert the runner's Android SDK has the platform the app compiles against
         run: |
