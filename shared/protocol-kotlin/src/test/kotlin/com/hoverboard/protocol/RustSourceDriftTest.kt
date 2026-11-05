@@ -1127,7 +1127,7 @@ class RustSourceDriftTest {
             )
         val windowMs = windowTicks * 1000 / tickHz
 
-        val linkConfig = app("apps/remote/app/src/main/java/com/hoverboard/remote/ble/LinkConfig.kt")
+        val linkConfig = app("apps/remote/app/src/main/java/com/hoverboardhavoc/remote/ble/LinkConfig.kt")
         fun appConst(name: String, suffix: String) = literal(
             name,
             findOne(linkConfig, """^\s*const val $name: \w+ = (\d+)$suffix$""", "remote app $name")
@@ -2283,9 +2283,9 @@ class RustSourceDriftTest {
         )
         // Both app rows take their lower bound FROM the constant above, imported from this module.
         for ((path, pattern) in listOf(
-            "apps/remote/app/src/main/java/com/hoverboard/remote/model/LayoutRows.kt" to
+            "apps/remote/app/src/main/java/com/hoverboardhavoc/remote/model/LayoutRows.kt" to
                 """LayoutEditor\.Number\(\s*DEAD_TIME_MIN_DTG\b""",
-            "apps/remote/app/src/main/java/com/hoverboard/remote/model/SetupFields.kt" to
+            "apps/remote/app/src/main/java/com/hoverboardhavoc/remote/model/SetupFields.kt" to
                 """Editor\.Range\(\s*DEAD_TIME_MIN_DTG\b""",
         )) {
             val source = app(path)
