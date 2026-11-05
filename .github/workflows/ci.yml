@@ -1548,6 +1548,40 @@ jobs:
   # for it), and then the build itself: two unit-test variants of 334 Robolectric cases each, plus
   # detekt. For scale, the same three tasks take 45 s on six warm cores with the dependencies
   # already present, which is the number to ignore when reasoning about this runner.
+  # The app built the way F-Droid builds it: fdroidserver's `fdroid build` on this commit, from the
+  # metadata in apps/remote/fdroid/ (tools/fdroid-build.sh). F-Droid's scanner strips the binaries
+  # the metadata's scandelete names and the gradle-wrapper.jar, then builds with its own Gradle, so
+  # this job installs Gradle 8.14, the wrapper's version.
+  remote-app-fdroid:
+    name: Remote app (F-Droid build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Install JDK 17 (the level the app compiles to)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.14
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14'
+
+      - name: Install fdroidserver
+        run: pipx install fdroidserver
+
+      - name: Build with fdroid build
+        working-directory: hoverboard-firmware
+        run: |
+          : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+          export ANDROID_HOME
+          GRADLE=$(command -v gradle) ./tools/fdroid-build.sh
+
   remote-app-tests:
     name: Remote app (unit tests, both variants, + detekt)
     runs-on: ubuntu-latest
