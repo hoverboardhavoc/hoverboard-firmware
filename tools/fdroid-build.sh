@@ -28,8 +28,17 @@ cd "$work"
   echo "gradle: $gradle"
 } > config.yml
 chmod 600 config.yml
-# The release metadata builds a tag from GitHub; this build takes HEAD from the local checkout.
-sed -e "s|^    commit: .*|    commit: $sha|" -e "s|^Repo: .*|Repo: $repo|" \
+# The metadata template takes its version from the one place it is set, the app's build file, and
+# builds HEAD from this checkout rather than a tag from GitHub.
+gradle_file="$repo/apps/remote/app/build.gradle.kts"
+name=$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' "$gradle_file")
+code=$(sed -n 's/^ *versionCode = \([0-9][0-9]*\)$/\1/p' "$gradle_file")
+if [ -z "$name" ] || [ -z "$code" ]; then
+  echo "fdroid-build: no literal versionName and versionCode in $gradle_file" >&2
+  exit 1
+fi
+sed -e "s|@VERSION_NAME@|$name|g" -e "s|@VERSION_CODE@|$code|g" -e "s|@COMMIT@|$sha|g" \
+  -e "s|^Repo: .*|Repo: $repo|" \
   "$repo/apps/remote/fdroid/$app.yml" > "metadata/$app.yml"
 git clone -q "$repo" "build/$app"
 
