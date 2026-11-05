@@ -30,8 +30,9 @@ name: CI
 #     then compare every HAL trace against them, plus the harness's tests and clippy,
 #   - run the Kotlin protocol mirror's drift gate: it reads the Rust as text and compares it to
 #     shared/protocol-kotlin's mirror of the wire protocol,
-#   - run the remote app's unit tests (both variants) and detekt. That job and the drift gate are
-#     the two with no Rust toolchain in them; it is the only one that needs the Android SDK.
+#   - run the remote app's unit tests (both variants) and detekt, and build the debug and
+#     instrumented-test APKs the bench smoke test installs. Those jobs and the drift gate have no
+#     Rust toolchain in them; the app jobs are the ones that need the Android SDK.
 #
 # TOOLCHAIN: every CARGO job runs the PINNED NIGHTLY nightly-2026-07-20, not stable
 # (motorcontroller/rust-toolchain.toml carries the why: the shipping image is built with -Z
@@ -980,6 +981,13 @@ jobs:
       - name: flash guard harness
         run: bash tools/tests/flash-guard-harness.sh
 
+      # The bench smoke test's host side (specs/bench-ci.md): the judge against synthetic runs that
+      # pass and that fail on each criterion of section 7, the symbol span over a fabricated ELF, the
+      # speed-cap guard, the adb client against a fake server, and the runner's job-started hook
+      # with allowed and refused events (a fork PR, a Dependabot PR, a push by someone else).
+      - name: bench smoke tools
+        run: python3 tools/tests/test_bench.py
+
       # The thumbv7m `runner`: a board binary handed to cargo must be refused by name.
       - name: board-target runner
         run: bash tools/tests/test_board_runner.sh
@@ -1581,6 +1589,45 @@ jobs:
           : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
           export ANDROID_HOME
           GRADLE=$(command -v gradle) ./tools/fdroid-build.sh
+
+  # The two APKs the bench smoke test installs on the bench phone (specs/bench-ci.md section 5): the
+  # debug app and its instrumented test (apps/remote/app/src/androidTest/), built here because
+  # nothing is compiled on the bench Pi. The bench workflow downloads them from this run. Both come
+  # out of one Gradle invocation, so they carry the same debug key, which `am instrument` requires.
+  remote-app-apks:
+    name: Remote app (debug and instrumented-test APKs)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hoverboard-firmware/apps/remote
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Install JDK 17 (the level the app compiles to)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the debug APK and the androidTest APK
+        run: |
+          : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+          export ANDROID_HOME
+          ./gradlew --console=plain :app:assembleDebug :app:assembleDebugAndroidTest
+          mkdir -p build/apks
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk build/apks/
+
+      - name: Upload the APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-app-apks
+          path: hoverboard-firmware/apps/remote/build/apks/
 
   remote-app-tests:
     name: Remote app (unit tests, both variants, + detekt)

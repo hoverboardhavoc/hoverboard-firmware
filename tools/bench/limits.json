@@ -1,0 +1,13 @@
+{
+  "throttle": 3000,
+  "ramp_ms": 2000,
+  "steady_ms": 3000,
+  "coast_ms": 4000,
+  "speed_cap_rpm": 120,
+  "phase_current_ceiling_a": 3.0,
+  "min_rpm": 10,
+  "speed_cv_max": 0.1,
+  "edge_cv_max": 0.15,
+  "read_hz": 50,
+  "method": "sine"
+}

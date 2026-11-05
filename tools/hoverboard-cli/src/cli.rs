@@ -220,6 +220,8 @@ pub enum Command {
         secs: u64,
         /// The boards; every motor controller when empty.
         targets: Vec<String>,
+        /// `--json`: one JSON line per frame in place of the once-a-second line.
+        json: bool,
     },
     /// `machine drive` (`specs/twelve-fet.md` section 6.3).
     Drive {
@@ -303,7 +305,7 @@ pub const USAGE: &str =
   machine apply <file> [--map <uid>=<board>]... [--force]
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
   machine diff [--replace] [<file>] [--map <uid>=<board>]... [--force]
-  machine watch <secs> [<board>...] | drive <value> <secs> [<board>[:<motor>]...]
+  machine watch <secs> [<board>...] [--json] | drive <value> <secs> [<board>[:<motor>]...]
   machine update <bundle> [--yes]
   bridge info <bridge> | update <bridge> <bundle|bin> [--yes] [--no-confirm]
   bridge install <bundle|image> [<file>...] [--yes]
@@ -564,10 +566,11 @@ fn command(pos: &[&str], o: &Opts) -> Result<Command, String> {
             }
         }
         ["machine", "watch", secs, targets @ ..] => {
-            ok(&[])?;
+            ok(&["--json"])?;
             Command::Watch {
                 secs: parse_secs(secs)?,
                 targets: owned(targets),
+                json: o.has("--json"),
             }
         }
         ["machine", "drive", value, secs, targets @ ..] => {
@@ -918,6 +921,16 @@ mod tests {
                 Command::Watch {
                     secs: 2,
                     targets: vec![s("0x01"), s("rover-right")],
+                    json: false,
+                },
+            ),
+            (
+                "watch json",
+                "machine watch 2 --json",
+                Command::Watch {
+                    secs: 2,
+                    targets: Vec::new(),
+                    json: true,
                 },
             ),
             (

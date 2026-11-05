@@ -2033,14 +2033,16 @@ fn machine_files(
 }
 
 /// Listen for `secs`, or until `stop` is set, counting `CYCLIC_STATE` into `tally` and printing
-/// its line once a second; send `drive`'s frames as they fall due. Returns the tally and the run's
-/// length.
+/// its line once a second, or with `json` every counted frame as a JSON line
+/// ([`Tally::frame_json`]); send `drive`'s frames as they fall due. Returns the tally and the
+/// run's length.
 fn session(
     wire: &mut impl Wire,
     mut tally: Tally,
     secs: u64,
     mut drive: Option<&mut Drive>,
     stop: &AtomicBool,
+    json: bool,
 ) -> (Tally, Duration) {
     let end = Duration::from_secs(secs);
     let mut next_line = LINE_EVERY;
@@ -2059,9 +2061,16 @@ fn session(
         }
         let wait = next.saturating_sub(t0.elapsed()).min(POLL);
         if let Some(pkt) = wire.recv(wait) {
-            tally.feed(&pkt, t0.elapsed());
+            let at = t0.elapsed();
+            if let Some(src) = tally.feed_src(&pkt, at) {
+                if json {
+                    if let Some(line) = tally.frame_json(src, at) {
+                        println!("{line}");
+                    }
+                }
+            }
         }
-        if t0.elapsed() >= next_line && next_line <= end {
+        if !json && t0.elapsed() >= next_line && next_line <= end {
             println!("{}", tally.line(next_line));
             next_line += LINE_EVERY;
         }
@@ -2248,7 +2257,11 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             yes,
             maps,
         } => return machine_files(link, &path, mode, force, yes, &maps),
-        Command::Watch { secs, targets } => {
+        Command::Watch {
+            secs,
+            targets,
+            json,
+        } => {
             let mut wire = wire_on(link)?;
             let (_, watched) = guest_boards(&mut wire, &targets)?;
             let (tally, elapsed) = session(
@@ -2257,8 +2270,16 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
                 secs,
                 None,
                 &AtomicBool::new(false),
+                json,
             );
-            print_summary(&tally, elapsed);
+            if json {
+                // stdout carries the frames alone, so a consumer reads it line by line as JSON.
+                for l in tally.summary(elapsed) {
+                    eprintln!("{l}");
+                }
+            } else {
+                print_summary(&tally, elapsed);
+            }
         }
         Command::Drive {
             value,
@@ -2272,7 +2293,14 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             let mut wire = wire_on(link)?;
             let (src, wheels) = drive_wheels(&mut wire, &targets)?;
             let mut drive = Drive::new(src, wheels, value);
-            let (tally, elapsed) = session(&mut wire, Tally::new(), secs, Some(&mut drive), &stop);
+            let (tally, elapsed) = session(
+                &mut wire,
+                Tally::new(),
+                secs,
+                Some(&mut drive),
+                &stop,
+                false,
+            );
             for _ in 0..STOP_REPEATS {
                 for f in drive.stop() {
                     wire.send(&f);

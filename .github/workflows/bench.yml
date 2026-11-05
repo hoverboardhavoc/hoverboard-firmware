@@ -1,0 +1,199 @@
+name: Bench
+
+# The hardware smoke test on the offroad pair (specs/bench-ci.md): the self-hosted bench runner
+# (label `bench`) flashes the commit's firmware bundle onto both boards, checks that they boot and
+# keep their settings, and has the Android app on the bench phone drive the wheels gently while the
+# CLI records and judges the run.
+#
+# Nothing is compiled on the runner (section 2, item 3). The images, the runner's hoverboard-cli and
+# the two APKs come from the CI workflow's run for the same commit, as artifacts: the first job waits for
+# that run to finish and hands its id to the bench job.
+#
+# The guards that decide whether a job may run on the bench sit outside this file (section 2): the
+# repository's fork-PR approval policy and the runner's job-started hook
+# (tools/bench/runner-job-started.sh, installed with the runner). A PR can edit this file; it cannot
+# edit the hook.
+#
+# The runner's own settings stay on the runner, never in this repository: the rig file (the
+# bridges' and the adb host's addresses, the phone) at $BENCH_RIG, set in the runner's .env, and the
+# bench Pi's address and key behind the ssh alias `bench-pi`. The key reaches only the Pi's gate,
+# which switches the PSU relay, takes the bench lock and records the master's telemetry.
+
+on:
+  pull_request:
+    # Section 3: a change to anything that runs on a board, or to the app that drives it.
+    # tools/, the docs and the workflow actions alone skip the bench.
+    paths:
+      - 'motorcontroller/**'
+      - 'shared/**'
+      - 'bridge/**'
+      - 'apps/remote/**'
+      - 'tools/bench/**'
+      - '.github/workflows/bench.yml'
+  workflow_dispatch:
+  schedule:
+    # Nightly on main, as a backstop.
+    - cron: '30 2 * * *'
+
+# One bench: a second run waits for the first rather than both reaching for the lock.
+concurrency:
+  group: bench-offroad
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ci-run:
+    name: Wait for the commit's CI artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      run-id: ${{ steps.wait.outputs.run-id }}
+    steps:
+      - name: Find the CI run for this commit and wait for it
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          for i in $(seq 1 170); do
+            line=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" \
+              --json databaseId,status,conclusion --jq 'sort_by(.databaseId) | last | "\(.databaseId) \(.status) \(.conclusion)"' || true)
+            read -r id status conclusion <<< "$line"
+            if [ -n "$id" ] && [ "$status" = completed ]; then
+              if [ "$conclusion" != success ]; then
+                echo "CI run $id for $SHA finished $conclusion; the bench needs a green build." >&2
+                exit 1
+              fi
+              echo "run-id=$id" >> "$GITHUB_OUTPUT"
+              echo "CI run $id for $SHA is green."
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "no finished CI run for $SHA after 85 minutes" >&2
+          exit 1
+
+  bench:
+    name: Bench smoke (offroad)
+    needs: ci-run
+    runs-on: [bench]
+    timeout-minutes: 30
+    # An explicit shell runs each step with pipefail, so a failure piped through `redact` still fails
+    # the step (the default shell does not set it).
+    defaults:
+      run:
+        shell: bash
+    env:
+      OUT: ${{ github.workspace }}/bench-out
+      ART: ${{ github.workspace }}/art
+    steps:
+      - name: Take the bench lock
+        id: lock
+        run: |
+          if ssh bench-pi lock acquire; then
+            echo "held=1" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = schedule ]; then
+            echo "The bench is held by someone else; the nightly run is skipped." >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "bench busy: the offroad lock is held (rerun this job when it is free)" >&2
+            exit 1
+          fi
+
+      - name: Checkout (tools/bench and the machine file; nothing is built here)
+        if: steps.lock.outputs.held == '1'
+        uses: actions/checkout@v4
+
+      - name: Download the CI run's artifacts
+        if: steps.lock.outputs.held == '1'
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ needs.ci-run.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.ART }}
+          pattern: '{firmware-bundle,firmware-elfs,hoverboard-cli-aarch64-apple-darwin,remote-app-apks}'
+
+      - name: Flash and check (section 4)
+        if: steps.lock.outputs.held == '1'
+        run: |
+          cli="$ART/hoverboard-cli-aarch64-apple-darwin/hoverboard-cli-aarch64-apple-darwin"
+          chmod +x "$cli"
+          echo "CLI=$cli" >> "$GITHUB_ENV"
+          CLI="$cli" tools/bench/smoke.sh flash "$(ls "$ART"/firmware-bundle/firmware-*.hbfw)" 2>&1 \
+            | python3 tools/bench/bench.py redact "$BENCH_RIG"
+
+      - name: The app drives, the CLI judges (sections 5 to 7)
+        if: steps.lock.outputs.held == '1'
+        run: |
+          rc=0
+          tools/bench/smoke.sh drive "$ART/firmware-elfs/mainboard-gd32f130c8.elf" \
+            "$ART/remote-app-apks/app-debug.apk" "$ART/remote-app-apks/app-debug-androidTest.apk" 2>&1 \
+            | python3 tools/bench/bench.py redact "$BENCH_RIG" || rc=$?
+          [ -f "$OUT/verdict.txt" ] && python3 tools/bench/bench.py redact "$BENCH_RIG" < "$OUT/verdict.txt" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Cleanup (disarm, relay off, release the lock)
+        if: always() && steps.lock.outputs.held == '1'
+        run: |
+          tools/bench/smoke.sh cleanup 2>&1 | python3 tools/bench/bench.py redact "$BENCH_RIG" || true
+          ssh bench-pi lock release
+
+      # A public repository's artifacts are public: no address or serial from the rig file leaves the
+      # runner.
+      - name: Redact the recordings
+        if: always() && steps.lock.outputs.held == '1'
+        run: |
+          [ -d "$OUT" ] || exit 0
+          find "$OUT" -type f -print0 | xargs -0 python3 tools/bench/bench.py redact "$BENCH_RIG"
+          if grep -rqF -f <(python3 -c 'import json,sys; sys.path.insert(0,"tools/bench"); import bench; [print(s) for s,_ in bench.redactions(json.load(open(sys.argv[1])))]' "$BENCH_RIG") "$OUT"; then
+            echo "an address survived the redaction; the recordings are not uploaded" >&2
+            rm -rf "$OUT"
+            exit 1
+          fi
+
+      - name: Upload the recordings
+        if: always() && steps.lock.outputs.held == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-offroad-${{ github.run_id }}
+          path: ${{ env.OUT }}
+          if-no-files-found: ignore
+
+  # Section 8: a failed nightly run on main opens an issue with the log.
+  nightly-issue:
+    name: Open an issue for a failed nightly run
+    needs: [ci-run, bench]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read
+    steps:
+      - name: Fetch the recordings
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: bench-offroad-${{ github.run_id }}
+          path: bench-out
+      - name: Open the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          {
+            echo "The nightly bench smoke test on \`main\` (${GITHUB_SHA::8}) failed: $url"
+            echo
+            echo "The recordings are the run's \`bench-offroad-$GITHUB_RUN_ID\` artifact."
+            for f in bench-out/verdict.txt bench-out/smoke.log; do
+              [ -f "$f" ] || continue
+              echo
+              echo "\`$(basename "$f")\`:"
+              echo '```'
+              tail -n 80 "$f"
+              echo '```'
+            done
+          } > body.md
+          gh issue create -R "$GITHUB_REPOSITORY" --title "Nightly bench smoke failed on main (${GITHUB_SHA::8})" --body-file body.md
