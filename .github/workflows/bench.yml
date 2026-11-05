@@ -109,7 +109,7 @@ jobs:
 
       - name: Download the CI run's artifacts
         if: steps.lock.outputs.held == '1'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           run-id: ${{ needs.ci-run.outputs.run-id }}
           github-token: ${{ github.token }}
@@ -173,7 +173,7 @@ jobs:
       actions: read
     steps:
       - name: Fetch the recordings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: bench-offroad-${{ github.run_id }}
