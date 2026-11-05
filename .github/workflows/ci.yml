@@ -981,6 +981,13 @@ jobs:
       - name: flash guard harness
         run: bash tools/tests/flash-guard-harness.sh
 
+      # The bench smoke test's host side (specs/bench-ci.md): the judge against synthetic runs that
+      # pass and that fail on each criterion of section 7, the symbol span over a fabricated ELF, the
+      # speed-cap guard, the adb client against a fake server, and the runner's job-started hook
+      # with allowed and refused events (a fork PR, a Dependabot PR, a push by someone else).
+      - name: bench smoke tools
+        run: python3 tools/tests/test_bench.py
+
       # The thumbv7m `runner`: a board binary handed to cargo must be refused by name.
       - name: board-target runner
         run: bash tools/tests/test_board_runner.sh

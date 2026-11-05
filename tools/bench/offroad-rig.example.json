@@ -1,0 +1,20 @@
+{
+  "machine_file": "shared/config-checks/machines/offroad.json",
+  "adb_host": "<adb host address>",
+  "phone": "<phone serial>",
+  "device": "offroad-master",
+  "boards": [
+    {
+      "role": "slave",
+      "uid": "51ce39393333370134313739",
+      "bridge": "28372f54bf7c",
+      "tcp": "<slave bridge address>:5333"
+    },
+    {
+      "role": "master",
+      "uid": "58224535393631174a353930",
+      "bridge": "dc0675f8526c",
+      "tcp": "<master bridge address>:5333"
+    }
+  ]
+}

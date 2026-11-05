@@ -1,0 +1,12 @@
+{
+  "throttle": 2000,
+  "ramp_ms": 2000,
+  "steady_ms": 3000,
+  "coast_ms": 4000,
+  "speed_cap_rpm": 120,
+  "phase_current_ceiling_a": 2.0,
+  "min_rpm": 10,
+  "speed_cv_max": 0.10,
+  "edge_cv_max": 0.15,
+  "read_hz": 50
+}
