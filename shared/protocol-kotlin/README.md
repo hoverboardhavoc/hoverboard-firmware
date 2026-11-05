@@ -2,7 +2,7 @@
 
 The single Kotlin mirror of the firmware's wire protocol, living beside the Rust it mirrors.
 
-The remote app (`apps/remote/`, `com.hoverboard.remote`) depends on it.
+The remote app (`apps/remote/`, `com.hoverboardhavoc.remote`) depends on it.
 
 It exists because there used to be two hand-written Kotlin copies of the protocol, and they had
 drifted apart: the remote app's copy expected a version byte where the current framing carries a length,

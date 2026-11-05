@@ -85,7 +85,7 @@ tasks.test {
     // One named file rather than a tree, because that is exactly what the test reads and the test
     // names the same path. If it ever reads a second app file, this declaration has to grow with it.
     val linkConfig = repo
-        ?.resolve("apps/remote/app/src/main/java/com/hoverboard/remote/ble/LinkConfig.kt")
+        ?.resolve("apps/remote/app/src/main/java/com/hoverboardhavoc/remote/ble/LinkConfig.kt")
     if (linkConfig != null && linkConfig.isFile) {
         inputs.file(linkConfig)
             .withPropertyName("remoteAppLinkConfig")
