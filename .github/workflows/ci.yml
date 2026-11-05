@@ -806,19 +806,13 @@ jobs:
           name: bridge-images
           path: hoverboard-firmware/target/images
 
+      # The same script a local build runs (tools/pack-bundle.sh), given the images the build and
+      # bridge jobs made, so the image list and names cannot drift between CI and a local bundle.
       - name: Pack the firmware bundle
-        run: |
-          cli=tools/target/${HOST_TARGET}/release/hoverboard-cli
-          img=target/images
-          mkdir -p target/bundle
-          bundle="target/bundle/firmware-$(git rev-parse --short=7 HEAD).hbfw"
-          "$cli" firmware pack "$bundle" \
-            motorcontroller/firmware:mainboard-gd32f103c8=$img/mainboard-gd32f103c8.elf \
-            motorcontroller/firmware:mainboard-gd32f130c8=$img/mainboard-gd32f130c8.elf \
-            motorcontroller/firmware:mainboard-gd32f103rc=$img/mainboard-gd32f103rc.elf \
-            bridge:bridge-esp32c3=$img/bridge-esp32c3.bin \
-            bridge:bridge-esp32c3-install=$img/bridge-esp32c3-install.bin
-          "$cli" firmware info "$bundle"
+        run: >
+          ./tools/pack-bundle.sh
+          --images target/images
+          --cli tools/target/${HOST_TARGET}/release/hoverboard-cli
 
       # One artifact name from build to build, so its download link stays the same.
       - name: Upload the firmware bundle

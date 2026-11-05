@@ -199,6 +199,10 @@ holds no Cargo workspace, and a bare `cargo build` there does nothing.
   F103 image, an F130 board the F130 image and the 12-FET the RC image: `hoverboard-cli board update`
   picks it from a bundle by the chip and flash size the board reports, while `board flash` writes an
   ELF as given and checks no chip.
+- **A local firmware bundle: `./tools/pack-bundle.sh`**, from anywhere. It builds the three board
+  images, the bridge's two images (with espflash 4.6.0) and `hoverboard-cli`, then packs
+  `target/bundle/firmware-<commit>.hbfw`, the same file CI publishes. `--images DIR` packs images
+  that are already built, which is how CI's pack job runs it.
 - **The size gate against main: `tools/size-vs-base.sh <base>`** (`specs/twelve-fet.md` section
   4.3). Builds the one-motor images at HEAD and at `<base>` and fails if any image's flashed span,
   `.hotcode` or static RAM grew, printing "byte-identical" or the `nm -S` diff per image. CI's
