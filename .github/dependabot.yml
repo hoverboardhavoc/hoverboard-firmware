@@ -1,0 +1,38 @@
+# Daily dependency update PRs, one per dependency. Dependabot has no unlimited setting, and its
+# default caps open PRs at 5, so the cap is set high. Every PR runs the full CI, and a change that
+# reaches a board image still needs the bench before it merges.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - /motorcontroller
+      - /shared
+      - /tools
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 100
+
+  # The bridge pins esp-hal and trouble-host to git revisions of a fork; moving them is a
+  # deliberate change, so only its crates.io dependencies are updated.
+  - package-ecosystem: cargo
+    directory: /bridge
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 100
+    ignore:
+      - dependency-name: "esp-*"
+      - dependency-name: trouble-host
+
+  - package-ecosystem: gradle
+    directories:
+      - /apps/remote
+      - /shared/protocol-kotlin
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 100
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 100
