@@ -1211,8 +1211,7 @@ jobs:
   # on the motorcontroller workspace's nightly). This job is also the check that the shared/ crates
   # the bridge links compile on stable 1.92, at the versions bridge/Cargo.lock pins; the shared
   # workspace itself runs on the nightly. The hardware-free core's host tests and clippy
-  # (all targets) first, then the firmware's release build with no Wi-Fi variables set (the network
-  # is a store field, specs/bridge-onboarding.md section 2), then the two images with a pinned
+  # (all targets) first, then the firmware's release build, then the two images with a pinned
   # espflash binary release: the merged install image for `bridge install` and the app image for
   # `bridge update`, which the pack job puts in the firmware bundle.
   bridge:
@@ -1253,8 +1252,8 @@ jobs:
           --target ${{ env.HOST_TARGET }}
           --all-targets -- -D warnings
 
-      - name: Release build (no Wi-Fi variables)
-        run: env -u ESP_WIFI_SSID -u ESP_WIFI_PASS cargo build --release
+      - name: Release build
+        run: cargo build --release
 
       - name: Install espflash (pinned binary release)
         run: |

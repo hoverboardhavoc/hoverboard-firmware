@@ -53,7 +53,7 @@ if [ -z "$IMAGES" ]; then
     command -v espflash >/dev/null || { echo "pack-bundle: espflash not found (cargo install espflash@4.6.0)" >&2; exit 1; }
     (
         cd "$ROOT/bridge"
-        env -u ESP_WIFI_SSID -u ESP_WIFI_PASS cargo build --release
+        cargo build --release
         elf=target/riscv32imc-unknown-none-elf/release/hoverboard-bridge
         espflash save-image --chip esp32c3 --merge --flash-size 4mb \
             --bootloader bootloader/bootloader.bin --partition-table partitions.csv \
