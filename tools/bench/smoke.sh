@@ -129,6 +129,13 @@ do_drive() {
   for r in $ROLES; do
     cli "$(role_field "$r" tcp)" board get "$(role_field "$r" uid)" motors.0.current.cal 2>&1 | $PY stamp > "$OUT/cal-$r.txt"
   done
+  # The smoke test drives in the limits' method (sine: a voltage drive settles at a steady speed on a
+  # free wheel, where a torque drive keeps accelerating); cleanup restores the machine file's.
+  # Set before the recorders start: each bridge serves one TCP client, and the master's is then
+  # taken by its hall reads.
+  log "method $(field "$LIMITS" method) for the drive"
+  cli "$MASTER_TCP" machine set machine.method "$(field "$LIMITS" method)" 2>&1 | tee -a "$OUT/method.txt" >&2 || die "machine set machine.method"
+
   log "install the app and its test on the phone"
   adb shell "am force-stop $APP" >/dev/null || true
   adb install "$app" "$test" | tee -a "$OUT/smoke.log" >&2
@@ -156,11 +163,6 @@ do_drive() {
     [ -s "$OUT/guard.txt" ] || rm -f "$OUT/guard.txt" ) &
   echo "$!" >> "$OUT/pids"
   sleep 4
-
-  # The smoke test drives in the limits' method (sine: a voltage drive settles at a steady speed on a
-  # free wheel, where a torque drive keeps accelerating); cleanup restores the machine file's.
-  log "method $(field "$LIMITS" method) for the drive"
-  cli "$MASTER_TCP" machine set machine.method "$(field "$LIMITS" method)" 2>&1 | tee -a "$OUT/method.txt" >&2 || die "machine set machine.method"
 
   log "the app drives"
   adb --stamp shell "am instrument -r -w \

@@ -18,6 +18,12 @@ Subcommands:
   judge <dir> <limits.json> <rig.json> <machine.json>
                               judge a run's recordings against section 7; prints the verdict and
                               writes <dir>/verdict.json; exit 1 on a failed run
+  redact <rig.json> [<file>...]
+                              replace every address and serial the rig file holds (the bridges',
+                              the adb host's, the Pi's, the phone's) with a name for it: stdin to
+                              stdout, or each <file> in place. The workflow runs everything it prints
+                              and uploads through it, because a public repository's logs and
+                              artifacts are public.
 
 The recordings a run leaves in <dir> (smoke.sh writes them; every line starts with the epoch time
 `stamp` gave it):
@@ -572,6 +578,46 @@ def judge_main(args):
     return 0 if v["pass"] else 1
 
 
+def redactions(rig):
+    """(secret, name) pairs from the rig file, longest first so a host:port goes before its host."""
+    pairs = []
+    for b in rig.get("boards", []):
+        tcp = b.get("tcp", "")
+        if tcp:
+            pairs.append((tcp, f"<{b['role']} bridge>"))
+            pairs.append((tcp.rsplit(":", 1)[0], f"<{b['role']} bridge host>"))
+    for key, name in (("adb_host", "<adb host>"), ("phone", "<phone>"), ("pi", "<bench pi>")):
+        if rig.get(key):
+            pairs.append((str(rig[key]), name))
+    return sorted({p for p in pairs if p[0]}, key=lambda p: -len(p[0]))
+
+
+def redact_text(text, pairs):
+    for secret, name in pairs:
+        text = text.replace(secret, name)
+    return text
+
+
+def redact_main(args):
+    if not args:
+        raise SystemExit("usage: bench.py redact <rig.json> [<file>...]")
+    pairs = redactions(load_json(args[0]))
+    if len(args) == 1:
+        for line in sys.stdin:
+            sys.stdout.write(redact_text(line, pairs))
+            sys.stdout.flush()
+        return 0
+    for path in args[1:]:
+        with open(path, "rb") as f:
+            raw = f.read()
+        text = raw.decode("utf-8", errors="surrogateescape")
+        new = redact_text(text, pairs)
+        if new != text:
+            with open(path, "wb") as f:
+                f.write(new.encode("utf-8", errors="surrogateescape"))
+    return 0
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -596,6 +642,8 @@ def main(argv):
         tripped = guard(cap, trip, files, layout, int(os.environ.get("BENCH_POLE_PAIRS", "15")),
                         stop_file=os.environ.get("BENCH_GUARD_STOP"))
         return 1 if tripped else 0
+    if cmd == "redact":
+        return redact_main(list(args))
     if cmd == "judge":
         return judge_main(args)
     print(__doc__)

@@ -502,3 +502,34 @@ class HookTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedactTest(unittest.TestCase):
+    RIG = {
+        "adb_host": "10.0.0.5", "phone": "SERIAL123", "pi": "10.0.0.9",
+        "boards": [{"role": "slave", "tcp": "10.0.0.21:5333"}, {"role": "master", "tcp": "10.0.0.2:5333"}],
+    }
+
+    def test_every_address_and_serial_becomes_its_name(self):
+        pairs = bench.redactions(self.RIG)
+        text = ("connected to 10.0.0.2:5333\nmaster bridge 10.0.0.2:5333 answers, slave 10.0.0.21:5333\n"
+                "adb 10.0.0.5 phone SERIAL123 pi 10.0.0.9 bare 10.0.0.21\n")
+        out = bench.redact_text(text, pairs)
+        for secret, _ in pairs:
+            self.assertNotIn(secret, out)
+        self.assertIn("connected to <master bridge>", out)
+        self.assertIn("slave <slave bridge>", out)
+        self.assertIn("bare <slave bridge host>", out)
+        self.assertIn("phone <phone> pi <bench pi>", out)
+
+    def test_files_are_redacted_in_place(self):
+        with tempfile.TemporaryDirectory() as d:
+            rig = os.path.join(d, "rig.json")
+            with open(rig, "w") as f:
+                json.dump(self.RIG, f)
+            log = os.path.join(d, "smoke.log")
+            with open(log, "w") as f:
+                f.write("10:00 slave bridge 10.0.0.21:5333 answers\n")
+            self.assertEqual(bench.redact_main([rig, log]), 0)
+            with open(log) as f:
+                self.assertEqual(f.read(), "10:00 slave bridge <slave bridge> answers\n")

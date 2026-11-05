@@ -117,20 +117,37 @@ jobs:
           cli="$ART/hoverboard-cli-aarch64-apple-darwin/hoverboard-cli-aarch64-apple-darwin"
           chmod +x "$cli"
           echo "CLI=$cli" >> "$GITHUB_ENV"
-          CLI="$cli" tools/bench/smoke.sh flash "$(ls "$ART"/firmware-bundle/firmware-*.hbfw)"
+          CLI="$cli" tools/bench/smoke.sh flash "$(ls "$ART"/firmware-bundle/firmware-*.hbfw)" 2>&1 \
+            | python3 tools/bench/bench.py redact "$BENCH_RIG"
 
       - name: The app drives, the CLI judges (sections 5 to 7)
         if: steps.lock.outputs.held == '1'
         run: |
+          rc=0
           tools/bench/smoke.sh drive "$ART/firmware-elfs/mainboard-gd32f130c8.elf" \
-            "$ART/remote-app-apks/app-debug.apk" "$ART/remote-app-apks/app-debug-androidTest.apk"
-          cat "$OUT/verdict.txt" >> "$GITHUB_STEP_SUMMARY"
+            "$ART/remote-app-apks/app-debug.apk" "$ART/remote-app-apks/app-debug-androidTest.apk" 2>&1 \
+            | python3 tools/bench/bench.py redact "$BENCH_RIG" || rc=$?
+          [ -f "$OUT/verdict.txt" ] && python3 tools/bench/bench.py redact "$BENCH_RIG" < "$OUT/verdict.txt" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
       - name: Cleanup (disarm, relay off, release the lock)
         if: always() && steps.lock.outputs.held == '1'
         run: |
-          tools/bench/smoke.sh cleanup || true
+          tools/bench/smoke.sh cleanup 2>&1 | python3 tools/bench/bench.py redact "$BENCH_RIG" || true
           ssh bench-pi lock release
+
+      # A public repository's artifacts are public: no address or serial from the rig file leaves the
+      # runner.
+      - name: Redact the recordings
+        if: always() && steps.lock.outputs.held == '1'
+        run: |
+          [ -d "$OUT" ] || exit 0
+          find "$OUT" -type f -print0 | xargs -0 python3 tools/bench/bench.py redact "$BENCH_RIG"
+          if grep -rqF -f <(python3 -c 'import json,sys; sys.path.insert(0,"tools/bench"); import bench; [print(s) for s,_ in bench.redactions(json.load(open(sys.argv[1])))]' "$BENCH_RIG") "$OUT"; then
+            echo "an address survived the redaction; the recordings are not uploaded" >&2
+            rm -rf "$OUT"
+            exit 1
+          fi
 
       - name: Upload the recordings
         if: always() && steps.lock.outputs.held == '1'
