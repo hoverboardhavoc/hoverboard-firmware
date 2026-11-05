@@ -129,6 +129,8 @@ class RiderCommandTest {
         assertEquals(Inputs.BUTTON_POWER or Inputs.BUTTON_HORN, armed.buttons)
         assertTrue(RiderCommand.armed(2_000).withHorn(true).withDemand(100).horn, "kept through the mix")
         assertTrue(RiderCommand.DISARMED.withHorn(true).withDemand(100).horn)
+        assertTrue(RiderCommand.DISARMED.withHorn(true).withTurn(1_500).horn, "kept through the rigid leader's turn")
+        assertEquals(0, RiderCommand.DISARMED.withHorn(true).withTurn(1_500).steer, "a disarmed horn turns nothing")
         assertFalse(inputsOf(RiderCommand.DISARMED).horn(), "the all-stop is silent")
         val drive = checkNotNull(
             DriveCmd.decode(pdusOf(RiderCommand.DISARMED.withHorn(true)).single { it.opcode == OP_DRIVE_CMD }.payload),
