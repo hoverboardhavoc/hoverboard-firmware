@@ -601,7 +601,7 @@ jobs:
           done
 
       - name: Upload the GD32F103RC validator ELFs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hal-bench-gd32f103rc
           path: hoverboard-firmware/motorcontroller/target/hal-bench-elfs/
@@ -647,7 +647,7 @@ jobs:
           done
 
       - name: Upload the unstripped ELFs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-elfs
           path: hoverboard-firmware/motorcontroller/target/elfs/
@@ -817,7 +817,7 @@ jobs:
 
       # One artifact name from build to build, so its download link stays the same.
       - name: Upload the firmware bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-bundle
           path: hoverboard-firmware/target/bundle/firmware-*.hbfw
@@ -1147,7 +1147,7 @@ jobs:
             target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hoverboard-cli-${{ matrix.target }}
           path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
@@ -1208,7 +1208,7 @@ jobs:
             target/dist/hoverboard-cli-${{ env.PI_TARGET }}
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hoverboard-cli-${{ env.PI_TARGET }}
           path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
@@ -1288,7 +1288,7 @@ jobs:
       # 4,194,304 B and 0xE9 magic, the app image's version) and packs them into the firmware
       # bundle. Kept one day: the bundle is the install artifact.
       - name: Upload the images for the pack job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bridge-images
           path: |
@@ -1624,7 +1624,7 @@ jobs:
           cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk build/apks/
 
       - name: Upload the APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: remote-app-apks
           path: hoverboard-firmware/apps/remote/build/apks/
