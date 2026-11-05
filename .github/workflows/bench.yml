@@ -79,7 +79,7 @@ jobs:
   bench:
     name: Bench smoke (offroad)
     needs: ci-run
-    runs-on: [self-hosted, bench]
+    runs-on: [bench]
     timeout-minutes: 30
     env:
       OUT: ${{ github.workspace }}/bench-out
