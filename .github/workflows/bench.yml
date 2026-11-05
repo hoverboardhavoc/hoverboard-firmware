@@ -105,7 +105,7 @@ jobs:
 
       - name: Checkout (tools/bench and the machine file; nothing is built here)
         if: steps.lock.outputs.held == '1'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download the CI run's artifacts
         if: steps.lock.outputs.held == '1'

@@ -90,7 +90,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -239,7 +239,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -668,7 +668,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -730,7 +730,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
           fetch-depth: 0
@@ -775,7 +775,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -879,7 +879,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -925,7 +925,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1025,7 +1025,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1078,7 +1078,7 @@ jobs:
         shell: bash
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1170,7 +1170,7 @@ jobs:
         working-directory: hoverboard-firmware/tools
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1232,7 +1232,7 @@ jobs:
         working-directory: hoverboard-firmware/bridge
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1311,7 +1311,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1371,7 +1371,7 @@ jobs:
         working-directory: hoverboard-firmware
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1467,7 +1467,7 @@ jobs:
       # single checkout provides; if it ever cannot find it, the test throws with an explanatory
       # message rather than skipping, and the job fails.
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1565,7 +1565,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1602,7 +1602,7 @@ jobs:
         working-directory: hoverboard-firmware/apps/remote
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
@@ -1637,7 +1637,7 @@ jobs:
         working-directory: hoverboard-firmware/apps/remote
     steps:
       - name: Checkout firmware
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: hoverboard-firmware
 
