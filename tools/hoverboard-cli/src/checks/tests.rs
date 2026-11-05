@@ -235,7 +235,7 @@ fn the_fleets_machine_files_pass_on_their_chips_and_not_on_the_other() {
             let got = file_refusals(chip, &files);
             assert!(got.is_empty(), "{name} {uid}: {got:?}");
             // `specs/no-fleet-pins.md` section 3: the latch and the LEDs written out on every
-            // board, the buzzer on every board but the offroad slave.
+            // board, the buzzer only on the masters (the slaves carry none).
             let stored: Vec<_> = files.entries.iter().map(|e| e.key).collect();
             for f in [
                 store::BOARD_SELF_HOLD,
@@ -249,9 +249,10 @@ fn the_fleets_machine_files_pass_on_their_chips_and_not_on_the_other() {
                     path_of(f.key())
                 );
             }
+            let slave = ["51ce39393333370134313739", "84fc41333235390839393638"];
             assert_eq!(
                 stored.contains(&store::BOARD_BUZZER.key()),
-                uid != "51ce39393333370134313739",
+                !slave.contains(&uid.as_str()),
                 "{name} {uid}: buzzer"
             );
             let wrong = file_refusals(other, &files);
