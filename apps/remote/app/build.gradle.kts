@@ -8,12 +8,12 @@ plugins {
 
 android {
     namespace = "com.hoverboardhavoc.remote"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.hoverboardhavoc.remote"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 2
         versionName = "0.1.1"
 
