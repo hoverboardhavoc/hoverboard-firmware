@@ -1666,11 +1666,11 @@ jobs:
           fi
           echo "ANDROID_HOME=$ANDROID_HOME"
           ls "$ANDROID_HOME/platforms" || true
-          # compileSdk 35 in app/build.gradle.kts. AGP resolves the SDK at CONFIGURATION time, so a
+          # compileSdk 36 in app/build.gradle.kts. AGP resolves the SDK at CONFIGURATION time, so a
           # missing platform fails every task in the build with a message about none of this.
-          if [ ! -d "$ANDROID_HOME/platforms/android-35" ]; then
-            echo "FAIL: platforms/android-35 is not installed, and app/build.gradle.kts sets compileSdk 35." >&2
-            echo "Install it in this job ('sdkmanager --install \"platforms;android-35\"') or move compileSdk." >&2
+          if [ ! -d "$ANDROID_HOME/platforms/android-36" ]; then
+            echo "FAIL: platforms/android-36 is not installed, and app/build.gradle.kts sets compileSdk 36." >&2
+            echo "Install it in this job ('sdkmanager --install \"platforms;android-36\"') or move compileSdk." >&2
             exit 1
           fi
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
