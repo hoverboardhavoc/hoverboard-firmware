@@ -1477,7 +1477,7 @@ jobs:
       # deliberately declares no jvmToolchain() (its comment says why), so whatever JDK Gradle runs
       # on IS the compiler; running it on 17 makes the compiling JVM and the bytecode target agree.
       - name: Install JDK 17 (the level the module compiles to)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -1570,7 +1570,7 @@ jobs:
           path: hoverboard-firmware
 
       - name: Install JDK 17 (the level the app compiles to)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -1607,7 +1607,7 @@ jobs:
           path: hoverboard-firmware
 
       - name: Install JDK 17 (the level the app compiles to)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -1645,7 +1645,7 @@ jobs:
       # sourceCompatibility/targetCompatibility to VERSION_17 and jvmTarget to "17", and the
       # included protocol-kotlin build compiles at 17 as well.
       - name: Install JDK 17 (the level the app compiles to)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
