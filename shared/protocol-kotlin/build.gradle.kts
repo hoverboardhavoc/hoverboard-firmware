@@ -29,7 +29,7 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
     // The shared configuration check cases are JSON (`shared/config-checks/`); the tests read them
     // with Gson, whose objects keep their members in file order as the CLI's reader does.
-    testImplementation("com.google.code.gson:gson:2.11.0")
+    testImplementation("com.google.code.gson:gson:2.15.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
