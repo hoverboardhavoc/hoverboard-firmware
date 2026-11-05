@@ -7,7 +7,7 @@ plugins {
 }
 
 android {
-    namespace = "com.hoverboard.remote"
+    namespace = "com.hoverboardhavoc.remote"
     compileSdk = 35
 
     defaultConfig {
