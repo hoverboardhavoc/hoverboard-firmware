@@ -81,6 +81,11 @@ jobs:
     needs: ci-run
     runs-on: [bench]
     timeout-minutes: 30
+    # An explicit shell runs each step with pipefail, so a failure piped through `redact` still fails
+    # the step (the default shell does not set it).
+    defaults:
+      run:
+        shell: bash
     env:
       OUT: ${{ github.workspace }}/bench-out
       ART: ${{ github.workspace }}/art

@@ -434,10 +434,14 @@ def judge(d, limits, rig, machine):
     ph, test_ok, test_failure = phases(os.path.join(d, "instrument.txt"))
     if not test_ok:
         fails.append("instrumented test failed" + (f": {test_failure}" if test_failure else " (no OK line)"))
+    # The guard writes guard.txt only when it trips; the file can exist empty when the recorders are
+    # stopped before the empty file is cleaned up.
     guard_file = os.path.join(d, "guard.txt")
     if os.path.exists(guard_file):
         with open(guard_file) as f:
-            fails.append("speed cap tripped: " + f.read().strip())
+            trip = f.read().strip()
+        if trip:
+            fails.append("speed cap tripped: " + trip)
     layout_path = os.path.join(d, "span.json")
     layout = load_json(layout_path) if os.path.exists(layout_path) else None
     uid_addr = parse_nodes(os.path.join(d, "nodes.txt"))

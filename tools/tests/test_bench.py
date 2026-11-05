@@ -533,3 +533,13 @@ class RedactTest(unittest.TestCase):
             self.assertEqual(bench.redact_main([rig, log]), 0)
             with open(log) as f:
                 self.assertEqual(f.read(), "10:00 slave bridge <slave bridge> answers\n")
+
+
+class GuardFileTest(unittest.TestCase):
+    def test_an_empty_guard_file_is_not_a_trip(self):
+        with tempfile.TemporaryDirectory() as d:
+            Run().write(d)
+            open(os.path.join(d, "guard.txt"), "w").close()
+            v = bench.judge(d, LIMITS, RIG, MACHINE)
+            self.assertTrue(v["pass"], v["failures"])
+
