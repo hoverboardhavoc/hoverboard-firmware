@@ -110,6 +110,41 @@ fn the_tally_counts_each_source_with_its_rate_and_longest_gap() {
     );
 }
 
+/// `machine watch --json`: every word of the last frame from a source, one JSON object, with the
+/// source a frame was counted under; a frame not counted has no source.
+#[test]
+fn a_counted_frame_is_one_json_line_with_every_word() {
+    let mut s = state(3, -40, 3095);
+    s.fault = 0x2000;
+    s.flags = CyclicState::FLAG_REBOOT;
+    s.wheel_speed = -7;
+    s.wheel_rate = -28_672;
+    s.wheel_pos = 1234;
+    s.obs.phase_peak = 812;
+    s.obs.phase_mean = 405;
+    s.obs.duty_on = 900;
+    s.obs.boot_tag = 17;
+    s.obs.odometer = 99_000;
+    s.machine = 0xBEEF;
+    let mut t = Tally::new();
+    assert_eq!(t.frame_json(0x03, ms(0)), None);
+    assert_eq!(t.feed_src(&cyclic(0x03, &s), ms(1500)), Some(0x03));
+    assert_eq!(t.feed_src(&[OP_CYCLIC_STATE, 0x01], ms(1600)), None);
+    let line = t.frame_json(0x03, ms(1500)).unwrap();
+    assert!(!line.contains('\n'));
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "t": 1.5, "src": 3, "mode": 3, "fault": 0x2000, "flags": CyclicState::FLAG_REBOOT,
+            "boot_tag": 17, "wheel_speed": -7, "wheel_rate": -28_672, "wheel_pos": 1234,
+            "phase_peak": 812, "phase_mean": 405, "duty_on": 900, "battery": 3095,
+            "peer_demand": -40, "pitch": 0, "roll": 0, "odometer": 99_000, "machine": 0xBEEF,
+            "motor1": null,
+        })
+    );
+}
+
 /// A two-motor board's 46 B frame: the board's part of the line ends in motor 1's peak, mean and
 /// rate (`specs/link-control.md`, "The motor-1 block"); a one-motor board's 34 B frame adds none.
 #[test]
