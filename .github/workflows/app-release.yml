@@ -197,9 +197,14 @@ jobs:
             echo
             echo "Signing certificate SHA-256: \`$fp\`"
           } > "$RUNNER_TEMP/notes.md"
-          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          # CI's release-assets job attaches the firmware bundle and the CLIs to the same release, and
+          # may have made it first, or make it at the same moment.
+          if ! gh release create "$TAG" "$apk" -R "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"; then
             gh release upload "$TAG" "$apk" -R "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$TAG" "$apk" -R "$GITHUB_REPOSITORY" --verify-tag \
-              --title "Hoverboard Remote $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+            body=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json body -q .body)
+            if ! grep -q "Signing certificate SHA-256" <<< "$body"; then
+              printf '%s\n\n%s\n' "$(cat "$RUNNER_TEMP/notes.md")" "$body" > "$RUNNER_TEMP/merged.md"
+              gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/merged.md"
+            fi
           fi

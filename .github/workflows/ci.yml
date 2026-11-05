@@ -822,20 +822,50 @@ jobs:
           path: hoverboard-firmware/target/bundle/firmware-*.hbfw
           if-no-files-found: error
 
-      - name: Attach the bundle to the GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  # On a tag, attach the firmware bundle and the CLI binaries to the GitHub release named after it
+  # (the app release workflow attaches the signed APK to the same release). This is the only CI job
+  # that can write to the repository; the jobs that build stay read-only, so code they compile never
+  # runs with a token that can publish.
+  release-assets:
+    name: Attach the bundle and the CLIs to the release (on tag)
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [pack, hoverboard-cli, hoverboard-cli-pi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the bundle and the CLIs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          files: hoverboard-firmware/target/bundle/firmware-*.hbfw
-          # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
-          # same text, so whichever job runs last leaves it.
-          body: |
-            The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
-            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
-            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
+          path: assets
+          pattern: '{firmware-bundle,hoverboard-cli-*}'
+          merge-multiple: true
 
-            A release promises no compatibility with any other release: a CLI, app, bridge image and
-            board image from different releases may not work together.
+      - name: Attach them
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l assets
+          # The release notes (specs/bridge-onboarding.md section 4).
+          cat > notes.md <<'NOTES'
+          The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
+          refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
+          is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
+
+          A release promises no compatibility with any other release: a CLI, app, bridge image and
+          board image from different releases may not work together.
+          NOTES
+          sed -i 's/^          //' notes.md
+          # The app release workflow may have made the release first, or make it at the same moment.
+          if ! gh release create "$TAG" assets/* -R "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file notes.md; then
+            gh release upload "$TAG" assets/* -R "$GITHUB_REPOSITORY" --clobber
+            body=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json body -q .body)
+            if ! grep -q "The binaries are not signed" <<< "$body"; then
+              printf '%s\n\n%s\n' "$body" "$(cat notes.md)" > merged.md
+              gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes-file merged.md
+            fi
+          fi
 
   # Host tests: the motorcontroller suite, then the shared suite. Run with an explicit host target so
   # they neither inherit the thumbv7m default nor the link.x flag scoped to it in
@@ -1015,9 +1045,9 @@ jobs:
   # BlueZ over D-Bus, WinRT), the USB console through serialport, the Wi-Fi console over TCP. Linux
   # needs the D-Bus headers for btleplug. The explicit --target names the host build, as every other
   # host job here does. The binaries are uploaded
-  # per platform and attached to a release on a tag beside the firmware images, each named for its
-  # target triple (`hoverboard-cli-<triple>`, `.exe` on Windows): softprops/action-gh-release
-  # replaces an asset of the same name, so one shared name would leave one platform's binary.
+  # per platform, and on a tag the release-assets job attaches them beside the firmware bundle, each
+  # named for its target triple (`hoverboard-cli-<triple>`, `.exe` on Windows): one release holds
+  # every platform's binary, so the names must differ.
   hoverboard-cli:
     name: hoverboard-cli (${{ matrix.os }})
     strategy:
@@ -1115,21 +1145,6 @@ jobs:
           path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
 
-      - name: Attach to GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
-          # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
-          # same text, so whichever job runs last leaves it.
-          body: |
-            The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
-            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
-            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
-
-            A release promises no compatibility with any other release: a CLI, app, bridge image and
-            board image from different releases may not work together.
-
   # The CLI for the bench Pi (a Raspberry Pi Model B, armv6l: arm-unknown-linux-gnueabihf), so
   # install-esp can reinstall a bench bridge on the Pi's USB (specs/bridge-onboarding.md section 4.2).
   # Built with cargo-zigbuild, which links with zig against an armv6 glibc 2.36 (the Pi runs 2.41;
@@ -1190,21 +1205,6 @@ jobs:
           name: hoverboard-cli-${{ env.PI_TARGET }}
           path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
           if-no-files-found: error
-
-      - name: Attach to GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
-          # The release notes (specs/bridge-onboarding.md section 4). Every release step sets the
-          # same text, so whichever job runs last leaves it.
-          body: |
-            The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
-            refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
-            is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
-
-            A release promises no compatibility with any other release: a CLI, app, bridge image and
-            board image from different releases may not work together.
 
   # The hoverboard bridge (bridge/): its own workspace on its own toolchain, the 1.92 stable its
   # rust-toolchain.toml pins with the riscv32imc target (the esp-hal fork it patches in is not built
