@@ -84,15 +84,16 @@ impl Tally {
     /// Count `pkt` if it is a `CYCLIC_STATE` PDU whose payload decodes; it arrived at `at`.
     /// Returns whether it was counted.
     pub fn feed(&mut self, pkt: &[u8], at: Duration) -> bool {
-        let Ok(p) = Pdu::decode(pkt) else {
-            return false;
-        };
+        self.feed_src(pkt, at).is_some()
+    }
+
+    /// [`Self::feed`], returning the source address of a counted frame.
+    pub fn feed_src(&mut self, pkt: &[u8], at: Duration) -> Option<u8> {
+        let p = Pdu::decode(pkt).ok()?;
         if p.opcode != OP_CYCLIC_STATE || !(self.only.is_empty() || self.only.contains(&p.src)) {
-            return false;
+            return None;
         }
-        let Ok((s, motor1)) = CyclicState::decode_with_motor1(p.payload) else {
-            return false;
-        };
+        let (s, motor1) = CyclicState::decode_with_motor1(p.payload).ok()?;
         match self.sources.get_mut(&p.src) {
             Some(src) => {
                 src.frames += 1;
@@ -114,7 +115,45 @@ impl Tally {
                 );
             }
         }
-        true
+        Some(p.src)
+    }
+
+    /// The last frame from `src` as one JSON object on one line, `at` seconds into the run: every
+    /// word of the frame, decoded (`machine watch --json`). `None` while nothing is heard from it.
+    pub fn frame_json(&self, src: u8, at: Duration) -> Option<String> {
+        let f = self.sources.get(&src)?;
+        let s = &f.last;
+        let motor1 = f.last_motor1.map(|m| {
+            serde_json::json!({
+                "wheel_speed": m.wheel_speed,
+                "wheel_rate": m.wheel_rate,
+                "phase_peak": m.phase_peak,
+                "phase_mean": m.phase_mean,
+                "duty_on": m.duty_on,
+            })
+        });
+        let v = serde_json::json!({
+            "t": (at.as_secs_f64() * 1000.0).round() / 1000.0,
+            "src": src,
+            "mode": s.mode,
+            "fault": s.fault,
+            "flags": s.flags,
+            "boot_tag": s.obs.boot_tag,
+            "wheel_speed": s.wheel_speed,
+            "wheel_rate": s.wheel_rate,
+            "wheel_pos": s.wheel_pos,
+            "phase_peak": s.obs.phase_peak,
+            "phase_mean": s.obs.phase_mean,
+            "duty_on": s.obs.duty_on,
+            "battery": s.battery,
+            "peer_demand": s.peer_demand,
+            "pitch": s.pitch,
+            "roll": s.roll,
+            "odometer": s.obs.odometer,
+            "machine": s.machine,
+            "motor1": motor1,
+        });
+        Some(v.to_string())
     }
 
     /// The last frame heard from `src`.
