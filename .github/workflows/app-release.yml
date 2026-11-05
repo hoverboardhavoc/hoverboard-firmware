@@ -1,0 +1,205 @@
+name: App release
+
+# The app's signed release for F-Droid's reproducible build. For an `app-v<version>` tag:
+#
+# 1. build: the tag's version matches the app's versionName, and the release APK built with Gradle is
+#    identical byte for byte to the one fdroidserver's `fdroid build` makes (tools/fdroid-build.sh),
+#    which is what F-Droid's build server makes.
+# 2. sign: the release key signs the Gradle APK. This job holds the key and runs nothing else: no
+#    checkout, no build, no package from PyPI, only GitHub's artifact actions and the Android SDK's
+#    apksigner. A compromised build dependency in the other jobs never shares a machine with the key.
+# 3. verify: F-Droid's own check, `apksigcopier compare`: the signature, copied onto fdroid build's
+#    APK, verifies there.
+# 4. release: the signed APK is attached to a GitHub release named after the tag. F-Droid's metadata
+#    points `Binaries:` at it and publishes it when its own build matches.
+#
+# Every action is pinned to a commit and every Python package to a version, so a moved tag or a new
+# upload cannot change what runs. A tag pushed after this workflow exists runs it; an older tag is
+# released by hand with `gh workflow run app-release.yml -f tag=app-v<version>`.
+
+on:
+  push:
+    tags: ['app-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The app-v<version> tag to release'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  # apksigner from build-tools 35 and later signs in a way apksigcopier cannot verify (F-Droid's
+  # Reproducible Builds page), so signing and checking use 34.
+  BUILD_TOOLS: '34.0.0'
+
+jobs:
+  build:
+    name: Build twice and compare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.TAG }}
+          path: hoverboard-firmware
+          persist-credentials: false
+
+      - name: The tag names the app's version
+        id: version
+        working-directory: hoverboard-firmware
+        run: |
+          case "$TAG" in app-v*) ;; *) echo "not an app-v tag: $TAG" >&2; exit 1 ;; esac
+          want="${TAG#app-v}"
+          have=$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' apps/remote/app/build.gradle.kts)
+          if [ "$want" != "$have" ]; then
+            echo "$TAG names version $want, but apps/remote/app/build.gradle.kts has versionName $have" >&2
+            exit 1
+          fi
+          echo "version=$want" >> "$GITHUB_OUTPUT"
+
+      - name: Install JDK 17 (the level the app compiles to)
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # fdroid build deletes the committed gradle-wrapper.jar, so it needs a Gradle of the wrapper's
+      # version on PATH; the Gradle build below uses the wrapper itself.
+      - name: Set up Gradle 8.14
+        uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4.4.4
+        with:
+          gradle-version: '8.14'
+
+      - name: Install fdroidserver
+        run: pipx install 'fdroidserver==2.4.5'
+
+      - name: Build the release APK with Gradle
+        working-directory: hoverboard-firmware/apps/remote
+        run: ./gradlew --console=plain --no-build-cache :app:assembleRelease
+
+      - name: Build it again with fdroid build, and compare
+        working-directory: hoverboard-firmware
+        run: |
+          : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+          export ANDROID_HOME
+          GRADLE=$(command -v gradle) ./tools/fdroid-build.sh "$RUNNER_TEMP/fdroid"
+          mkdir -p "$RUNNER_TEMP/out"
+          cp apps/remote/app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/out/gradle-unsigned.apk"
+          cp "$RUNNER_TEMP"/fdroid/unsigned/com.hoverboardhavoc.remote_*.apk "$RUNNER_TEMP/out/fdroid-unsigned.apk"
+          sha256sum "$RUNNER_TEMP"/out/*.apk
+          if ! cmp "$RUNNER_TEMP/out/gradle-unsigned.apk" "$RUNNER_TEMP/out/fdroid-unsigned.apk"; then
+            echo "The Gradle build and fdroid build differ: F-Droid could not verify a signed APK." >&2
+            exit 1
+          fi
+
+      - name: Upload the unsigned APKs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned
+          path: ${{ runner.temp }}/out/*.apk
+          if-no-files-found: error
+
+  sign:
+    name: Sign (the only job with the key)
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Download the unsigned APK
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned
+          path: ${{ runner.temp }}/in
+
+      - name: Install build-tools ${{ env.BUILD_TOOLS }}
+        run: |
+          : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;$BUILD_TOOLS" > /dev/null
+
+      - name: Sign
+        env:
+          KEYSTORE_B64: ${{ secrets.APP_RELEASE_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.APP_RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.APP_RELEASE_KEY_ALIAS }}
+        run: |
+          : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+          apksigner="$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner"
+          ks="$RUNNER_TEMP/release.jks"
+          trap 'rm -f "$ks"' EXIT
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$ks"
+          mkdir -p "$RUNNER_TEMP/out"
+          out="$RUNNER_TEMP/out/hoverboard-remote-$VERSION.apk"
+          "$apksigner" sign --ks "$ks" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD \
+            --out "$out" "$RUNNER_TEMP/in/gradle-unsigned.apk"
+          "$apksigner" verify --verbose --print-certs "$out" | tee "$RUNNER_TEMP/out/certs.txt"
+
+      - name: Upload the signed APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  verify:
+    name: F-Droid's check (apksigcopier compare)
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download both
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/in
+
+      - name: Install build-tools ${{ env.BUILD_TOOLS }} and apksigcopier
+        run: |
+          : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;$BUILD_TOOLS" > /dev/null
+          pipx install 'apksigcopier==1.1.1'
+
+      # Copy the release signature onto fdroid build's APK and verify it, as `fdroid publish` does
+      # before it publishes an upstream-signed APK. apksigcopier calls apksigner, hence the PATH.
+      - name: The signature verifies on fdroid build's APK
+        run: |
+          : "${ANDROID_HOME:=$ANDROID_SDK_ROOT}"
+          PATH="$ANDROID_HOME/build-tools/$BUILD_TOOLS:$PATH" apksigcopier compare \
+            "$(ls "$RUNNER_TEMP"/in/signed/hoverboard-remote-*.apk)" --unsigned "$RUNNER_TEMP/in/unsigned/fdroid-unsigned.apk"
+
+  release:
+    name: Publish the GitHub release
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Download the signed APK
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed
+          path: ${{ runner.temp }}/signed
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk="$RUNNER_TEMP/signed/hoverboard-remote-$VERSION.apk"
+          fp=$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/signed/certs.txt" | head -1)
+          {
+            echo "Hoverboard Remote $VERSION, the Android app."
+            echo
+            echo "Signing certificate SHA-256: \`$fp\`"
+          } > "$RUNNER_TEMP/notes.md"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$apk" -R "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$apk" -R "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Hoverboard Remote $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
