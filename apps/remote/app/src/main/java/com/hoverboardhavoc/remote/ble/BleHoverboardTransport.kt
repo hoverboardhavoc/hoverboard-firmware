@@ -504,7 +504,10 @@ class BleHoverboardTransport(
      * is how a module says which of its pipes is the UART TX path. Diagnostics only: nothing here
      * decides anything, so a descriptor that will not read is logged and skipped.
      */
+    // MissingPermission: called only from inside a connected session, which [connect] starts after
+    // BLUETOOTH_CONNECT is granted.
     @Suppress("TooGenericExceptionCaught")
+    @SuppressLint("MissingPermission")
     private suspend fun logUserDescriptions(services: ClientBleGattServices) {
         for (service in services.services) {
             if (service.uuid.isSigStandardMetadata()) continue
@@ -554,7 +557,11 @@ class BleHoverboardTransport(
         }
     }
 
-    /** Write one outgoing byte run, split to what a single ATT write carries. */
+    /**
+     * Write one outgoing byte run, split to what a single ATT write carries. Called only from
+     * inside a connected session, which [connect] starts after BLUETOOTH_CONNECT is granted.
+     */
+    @SuppressLint("MissingPermission")
     private suspend fun writeChunked(
         writeChar: ClientBleGattCharacteristic,
         writeType: BleWriteType,
