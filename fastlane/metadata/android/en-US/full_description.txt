@@ -1,0 +1,10 @@
+<p>Hoverboard Remote drives and tunes vehicles and robots built on hoverboard motor controllers that run the <a href="https://github.com/hoverboardhavoc/hoverboard-firmware">hoverboard-firmware</a>.</p>
+<p>The phone connects over Bluetooth LE to an ESP32-C3 bridge wired to the motor controller's SWD header. Through it the app reaches every board of the vehicle.</p>
+<ul>
+<li>Arm the vehicle and drive it from a throttle pad.</li>
+<li>Watch speed, battery voltage, phase currents and attitude live.</li>
+<li>Tune the balance controller's gains while it runs.</li>
+<li>Sound the horn.</li>
+<li>Edit each board's settings: pins, IMU, drive mode.</li>
+</ul>
+<p>The app needs boards running hoverboard-firmware and a bridge. It does not work with stock hoverboard firmware.</p>
