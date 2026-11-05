@@ -24,7 +24,7 @@ espsvc = { path = "../../shared/espsvc" }
 linkctl = { path = "../../shared/linkctl" }
 embedded-io = "0.6"
 heapless = "0.8"
-sha2 = { version = "0.10", default-features = false }
+sha2 = { version = "0.11", default-features = false }
 # The GDB remote serial protocol (src/gdb.rs). `alloc` for the per-session packet buffer: the
 # state machine owns it, so a new session needs a new one.
 gdbstub = { version = "0.7.10", default-features = false, features = ["alloc"] }
