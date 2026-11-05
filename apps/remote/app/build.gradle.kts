@@ -16,6 +16,10 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        // The bench smoke test (`src/androidTest/`, `specs/bench-ci.md` section 5), run on the bench
+        // phone with `am instrument` against the real app and the real BLE transport.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -107,4 +111,10 @@ dependencies {
     testImplementation(libs.roborazzi)
     testImplementation(libs.roborazzi.compose)
     testImplementation(libs.roborazzi.junit.rule)
+
+    // The bench smoke test: the real activity under the Compose test rule.
+    androidTestImplementation(composeBom)
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }
