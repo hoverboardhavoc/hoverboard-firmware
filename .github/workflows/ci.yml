@@ -1396,7 +1396,7 @@ jobs:
       # it. The cache key is that hash, so a cached zip is the verified one (the script checks it
       # again before unpacking either way).
       - name: Cache MindMotion LibSamples (keyed by its SHA-256)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: hoverboard-firmware/third_party/.cache
           key: mm32-libsamples-eb294c20129a474daf6295e03f42667f14c4826b1639c2afbf3bad3c2e4a8cbd
