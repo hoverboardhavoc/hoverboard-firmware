@@ -412,6 +412,17 @@ def cv(xs):
     return statistics.pstdev(xs) / abs(m) if m else None
 
 
+def trimmed_cv(xs):
+    """The coefficient of variation with the lowest and highest tenth of the samples left out (at
+    least one each way from ten samples up), so that a single late or dropped telemetry frame does
+    not fail a steady hold whose other samples agree."""
+    if len(xs) < 2:
+        return None
+    k = max(1, len(xs) // 10) if len(xs) >= 10 else 0
+    s = sorted(xs)
+    return cv(s[k:len(s) - k] if k else s)
+
+
 def judge(d, limits, rig, machine):
     fails, notes, figures = [], [], {}
     ph, test_ok, test_failure = phases(os.path.join(d, "instrument.txt"))
@@ -484,10 +495,15 @@ def judge(d, limits, rig, machine):
             if cal <= 0:
                 fails.append(f"{role}: no motors.0.current.cal")
             else:
+                # The current-sense peak reads about 2 A of noise with the motors off, so the
+                # ceiling applies to the mean over the steady holds; the peak is a figure only.
+                steady = [f["phase_peak"] / cal for e, f in armed if any(inside(e, w) for w in windows.values())]
                 peak = max(f["phase_peak"] for _e, f in armed) / cal if armed else 0.0
                 fig["phase_peak_a"] = round(peak, 2)
-                if peak > limits["phase_current_ceiling_a"]:
-                    fails.append(f"{role}: phase current {peak:.2f} A peak, ceiling {limits['phase_current_ceiling_a']} A")
+                mean_a = statistics.fmean(steady) if steady else 0.0
+                fig["phase_steady_mean_a"] = round(mean_a, 2)
+                if mean_a > limits["phase_current_ceiling_a"]:
+                    fails.append(f"{role}: phase current {mean_a:.2f} A mean in the steady holds, ceiling {limits['phase_current_ceiling_a']} A")
         top = max(abs(rpm(f["wheel_rate"], pp)) for _e, f in frames)
         fig["max_rpm"] = round(top, 1)
         if top > limits["speed_cap_rpm"]:
@@ -521,7 +537,7 @@ def judge(d, limits, rig, machine):
                 fails.append(f"{role} {name}: did not reach {limits['min_rpm']} rpm (max {max(abs(s) for s in speeds):.1f})")
             if mean * sign <= 0:
                 fails.append(f"{role} {name}: turned the wrong way (mean {mean:.1f} rpm)")
-            c = cv(speeds)
+            c = trimmed_cv(speeds)
             fig[f"{name}_speed_cv"] = None if c is None else round(c, 3)
             if c is not None and c > limits["speed_cv_max"]:
                 fails.append(f"{role} {name}: steady speed CV {c:.3f} above {limits['speed_cv_max']}")

@@ -81,6 +81,7 @@ class Run:
         self.status_after_ok = True
         self.guard = False
         self.cut_after = None       # the last phase the test reported
+        self.outlier = None         # (role, t): one telemetry frame at t reads half speed
 
     def raw_rate(self, role, t, i):
         d = direction_at(t)
@@ -123,7 +124,9 @@ class Run:
                     "t": t + 8, "src": ADDR[role], "mode": mode, "fault": fault,
                     "flags": bench.FLAG_REBOOT if role == self.flag_reboot else 0,
                     "boot_tag": 2 if (role == self.boot_tag_change and t > 10) else 1,
-                    "wheel_speed": 0, "wheel_rate": self.raw_rate(role, t, i), "wheel_pos": 0,
+                    "wheel_speed": 0,
+                    "wheel_rate": self.raw_rate(role, t, i) // (2 if self.outlier == (role, round(t, 1)) else 1),
+                    "wheel_pos": 0,
                     "phase_peak": self.peak_counts if armed else 300, "phase_mean": 200, "duty_on": 0,
                     "battery": 3095, "peer_demand": 0, "pitch": 0, "roll": 0, "odometer": 0,
                     "machine": 1, "motor1": None})))
@@ -205,8 +208,15 @@ class JudgeTest(unittest.TestCase):
 
     def test_phase_current_above_the_ceiling_fails(self):
         r = Run()
-        r.peak_counts = 1000
-        self.failing(r, "phase current 2.20 A peak")
+        r.peak_counts = 1500
+        self.failing(r, "phase current 3.30 A mean in the steady holds")
+
+    def test_one_stray_telemetry_frame_does_not_fail_a_steady_hold(self):
+        r = Run()
+        steady = PHASES["forward_steady"] + 1.0
+        r.outlier = ("slave", round(steady, 1))
+        v = judged(r)
+        self.assertTrue(v["pass"], v["failures"])
 
     def test_a_fault_bit_while_armed_fails_and_the_arm_request_does_not(self):
         r = Run()

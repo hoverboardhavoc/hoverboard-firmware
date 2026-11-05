@@ -157,6 +157,11 @@ do_drive() {
   echo "$!" >> "$OUT/pids"
   sleep 4
 
+  # The smoke test drives in the limits' method (sine: a voltage drive settles at a steady speed on a
+  # free wheel, where a torque drive keeps accelerating); cleanup restores the machine file's.
+  log "method $(field "$LIMITS" method) for the drive"
+  cli "$MASTER_TCP" machine set machine.method "$(field "$LIMITS" method)" 2>&1 | tee -a "$OUT/method.txt" >&2 || die "machine set machine.method"
+
   log "the app drives"
   adb --stamp shell "am instrument -r -w \
       -e device $(field "$RIG" device) -e boards 2 \
@@ -177,6 +182,11 @@ case "${1:-}" in
   flash) [ "$#" = 2 ] || exit 2; do_flash "$2" ;;
   drive) [ "$#" = 4 ] || exit 2; do_drive "$2" "$3" "$4" ;;
   disarm) do_disarm ;;
-  cleanup) do_disarm; log "relay off"; relay off ;;
+  cleanup)
+    do_disarm
+    m="$(field "$REPO/$(field "$RIG" machine_file)" machine.method)"
+    log "method back to $m"
+    cli "$MASTER_TCP" machine set machine.method "$m" 2>&1 | tee -a "$OUT/method.txt" >&2 || log "restoring the method failed"
+    log "relay off"; relay off ;;
   *) sed -n '2,20p' "$0" >&2; exit 2 ;;
 esac
