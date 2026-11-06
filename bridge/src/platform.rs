@@ -14,6 +14,7 @@
 //! running. The target here is the app slot that is not the booted one, and a blank otadata is
 //! first pointed at the running slot so the sequence numbers start from a selected slot.
 
+use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_bootloader_esp_idf::ota::OtaImageState;
 use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
 use esp_bootloader_esp_idf::partitions::{
@@ -145,13 +146,11 @@ impl Platform for EspPlatform {
         let fail = |_| Status::FlashError;
         // Whole words; the last word of an image whose length is not one is padded erased.
         let whole = data.len() / 4 * 4;
-        self.flash.write_nor(at, &data[..whole]).map_err(fail)?;
+        self.flash.write(at, &data[..whole]).map_err(fail)?;
         if whole < data.len() {
             let mut word = [0xFF; 4];
             word[..data.len() - whole].copy_from_slice(&data[whole..]);
-            self.flash
-                .write_nor(at + whole as u32, &word)
-                .map_err(fail)?;
+            self.flash.write(at + whole as u32, &word).map_err(fail)?;
         }
         Ok(())
     }
@@ -162,7 +161,7 @@ impl Platform for EspPlatform {
             return Err(Status::BadRequest);
         }
         self.flash
-            .read_nor(t.offset + offset, buf)
+            .read(t.offset + offset, buf)
             .map_err(|_| Status::FlashError)
     }
 

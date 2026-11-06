@@ -39,17 +39,18 @@ boot-log = ["dep:log", "esp-println/log-04", "esp-println/critical-section"]
 
 [dependencies]
 log = { version = "0.4", optional = true }
-esp-hal = { version = "1.2.2", features = ["esp32c3", "unstable"] }
-esp-radio = { version = "1.0.0-beta.1", features = ["esp32c3", "ble", "wifi", "coex", "log-04", "unstable"] }
-esp-rtos = { version = "0.4.0", features = ["esp32c3", "embassy", "esp-alloc", "esp-radio", "log-04"] }
-esp-alloc = "0.11.0"
-esp-backtrace = { version = "0.20.0", features = ["esp32c3", "panic-handler", "println"] }
-esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c3"] }
+esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
+esp-radio = { version = "0.17.0", features = ["esp32c3", "ble", "wifi", "coex", "log-04", "unstable"] }
+esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy", "esp-alloc", "esp-radio", "log-04"] }
+esp-alloc = "0.9.0"
+esp-backtrace = { version = "0.18.1", features = ["esp32c3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c3"] }
 # The ESP's own flash, for its app slots (src/platform.rs) and its keys (src/keys.rs).
-esp-storage = { version = "0.10.0", features = ["esp32c3"] }
+esp-storage = { version = "0.8.1", features = ["esp32c3"] }
+embedded-storage = "0.3"
 # The panic backtrace's output, on the USB-Serial-JTAG; nothing else prints (src/usb.rs).
-esp-println = { version = "0.18.0", default-features = false, features = ["esp32c3", "jtag-serial"] }
-embassy-executor = "0.10"
+esp-println = { version = "0.16.0", default-features = false, features = ["esp32c3", "jtag-serial"] }
+embassy-executor = "0.9"
 embassy-time = "0.5"
 embassy-sync = "0.8"
 embassy-futures = "0.1"
@@ -65,7 +66,7 @@ rand_core = { version = "0.10", default-features = false }
 # Nothing here builds an owned socket set; the line only keeps the two features in step.
 smoltcp = { version = "0.13", default-features = false, features = ["alloc"] }
 edge-nal-embassy = { version = "0.9", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "multicast"] }
-trouble-host = { version = "0.7", features = ["default-packet-pool-mtu-255"] }
+trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "94e15ffe139bc992c1a8b4c34c1fd6a6359356ef", features = ["default-packet-pool-mtu-255"] }
 static_cell = "2.1"
 # The GATT characteristic value type trouble-host implements (its heapless is 0.9; the shared
 # crates use 0.8).
@@ -86,3 +87,13 @@ codegen-units = 1
 debug = 2
 lto = "fat"
 opt-level = "s"
+
+[patch.crates-io]
+esp-alloc = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-backtrace = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-bootloader-esp-idf = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-hal = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-println = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-storage = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-radio = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
+esp-rtos = { git = "https://github.com/lulf/esp-hal.git", rev = "49ba429e34266bcac867b968e0a55b433d5a7c37" }
