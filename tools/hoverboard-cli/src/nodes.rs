@@ -166,12 +166,18 @@ pub fn status_name(status: u8) -> String {
 /// [`net::walk::CFG_BAD`] for a name it cannot advertise ([`net::walk::bridge_name_usable`]), so
 /// that status names the rule.
 pub fn name_status(class: Option<u8>, status: u8) -> String {
-    use net::walk::{BRIDGE_NAME_MAX, CFG_BAD};
-    if class == Some(CLASS_BRIDGE) && status == CFG_BAD {
-        format!("name must be 1 to {BRIDGE_NAME_MAX} letters, digits or '-'")
+    if class == Some(CLASS_BRIDGE) && status == net::walk::CFG_BAD {
+        bridge_name_rule()
     } else {
         status_name(status)
     }
+}
+
+/// The rule a bridge's `device.name` follows ([`net::walk::bridge_name_usable`]), as the CLI
+/// states it.
+pub fn bridge_name_rule() -> String {
+    use net::walk::BRIDGE_NAME_MAX;
+    format!("name must be 1 to {BRIDGE_NAME_MAX} letters, digits or '-'")
 }
 
 /// Run the whole walk over `wire`: first contact, then every node addressed and probed. Answers

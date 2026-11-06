@@ -174,9 +174,12 @@ impl Identity {
 /// (`specs/configured-links.md` section 5).
 pub const STATUS_MAX: usize = 56;
 
-/// The longest `device.name` a bridge takes: what fits its BLE advertising packet beside the flags
-/// (31 B less 3 for the flags and 2 for the name's own header).
-pub const BRIDGE_NAME_MAX: usize = 26;
+/// The longest `device.name` a bridge takes. Two limits bound it: the BLE advertising packet holds
+/// 26 B of name beside the flags (31 B less 3 for the flags and 2 for the name's own header), and
+/// the BLE host, `trouble-host`, holds the GATT Device Name in 22 B (`DEVICE_NAME_MAX_LENGTH`,
+/// `host/src/gap.rs`) and refuses to build its server for a longer one. The host's is the tighter
+/// (`specs/bridge-name-limit.md` section 1).
+pub const BRIDGE_NAME_MAX: usize = 22;
 
 /// A `device.name` a bridge can advertise over BLE and answer mDNS for: 1 to [`BRIDGE_NAME_MAX`]
 /// bytes of ASCII letters, digits and `-`. A bridge's `CONFIG_WRITE` of any other name is refused
