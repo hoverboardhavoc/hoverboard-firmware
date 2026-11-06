@@ -120,8 +120,10 @@ object Names {
         array(Fields.CONTROL_GAIN_MAX, "machine.balance.gain_max"),
         array(Fields.CONTROL_REFERENCE, "machine.balance.reference"),
         single(Fields.CONTROL_POS_CLAMP, "machine.balance.pos_clamp"),
-        array(Fields.CONTROL_DRIVE_TURN, "machine.turn"),
         single(Fields.BOARD_BATTERY_WARN, "machine.battery.warn"),
+        array(Fields.CONTROL_TURN_GAINS, "machine.turn.gains"),
+        array(Fields.CONTROL_TURN_REFERENCE, "machine.turn.reference"),
+        array(Fields.CONTROL_TURN_CLAMP, "machine.turn.clamp"),
         // Wheel.
         pin(Fields.MOTOR_HALL_A, "hall.a", IndexKind.MOTOR),
         pin(Fields.MOTOR_HALL_B, "hall.b", IndexKind.MOTOR),

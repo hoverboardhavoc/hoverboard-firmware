@@ -984,6 +984,48 @@ mod dynamic {
         );
     }
 
+    /// The heading hold's three fields are the control crate's (`specs/heading-hold.md` section
+    /// 6): the two live rows' ids are the tune seam's keys and their defaults the unstaged
+    /// `GainShadow`'s; the clamp row's defaults survive `control::turn::clamp` unchanged. The
+    /// retired 0x2B is unknown, so a `[12000, 600]` record the rover still holds there is never
+    /// decoded as anything.
+    #[test]
+    fn the_heading_hold_fields_are_the_control_crates() {
+        use crate::field::{CONTROL_TURN_CLAMP, CONTROL_TURN_GAINS, CONTROL_TURN_REFERENCE};
+        assert_eq!(CONTROL_TURN_GAINS.id(), control::TURN_GAINS_FIELD);
+        assert_eq!(CONTROL_TURN_REFERENCE.id(), control::TURN_REFERENCE_FIELD);
+        assert_eq!(CONTROL_TURN_CLAMP.id(), 0x2F);
+        assert_eq!(CONTROL_TURN_GAINS.len(), control::config::turn::GAINS);
+        assert_eq!(
+            CONTROL_TURN_REFERENCE.len(),
+            control::config::turn::REFERENCE_WORDS
+        );
+        let unstaged = control::GainShadow::default();
+        for i in 0..3u8 {
+            assert_eq!(
+                CONTROL_TURN_GAINS.at(i).default(),
+                control::config::turn::GAINS_DEFAULT[i as usize]
+            );
+            assert_eq!(
+                Some(CONTROL_TURN_GAINS.at(i).default()),
+                unstaged.stored(CONTROL_TURN_GAINS.id(), i)
+            );
+        }
+        for i in 0..2u8 {
+            assert_eq!(
+                CONTROL_TURN_REFERENCE.at(i).default(),
+                control::config::turn::REFERENCE_DEFAULT[i as usize]
+            );
+        }
+        let d = [
+            CONTROL_TURN_CLAMP.at(0).default(),
+            CONTROL_TURN_CLAMP.at(1).default(),
+        ];
+        assert_eq!(d, [0, 45]);
+        assert_eq!(control::turn::clamp(d), (d[0], d[1]));
+        assert!(crate::field::lookup(0x2B).is_none());
+    }
+
     /// The retired PID-cascade ids (0x71 `CONTROL_GAIN_A`, 0x72 `CONTROL_GAIN_B`, 0x73
     /// `CONTROL_DRIVE_LEAN`, 0x74 the three-index `CONTROL_GAIN_MAX`, 0x76 `CONTROL_SPEED_LOOP`,
     /// 0x77 `CONTROL_KD`) are unregistered: a `CONFIG_READ` or `CONFIG_WRITE` of one is an unknown
@@ -1010,7 +1052,10 @@ mod dynamic {
     /// the tune lane itself.
     #[test]
     fn a_stored_gain_max_bounds_the_shadow_built_from_the_store() {
-        use crate::field::{CONTROL_GAIN_MAX, CONTROL_REFERENCE, CONTROL_SF_GAINS};
+        use crate::field::{
+            CONTROL_GAIN_MAX, CONTROL_REFERENCE, CONTROL_SF_GAINS, CONTROL_TURN_GAINS,
+            CONTROL_TURN_REFERENCE,
+        };
         let mut f = MockFlash::erased(PS);
         {
             let mut s = Store::mount(&mut f).unwrap();
@@ -1036,6 +1081,11 @@ mod dynamic {
             g[3],
             s.get(CONTROL_REFERENCE.at(0)),
             s.get(CONTROL_REFERENCE.at(1)),
+            s.get(CONTROL_TURN_GAINS.at(0)),
+            s.get(CONTROL_TURN_GAINS.at(1)),
+            s.get(CONTROL_TURN_GAINS.at(2)),
+            s.get(CONTROL_TURN_REFERENCE.at(0)),
+            s.get(CONTROL_TURN_REFERENCE.at(1)),
         ]);
         shadow.re_apply_max(g4(CONTROL_GAIN_MAX));
         assert_eq!(shadow.gains()[0], 3000, "3491 clamps to the stored maximum");
@@ -1249,47 +1299,46 @@ mod dynamic {
         );
     }
 
-    /// The `CONTROL_SIDE` and `CONTROL_DRIVE_TURN` seams end to end (`specs/rover-one-imu.md`
-    /// section 5): an erased board is the left wheel with the turn disabled, so it drives
-    /// straight; a `CONFIG_WRITE` of each survives a cold remount, and the turn's two indices go
-    /// through `DriveTurn::new`'s clamp on the way into the loop. Neither is on the tune lane.
+    /// The `CONTROL_SIDE` and `CONTROL_TURN_CLAMP` seams end to end (`specs/rover-one-imu.md`
+    /// section 5, `specs/heading-hold.md` section 6): an erased board is the left wheel with no
+    /// differential, so it drives straight; a `CONFIG_WRITE` of each survives a cold remount, and
+    /// the clamp row's two indices go through `control::turn::clamp` on the way into the loop.
+    /// Neither is on the tune lane.
     #[test]
-    fn the_side_and_the_turn_round_trip_from_the_store() {
-        use crate::field::{CONTROL_DRIVE_TURN, CONTROL_SIDE};
+    fn the_side_and_the_turn_clamp_round_trip_from_the_store() {
+        use crate::field::{CONTROL_SIDE, CONTROL_TURN_CLAMP};
         assert_eq!(CONTROL_SIDE.id(), 0x50);
-        assert_eq!(CONTROL_DRIVE_TURN.id(), 0x2B);
         let mut f = MockFlash::erased(PS);
+        let read = |s: &Store<'_, MockFlash>| {
+            control::turn::clamp([
+                s.get(CONTROL_TURN_CLAMP.at(0)),
+                s.get(CONTROL_TURN_CLAMP.at(1)),
+            ])
+        };
         {
             let s = Store::mount(&mut f).unwrap();
             assert_eq!(s.get(CONTROL_SIDE), 0, "default = left");
-            let t = control::DriveTurn::new(
-                s.get(CONTROL_DRIVE_TURN.at(0)),
-                s.get(CONTROL_DRIVE_TURN.at(1)),
+            assert_eq!(
+                read(&s),
+                (0, 45),
+                "no differential: the machine drives straight"
             );
-            assert_eq!(t, control::DriveTurn::default());
-            assert_eq!(t.turn_max(), 0, "disabled: the machine drives straight");
-            assert_eq!(t.turn_cmd(32767), 0);
         }
         {
             let mut s = Store::mount(&mut f).unwrap();
             s.set_value(CONTROL_SIDE.key(), Value::U8(1)).unwrap();
-            s.set_value(CONTROL_DRIVE_TURN.at(0).key(), Value::I16(3_000))
+            s.set_value(CONTROL_TURN_CLAMP.at(0).key(), Value::I16(12_000))
                 .unwrap();
             // Past the seam ceiling, so the clamp below is exercised and not merely present.
-            s.set_value(CONTROL_DRIVE_TURN.at(1).key(), Value::I16(5_000))
+            s.set_value(CONTROL_TURN_CLAMP.at(1).key(), Value::I16(5_000))
                 .unwrap();
         }
         let s = Store::mount(&mut f).unwrap();
         assert_eq!(s.get(CONTROL_SIDE), 1, "the right wheel's board");
-        let t = control::DriveTurn::new(
-            s.get(CONTROL_DRIVE_TURN.at(0)),
-            s.get(CONTROL_DRIVE_TURN.at(1)),
-        );
-        assert_eq!(t.turn_max(), 3_000);
-        assert_eq!(t.turn_slew(), control::drive::TURN_SLEW_MAX);
+        assert_eq!(read(&s), (12_000, control::turn::HEAD_CLAMP_MAX));
 
         let mut g = control::GainShadow::default();
-        for id in [CONTROL_SIDE.id(), CONTROL_DRIVE_TURN.id()] {
+        for id in [CONTROL_SIDE.id(), CONTROL_TURN_CLAMP.id()] {
             assert_eq!(
                 g.set(id, 0, 1),
                 Err(control::TuneError::UnknownKey),
@@ -1815,8 +1864,8 @@ mod tombstone {
 mod digest {
     use super::*;
     use crate::field::{
-        Effect, Scope, BOARD_SELF_HOLD, CONTROL_DRIVE_TURN, CONTROL_FRAME, CONTROL_MODE,
-        CONTROL_SF_GAINS, CONTROL_SIDE, MOTOR_DIRECTION, MOTOR_ODOMETER, NODE_ADDRESS, REGISTRY,
+        Effect, Scope, BOARD_SELF_HOLD, CONTROL_FRAME, CONTROL_MODE, CONTROL_SF_GAINS,
+        CONTROL_SIDE, CONTROL_TURN_CLAMP, MOTOR_DIRECTION, MOTOR_ODOMETER, NODE_ADDRESS, REGISTRY,
     };
     use crate::value::Value;
     use base::crc16::Crc16;
@@ -1852,7 +1901,7 @@ mod digest {
             crc.update(&b[..n]);
             rows += 1;
         }
-        assert_eq!(rows, 21, "the machine block's rows, every index");
+        assert_eq!(rows, 26, "the machine block's rows, every index");
         assert_eq!(machine(&mut MockFlash::erased(PS)), crc.finish());
     }
 
@@ -1891,7 +1940,7 @@ mod digest {
             (CONTROL_FRAME.key(), Value::U8(1)),
             (CONTROL_SF_GAINS.at(0).key(), Value::I16(7)),
             (CONTROL_SF_GAINS.at(3).key(), Value::I16(7)),
-            (CONTROL_DRIVE_TURN.at(1).key(), Value::I16(7)),
+            (CONTROL_TURN_CLAMP.at(1).key(), Value::I16(7)),
         ] {
             let d = machine(&mut with(|s| s.set_value(key, v).unwrap()));
             assert_ne!(d, empty, "{key:?}");
@@ -1925,7 +1974,7 @@ mod digest {
             )
         };
         let (arm, boot, live) = digests(&mut MockFlash::erased(PS));
-        let (a, b, l) = digests(&mut with(|s| s.set(CONTROL_DRIVE_TURN.at(0), 9).unwrap()));
+        let (a, b, l) = digests(&mut with(|s| s.set(CONTROL_TURN_CLAMP.at(0), 9).unwrap()));
         assert_eq!((a != arm, b, l), (true, boot, live));
         let (a, b, l) = digests(&mut with(|s| {
             s.set_value(BOARD_SELF_HOLD.key(), Value::Pin([2, 0]))

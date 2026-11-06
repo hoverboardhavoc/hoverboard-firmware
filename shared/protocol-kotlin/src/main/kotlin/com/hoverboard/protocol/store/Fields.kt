@@ -535,21 +535,36 @@ object Fields {
     val BOARD_BATTERY_CAL = IndexedFieldDef(0x18, Type.I16, listOf(Value.I16(25_200), Value.I16(-5)), Effect.BOOT)
 
     /**
-     * The rigid frame's turn input bound and rate (`shared/store/src/field.rs`,
-     * `CONTROL_DRIVE_TURN`), indices 0 = `turn_max`, the differential torque in stock counts at
-     * full stick, and 1 = `turn_slew`, the counts per control tick that the turn may move.
-     *
-     * `turn_max` defaults to 0, which is DISABLED: the machine drives straight and a client
-     * showing 0 is showing "steering is off", not "no turn". `turn_slew`'s 24 traverses a staged
-     * 3000 in half a second at the 250 Hz control tick, because a step in differential torque is a
-     * yaw impulse that reaches the pitch loop through the frame.
-     *
-     * An arm-time parameter rather than a live-tune one (the tune lane carries [CONTROL_SF_GAINS]
-     * and [CONTROL_REFERENCE] only), so a write takes effect at the next arm ([Effect.ARM]). Both
-     * indices are clamped by the firmware seam (`motorcontroller/control/src/drive.rs`, `DriveTurn`), since
-     * the store validates type and nothing else: [TURN_MAX] and [TURN_SLEW] mirror that clamp.
+     * The heading hold's three gains (`shared/store/src/field.rs`, `CONTROL_TURN_GAINS`;
+     * `specs/heading-hold.md` sections 2 and 6), the differential half of the balance law on the
+     * rigid leader: indices [Gains.GH] / [Gains.GHV] / [Gains.GFF]. Default zero: no loop and no
+     * feedforward. ON the live tune lane ([Gains], [Effect.LIVE]); bounded by the compiled
+     * [Gains.TURN_GAIN_MAXIMA].
      */
-    val CONTROL_DRIVE_TURN = IndexedFieldDef(0x2B, Type.I16, listOf(Value.I16(0), Value.I16(24)), Effect.ARM)
+    val CONTROL_TURN_GAINS = IndexedFieldDef(0x2D, Type.I16, Gains.TURN_DEFAULT.map { Value.I16(it) }, Effect.LIVE)
+
+    /**
+     * The heading hold's stick reference (`CONTROL_TURN_REFERENCE`, `specs/heading-hold.md` section
+     * 4), indices [Gains.RATE_MAX] (sixteenths of a count per wheel at full stick; 0 is a dead
+     * steer axis and the machine holds its heading) and [Gains.RATE_SLEW] (1/4096 count per control
+     * tick). ON the live tune lane, against [Gains.TURN_REFERENCE_MINIMA] and
+     * [Gains.TURN_REFERENCE_MAXIMA].
+     */
+    val CONTROL_TURN_REFERENCE =
+        IndexedFieldDef(0x2E, Type.I16, Gains.TURN_REFERENCE_DEFAULT.map { Value.I16(it) }, Effect.LIVE)
+
+    /**
+     * The heading hold's bounds (`CONTROL_TURN_CLAMP`, `specs/heading-hold.md` section 6), indices
+     * 0 = `turn_max` (word counts, the differential's authority; 0 is no differential at all,
+     * whatever the gains) and 1 = `head_clamp` (hall edges, the bound on the heading error).
+     * Defaults `[0, 45]`. Read at the next arm ([Effect.ARM]); clamped by the firmware seam
+     * (`motorcontroller/control/src/turn.rs`, `clamp`), which [TURN_MAX] and [HEAD_CLAMP] mirror.
+     *
+     * Replaces the retired 0x2B (`CONTROL_DRIVE_TURN`, the open-loop turn's `turn_max` and
+     * `turn_slew`): a board ignores a record under 0x2B, and an app older than this mirror shows
+     * the retired bounds and none of these.
+     */
+    val CONTROL_TURN_CLAMP = IndexedFieldDef(0x2F, Type.I16, listOf(Value.I16(0), Value.I16(45)), Effect.ARM)
 
     /**
      * The state-feedback balance law's four gains (`shared/store/src/field.rs`, `CONTROL_SF_GAINS`;
@@ -655,10 +670,12 @@ object Fields {
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
     val INDEXED: Map<String, IndexedFieldDef> = mapOf(
         "BOARD_BATTERY_CAL" to BOARD_BATTERY_CAL,
-        "CONTROL_DRIVE_TURN" to CONTROL_DRIVE_TURN,
         "CONTROL_SF_GAINS" to CONTROL_SF_GAINS,
         "CONTROL_GAIN_MAX" to CONTROL_GAIN_MAX,
         "CONTROL_REFERENCE" to CONTROL_REFERENCE,
+        "CONTROL_TURN_GAINS" to CONTROL_TURN_GAINS,
+        "CONTROL_TURN_REFERENCE" to CONTROL_TURN_REFERENCE,
+        "CONTROL_TURN_CLAMP" to CONTROL_TURN_CLAMP,
         "LINK_USART" to LINK_USART,
         "LINK_REMAP" to LINK_REMAP,
         "IMU_GYRO_BIAS" to IMU_GYRO_BIAS,
@@ -726,18 +743,17 @@ object Fields {
     val POS_CLAMP = 0L..450L
 
     /**
-     * The inclusive range the firmware clamps a staged [CONTROL_DRIVE_TURN] index 0 (`turn_max`)
-     * into, differential torque counts at full stick: 0 (steering off) up to
-     * `base::TORQUE_FULL_SCALE`, the whole torque word one wheel can be asked for.
+     * The inclusive range the firmware clamps a staged [CONTROL_TURN_CLAMP] index 0 (`turn_max`)
+     * into, word counts: 0 (no differential) up to `control::turn::TURN_MAX_MAX`, the torque word's
+     * full scale.
      */
     val TURN_MAX = 0L..28_500L
 
     /**
-     * The same for index 1 (`turn_slew`), counts per control tick: `TURN_SLEW_MIN` up to
-     * `TURN_SLEW_MAX`, which crosses the whole torque word in 29 ticks. The floor is 1 and not 0,
-     * so a staged `turn_max` is never dead behind a rate of nothing.
+     * The same for index 1 (`head_clamp`), hall edges: 0 (the heading term off) up to
+     * `control::turn::HEAD_CLAMP_MAX`, the position clamp's ceiling.
      */
-    val TURN_SLEW = 1L..1_000L
+    val HEAD_CLAMP = 0L..450L
 
     /**
      * One row of [RANGES]: field [id]'s values at [index] (every index when null) lie in
@@ -748,7 +764,8 @@ object Fields {
     /**
      * The range table (`store::RANGES`, `specs/config-read-once.md` section 4): every arm-row and
      * calibration field's accepted values, the two boot-read protection settings'
-     * (`specs/optional-protections.md` section 4), and `wifi.tx_power`'s. The app refuses a write outside
+     * (`specs/optional-protections.md` section 4), the heading hold's two live rows'
+     * (`specs/heading-hold.md` section 6), and `wifi.tx_power`'s. The app refuses a write outside
      * it, as the CLI does; the firmware applies what is stored. Pinned row for row to the Rust by
      * `RustSourceDriftTest`.
      */
@@ -763,8 +780,13 @@ object Fields {
         Range(BOARD_BATTERY_FLOOR.id, null, 0, 6000),
         Range(CONTROL_GAIN_MAX.id, null, 0, Short.MAX_VALUE.toLong()),
         Range(CONTROL_POS_CLAMP.id, null, 0, 450),
-        Range(CONTROL_DRIVE_TURN.id, 0, 0, 28_500),
-        Range(CONTROL_DRIVE_TURN.id, 1, 1, 1000),
+        Range(CONTROL_TURN_GAINS.id, 0, 0, 2000),
+        Range(CONTROL_TURN_GAINS.id, 1, 0, 10_000),
+        Range(CONTROL_TURN_GAINS.id, 2, 0, 10_000),
+        Range(CONTROL_TURN_REFERENCE.id, 0, 0, 512),
+        Range(CONTROL_TURN_REFERENCE.id, 1, 1, 4096),
+        Range(CONTROL_TURN_CLAMP.id, 0, 0, 28_500),
+        Range(CONTROL_TURN_CLAMP.id, 1, 0, 450),
         Range(MOTOR_CURRENT_CAL.id, null, 100, 819),
         Range(MOTOR_CURRENT_LIMIT.id, null, 0, 163_840),
         Range(MOTOR_DIRECTION.id, null, 0, 1),

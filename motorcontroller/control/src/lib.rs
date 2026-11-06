@@ -15,7 +15,8 @@
 //! - [`sf`]       The four-term state-feedback balance law, its reference and the side mirror
 //!   [`wheel_forward`], with its differential half, the rigid leader's heading hold
 //!   (`specs/heading-hold.md`).
-//! - [`drive`]    The rigid frame's turn input and steering split.
+//! - [`drive`]    The rigid frame's steering split.
+//! - [`turn`]     The heading hold's arm-time bounds seam (`specs/heading-hold.md` section 6).
 //! - [`gating`]   The engagement machine's gating/pickup input: the conditioned up-axis accel
 //!   channel (Section 7's `> 500` / `< 0` cell, producer recovered).
 //! - [`fsm`]      Section 7: the engagement machine (rebuilt to the binary, slice-5 re-cut) +
@@ -41,12 +42,13 @@ pub mod helpers;
 pub mod mode;
 pub mod sf;
 pub mod throttle;
+pub mod turn;
 
 pub use config::{
     GainProfile, GainShadow, GainTriple, TuneError, DEFAULT_GAIN_MAX, GAIN_MIN, REFERENCE_FIELD,
-    SF_GAINS_FIELD, STANDBY_SET, TUNED,
+    SF_GAINS_FIELD, STANDBY_SET, TUNED, TURN_GAINS_FIELD, TURN_REFERENCE_FIELD,
 };
-pub use drive::{wheel_split, DriveTurn};
+pub use drive::wheel_split;
 pub use fsm::{fsm_step, tilt_cutout, FsmInputs, FsmState, SubState};
 pub use gating::GatingFilter;
 pub use helpers::{clamp, clamp_sym, iabs, ramp_step, RampRecord};

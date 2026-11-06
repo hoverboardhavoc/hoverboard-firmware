@@ -4,10 +4,21 @@
     "frame": "rigid",
     "rider_required": false,
     "method": "foc",
-    "turn": [
-      12000,
-      600
-    ],
+    "turn": {
+      "gains": [
+        50,
+        60,
+        0
+      ],
+      "reference": [
+        20,
+        41
+      ],
+      "clamp": [
+        12000,
+        45
+      ]
+    },
     "balance": {
       "gains": [
         3200,

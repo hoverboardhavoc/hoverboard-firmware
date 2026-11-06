@@ -6,9 +6,10 @@
 //! also goes on the wire, the FOLLOWER applies the leader's word through the shared shell, and
 //! both gate their wheel on the peer cyclic's freshness). The orchestrator owns the balance
 //! producer record (`SfState`, the (g) note) alongside the `FsmState`, and wires the block words
-//! into the crate-owned math. Per tick, in block order: the turn input (rigid leader), the
-//! four-term state-feedback law (`specs/state-feedback.md`), then the engagement FSM (the sole
-//! writer of the torque setpoint). Throttle mode runs the EFeru conditioner off the
+//! into the crate-owned math. Per tick, in block order: the four-term state-feedback law
+//! (`specs/state-feedback.md`) with its differential half on a rigid leader
+//! (`specs/heading-hold.md`), then the engagement FSM (the sole writer of the torque setpoint),
+//! then the steering split of the two. Throttle mode runs the EFeru conditioner off the
 //! effective drive command (neutral once stale: the `link-control.md` decay, applied at the
 //! reference producer's input so the conditioning's own rate limit IS the decay ramp) and feeds
 //! the same shell with the balance-only upright/rider/step-off gates parameterized off.
@@ -25,9 +26,9 @@
 use crate::{events, LinkInbox, OrchestratorState};
 use base::fixed::Fix;
 use control::{
-    clamp, fsm_step, iabs, sf_step, wheel_split, ControlDispatch, DriveTurn, FsmInputs, FsmState,
-    GainProfile, GainShadow, GatingFilter, Producer, SfConfig, SfInputs, SfState, SubState,
-    ThrottleConfig, STANDBY_SET,
+    clamp, fsm_step, iabs, sf_step, wheel_split, ControlDispatch, FsmInputs, FsmState, GainProfile,
+    GainShadow, GatingFilter, Producer, SfConfig, SfInputs, SfState, SubState, ThrottleConfig,
+    TurnConfig, STANDBY_SET,
 };
 use linkctl::{CyclicMotor, CyclicObs, CyclicState, DriveKind};
 
@@ -58,12 +59,15 @@ pub struct ControlCtl<const M: usize> {
     pub throttle_cfg: ThrottleConfig,
     /// The state-feedback law's carries (`specs/state-feedback.md` sections 3 and 4, balance
     /// producer record): the filtered wheel speed, the slewed speed reference, the position error,
-    /// the live gains, this pass's four terms and the two position latches.
+    /// the live gains, this pass's four terms and the two position latches, with the differential
+    /// half's (`specs/heading-hold.md` sections 3 and 4): the filtered heading rate, the slewed
+    /// heading-rate reference, the heading error, the live turn gains and two terms.
     pub sf: SfState,
     /// The engagement machine: the torque setpoint's sole writer.
     pub fsm: FsmState,
-    /// The live tunable words (`specs/state-feedback.md` section 6): the RAM shadow of
-    /// `CONTROL_SF_GAINS` and `CONTROL_REFERENCE`, built from the store at boot and writable live
+    /// The live tunable words (`specs/state-feedback.md` section 6, `specs/heading-hold.md`
+    /// section 6): the RAM shadow of `CONTROL_SF_GAINS`, `CONTROL_REFERENCE`, `CONTROL_TURN_GAINS`
+    /// and `CONTROL_TURN_REFERENCE`, built from the store at boot and writable live
     /// by the tune lane. Read once per balance pass into the law's configuration; never written
     /// from the control pass, so the tune lane's writer and this reader never contend for it.
     pub gains: GainShadow,
@@ -71,17 +75,14 @@ pub struct ControlCtl<const M: usize> {
     /// (`control::sf::pos_clamp`), read at boot and re-read at every arm (`specs/integration.md`,
     /// "When a stored value takes effect: the arm-time re-read"). 0 disables the position term.
     pub pos_clamp: i16,
-    /// The rigid frame's turn input bound and rate (`specs/rover-one-imu.md` section 5): the
-    /// seam-clamped `CONTROL_DRIVE_TURN`, read at boot and re-read at every arm beside
-    /// [`Self::pos_clamp`], the same discipline and the same reason. `turn_max` 0 (the default)
-    /// keeps the machine driving straight.
-    pub drive_turn: DriveTurn,
-    /// The SLEWED turn, stock torque counts: the differential the split applies to the leader's
-    /// common torque this pass. Written by [`balance_step`] on a leader (a stale drive command
-    /// arrives as `steer = 0`, so the slew is the decay ramp) and read by
-    /// [`control_dispatch_step`]'s split. Reset with the engagement machine
-    /// ([`reset_engagement`]), which is the OFF pass and an arm that changed the producer.
-    pub turn: i32,
+    /// The heading hold's authority, word counts (`specs/heading-hold.md` section 6): the
+    /// seam-clamped `CONTROL_TURN_CLAMP` index 0 (`control::turn::clamp`), read at boot and re-read
+    /// at every arm beside [`Self::pos_clamp`], the same discipline and the same reason. 0 (the
+    /// default) is no differential: the machine drives straight.
+    pub turn_max: i16,
+    /// The heading hold's heading-error clamp, edges: `CONTROL_TURN_CLAMP` index 1 through the same
+    /// seam. 0 disables the heading term.
+    pub head_clamp: i16,
     /// The gating/pickup row's conditioning carry (the recovered stock producer,
     /// `control::gating`). Stepped by the attitude step, not by the dispatch: it conditions an
     /// IMU channel, so it lives with the IMU tick and is NOT reset by a control-mode change,
@@ -133,10 +134,11 @@ impl<const M: usize> ControlCtl<M> {
         imu_configured: bool,
         gains: GainShadow,
         pos_clamp: i16,
-        drive_turn: DriveTurn,
+        turn_clamp: [i16; 2],
         rider_required_byte: u8,
         battery_floor: i16,
     ) -> Self {
+        let (turn_max, head_clamp) = control::turn::clamp(turn_clamp);
         ControlCtl {
             dispatch: ControlDispatch::new(
                 control_mode_byte,
@@ -151,8 +153,8 @@ impl<const M: usize> ControlCtl<M> {
             fsm: FsmState::default(),
             gains,
             pos_clamp: control::sf::pos_clamp(pos_clamp),
-            drive_turn,
-            turn: 0,
+            turn_max,
+            head_clamp,
             gating: GatingFilter::default(),
             pre_env_ref: 0,
             wheel_demand: [0; M],
@@ -298,7 +300,7 @@ pub(crate) fn new_ctl<const M: usize>(
     imu_configured: bool,
     gains: GainShadow,
     pos_clamp: i16,
-    drive_turn: DriveTurn,
+    turn_clamp: [i16; 2],
     rider_required_byte: u8,
     battery_floor: i16,
 ) -> (ControlCtl<M>, BlockWords<M>) {
@@ -310,7 +312,7 @@ pub(crate) fn new_ctl<const M: usize>(
             imu_configured,
             gains,
             pos_clamp,
-            drive_turn,
+            turn_clamp,
             rider_required_byte,
             battery_floor,
         ),
@@ -389,17 +391,19 @@ pub(crate) fn control_dispatch_step<const M: usize>(
     let producer = state.ctl.dispatch.mode();
     // Motor 0's setpoint, and the other motors' words where the producer drives them.
     let mut others = [0i16; M];
-    let setpoint = match producer {
+    // The differential is the heading hold's (`specs/heading-hold.md` section 2), formed by the
+    // law on a leader only; every other producer forms none.
+    let (setpoint, diff) = match producer {
         Producer::Balance | Producer::Leader => balance_step(state, run),
-        Producer::Throttle => throttle_step(state, run, &mut others),
-        Producer::Follower => follower_step(state, run),
+        Producer::Throttle => (throttle_step(state, run, &mut others), 0),
+        Producer::Follower => (follower_step(state, run), 0),
     };
     // The steering split (`specs/rover-one-imu.md` section 5), on the LEADER and nowhere else:
-    // its setpoint is the MACHINE's common torque, and the slewed turn makes two wheel demands of
-    // it on the same scale. Every other producer drives its own wheel with its setpoint and
-    // commands its peer nothing.
+    // its setpoint is the MACHINE's common torque, and the heading hold's differential makes two
+    // wheel demands of it on the same scale. Every other producer drives its own wheel with its
+    // setpoint and commands its peer nothing.
     let (own, peer) = if producer == Producer::Leader {
-        wheel_split(setpoint, state.ctl.turn, state.block.role_right)
+        wheel_split(setpoint, diff, state.block.role_right)
     } else {
         (setpoint, 0)
     };
@@ -500,12 +504,13 @@ fn run_shell(fsm: &mut FsmState, pre_env_ref: &mut i16, inp: &FsmInputs) -> i16 
     fsm_step(inp, &GainProfile::of(STANDBY_SET), fsm)
 }
 
-/// The balance assembly: the turn input, the four-term state-feedback law
-/// (`specs/state-feedback.md`), then the engagement FSM. Runs the pivoting producer and the rigid
-/// LEADER alike; the leader differs in one input, its engagement gate (below), and in what happens
-/// to its output afterwards ([`control_dispatch_step`]'s freshness gate and the cyclic's
-/// `peer_demand`).
-fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> i16 {
+/// The balance assembly: the four-term state-feedback law (`specs/state-feedback.md`) and its
+/// differential half (`specs/heading-hold.md`), then the engagement FSM. Runs the pivoting
+/// producer and the rigid LEADER alike; the leader differs in two inputs, its engagement gate
+/// (below) and the differential half, which forms nothing on the pivoting producer, and in what
+/// happens to its output afterwards ([`control_dispatch_step`]'s split, freshness gate and the
+/// cyclic's `peer_demand`). Returns the engagement machine's setpoint and the differential.
+fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> (i16, i32) {
     let leader = state.ctl.dispatch.mode() == Producer::Leader;
     let peer_wheel = state.inbox.peer().map(|p| p.wheel_speed).unwrap_or(0);
     // The EFFECTIVE rider level ([`effective_rider`], `specs/control.md` (i)), read once and fed
@@ -515,27 +520,28 @@ fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> 
     let rider = effective_rider(state);
     let (drive_value, drive_steer) = effective_drive(&state.inbox, 0);
 
-    // The rigid frame's turn input (`specs/rover-one-imu.md` section 5), on the LEADER only: the
-    // `DRIVE_CMD.steer` word as a bounded, slewed DIFFERENTIAL torque, stepped here where the
-    // drive command is read and consumed by the split after the output stage. A stale link
-    // arrives as `steer = 0`, so the slew is the decay ramp.
-    if leader {
-        state.ctl.drive_turn.step(drive_steer, &mut state.ctl.turn);
-    }
-
     // The law (`specs/state-feedback.md` section 2), every tick, armed or not: the terms are live
     // outside RUN (the gains are then the shadow's), which is what makes the sign gate a disarmed
     // read, and the reference cells are zeroed on every tick the machine is not in RUN (section
     // 4). The stick is the effective drive value, so a stale link is target speed 0 and the slew
     // is the stop ramp. The peer's position is the inbox's unwrap, which moves only on a tick
-    // that accepted a frame.
+    // that accepted a frame; its rate is the last accepted frame's word. On the leader the stick's
+    // steer moves the heading-rate reference the same way (`specs/heading-hold.md` section 4), so
+    // a stale link is a target rate of 0 and the machine holds the heading where the ramp ends.
     let [speed_max, speed_slew] = state.ctl.gains.reference();
+    let [rate_max, rate_slew] = state.ctl.gains.turn_reference();
     let cfg = SfConfig {
         gains: state.ctl.gains.gains(),
         speed_max,
         speed_slew,
         pos_clamp: state.ctl.pos_clamp,
-        turn: control::TurnConfig::OFF,
+        turn: TurnConfig {
+            gains: state.ctl.gains.turn_gains(),
+            rate_max,
+            rate_slew,
+            turn_max: state.ctl.turn_max,
+            head_clamp: state.ctl.head_clamp,
+        },
     };
     let inp = SfInputs {
         pitch_word: state.block.pitch_word,
@@ -549,11 +555,11 @@ fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> 
         // nominal pack while it is a current.
         scale: law_scale(state.block.battery, state.block.torque_is_current),
         in_run: run && state.ctl.fsm.sub_state == SubState::Run,
-        peer_rate_q12: 0,
-        steer: 0,
-        leader: false,
+        peer_rate_q12: state.inbox.peer_wheel_rate().unwrap_or(0),
+        steer: drive_steer,
+        leader,
     };
-    let (word, _) = sf_step(&cfg, &inp, &mut state.ctl.sf);
+    let (word, diff) = sf_step(&cfg, &inp, &mut state.ctl.sf);
 
     // The rigid LEADER's partner gate (`specs/rover-one-imu.md` sections 2 and 6): the leader
     // engages only while a fresh peer cyclic says the peer is the rigid FOLLOWER and not a second
@@ -613,7 +619,10 @@ fn balance_step<const M: usize>(state: &mut OrchestratorState<M>, run: bool) -> 
         pid_scale: state.block.battery,
         pid_kd: Fix::ZERO,
     };
-    run_shell(&mut state.ctl.fsm, &mut state.ctl.pre_env_ref, &fsm_in)
+    (
+        run_shell(&mut state.ctl.fsm, &mut state.ctl.pre_env_ref, &fsm_in),
+        diff,
+    )
 }
 
 /// The throttle assembly: the EFeru conditioner off the effective drive command, feeding the
@@ -767,12 +776,9 @@ fn run_gated_shell<const M: usize>(
 /// widening the FSM's abort inputs keeps the machine binary-faithful and keeps the disengage act
 /// on the orchestrator's existing OFF edge, beside the latch clear.
 pub(crate) fn reset_engagement<const M: usize>(ctl: &mut ControlCtl<M>) {
+    // The heading hold's reference cells need no reset here: the law zeroes them on every tick
+    // the machine is not in RUN (`specs/heading-hold.md` section 4), which an IDLE machine is not.
     ctl.fsm = FsmState::default();
-    // The slewed turn is the engagement machine's companion carry (`specs/rover-one-imu.md`
-    // section 5): a machine that comes back engaged
-    // must not resume mid-turn, and the slew's whole purpose is that the differential arrives as
-    // a ramp rather than a yaw impulse.
-    ctl.turn = 0;
 }
 
 /// The control section's ARM-TIME value apply (`specs/integration.md`, "When a stored value takes
@@ -800,6 +806,7 @@ pub fn re_apply_control_values<const M: usize>(
     rider_required_byte: u8,
     battery_floor: i16,
     pos_clamp: i16,
+    turn_clamp: [i16; 2],
 ) {
     // The board's own side, this word's owner (`specs/rover-one-imu.md` section 5). Not a
     // producer change: which wheel this board is under does not reset anything.
@@ -807,6 +814,9 @@ pub fn re_apply_control_values<const M: usize>(
     // The law's position clamp, through its seam (`specs/state-feedback.md` section 4). In the
     // value row and not the tune lane, so it moves at an arm and never under a moving machine.
     state.ctl.pos_clamp = control::sf::pos_clamp(pos_clamp);
+    // The heading hold's bounds, through their seam (`specs/heading-hold.md` section 6), for the
+    // same reason.
+    (state.ctl.turn_max, state.ctl.head_clamp) = control::turn::clamp(turn_clamp);
     let mode_changed = state.ctl.dispatch.re_apply_values(
         control_mode_byte,
         frame_byte,

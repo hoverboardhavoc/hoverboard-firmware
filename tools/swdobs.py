@@ -26,11 +26,11 @@ PI = os.environ.get("PI_HOST", "pi@192.168.0.248")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in motorcontroller/firmware/src/main.rs (#[repr(C)], 52 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in motorcontroller/firmware/src/main.rs (#[repr(C)], 55 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 52
+CTRL_OBS_WORDS = 55
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -131,6 +131,15 @@ W_IMU_RETRIES = 51      # low byte: the boot's IMU probe-and-init attempts (spec
 #                         0 the first answered, 1 the second answered after a bus clear, 2 the IMU
 #                         did not come up. Also 0 on a board that never probed: read it beside the
 #                         flags byte's b0 and b6 (word 12). Bytes 1-3 are zero.
+# Words 52-54: the heading hold (specs/heading-hold.md section 8), the differential half of the
+# balance law on the rigid leader. Right turn positive throughout.
+W_TURN_TERMS = 52       # term_h i16 | term_hv i16 << 16, each a torque word on its own. Live every
+#                         balance pass, armed or not: a disarmed hand turn to the right reads term_hv
+#                         NEGATIVE. The feedforward is gff times word 54's low half.
+W_HEADING = 53          # H, i32 hall edges: half the left wheel's forward position less the right's,
+#                         never cleared. A quarter turn in place is about +70 on the rover.
+W_TURN_REF = 54         # v_href_q i16 (1/4096 count) | e_h i16 << 16 (edges, H_ref - H). Zero
+#                         outside RUN.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT

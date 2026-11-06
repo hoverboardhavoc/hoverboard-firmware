@@ -1305,9 +1305,64 @@ class RustSourceDriftTest {
             assertTrue(Gains.referenceInRange(i, Gains.REFERENCE_DEFAULT[i]), "reference default $i is outside its range")
         }
 
-        // The lane's allowlist is exactly these two keys at these indices: the seam's `slot`.
+        // The heading hold's two live rows (`specs/heading-hold.md` section 6), against
+        // `control::config::turn` and the store.
+        val turnMod = rustModule(config, "turn")
+        val (idTurn, defTurn) = family("CONTROL_TURN_GAINS")
+        assertEquals(idTurn, Gains.CONTROL_TURN_GAINS, "CONTROL_TURN_GAINS id drifted")
+        assertEquals(id("TURN_GAINS_FIELD"), Gains.CONTROL_TURN_GAINS, "control::TURN_GAINS_FIELD drifted")
+        assertEquals(defTurn, Gains.TURN_DEFAULT, "the turn gain defaults drifted")
+        assertEquals(row("GAINS_DEFAULT", turnMod), Gains.TURN_DEFAULT, "turn::GAINS_DEFAULT drifted")
+        assertEquals(row("GAIN_MAX", turnMod), Gains.TURN_GAIN_MAXIMA, "turn::GAIN_MAX drifted")
+        assertEquals(
+            literal(
+                "GAINS",
+                findOne(turnMod, """^\s*pub const GAINS: usize = (\d+);""", "turn::GAINS").groupValues[1],
+                "turn gain count",
+            ),
+            Gains.TURN_COUNT,
+            "control::config::turn::GAINS drifted",
+        )
+        assertEquals(Gains.TURN_DEFAULT.map { Value.I16(it) }, Fields.CONTROL_TURN_GAINS.defaults)
+        val (idTurnRef, defTurnRef) = family("CONTROL_TURN_REFERENCE")
+        assertEquals(idTurnRef, Gains.CONTROL_TURN_REFERENCE, "CONTROL_TURN_REFERENCE id drifted")
+        assertEquals(id("TURN_REFERENCE_FIELD"), Gains.CONTROL_TURN_REFERENCE, "control::TURN_REFERENCE_FIELD drifted")
+        assertEquals(defTurnRef, Gains.TURN_REFERENCE_DEFAULT, "the turn reference defaults drifted")
+        assertEquals(row("REFERENCE_DEFAULT", turnMod), Gains.TURN_REFERENCE_DEFAULT, "turn::REFERENCE_DEFAULT drifted")
+        // The turn reference bounds are the common reference's, declared as such.
+        findOne(turnMod, """pub const REFERENCE_MIN: \[i16; REFERENCE_WORDS\] = super::sf::REFERENCE_MIN;""", "turn::REFERENCE_MIN")
+        findOne(turnMod, """pub const REFERENCE_MAX: \[i16; REFERENCE_WORDS\] = super::sf::REFERENCE_MAX;""", "turn::REFERENCE_MAX")
+        assertEquals(Gains.REFERENCE_MINIMA, Gains.TURN_REFERENCE_MINIMA)
+        assertEquals(Gains.REFERENCE_MAXIMA, Gains.TURN_REFERENCE_MAXIMA)
+        val (idClamp, defClamp) = family("CONTROL_TURN_CLAMP")
+        assertEquals(idClamp, Fields.CONTROL_TURN_CLAMP.id, "CONTROL_TURN_CLAMP id drifted")
+        assertEquals(defClamp.map { Value.I16(it) }, Fields.CONTROL_TURN_CLAMP.defaults, "CONTROL_TURN_CLAMP defaults drifted")
+        assertEquals(listOf(Gains.GH, Gains.GHV, Gains.GFF), listOf(0, 1, 2))
+        assertEquals(listOf(Gains.RATE_MAX, Gains.RATE_SLEW), listOf(0, 1))
+        for (i in 0 until Gains.TURN_COUNT) {
+            assertTrue(Gains.turnInRange(i, Gains.TURN_DEFAULT[i]), "turn gain default $i is outside its range")
+            assertTrue(!Gains.turnInRange(i, Gains.TURN_GAIN_MAXIMA[i] + 1))
+        }
+        for (i in Gains.TURN_REFERENCE_DEFAULT.indices) {
+            assertTrue(Gains.turnReferenceInRange(i, Gains.TURN_REFERENCE_DEFAULT[i]), "turn reference default $i is outside its range")
+        }
+        assertTrue(!Gains.turnInRange(Gains.TURN_COUNT, 0) && !Gains.turnReferenceInRange(2, 0))
+
+        // The lane's allowlist is exactly these four keys at these indices: the seam's `slot`,
+        // eleven words in all.
         findOne(config, """SF_GAINS_FIELD if i < sf::GAINS => Some\(i\),""", "the gains' slot")
         findOne(config, """REFERENCE_FIELD if i < sf::REFERENCE_WORDS => Some\(REFERENCE_AT \+ i\),""", "the reference slot")
+        findOne(config, """TURN_GAINS_FIELD if i < turn::GAINS => Some\(TURN_GAINS_AT \+ i\),""", "the turn gains' slot")
+        findOne(
+            config,
+            """TURN_REFERENCE_FIELD if i < turn::REFERENCE_WORDS => Some\(TURN_REFERENCE_AT \+ i\),""",
+            "the turn reference slot",
+        )
+        val slotBody = checkNotNull(
+            Regex("""const fn slot\(field_id: u8, index: u8\) -> Option<usize> \{(.*?)\n\}""", RegexOption.DOT_MATCHES_ALL)
+                .find(config),
+        ) { "no `const fn slot` in config.rs; update this drift test" }.groupValues[1]
+        assertEquals(4, Regex("""=> Some\(""").findAll(slotBody).count(), "the tune lane's allowlist grew or shrank")
     }
 
     /**
@@ -1326,9 +1381,16 @@ class RustSourceDriftTest {
             "RAMP_CAPS",
         ).groupValues[1].split(",").map { literal("RAMP_CAPS", it.trim(), "ramp cap") }
         assertEquals(caps, Gains.Ramp.CAPS, "RAMP_CAPS drifted")
+        val turnCaps = findOne(
+            rustModule(config, "turn"),
+            """^\s+pub const RAMP_CAPS: \[i16; GAINS\] = \[([^\]]+)\];""",
+            "turn::RAMP_CAPS",
+        ).groupValues[1].split(",").map { literal("RAMP_CAPS", it.trim(), "ramp cap") }
+        assertEquals(turnCaps, Gains.Ramp.TURN_CAPS, "turn::RAMP_CAPS drifted")
         // The law applies them as a symmetric clamp of the step toward the shadow, every RUN pass.
         val sf = rust("motorcontroller/control/src/sf.rs")
         findOne(sf, """ramp_by\(live, target, RAMP_CAPS\)""", "the ramp's caps")
+        findOne(sf, """ramp_by\(live, target, turn::RAMP_CAPS\)""", "the turn ramp's caps")
         findOne(
             sf,
             """\(l \+ clamp_sym\(target\[i\] as i32 - l, caps\[i\] as i32\)\) as i16""",
@@ -1560,10 +1622,19 @@ class RustSourceDriftTest {
             assertEquals(rust, com.hoverboard.protocol.store.Scope.of(id)?.name, "Scope.of(0x%02X) drifted".format(id))
         }
         val ids = (Fields.ALL.values.map { it.id } + Fields.INDEXED.values.map { it.id }).toSet()
+        // A retired id may leave a hole (the store's density test names them: 0x2B, the open-loop
+        // turn the heading hold replaced, `specs/heading-hold.md` section 6), and nothing mirrors it.
+        val retired = findOne(field, """const RETIRED: \[u8; \d+\] = \[([^\]]+)\];""", "the retired ids")
+            .groupValues[1].split(",").map { num(it.trim()) }.toSet()
+        assertTrue(retired.none { it in ids }, "a retired id is mirrored")
         for (scope in com.hoverboard.protocol.store.Scope.entries) {
             val block = checkNotNull(arms[scope.name])
             val inBlock = ids.filter { it in block }.sorted()
-            assertEquals((block.first..inBlock.last()).toList(), inBlock, "the $scope block has a free id below its last")
+            assertEquals(
+                (block.first..inBlock.last()).filter { it !in retired },
+                inBlock,
+                "the $scope block has a free id below its last",
+            )
         }
     }
 
@@ -1926,35 +1997,30 @@ class RustSourceDriftTest {
             "full_scale_counts' floor at zero",
         )
 
-        // The turn bounds' two seam clamps, which the Machine section offers as the ranges of its
-        // rows (`specs/remote-ui.md` 3.7b). The seam (`motorcontroller/control/src/drive.rs`,
-        // `DriveTurn::new`) bounds each word as it reads it, at boot and again at every arm, and
-        // the store validates type only, so a client offering a wider range offers values the board
-        // will silently narrow. Mirrored on `Fields.NOISE_FLOOR`'s precedent, and pinned here the
-        // way the battery calibration's clamps are below.
-        val drive = rust("motorcontroller/control/src/drive.rs")
-        fun seam(name: String, ty: String = "i16", src: String = drive): Long = literal(
-            name,
-            findOne(src, """^pub\s+const\s+$name\s*:\s*$ty\s*=\s*([^;]+);""", name)
+        // The heading hold's clamp row (`specs/heading-hold.md` section 6), whose two seam clamps
+        // the Tune screen's bounds section offers as ranges. The seam
+        // (`motorcontroller/control/src/turn.rs`, `clamp`) bounds each word at boot and again at
+        // every arm, and the store validates type only, so a client offering a wider range offers
+        // values the board will silently narrow.
+        val turn = rust("motorcontroller/control/src/turn.rs")
+        // The `turn_max` ceiling is the torque word's full scale, which lives in `base`.
+        findOne(turn, """^use\s+base::TORQUE_FULL_SCALE;""", "the turn seam's import of the full scale")
+        findOne(turn, """^pub const TURN_MAX_MAX: i16 = TORQUE_FULL_SCALE as i16;""", "TURN_MAX_MAX")
+        val fullScale = literal(
+            "TORQUE_FULL_SCALE",
+            findOne(rust("shared/base/src/lib.rs"), """^pub\s+const\s+TORQUE_FULL_SCALE\s*:\s*i32\s*=\s*([^;]+);""", "TORQUE_FULL_SCALE")
                 .groupValues[1].trim().replace("_", ""),
-            "drive seam bound",
+            "the torque full scale",
         ).toLong()
-        // The ceiling is the torque word's full scale, which lives in `base` (the commutation crate
-        // reads it too and cannot depend on `control`); the seam imports it rather than declaring it.
-        findOne(drive, """^use\s+base::TORQUE_FULL_SCALE;""", "the drive seam's import of the full scale")
-        assertEquals(
-            0L..seam("TORQUE_FULL_SCALE", "i32", rust("shared/base/src/lib.rs")),
-            Fields.TURN_MAX,
-            "the turn_max seam clamp drifted",
-        )
-        assertEquals(seam("TURN_SLEW_MIN")..seam("TURN_SLEW_MAX"), Fields.TURN_SLEW, "the turn_slew seam clamp drifted")
-        // The floor of turn_max is 0 because the seam reads a negative word as the disabled state,
-        // which is a rule in the constructor rather than a constant: read as text, so a seam that
-        // stopped flooring at zero fails here rather than at the bench.
-        findOne(drive, """turn_max:\s*if\s+turn_max\s*<\s*0\s*\{""", "the turn_max disabled-state floor")
-        findOne(drive, """else\s+if\s+turn_max\s+as\s+i32\s*>\s*TORQUE_FULL_SCALE\s*\{""", "the turn_max seam ceiling")
-        for ((i, range) in listOf(Fields.TURN_MAX, Fields.TURN_SLEW).withIndex()) {
-            assertTrue((Fields.CONTROL_DRIVE_TURN.defaults[i] as Value.I16).v.toLong() in range, "a turn default is outside its clamp")
+        assertEquals(0L..fullScale, Fields.TURN_MAX, "the turn_max seam clamp drifted")
+        // The `head_clamp` ceiling is the position clamp's, read below as POS_CLAMP_MAX.
+        findOne(turn, """^pub const HEAD_CLAMP_MAX: i16 = crate::sf::POS_CLAMP_MAX;""", "HEAD_CLAMP_MAX")
+        // Both floor at 0 (a negative word is the off state) and cap at their ceiling, index for
+        // index; read as text, so a seam that stopped flooring at zero fails here.
+        findOne(turn, """\(\s*bound\(stored\[0\], TURN_MAX_MAX\),\s*bound\(stored\[1\], HEAD_CLAMP_MAX\),?\s*\)""", "the clamp's indices")
+        findOne(turn, """if v < 0 \{\s*0\s*\} else if v > max \{\s*max""", "the turn seam's bound")
+        for ((i, range) in listOf(Fields.TURN_MAX, Fields.HEAD_CLAMP).withIndex()) {
+            assertTrue((Fields.CONTROL_TURN_CLAMP.defaults[i] as Value.I16).v.toLong() in range, "a turn clamp default is outside its clamp")
         }
 
         // The position clamp's seam (`control::sf::pos_clamp`, `specs/state-feedback.md` section
@@ -1967,6 +2033,7 @@ class RustSourceDriftTest {
             "the position clamp ceiling",
         ).toLong()
         assertEquals(0L..posMax, Fields.POS_CLAMP, "the pos_clamp seam clamp drifted")
+        assertEquals(0L..posMax, Fields.HEAD_CLAMP, "the head_clamp seam clamp drifted")
         findOne(sf, """if stored < 0 \{\s*0\s*\} else if stored > POS_CLAMP_MAX \{\s*POS_CLAMP_MAX""", "the pos_clamp seam")
         assertTrue(
             (Fields.CONTROL_POS_CLAMP.default as Value.I16).v.toLong() in Fields.POS_CLAMP,

@@ -32,8 +32,8 @@ import time
 from swdobs import (
     BOARDS, CTRL_MAGIC, LOCAL_BOARDS, MOTOR_CURRENT_OFFSET, REPO,
     W_FOC_DQ_MEAN, W_FOC_PHASE_MEAN, W_FOC_REF_VQ, W_GATING_PRE_ENV, W_MOTOR_RATE_Q,
-    W_PITCH_MILLI, W_ROLL_MILLI, W_SF_REF, W_SF_TERMS_PR, W_TORQUE_MODE, W_WHEEL_POS_OWN,
-    W_WHEEL_POS_PEER, Ocd, i16_pair, motor_block, read_current_cal, resolve_symbols, s16, s32,
+    W_PITCH_MILLI, W_ROLL_MILLI, W_SF_REF, W_SF_TERMS_PR, W_TORQUE_MODE, W_TURN_REF,
+    W_TURN_TERMS, W_WHEEL_POS_OWN, W_WHEEL_POS_PEER, Ocd, i16_pair, motor_block, read_current_cal, resolve_symbols, s16, s32,
     add_image_args as swdobs_image_args, image_elf, sh, start_local_ocd, start_remote_ocd, stop_local_ocd, stop_remote_ocd,
 )
 
@@ -63,6 +63,13 @@ def sample(ocd, addrs, base, span, off, cpa):
     tp, tr = s16(sf[0] & 0xFFFF), s16(sf[0] >> 16)
     tx, tv = s16(sf[1] & 0xFFFF), s16(sf[1] >> 16)
     vref, ex = s16(sf[2] & 0xFFFF) / 4096.0, s16(sf[2] >> 16)
+    # Words 52-54: the heading hold (specs/heading-hold.md section 8): term_h and term_hv as
+    # torque words, the heading in edges (right turn positive), then the heading-rate reference
+    # (1/4096 count, printed in counts) and the heading error in edges. One read, one pass.
+    hh = ocd.read_words(addrs["CTRL_OBS"] + 4 * W_TURN_TERMS, W_TURN_REF - W_TURN_TERMS + 1)
+    th, thv = i16_pair(hh[0])
+    head = s32(hh[1])
+    vhref, eh = s16(hh[2] & 0xFFFF) / 4096.0, s16(hh[2] >> 16)
     # Word 31: the phase-current observation (the current-limit slice).
     cur = ocd.read_words(addrs["CTRL_OBS"] + MOTOR_CURRENT_OFFSET, 1)[0]
     peak, chopped, trips = s16(cur & 0xFFFF), (cur >> 16) & 0xFF, (cur >> 24) & 0xFF
@@ -91,7 +98,7 @@ def sample(ocd, addrs, base, span, off, cpa):
     moe = (c[0] >> 24) & 0xFF
 
     return (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, tp, tr, tx, tv, vref, ex,
-            d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, cur, peak_a,
+            th, thv, head, vhref, eh, d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, cur, peak_a,
             chopped, trips, ia, ib, fid, fiq, iqref, vq)
 
 
@@ -148,7 +155,8 @@ def main():
         atexit.register(fh.close)
         writer = csv.writer(fh)
         writer.writerow(
-            ("t demand torque preenv pitch roll speed rate xown xpeer tp tr tx tv vref ex d0 d1 d2 "
+            ("t demand torque preenv pitch roll speed rate xown xpeer tp tr tx tv vref ex "
+             "th thv head vhref eh d0 d1 d2 "
              "angle periods dperiods "
              "dwell fault state mode moe motor_current peak_a chopped trips "
              "ia ib id iq iq_ref vq").split()
@@ -157,7 +165,8 @@ def main():
     hdr = (
         f"{'t':>6} {'demand':>7} {'torque':>7} {'preenv':>7} {'pitch':>7} {'roll':>7} {'speed':>7} "
         f"{'rate':>8} {'xown':>7} {'xpeer':>7} {'tp':>6} {'tr':>6} {'tx':>6} {'tv':>6} "
-        f"{'vref':>6} {'ex':>5} {'d0':>5} {'d1':>5} {'d2':>5} {'ang':>5} {'dper':>6} "
+        f"{'vref':>6} {'ex':>5} {'th':>6} {'thv':>6} {'head':>6} {'vhref':>6} {'eh':>5} "
+        f"{'d0':>5} {'d1':>5} {'d2':>5} {'ang':>5} {'dper':>6} "
         f"{'dwell':>5} {'fault':>5} {'mode':>4} {'moe':>3} "
         f"{'peakA':>6} {'chop':>4} {'trip':>4} {'ia':>6} {'ib':>6} {'id':>6} {'iq':>6} "
         f"{'iqref':>6} {'vq':>6}"
@@ -175,6 +184,9 @@ def main():
     print("  tp tr tx tv = the balance law's pitch, rate, position and speed terms as torque words")
     print("  (words 44, 45), live disarmed; vref = its speed reference in counts and ex its")
     print("  position error in edges (word 46), both 0 outside RUN.")
+    print("  th thv = the heading hold's heading and heading-rate terms as torque words (word 52);")
+    print("  head = the heading in edges, right turn positive (word 53); vhref = its rate")
+    print("  reference in counts and eh its heading error in edges (word 54), both 0 outside RUN.")
     print("  ia ib = the mean phase currents in counts (word 47, every method); id iq iqref vq =")
     print("  the FOC loops' means and reference (words 48, 49), 0 unless the method is FOC.\n")
     print(hdr)
@@ -204,7 +216,7 @@ def main():
             continue
         failed = 0
         (demand, torque, preenv, pitch, roll, speed, rate, xown, xpeer, tp, tr, tx, tv, vref, ex,
-         d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, cur, peak_a,
+         th, thv, head, vhref, eh, d0, d1, d2, ang, periods, dwell, fault, state, mode, moe, cur, peak_a,
          chopped, trips, ia, ib, fid, fiq, iqref, vq) = row
         dper = 0 if prev_periods is None else periods - prev_periods
         prev_periods = periods
@@ -215,6 +227,7 @@ def main():
         print(
             f"{t:6.1f} {demand:7d} {torque:7d} {preenv:7d} {pitch:7d} {roll:7d} {speed:7d} "
             f"{rate:8.2f} {xown:7d} {xpeer:7d} {tp:6d} {tr:6d} {tx:6d} {tv:6d} {vref:6.2f} {ex:5d} "
+            f"{th:6d} {thv:6d} {head:6d} {vhref:6.2f} {eh:5d} "
             f"{d0:5d} {d1:5d} {d2:5d} {ang:5d} {dper:6d} "
             f"{dwell:5d} {fault:5d} {mode:4d} 0x{moe:02x} "
             f"{peak_a:6.2f} {chopped:4d} {trips:4d} {ia:6d} {ib:6d} {fid:6d} {fiq:6d} "
@@ -224,6 +237,7 @@ def main():
         if writer:
             writer.writerow([f"{t:.3f}", demand, torque, preenv, pitch, roll, speed, f"{rate:.3f}",
                              xown, xpeer, tp, tr, tx, tv, f"{vref:.3f}", ex,
+                             th, thv, head, f"{vhref:.3f}", eh,
                              d0, d1, d2, ang, periods, dper, dwell, fault, state, mode, moe,
                              f"0x{cur:08x}", f"{peak_a:.3f}",
                              chopped, trips, ia, ib, fid, fiq, iqref, vq])

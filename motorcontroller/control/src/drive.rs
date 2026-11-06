@@ -1,7 +1,7 @@
-//! The rigid frame's turn input and steering split (`specs/rover-one-imu.md` section 5): the
-//! steer component of the effective drive command becomes a bounded, slewed DIFFERENTIAL torque
-//! that the split adds to one wheel and takes from the other around the machine's common balance
-//! torque.
+//! The rigid frame's steering split (`specs/rover-one-imu.md` section 5): the DIFFERENTIAL torque
+//! the heading hold forms (`specs/heading-hold.md`, `crate::sf`) is added to one wheel and taken
+//! from the other around the machine's common balance torque. The open-loop turn that used to feed
+//! it (`DriveTurn`, the stick's steer as a slewed torque) went with the heading hold.
 //!
 //! The value component's old consumer, the commanded lean (`specs/control.md` (h), `DriveLean`
 //! and `drive_off`), went with the PID cascade: in balance mode the stick now commands a speed
@@ -9,99 +9,16 @@
 
 use crate::helpers::{clamp_sym, iabs};
 // The torque word's full scale: the magnitude the output stage caps a wheel demand at, and
-// therefore the sum a wheel pair has to fit inside. Also the `turn_max` seam ceiling, because the
-// saturation rule below is what protects the balance authority; there is no smaller number that
-// this bound could be derived from. Owned by `base` since the FOC arm scales its current
-// reference by it too (`specs/foc-torque.md` section 6).
+// therefore the sum a wheel pair has to fit inside. Owned by `base` since the FOC arm scales its
+// current reference by it too (`specs/foc-torque.md` section 6).
 use base::TORQUE_FULL_SCALE;
-
-/// The full-stick magnitude of `DRIVE_CMD.steer`: `turn = steer * turn_max / 32767`.
-const FULL_STICK: i32 = 32767;
 
 // -------------------------------------------------------------------------------------------
 // The rigid frame's steering split (`specs/rover-one-imu.md` section 5)
 // -------------------------------------------------------------------------------------------
 
-/// The `turn_slew` seam floor, torque counts per tick: a configured `turn_max` is never silently
-/// dead behind a zero rate.
-pub const TURN_SLEW_MIN: i16 = 1;
-/// The `turn_slew` seam ceiling, torque counts per tick: 1000 crosses the whole word in 29 ticks
-/// (114 ms).
-pub const TURN_SLEW_MAX: i16 = 1000;
-
-/// The validated turn configuration (`store::CONTROL_DRIVE_TURN`, index 0 `turn_max` in torque
-/// counts at full stick, index 1 `turn_slew` in counts per tick): read at boot, re-read at every
-/// arm, clamped at this one seam, and deliberately NOT on the live tune lane (a protection
-/// parameter, set disarmed).
-///
-/// `turn_slew` exists because a step in differential torque is a yaw impulse, and on a rigid frame
-/// a yaw impulse reaches the pitch loop as a disturbance through the steel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DriveTurn {
-    turn_max: i16,
-    turn_slew: i16,
-}
-
-impl DriveTurn {
-    /// Build from the two stored words, each clamped into its seam range (`turn_max`
-    /// 0..[`TORQUE_FULL_SCALE`], `turn_slew` [`TURN_SLEW_MIN`]..[`TURN_SLEW_MAX`]), so a
-    /// hand-poked flash value cannot reach the loop. `turn_max = 0` is the disabled state and the
-    /// store's default: the machine drives straight exactly as it did before the field existed.
-    pub const fn new(turn_max: i16, turn_slew: i16) -> Self {
-        DriveTurn {
-            turn_max: if turn_max < 0 {
-                0
-            } else if turn_max as i32 > TORQUE_FULL_SCALE {
-                TORQUE_FULL_SCALE as i16
-            } else {
-                turn_max
-            },
-            turn_slew: if turn_slew < TURN_SLEW_MIN {
-                TURN_SLEW_MIN
-            } else if turn_slew > TURN_SLEW_MAX {
-                TURN_SLEW_MAX
-            } else {
-                turn_slew
-            },
-        }
-    }
-
-    /// The clamped full-stick differential torque, counts.
-    pub const fn turn_max(&self) -> i16 {
-        self.turn_max
-    }
-
-    /// The clamped per-tick slew, counts.
-    pub const fn turn_slew(&self) -> i16 {
-        self.turn_slew
-    }
-
-    /// The commanded differential torque for a drive `steer`: `steer * turn_max / 32767`, counts,
-    /// truncating toward zero (symmetric), `+-turn_max` at the rails.
-    pub fn turn_cmd(&self, steer: i16) -> i32 {
-        (steer as i32 * self.turn_max as i32) / FULL_STICK
-    }
-
-    /// One tick: move the slewed turn `turn` (the dispatch's carry) toward [`Self::turn_cmd`] of
-    /// `steer` by at most `turn_slew`, and return it. A stale link arrives here as `steer = 0`, so
-    /// the slew IS the decay ramp.
-    pub fn step(&self, steer: i16, turn: &mut i32) -> i32 {
-        let delta = self.turn_cmd(steer) - *turn;
-        *turn += clamp_sym(delta, self.turn_slew as i32);
-        *turn
-    }
-}
-
-impl Default for DriveTurn {
-    /// The unstaged board: `turn_max` 0 (disabled), `turn_slew` 24 (a 3000-count turn in 0.5 s),
-    /// which are also the store's defaults.
-    fn default() -> Self {
-        Self::new(0, 24)
-    }
-}
-
 /// The steering split (`specs/rover-one-imu.md` section 5): the machine's common balance torque
-/// `t` and the slewed differential `turn` become this board's own wheel demand and its peer's, in
+/// `t` and the differential `turn` become this board's own wheel demand and its peer's, in
 /// that order. `side_right` is the leader's own wall (`store::CONTROL_SIDE`, the `role_right`
 /// board fact): positive `steer` turns RIGHT, so the right wheel gets `t + turn` and the left gets
 /// `t - turn`.

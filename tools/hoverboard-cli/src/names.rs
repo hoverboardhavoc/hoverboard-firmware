@@ -799,7 +799,7 @@ mod tests {
             ("links.1.rx", k(0x10, 1)),
             ("links[1].tx", k(0x0F, 1)),
             ("machine.battery.floor", k(0x26, 0)),
-            ("machine.turn.1", k(0x2B, 1)),
+            ("machine.turn.clamp.1", k(0x2F, 1)),
             ("motors.1.side", k(0x50, 1)),
         ] {
             assert_eq!(parse_path(path), Ok((key, Vec::new())), "{path}");
@@ -872,8 +872,12 @@ mod tests {
         ] {
             assert!(parse_path(old).is_err(), "{old}");
         }
+        // The tunes' old machine ids are the heading hold's rows now (`specs/heading-hold.md`).
         for id in 0x2D..=0x2F {
-            assert!(row_of(k(id, 0)).is_none(), "{id:#04x}");
+            assert!(
+                row_of(k(id, 0)).unwrap().path.starts_with("machine.turn."),
+                "{id:#04x}"
+            );
         }
     }
 
@@ -1264,8 +1268,8 @@ mod tests {
         let align = row("align_offset");
         assert_eq!(align["ranges"], serde_json::json!([{ "range": [0, 5] }]));
         assert_eq!(
-            row("machine.turn")["ranges"],
-            serde_json::json!([{ "index": 0, "range": [0, 28500] }, { "index": 1, "range": [1, 1000] }])
+            row("machine.turn.clamp")["ranges"],
+            serde_json::json!([{ "index": 0, "range": [0, 28500] }, { "index": 1, "range": [0, 450] }])
         );
         assert_eq!(row("gate.hi_a")["type"], "pinaf");
     }

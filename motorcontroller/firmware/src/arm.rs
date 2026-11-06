@@ -290,8 +290,10 @@ pub struct ArmValues {
     /// `store::CONTROL_GAIN_MAX` (0x28), indices 0..3 = the per-gain inclusive upper bounds of
     /// `[gp, gr, gx, gv]`.
     pub gain_max: [i16; 4],
-    /// `store::CONTROL_DRIVE_TURN` (0x2B), indices 0..1 = `[turn_max, turn_slew]`, torque counts.
-    pub drive_turn: [i16; 2],
+    /// `store::CONTROL_TURN_CLAMP` (0x2F), indices 0..1 = `[turn_max, head_clamp]` (word counts,
+    /// edges), raw: the owning seam (`control::turn::clamp`) clamps it (`specs/heading-hold.md`
+    /// section 6).
+    pub turn_clamp: [i16; 2],
     /// `store::CONTROL_POS_CLAMP` (0x2A), edges, raw: the owning seam (`control::sf::pos_clamp`)
     /// clamps it (`specs/state-feedback.md` section 4).
     pub pos_clamp: i16,
@@ -378,8 +380,8 @@ const ARM_ROW_BASE: [store::Key; 25] = [
     store::CONTROL_GAIN_MAX.at(2).key(),
     store::CONTROL_GAIN_MAX.at(3).key(),
     store::CONTROL_POS_CLAMP.key(),
-    store::CONTROL_DRIVE_TURN.at(0).key(),
-    store::CONTROL_DRIVE_TURN.at(1).key(),
+    store::CONTROL_TURN_CLAMP.at(0).key(),
+    store::CONTROL_TURN_CLAMP.at(1).key(),
     store::MOTOR_CURRENT_CAL.at(0).key(),
     store::MOTOR_CURRENT_LIMIT.at(0).key(),
     store::MOTOR_DIRECTION.at(0).key(),
@@ -427,9 +429,9 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             store::CONTROL_GAIN_MAX.at(2).default(),
             store::CONTROL_GAIN_MAX.at(3).default(),
         ],
-        drive_turn: [
-            store::CONTROL_DRIVE_TURN.at(0).default(),
-            store::CONTROL_DRIVE_TURN.at(1).default(),
+        turn_clamp: [
+            store::CONTROL_TURN_CLAMP.at(0).default(),
+            store::CONTROL_TURN_CLAMP.at(1).default(),
         ],
         pos_clamp: store::CONTROL_POS_CLAMP.default(),
     };
@@ -490,9 +492,9 @@ pub fn read_arm_values<F: store::Flash>(s: &store::Store<F>) -> ArmValues {
             if let Some(slot) = v.gain_max.get_mut(k.index as usize) {
                 *slot = store::scalar_or_default(store::CONTROL_GAIN_MAX.at(k.index), tag, b);
             }
-        } else if k.field_id == store::CONTROL_DRIVE_TURN.id() {
-            if let Some(slot) = v.drive_turn.get_mut(k.index as usize) {
-                *slot = store::scalar_or_default(store::CONTROL_DRIVE_TURN.at(k.index), tag, b);
+        } else if k.field_id == store::CONTROL_TURN_CLAMP.id() {
+            if let Some(slot) = v.turn_clamp.get_mut(k.index as usize) {
+                *slot = store::scalar_or_default(store::CONTROL_TURN_CLAMP.at(k.index), tag, b);
             }
         }
     });
@@ -521,8 +523,9 @@ pub struct Rederived {
     pub rider_required_byte: u8,
     /// `BOARD_BATTERY_FLOOR` as written (the dispatch takes the word, `<= 0` = no floor).
     pub battery_floor: i16,
-    /// The turn bound and rate, through `control::DriveTurn::new`'s seam clamp.
-    pub drive_turn: control::DriveTurn,
+    /// `CONTROL_TURN_CLAMP` as read; the control section's owner clamps it through
+    /// `control::turn::clamp` (`orchestrator::re_apply_control_values`).
+    pub turn_clamp: [i16; 2],
     /// The gain maxima as read; `control::GainShadow` applies its own non-negative floor.
     pub gain_max: [i16; 4],
     /// `CONTROL_POS_CLAMP` as read; the control section's owner clamps it through
@@ -564,9 +567,7 @@ pub fn rederive(
         side_byte: values.side_byte,
         rider_required_byte: values.rider_required_byte,
         battery_floor: values.battery_floor,
-        // The seam clamp, applied by the type that owns it (`turn_max` 0..28500, `turn_slew`
-        // 1..1000).
-        drive_turn: control::DriveTurn::new(values.drive_turn[0], values.drive_turn[1]),
+        turn_clamp: values.turn_clamp,
         gain_max: values.gain_max,
         pos_clamp: values.pos_clamp,
     }
@@ -1313,8 +1314,8 @@ mod tests {
             s.set(store::CONTROL_GAIN_MAX.at(1), 567).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(2), 89).unwrap();
             s.set(store::CONTROL_GAIN_MAX.at(3), 12).unwrap();
-            s.set(store::CONTROL_DRIVE_TURN.at(0), 2_500).unwrap();
-            s.set(store::CONTROL_DRIVE_TURN.at(1), 33).unwrap();
+            s.set(store::CONTROL_TURN_CLAMP.at(0), 2_500).unwrap();
+            s.set(store::CONTROL_TURN_CLAMP.at(1), 33).unwrap();
             s.set(store::CONTROL_POS_CLAMP, 60).unwrap();
         });
         // Motor 0's keys were written; every further motor's read its defaults.
@@ -1350,7 +1351,7 @@ mod tests {
                 rider_required_byte: 0,
                 battery_floor: 2_900,
                 gain_max: [1_234, 567, 89, 12],
-                drive_turn: [2_500, 33],
+                turn_clamp: [2_500, 33],
                 pos_clamp: 60,
             }
         );
@@ -1434,7 +1435,7 @@ mod tests {
         0x26, // BOARD_BATTERY_FLOOR
         0x28, // CONTROL_GAIN_MAX
         0x2A, // CONTROL_POS_CLAMP
-        0x2B, // CONTROL_DRIVE_TURN
+        0x2F, // CONTROL_TURN_CLAMP
         0x4C, // MOTOR_CURRENT_CAL
         0x4E, // MOTOR_CURRENT_LIMIT
         0x4F, // MOTOR_DIRECTION
@@ -1491,7 +1492,7 @@ mod tests {
         assert_eq!(m.flags(), 0);
         assert_ne!(m.digest(), machine0);
         // Arm: the turn bound. FLAG_REARM until the arm-time re-read installs it.
-        s.set(store::CONTROL_DRIVE_TURN.at(0), 2_000).unwrap();
+        s.set(store::CONTROL_TURN_CLAMP.at(0), 2_000).unwrap();
         m.persisted(Digests::of(&s));
         assert_eq!(m.flags(), C::FLAG_REARM);
         m.armed();
@@ -1540,7 +1541,7 @@ mod tests {
             rider_required_byte: 1,
             battery_floor: 2_400,
             gain_max: [20_000, 20_000, 2_000, 10_000],
-            drive_turn: [0, 24],
+            turn_clamp: [0, 45],
             pos_clamp: 45,
         };
         let bias = Some([48, 13, -88]);
@@ -1580,7 +1581,7 @@ mod tests {
             rider_required_byte: 0,
             battery_floor: 0,
             gain_max: [20_000, 20_000, 2_000, 10_000],
-            drive_turn: [0, 24],
+            turn_clamp: [0, 45],
             pos_clamp: 900,
         };
         let r = rederive(&values, [BOOT; motor::COUNT], None);
@@ -1609,11 +1610,11 @@ mod tests {
     }
 
     /// The seam clamps ride on the owning types rather than on this layer: an out-of-range
-    /// `CONTROL_DRIVE_TURN` pair is clamped by `DriveTurn::new`, which is the only place that range
-    /// lives.
+    /// `CONTROL_TURN_CLAMP` pair travels raw, and `control::turn::clamp`, applied by the control
+    /// section's owner, is the only place that range lives (`specs/heading-hold.md` section 6).
     #[test]
-    fn the_drive_turn_goes_through_its_seam_clamp() {
-        let mut values = ArmValues {
+    fn the_turn_clamp_travels_raw_to_its_seam() {
+        let values = ArmValues {
             method_byte: 0,
             direction_byte: [0; motor::COUNT],
             align_offset_byte: [2; motor::COUNT],
@@ -1630,16 +1631,15 @@ mod tests {
             rider_required_byte: 1,
             battery_floor: 2_400,
             gain_max: [20_000, 20_000, 2_000, 10_000],
-            drive_turn: [i16::MAX, 0],
+            turn_clamp: [i16::MAX, -1],
             pos_clamp: 45,
         };
         let r = rederive(&values, [BOOT; motor::COUNT], None);
-        assert_eq!(r.drive_turn.turn_max() as i32, base::TORQUE_FULL_SCALE);
-        assert_eq!(r.drive_turn.turn_slew(), control::drive::TURN_SLEW_MIN);
-        values.drive_turn = [-1, i16::MAX];
-        let r = rederive(&values, [BOOT; motor::COUNT], None);
-        assert_eq!(r.drive_turn.turn_max(), 0, "negative is the disabled state");
-        assert_eq!(r.drive_turn.turn_slew(), control::drive::TURN_SLEW_MAX);
+        assert_eq!(r.turn_clamp, [i16::MAX, -1]);
+        assert_eq!(
+            control::turn::clamp(r.turn_clamp),
+            (base::TORQUE_FULL_SCALE as i16, 0)
+        );
     }
 
     /// **A direction written while disarmed is live at the next arm, without a reboot, on both
@@ -1842,7 +1842,7 @@ mod tests {
             ("BOARD_BATTERY_FLOOR", store::BOARD_BATTERY_FLOOR.id()),
             ("CONTROL_GAIN_MAX", store::CONTROL_GAIN_MAX.id()),
             ("CONTROL_POS_CLAMP", store::CONTROL_POS_CLAMP.id()),
-            ("CONTROL_DRIVE_TURN", store::CONTROL_DRIVE_TURN.id()),
+            ("CONTROL_TURN_CLAMP", store::CONTROL_TURN_CLAMP.id()),
             ("MOTOR_CURRENT_CAL", store::MOTOR_CURRENT_CAL.id()),
             ("MOTOR_CURRENT_LIMIT", store::MOTOR_CURRENT_LIMIT.id()),
             ("MOTOR_DIRECTION", store::MOTOR_DIRECTION.id()),
