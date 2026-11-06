@@ -1,7 +1,7 @@
 //! The firmware bundle (`specs/firmware-bundle.md`): every image a build makes, the board images
 //! and the bridge's two, in one zip archive (`.hbfw`) with a `manifest.json`, so `board update`,
-//! `bridge update`, `bridge install` and `machine update` read what each device is and install the
-//! image built for it.
+//! `bridge update` and `bridge install` read what each device is and install the image built for
+//! it.
 //!
 //! - [`is_bundle`] tells a bundle from a single file by the zip signature, not the extension;
 //!   [`file_kind`] tells a bundle from an ELF.

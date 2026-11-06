@@ -253,13 +253,6 @@ pub enum Command {
         /// `--no-confirm`.
         no_confirm: bool,
     },
-    /// `machine update`: every bridge and every board from a bundle.
-    MachineUpdate {
-        /// The bundle.
-        bundle: String,
-        /// `--yes`.
-        yes: bool,
-    },
     /// `firmware info`: a bundle's manifest; no link.
     FirmwareInfo {
         /// The bundle.
@@ -310,7 +303,6 @@ pub const USAGE: &str =
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
   machine diff [--replace] [<file>] [--map <uid>=<board>]... [--force]
   machine watch <secs> [<board>...] [--json] | drive <value> <secs> [<board>[:<motor>]...]
-  machine update <bundle> [--yes]
   bridge info <bridge> | update <bridge> <bundle|bin> [--yes] [--no-confirm]
   bridge install <bundle|image> [<file>...] [--yes]
   bridge get|set|dump|apply|replace|diff, as under board
@@ -560,13 +552,6 @@ fn command(pos: &[&str], o: &Opts) -> Result<Command, String> {
                 force: o.has("--force"),
                 yes: o.has("--yes"),
                 maps: maps()?,
-            }
-        }
-        ["machine", "update", bundle] => {
-            ok(&["--yes"])?;
-            Command::MachineUpdate {
-                bundle: bundle.to_string(),
-                yes: o.has("--yes"),
             }
         }
         ["machine", "watch", secs, targets @ ..] => {
@@ -979,14 +964,6 @@ mod tests {
                 },
             ),
             (
-                "none",
-                "machine update hoverboard-firmware-1a2b3c4.hbfw --yes",
-                Command::MachineUpdate {
-                    bundle: s("hoverboard-firmware-1a2b3c4.hbfw"),
-                    yes: true,
-                },
-            ),
-            (
                 "install-esp",
                 "--serial /dev/ttyACM0 bridge install i.bin wifi.json --yes",
                 Command::BridgeInstall {
@@ -1120,6 +1097,16 @@ mod tests {
         }
     }
 
+    /// `specs/cli-onboarding.md` part A: a machine is updated one device at a time (`bridge update`,
+    /// `board update`); `machine update` is no command.
+    #[test]
+    fn machine_update_is_no_command() {
+        for line in ["machine update b.hbfw", "machine update b.hbfw --yes"] {
+            assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
+        }
+        assert!(!USAGE.contains("machine update"));
+    }
+
     #[test]
     fn an_option_the_command_does_not_take_is_a_usage_error() {
         for line in [
@@ -1135,9 +1122,6 @@ mod tests {
             "board update 0x01 b.hbfw --dirty",
             "board recover --yes",
             "bridge update 0x03 b.bin --image x",
-            "machine update b.hbfw --image x",
-            "machine update b.hbfw --no-confirm",
-            "machine update",
             "machine nodes --yes",
             "scan --yes",
             "board erase 0x01 --image x",

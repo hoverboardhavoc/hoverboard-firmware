@@ -115,8 +115,8 @@ espflash save-image --chip esp32c3 \
 hoverboard-cli --tcp <name>.local:5333 bridge update <bridge> target/img/bridge-esp32c3.bin
 ```
 
-`hoverboard-cli machine update <bundle>` updates every bridge of a machine and the board each one
-flashes, each over the bridge's own link.
+Updating a machine is `bridge update` and `board update` once per device, each through its own
+bridge.
 
 `<bridge>` is the bridge's address (as `hoverboard-cli machine nodes` lists it), its `device.name`
 or a prefix of its `uid`; an address needs no walk. `bridge update` writes the slot not running, the
