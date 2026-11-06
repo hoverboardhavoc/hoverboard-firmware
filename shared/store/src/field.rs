@@ -108,6 +108,25 @@ impl<T: Scalar, const N: usize> IndexedField<T, N> {
         N == 0
     }
 
+    /// Every index's default, in index order.
+    pub const fn defaults(self) -> [T; N] {
+        self.defaults
+    }
+
+    /// One element of motor `motor`'s copy of a per-motor family (`specs/flux-observer.md`,
+    /// "Fields"; the name table's [`names::Index::MotorArray`]): the key is
+    /// `motor * N + element`, so each motor's `N` values sit together, and it carries the
+    /// element's default, which every motor shares. An element past the end resolves to element
+    /// 0, as [`IndexedField::at`] does.
+    pub const fn at_motor(self, motor: u8, element: u8) -> Field<T> {
+        let e = if (element as usize) < N { element } else { 0 };
+        Field {
+            field_id: self.field_id,
+            index: (motor as usize * N + e as usize) as u8,
+            default: self.defaults[e as usize],
+        }
+    }
+
     /// One index as an ordinary [`Field`] handle, carrying THAT index's default: the form every
     /// typed `get` / `set` takes. An index past the declared end resolves to index 0, the same
     /// fallback [`lookup_key`] applies on the dynamic path, so no path can panic on a stray index.
@@ -669,6 +688,30 @@ pub const MOTOR_BREAK_PIN: PinField = PinField::new(0x5E, Type::PinAf);
 /// sets the timer's `BRKEN` and a break latches the motor's fault (`specs/optional-protections.md`
 /// section 3.3). Enabled only with [`MOTOR_BREAK_PIN`] stored (`protect_input`). Boot-read.
 pub const MOTOR_BREAK_ENABLE: Field<u8> = Field::new(0x5F, 0);
+/// The flux observer's motor model, per motor (`specs/flux-observer.md`, "Fields"): `0 = r_mohm`
+/// (phase resistance, milliohms), `1 = l_uh` (inductance, microhenries), `2 = flux_uvs` (the flux
+/// linkage, microvolt-seconds, 0 = unknown), `3` spare. Defaults 240, 500, 0, 0.
+///
+/// **Per motor AND indexed**: motor `m`'s element `e` is `Key.index` `m * 4 + e`
+/// ([`IndexedField::at_motor`], the name table's [`names::Index::MotorArray`]), and a motor-1 key
+/// resolves to its element's motor-0 row ([`lookup_key`]). Applied as it is written: `r_mohm` and
+/// `l_uh` are on the live tune lane (RAM, allowed armed; in S1 nothing acts on them), and a
+/// persisted write is re-read by the firmware's observer shadow (`firmware::observer`). `flux_uvs`
+/// and the spare have no firmware consumer in S1; their rows carry the field's one effect, which
+/// is what a client mirrors per field. Range enforcement is the firmware's seam
+/// (`commutation::observer::ObserverParams::derive` clamps; the tune lane refuses).
+pub const OBSERVER_MODEL: IndexedField<i16, 4> = IndexedField::new(0x60, [240, 500, 0, 0]);
+/// The flux observer's shadow-mode words, per motor (`specs/flux-observer.md`, "Fields"): `0 =
+/// band` and `1 = spread` (the tracked window's largest error mean and spread, angle units, 65536
+/// a revolution), `2 = min_windows` (a bin is measured at this many windows), `3 = ratio` (a
+/// measured bin passes tracked in `ratio / 256` of its windows), `4 = offset` (angle units, taken
+/// off every period's error: the hall frame against the observer's), `5 = leak_shift` (6..=14),
+/// `6 = dt_comp` (0 or 1). Defaults 2730, 1820, 64, 243, 0, 10, 1.
+///
+/// Per motor and indexed as [`OBSERVER_MODEL`] (`Key.index` = `m * 7 + e`), all seven on the
+/// live tune lane.
+pub const OBSERVER_SHADOW: IndexedField<i16, 7> =
+    IndexedField::new(0x61, [2730, 1820, 64, 243, 0, 10, 1]);
 /// The power-button sense pin (`specs/board-model.md` `power.button`; the `power_request`
 /// producer, `specs/integration.md`'s input task). No fleet default is pinned yet, so unset
 /// until configured.
@@ -1220,6 +1263,8 @@ field_ids! {
     0x5D, // MOTOR_DC_LINK_LIMIT
     0x5E, // MOTOR_BREAK_PIN
     0x5F, // MOTOR_BREAK_ENABLE
+    0x60, // OBSERVER_MODEL
+    0x61, // OBSERVER_SHADOW
 }
 
 #[cfg(feature = "test-fields")]
@@ -1300,6 +1345,8 @@ field_ids! {
     0x5D, // MOTOR_DC_LINK_LIMIT
     0x5E, // MOTOR_BREAK_PIN
     0x5F, // MOTOR_BREAK_ENABLE
+    0x60, // OBSERVER_MODEL
+    0x61, // OBSERVER_SHADOW
     0xFD, // T_BLOB (store-test reserved)
     0xFE, // T_KEY  (store-test reserved)
 }
@@ -1387,10 +1434,10 @@ pub struct FieldDef {
 /// signs and roles, the level trim, the battery-sense calibration, the tunes, the gains and their
 /// maxima, the reference and the turn bound). Tracks the field set under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 76 + 21;
+pub const REGISTRY_LEN: usize = 78 + 30;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 78 + 21;
+pub const REGISTRY_LEN: usize = 80 + 30;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1651,6 +1698,19 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     MOTOR_DC_LINK_LIMIT.entry(Boot),
     MOTOR_BREAK_PIN.entry(Boot),
     MOTOR_BREAK_ENABLE.entry(Boot),
+    // The observer's two families, motor 0's elements (a motor-1 key resolves to its element's
+    // row, `lookup_key`).
+    OBSERVER_MODEL.at(0).entry(Live),
+    OBSERVER_MODEL.at(1).entry(Live),
+    OBSERVER_MODEL.at(2).entry(Live),
+    OBSERVER_MODEL.at(3).entry(Live),
+    OBSERVER_SHADOW.at(0).entry(Live),
+    OBSERVER_SHADOW.at(1).entry(Live),
+    OBSERVER_SHADOW.at(2).entry(Live),
+    OBSERVER_SHADOW.at(3).entry(Live),
+    OBSERVER_SHADOW.at(4).entry(Live),
+    OBSERVER_SHADOW.at(5).entry(Live),
+    OBSERVER_SHADOW.at(6).entry(Live),
     #[cfg(feature = "test-fields")]
     T_BLOB.entry(BYTES_EMPTY, Client),
     #[cfg(feature = "test-fields")]
@@ -1679,6 +1739,7 @@ pub fn lookup(field_id: u8) -> Option<FieldDef> {
 /// build the descriptor from the one matching row, for the reason [`lookup`] records.
 pub fn lookup_key(key: Key) -> Option<FieldDef> {
     let mut base = None;
+    let mut rows = 0u8;
     for d in REGISTRY.iter() {
         if d.field_id != key.field_id {
             continue;
@@ -1688,6 +1749,17 @@ pub fn lookup_key(key: Key) -> Option<FieldDef> {
         }
         if d.index == 0 {
             base = Some(d.def());
+        }
+        rows += 1;
+    }
+    // A wheel family with more than one row is per motor AND indexed (`IndexedField::at_motor`):
+    // a key past motor 0's rows names another motor's copy of element `index % rows`.
+    if rows > 1 && matches!(Scope::of(key.field_id), Some(Scope::Wheel)) {
+        let e = key.index % rows;
+        for d in REGISTRY.iter() {
+            if d.field_id == key.field_id && d.index == e {
+                return Some(d.def());
+            }
         }
     }
     base
@@ -1716,6 +1788,10 @@ pub mod names {
         /// One value per motor, the index being the motor (`0..`[`MOTORS`]), in a file under the
         /// top-level `motors` array.
         Motor,
+        /// A fixed family of `n` values per motor, in a file under the top-level `motors` array
+        /// as a list (`specs/flux-observer.md`, "Fields"): motor `m`'s element `e` is index
+        /// `m * n + e` ([`IndexedField::at_motor`]).
+        MotorArray(u8),
         /// One value per inter-board link, the index being the link (`0..`[`LINKS`]), in a file
         /// under the top-level `links` array (`specs/machine-settings.md` section 3.1).
         Link,
@@ -1732,6 +1808,7 @@ pub mod names {
                 Index::Single => 1,
                 Index::Array(n) => n,
                 Index::Motor => MOTORS,
+                Index::MotorArray(n) => MOTORS * n,
                 Index::Link => LINKS,
                 Index::Named(names) => names.len() as u8,
             }
@@ -1741,7 +1818,7 @@ pub mod names {
         /// field that is a value at its own path.
         pub const fn array(self) -> Option<&'static str> {
             match self {
-                Index::Motor => Some("motors"),
+                Index::Motor | Index::MotorArray(_) => Some("motors"),
                 Index::Link => Some("links"),
                 Index::Single | Index::Array(_) | Index::Named(_) => None,
             }
@@ -1834,6 +1911,15 @@ pub mod names {
             kind: Kind,
         ) -> Self {
             Self::new(f.id(), T::KIND, path, Index::Array(N as u8), kind)
+        }
+
+        /// A fixed family per motor, whose per-motor count is the handle's own.
+        pub const fn motor_array<T: Scalar, const N: usize>(
+            f: IndexedField<T, N>,
+            path: &'static str,
+            kind: Kind,
+        ) -> Self {
+            Self::new(f.id(), T::KIND, path, Index::MotorArray(N as u8), kind)
         }
 
         /// A field with one value per link, whose count is the handle's own and [`LINKS`].
@@ -2006,6 +2092,8 @@ pub mod names {
         FieldName::motor(MOTOR_DC_LINK_LIMIT, "current.dc_link.limit", Kind::Int),
         FieldName::pin(MOTOR_BREAK_PIN, "gate.break.pin", Index::Motor),
         FieldName::motor(MOTOR_BREAK_ENABLE, "gate.break.enable", Kind::Bool),
+        FieldName::motor_array(OBSERVER_MODEL, "observer.model", Kind::Int),
+        FieldName::motor_array(OBSERVER_SHADOW, "observer.shadow", Kind::Int),
         #[cfg(feature = "test-fields")]
         FieldName::blob(T_BLOB, "test.blob"),
         #[cfg(feature = "test-fields")]
@@ -2209,7 +2297,7 @@ pub mod names {
                     r.path
                 );
                 assert_eq!(
-                    r.index == Index::Motor,
+                    matches!(r.index, Index::Motor | Index::MotorArray(_)),
                     r.scope() == Some(Scope::Wheel),
                     "{}",
                     r.path
@@ -2290,13 +2378,47 @@ pub mod names {
             assert_eq!(range_of(DEVICE_NAME.key()), None);
         }
 
+        /// A per-motor family's keys: motor `m`'s element `e` is index `m * n + e` with the
+        /// element's default, and a motor-1 key resolves to its element's motor-0 row through the
+        /// dynamic lookup, type and default both.
+        #[test]
+        fn a_motor_array_key_is_the_motor_times_the_count_plus_the_element() {
+            let k = OBSERVER_SHADOW.at_motor(1, 5);
+            assert_eq!((k.id(), k.key().index, k.default()), (0x61, 12, 10));
+            assert_eq!(OBSERVER_SHADOW.at_motor(0, 5).key().index, 5);
+            assert_eq!(OBSERVER_MODEL.at_motor(1, 1).key().index, 5);
+            // An element past the end is element 0.
+            assert_eq!(OBSERVER_MODEL.at_motor(1, 9).default(), 240);
+            for m in 0..MOTORS {
+                for e in 0..7u8 {
+                    let d = lookup_key(OBSERVER_SHADOW.at_motor(m, e).key()).unwrap();
+                    assert_eq!(d.index, e);
+                    assert_eq!(
+                        d.default,
+                        Value::I16(OBSERVER_SHADOW.defaults()[e as usize])
+                    );
+                    assert_eq!(d.effect, Effect::Live);
+                }
+            }
+            // The spec's defaults (`specs/flux-observer.md`, "Fields").
+            assert_eq!(OBSERVER_MODEL.defaults(), [240, 500, 0, 0]);
+            assert_eq!(OBSERVER_SHADOW.defaults(), [2730, 1820, 64, 243, 0, 10, 1]);
+            // A one-row wheel field still resolves every motor to its one row.
+            assert_eq!(
+                lookup_key(MOTOR_CURRENT_SENSE.at(1).key()).unwrap().index,
+                0
+            );
+            assert_eq!(Index::MotorArray(7).count(), 14);
+            assert_eq!(Index::MotorArray(7).array(), Some("motors"));
+        }
+
         /// An array's count is the registry's: one row per index, each carrying its default.
         #[test]
         fn an_array_rows_count_is_its_registry_rows() {
             for r in NAMES {
                 let rows = REGISTRY.iter().filter(|e| e.field_id == r.id).count();
                 let want = match r.index {
-                    Index::Array(n) => n as usize,
+                    Index::Array(n) | Index::MotorArray(n) => n as usize,
                     Index::Link => LINKS as usize,
                     Index::Named(names) => names.len(),
                     Index::Single | Index::Motor => 1,
@@ -2568,7 +2690,18 @@ mod registry_tests {
                 (0x27, 2),
                 (0x27, 3),
                 (0x29, 0),
-                (0x29, 1)
+                (0x29, 1),
+                (0x60, 0),
+                (0x60, 1),
+                (0x60, 2),
+                (0x60, 3),
+                (0x61, 0),
+                (0x61, 1),
+                (0x61, 2),
+                (0x61, 3),
+                (0x61, 4),
+                (0x61, 5),
+                (0x61, 6),
             ]
         );
         assert_eq!(

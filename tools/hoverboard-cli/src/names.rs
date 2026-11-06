@@ -47,9 +47,9 @@ pub fn row_of(key: Key) -> Option<&'static FieldName> {
 }
 
 /// The path `key` prints as: `machine.mode`, `battery_sense.cal[1]`, `motors[0].hall.a`,
-/// `links[0].tx`, `tone.horn`, or the raw `0x99.0` for an id the table does not name. A single
-/// field at an index past its one, or a named field past its names, prints with the index, so a
-/// forced write names what it wrote.
+/// `motors[1].observer.shadow[4]`, `links[0].tx`, `tone.horn`, or the raw `0x99.0` for an id the
+/// table does not name. A single field at an index past its one, or a named field past its names,
+/// prints with the index, so a forced write names what it wrote.
 pub fn path_of(key: Key) -> String {
     match row_of(key) {
         Some(r) => match r.index {
@@ -58,6 +58,12 @@ pub fn path_of(key: Key) -> String {
                 r.index.array().expect("an object array"),
                 key.index,
                 r.path
+            ),
+            Index::MotorArray(n) => format!(
+                "motors[{}].{}[{}]",
+                key.index / n.max(1),
+                r.path,
+                key.index % n.max(1)
             ),
             Index::Single if key.index == 0 => r.path.to_string(),
             Index::Named(_) if r.index.name(key.index).is_some() => {
@@ -98,7 +104,7 @@ pub fn find(path: &str, array: Option<&str>) -> Option<&'static FieldName> {
 /// for a field at its own path. The array's key is the store's ([`Index::array`]).
 pub fn element(index: Index) -> Option<(&'static str, &'static str)> {
     let what = match index {
-        Index::Motor => "motor",
+        Index::Motor | Index::MotorArray(_) => "motor",
         Index::Link => "link",
         Index::Single | Index::Array(_) | Index::Named(_) => return None,
     };
@@ -138,6 +144,11 @@ fn index_check(row: &FieldName, index: u8) -> Option<Problem> {
                 row.index.count()
             )
         }
+        Index::MotorArray(n) => format!(
+            "{} has {n} indices on each of {} motors (--force writes index {index} anyway)",
+            row.path,
+            store::MOTORS
+        ),
     }))
 }
 
@@ -183,12 +194,28 @@ pub fn parse_path(s: &str) -> Result<(Key, Vec<Problem>), Problem> {
     };
     for (array, _) in object_arrays() {
         if let Some(rest) = norm.strip_prefix(array).and_then(|r| r.strip_prefix('.')) {
-            let found = rest.split_once('.').and_then(|(i, name)| {
+            let (i, name) = rest.split_once('.').ok_or_else(|| unknown(s))?;
+            let i = i.parse::<u8>().map_err(|_| unknown(s))?;
+            if let Some(row) = find(name, Some(array)) {
+                if let Index::MotorArray(n) = row.index {
+                    return Err(Problem::stop(format!(
+                        "{} has {n} values per motor ({array}.{i}.{}.<index>)",
+                        row.path, row.path
+                    )));
+                }
+                let k = key(row, i);
+                return Ok((k, key_checks(k)));
+            }
+            // A per-motor family's element: `motors.<m>.<path>.<e>`, index `m * n + e`.
+            let found = name.rsplit_once('.').and_then(|(name, e)| {
                 let row = find(name, Some(array))?;
-                Some((row, i.parse::<u8>().ok()?))
+                let Index::MotorArray(n) = row.index else {
+                    return None;
+                };
+                let e = e.parse::<u8>().ok().filter(|e| *e < n)?;
+                Some(key(row, i.checked_mul(n)?.checked_add(e)?))
             });
-            let (row, i) = found.ok_or_else(|| unknown(s))?;
-            let k = key(row, i);
+            let k = found.ok_or_else(|| unknown(s))?;
             return Ok((k, key_checks(k)));
         }
     }
@@ -691,6 +718,7 @@ pub fn table_json() -> Json {
             Index::Single => "single",
             Index::Array(_) => "array",
             Index::Named(_) => "named",
+            Index::MotorArray(_) => "motor_array",
             Index::Motor | Index::Link => element(r.index).expect("an object array").1,
         };
         o.insert("index".into(), index.into());
@@ -778,6 +806,19 @@ mod tests {
         assert_eq!(path_of(k(0x4B, 0)), "motors[0].gate.dead_time");
         assert_eq!(path_of(k(0x27, 1)), "machine.balance.gains[1]");
         assert_eq!(path_of(k(0x99, 0)), "0x99.0");
+        // A per-motor family (`specs/flux-observer.md`, "Fields"): motor m's element e is
+        // index m * n + e.
+        assert_eq!(path_of(k(0x61, 11)), "motors[1].observer.shadow[4]");
+        assert_eq!(
+            parse_path("motors.1.observer.shadow.4").unwrap().0,
+            k(0x61, 11)
+        );
+        assert_eq!(
+            parse_path("motors[0].observer.model[1]").unwrap().0,
+            k(0x60, 1)
+        );
+        assert!(parse_path("motors.0.observer.model.4").is_err());
+        assert!(parse_path("motors.0.observer.model").is_err());
     }
 
     /// `specs/machine-settings.md` section 3.1: the node paths are grouped by function, and a

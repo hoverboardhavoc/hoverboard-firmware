@@ -64,6 +64,10 @@ class SharedCheckCasesTest {
         if (row != null) {
             if (row.index == Names.IndexKind.ARRAY) {
                 v.asJsonArray.forEachIndexed { i, item -> add(Key(row.id, i), item, into) }
+            } else if (row.index == Names.IndexKind.MOTOR_ARRAY) {
+                val n = Names.perMotor(row.id)
+                val m = elem?.second ?: 0
+                v.asJsonArray.forEachIndexed { i, item -> add(Key(row.id, m * n + i), item, into) }
             } else {
                 add(Key(row.id, elem?.second ?: 0), v, into)
             }

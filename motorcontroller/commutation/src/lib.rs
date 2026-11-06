@@ -26,6 +26,7 @@
 extern crate std;
 
 pub mod foc;
+pub mod observer;
 pub mod sine;
 pub mod sixstep;
 
@@ -346,6 +347,17 @@ impl Commutator {
     pub fn take_foc_window(&mut self) -> Option<foc::FocWindow> {
         match &mut self.method {
             MethodState::Foc(st) => Some(st.take_window()),
+            MethodState::SixStep(_) | MethodState::Sine => None,
+        }
+    }
+
+    /// What the FOC arm applied on the last step ([`foc::FocState::applied`]), or `None` when the
+    /// active method is not FOC: the flux observer's input (`specs/flux-observer.md`), which runs on
+    /// FOC periods only, since only that arm hands it an applied voltage vector.
+    #[inline]
+    pub fn foc_applied(&self) -> Option<foc::FocApplied> {
+        match &self.method {
+            MethodState::Foc(st) => Some(st.applied()),
             MethodState::SixStep(_) | MethodState::Sine => None,
         }
     }

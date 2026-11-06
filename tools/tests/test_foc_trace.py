@@ -67,6 +67,9 @@ def block(**f):
     w[swdobs.W_FOC_DQ_MEAN] = pair(f.get("id", 0), f.get("iq", 0))
     w[swdobs.W_FOC_REF_VQ] = pair(f.get("iq_ref", 0), f.get("vq", 0))
     w[swdobs.W_FOC_HOLD] = f.get("hold", 0)
+    w[swdobs.W_FOC_ANGLES] = (f.get("theta", 0) & 0xFFFF) | ((f.get("obs_angle", 0) & 0xFFFF) << 16)
+    w[swdobs.W_FOC_TRACK] = pair(f.get("err_mean", 0), f.get("err_spread", 0))
+    w[swdobs.W_FOC_FLUX] = f.get("flux_word", 0xFF << 16)
     return w
 
 
@@ -118,16 +121,21 @@ def ram_of(addr, words):
 
 class WordMap(unittest.TestCase):
     def test_the_foc_words_are_where_the_firmware_pins_them(self):
-        """words 47 to 50 at the byte offsets motorcontroller/firmware/src/main.rs asserts, and the count
-        its size pin asserts: the map and the struct are one statement."""
+        """words 47 to 50 and the flux observer's 52 to 54 at the byte offsets
+        motorcontroller/firmware/src/main.rs asserts, and the count its size pin asserts: the map and
+        the struct are one statement."""
         self.assertEqual((swdobs.W_FOC_PHASE_MEAN, swdobs.W_FOC_DQ_MEAN, swdobs.W_FOC_REF_VQ,
                           swdobs.W_FOC_HOLD), (47, 48, 49, 50))
+        self.assertEqual((swdobs.W_FOC_ANGLES, swdobs.W_FOC_TRACK, swdobs.W_FOC_FLUX), (52, 53, 54))
         with open(os.path.join(_REPO, "motorcontroller", "firmware", "src", "main.rs")) as fh:
             src = fh.read()
         for field, word in (("foc_phase_mean", swdobs.W_FOC_PHASE_MEAN),
                             ("foc_dq_mean", swdobs.W_FOC_DQ_MEAN),
                             ("foc_ref_vq", swdobs.W_FOC_REF_VQ),
-                            ("foc_hold", swdobs.W_FOC_HOLD)):
+                            ("foc_hold", swdobs.W_FOC_HOLD),
+                            ("foc_angles", swdobs.W_FOC_ANGLES),
+                            ("foc_track", swdobs.W_FOC_TRACK),
+                            ("foc_flux", swdobs.W_FOC_FLUX)):
             m = re.search(rf"offset_of!\(CtrlObs, {field}\) == (0x[0-9A-Fa-f]+)", src)
             self.assertIsNotNone(m, field)
             self.assertEqual(int(m.group(1), 16), 4 * word, field)
@@ -184,7 +192,23 @@ class Decode(unittest.TestCase):
         self.assertAlmostEqual(r["ia_a"], -1200 / 455)
         self.assertAlmostEqual(r["iq_ref_a"], 688 / 455)
         self.assertNotIn("vq_a", r, "vq is a voltage count, never amps")
-        self.assertNotIn("theta", r, "no frame unless asked")
+        self.assertNotIn("htheta", r, "no frame unless asked")
+
+    def test_decode_the_flux_observer_words(self):
+        """Words 52 to 54 (specs/flux-observer.md, "What it publishes"), packed as
+        motorcontroller/commutation/src/observer/tests.rs the_published_words_pack_as_the_spec_lays_them_out
+        pins them: theta and the observer's angle, the error mean and spread in degrees, the RMS
+        flux, the tracked bit and the lock bin."""
+        w = block(method=2, theta=0x1234, obs_angle=0xABCD, err_mean=-2, err_spread=300,
+                  flux_word=((7 | 1 << 8) << 16) | 21_000)
+        r = ft.decode(w, 455)
+        self.assertEqual((r["theta"], r["obs_angle"]), (0x1234, 0xABCD))
+        self.assertAlmostEqual(r["err_mean"], -2 * 360.0 / 65536.0)
+        self.assertAlmostEqual(r["err_spread"], 300 * 360.0 / 65536.0)
+        self.assertEqual((r["flux"], r["tracked"], r["lock"]), (21_000, 1, 7))
+        r = ft.decode(block(method=1), 455)
+        self.assertEqual((r["theta"], r["obs_angle"], r["flux"], r["tracked"], r["lock"]),
+                         (0, 0, 0, 0, 255), "no observer outside FOC, and no lock")
 
     def test_the_rail_skip_is_the_cause_bytes_top_bit(self):
         # motor.rs HOLD_CAUSE_RAIL, bit 31 of word 50 (specs/optional-protections.md section 6.4).
@@ -346,7 +370,7 @@ class HostFrame(unittest.TestCase):
             angle = (aligned - ft.angle_path_offset(d, off)) & 0xFFFF
             ia, ib = 1200, -700
             r = ft.decode(block(angle=angle, ia=ia, ib=ib), 455, frame=(d, off))
-            self.assertEqual(r["theta"], aligned)
+            self.assertEqual(r["htheta"], aligned)
             want = ft.park_forward(*ft.clarke(ia, ib), aligned)
             self.assertEqual((r["hiq"], r["hid"]), want)
             self.assertAlmostEqual(r["hmag"], math.hypot(*want))
@@ -399,7 +423,9 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(row[10:16], ["-300", "150", "-12", "430", "430", "420"])
         self.assertEqual(row[19], f"{430 / 455:.2f}")
         self.assertEqual(row[21:25], ["0", "0", "0", "00"], "the hold word's four columns")
-        self.assertEqual(len(row), 25 + 6, "the six frame columns follow")
+        self.assertEqual(row[25:32], ["0", "0", "0.0", "0.0", "0", "0", "255"],
+                         "the flux observer's seven columns")
+        self.assertEqual(len(row), 32 + 6, "the six frame columns follow")
 
     def test_a_wrong_image_is_refused(self):
         words = block()

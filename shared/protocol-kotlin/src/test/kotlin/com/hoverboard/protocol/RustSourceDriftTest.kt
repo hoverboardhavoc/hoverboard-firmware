@@ -2369,6 +2369,7 @@ class RustSourceDriftTest {
             val (index, k) = when (ctor) {
                 "single" -> Names.IndexKind.SINGLE to kind(arg)
                 "motor" -> Names.IndexKind.MOTOR to kind(arg)
+                "motor_array" -> Names.IndexKind.MOTOR_ARRAY to kind(arg)
                 "array" -> Names.IndexKind.ARRAY to kind(arg)
                 "link" -> Names.IndexKind.LINK to kind(arg)
                 "text" -> Names.IndexKind.SINGLE to (Names.Kind.STR to emptyList())

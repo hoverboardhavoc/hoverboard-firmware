@@ -1105,5 +1105,27 @@
     "scope": "wheel",
     "effect": "boot",
     "board_owned": false
+  },
+  {
+    "id": 96,
+    "path": "observer.model",
+    "type": "i16",
+    "index": "motor_array",
+    "count": 8,
+    "kind": "int",
+    "scope": "wheel",
+    "effect": "live",
+    "board_owned": false
+  },
+  {
+    "id": 97,
+    "path": "observer.shadow",
+    "type": "i16",
+    "index": "motor_array",
+    "count": 14,
+    "kind": "int",
+    "scope": "wheel",
+    "effect": "live",
+    "board_owned": false
   }
 ]
