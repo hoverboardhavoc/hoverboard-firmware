@@ -870,8 +870,9 @@ jobs:
               curl -L https://github.com/@REPO@/releases/download/@TAG@/hoverboard-cli-<target>.tar.gz | tar xz
 
           where `<target>` is `aarch64-apple-darwin` (a Mac with Apple silicon),
-          `x86_64-unknown-linux-gnu` (a Linux PC) or `arm-unknown-linux-gnueabihf` (a Raspberry Pi, no
-          BLE). It unpacks an executable `hoverboard-cli` into the current directory. On Windows,
+          `x86_64-unknown-linux-gnu` (a Linux PC), `aarch64-unknown-linux-gnu` (a Raspberry Pi on
+          64-bit Raspberry Pi OS: Pi 3, 4, 5, 400, Zero 2 W, CM4, CM5; no BLE) or
+          `arm-unknown-linux-gnueabihf` (a Pi 1, Zero or Zero W, or a 32-bit install; no BLE). It unpacks an executable `hoverboard-cli` into the current directory. On Windows,
           download `hoverboard-cli-x86_64-pc-windows-msvc.exe`.
 
           The binaries are not signed. `curl` sets no quarantine flag, so macOS runs the CLI it
@@ -1177,18 +1178,25 @@ jobs:
           path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
 
-  # The CLI for the bench Pi (a Raspberry Pi Model B, armv6l: arm-unknown-linux-gnueabihf), so
-  # install-esp can reinstall a bench bridge on the Pi's USB (specs/bridge-onboarding.md section 4.2).
-  # Built with cargo-zigbuild, which links with zig against an armv6 glibc 2.36 (the Pi runs 2.41;
-  # Ubuntu's gnueabihf toolchain is armv7). It builds on the runner itself; `cross`, which builds
-  # inside Docker, was dropped when it could not see the sibling runtime-hal checkout this workflow
-  # then used. The `ble` feature is off: it drops btleplug and its D-Bus dependency, and the Pi has
-  # no Bluetooth adapter. Nothing here runs the binary; the bench gate does.
+  # The CLI for the Raspberry Pis, built with cargo-zigbuild, which links with zig against glibc 2.36
+  # (the bench Pi runs 2.41). Two targets:
+  #   - arm-unknown-linux-gnueabihf (ARMv6) for the bench Pi (a Model B, armv6l), so install-esp can
+  #     reinstall a bench bridge on its USB (specs/bridge-onboarding.md section 4.2), and for the Pi 1,
+  #     the Zero and Zero W and 32-bit installs. Ubuntu's gnueabihf toolchain is armv7.
+  #   - aarch64-unknown-linux-gnu for a Pi 3, 4, 5, 400, Zero 2 W or CM4/CM5 on the default 64-bit
+  #     Raspberry Pi OS, which runs the ARMv6 build only with the armhf runtime installed (the Pi 5's
+  #     16K-page kernel can refuse it).
+  # It builds on the runner itself; `cross`, which builds inside Docker, was dropped when it could not
+  # see the sibling runtime-hal checkout this workflow then used. The `ble` feature is off: it drops
+  # btleplug and its D-Bus dependency, which zigbuild does not provide (and the bench Pi has no
+  # Bluetooth adapter). Nothing here runs the binaries; the bench gate does.
   hoverboard-cli-pi:
-    name: hoverboard-cli (bench Pi, arm-unknown-linux-gnueabihf, no BLE)
+    name: hoverboard-cli (Raspberry Pi, ${{ matrix.target }}, no BLE)
     runs-on: ubuntu-24.04
-    env:
-      PI_TARGET: arm-unknown-linux-gnueabihf
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [arm-unknown-linux-gnueabihf, aarch64-unknown-linux-gnu]
     defaults:
       run:
         working-directory: hoverboard-firmware/tools
@@ -1202,7 +1210,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-20
-          targets: arm-unknown-linux-gnueabihf
+          targets: ${{ matrix.target }}
           components: rustfmt, clippy, rust-src
 
       - name: Install zig (pinned)
@@ -1221,21 +1229,22 @@ jobs:
         run: >
           cargo zigbuild --release
           -p hoverboard-cli
-          --target ${{ env.PI_TARGET }}.2.36
+          --target ${{ matrix.target }}.2.36
           --no-default-features
 
       # Named for its target triple beside the other platforms' (the hoverboard-cli job says why).
       - name: Name the binary for its target
         run: |
           mkdir -p target/dist
-          cp target/${{ env.PI_TARGET }}/release/hoverboard-cli \
-            target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+          cp target/${{ matrix.target }}/release/hoverboard-cli \
+            target/dist/hoverboard-cli-${{ matrix.target }}
+          file target/dist/hoverboard-cli-${{ matrix.target }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
-          name: hoverboard-cli-${{ env.PI_TARGET }}
-          path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ env.PI_TARGET }}
+          name: hoverboard-cli-${{ matrix.target }}
+          path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ matrix.target }}
           if-no-files-found: error
 
   # The hoverboard bridge (bridge/): its own workspace on its own toolchain, the 1.96 stable its
