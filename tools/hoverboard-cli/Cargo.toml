@@ -11,7 +11,7 @@ description = "Terminal tool for the hoverboard bridge: commands by noun (board,
 [features]
 default = ["ble"]
 # BLE through btleplug (CoreBluetooth, BlueZ over D-Bus, WinRT). The bench Pi's build turns it off,
-# which drops btleplug and its D-Bus dependency; that CLI refuses --device and scan
+# which drops btleplug and its D-Bus dependency; that CLI refuses --device and ble scan
 # (specs/bridge-onboarding.md section 4.2).
 ble = ["dep:btleplug", "dep:tokio", "dep:futures"]
 
@@ -33,7 +33,7 @@ hal = { path = "../../motorcontroller/hal", default-features = false, features =
 imu = { path = "../../motorcontroller/imu" }
 espsvc = { path = "../../shared/espsvc" }
 embedded-io = "0.7"
-# The BLE link and `scan` (the `ble` feature).
+# The BLE link and `ble scan` (the `ble` feature).
 btleplug = { version = "0.11", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
 futures = { version = "0.3", optional = true }
@@ -42,8 +42,8 @@ object = { version = "0.36", default-features = false, features = ["read_core", 
 regex = "1"
 sha2 = "0.10"
 uuid = "1"
-# The USB console (--serial), and the port list install-esp chooses from. No libudev: the list
-# comes from sysfs on Linux.
+# The USB console (--serial), and the port list install-esp chooses from and `usb scan` reads
+# (with each port's USB serial number). No libudev: the list comes from sysfs on Linux.
 serialport = { version = "4", default-features = false }
 # install-esp (specs/bridge-onboarding.md section 3.3): the flasher and the serial connection, with
 # Espressif's flasher stub, and none of espflash's own command line.
