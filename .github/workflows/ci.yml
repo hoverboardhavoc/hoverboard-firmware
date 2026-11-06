@@ -847,17 +847,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # Each macOS and Linux CLI goes in a .tar.gz holding an executable `hoverboard-cli`: a bare
+          # download loses its executable bit. The Windows .exe stays bare.
+          for f in assets/hoverboard-cli-*; do
+            case "$f" in *.exe) continue ;; esac
+            d="$(mktemp -d)"
+            install -m 755 "$f" "$d/hoverboard-cli"
+            tar -C "$d" --owner=0 --group=0 -czf "$f.tar.gz" hoverboard-cli
+            rm "$f"
+          done
           ls -l assets
           # The release notes (specs/bridge-onboarding.md section 4).
           cat > notes.md <<'NOTES'
-          The binaries are not signed. A browser download on macOS is quarantined, and Gatekeeper
-          refuses to run it until `xattr -d com.apple.quarantine hoverboard-cli-aarch64-apple-darwin`
-          is run; Windows SmartScreen warns once. A download with `curl` is not quarantined.
+          Install the CLI on macOS or Linux with
+
+              curl -L https://github.com/@REPO@/releases/download/@TAG@/hoverboard-cli-<target>.tar.gz | tar xz
+
+          where `<target>` is `aarch64-apple-darwin` (a Mac with Apple silicon),
+          `x86_64-unknown-linux-gnu` (a Linux PC) or `arm-unknown-linux-gnueabihf` (a Raspberry Pi, no
+          BLE). It unpacks an executable `hoverboard-cli` into the current directory. On Windows,
+          download `hoverboard-cli-x86_64-pc-windows-msvc.exe`.
+
+          The binaries are not signed. `curl` sets no quarantine flag, so macOS runs the CLI it
+          fetched; a browser download is quarantined, and Gatekeeper refuses to run it until
+          `xattr -d com.apple.quarantine hoverboard-cli` is run. Windows SmartScreen warns once.
 
           A release promises no compatibility with any other release: a CLI, app, bridge image and
           board image from different releases may not work together.
           NOTES
-          sed -i 's/^          //' notes.md
+          sed -i "s/^          //; s|@REPO@|$GITHUB_REPOSITORY|; s|@TAG@|$TAG|" notes.md
           # The app release workflow may have made the release first, or make it at the same moment.
           if ! gh release create "$TAG" assets/* -R "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file notes.md; then
             gh release upload "$TAG" assets/* -R "$GITHUB_REPOSITORY" --clobber
