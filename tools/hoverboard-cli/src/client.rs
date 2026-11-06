@@ -36,10 +36,25 @@ const STATUS_GAP: Duration = Duration::from_secs(30);
 const STREAM_POLL: Duration = Duration::from_millis(50);
 
 /// One `board read --hz` line (`specs/board-route.md` section 2): the seconds since the stream
-/// started, to the millisecond, then the bytes as hex.
+/// started, to the millisecond, then the bytes as hex. The time is cut to the millisecond, not
+/// rounded: a read asked in the last half millisecond of its slot keeps its slot's time rather than
+/// the next slot's start, which the next read may print too.
 pub fn sample_line(at: Duration, data: &[u8]) -> String {
     let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{:.3} {hex}", at.as_secs_f64())
+    format!("{}.{:03} {hex}", at.as_secs(), at.subsec_millis())
+}
+
+/// When [`Client::read_every`] asks its next read, given when the last one ended and the interval
+/// `every`: when the first slot after the end opens. Slot `k` opens `k * every` after the start,
+/// rounded up to the whole millisecond [`sample_line`] prints, so the schedule does not drift and
+/// a read that ran past one or more slots skips them. A read asked at the start of its slot prints
+/// a time in that slot, and later than the line before, whose read ended in an earlier millisecond.
+pub fn next_read(ended: Duration, every: Duration) -> Duration {
+    const MS: u128 = 1_000_000;
+    let every = every.as_nanos();
+    // The first slot to open after the millisecond the read ended in.
+    let k = ended.as_millis() * MS / every + 1;
+    Duration::from_millis(u64::try_from((k * every).div_ceil(MS)).unwrap_or(u64::MAX))
 }
 
 /// Why a command failed.
@@ -345,7 +360,8 @@ impl<W: Wire> Client<W> {
     /// `board read --hz` (`specs/board-route.md` section 2): [`read`](Self::read) `len` bytes at
     /// `addr` in slots `every` apart until `stop` says so, handing `sample` each read's bytes and
     /// the time since the first slot at which it was asked. A read that runs past its slot takes
-    /// the next slot after it ends: a slow bridge yields fewer samples, and none is made up.
+    /// the next slot after it ends ([`next_read`]): a slow bridge or a late wake yields fewer
+    /// samples, at most one a slot, and none is made up.
     pub fn read_every(
         &mut self,
         addr: u32,
@@ -365,8 +381,7 @@ impl<W: Wire> Client<W> {
             let at = t0.elapsed();
             let data = self.read(addr, len)?;
             sample(at, &data);
-            let next = t0.elapsed().as_nanos() / every.as_nanos() + 1;
-            slot = every * u32::try_from(next).unwrap_or(u32::MAX);
+            slot = next_read(t0.elapsed(), every);
         }
         Ok(())
     }

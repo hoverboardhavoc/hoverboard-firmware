@@ -22,7 +22,7 @@ use hoverboard_bridge_core::router::{Port, Router, NOTIFY_MAX};
 use hoverboard_bridge_core::sim::{board, Family, Gd32, Inject, RamFlash, SimPins, SimPlatform};
 use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
 use hoverboard_bridge_core::update::Update;
-use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTimes};
+use hoverboard_cli::client::{next_read, sample_line, Client, ClientError, Progress, StageTimes};
 use hoverboard_cli::transport::Tcp;
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 use link::StreamFramer;
@@ -374,6 +374,91 @@ fn a_streaming_read_takes_the_slots_the_bridge_keeps_up_with() {
         "1.234 4d4200ff"
     );
     assert_eq!(sample_line(Duration::ZERO, &[]), "0.000 ");
+}
+
+/// [`Client::read_every`]'s schedule on a made-up clock: each read starts `late` after it was due
+/// and takes `took`, as the loop asks it ([`next_read`] from when the last one ended). Each row is
+/// the line's time as printed, in milliseconds, when the read ended, and when the next was due.
+fn schedule(every: Duration, reads: &[(Duration, Duration)]) -> Vec<(u128, Duration, Duration)> {
+    let mut due = Duration::ZERO;
+    reads
+        .iter()
+        .map(|&(late, took)| {
+            let at = due + late;
+            let line = sample_line(at, &[]);
+            let (s, ms) = line.trim_end().split_once('.').unwrap();
+            let printed = s.parse::<u128>().unwrap() * 1000 + ms.parse::<u128>().unwrap();
+            let ended = at + took;
+            due = next_read(ended, every);
+            (printed, ended, due)
+        })
+        .collect()
+}
+
+/// `specs/board-route.md` section 2: a sample that misses its slot is not made up, so no two
+/// lines fall in one slot, and their times rise strictly as printed (to the millisecond), whatever
+/// the host's sleeps and the bridge's reads do. The schedule stays on the slots counted from the
+/// start, and a late or slow read takes the first slot after it ends, not a later one.
+#[test]
+fn a_late_read_never_shares_a_slot_or_a_printed_time_with_the_next() {
+    let ms = Duration::from_millis;
+    let us = Duration::from_micros;
+
+    // CI on PR #65 (2026-11-06): the read due at 1.000 s woke 49.6 ms late and took 0.1 ms, and
+    // the next, due at 1.050 s, printed the same time as it.
+    let mut reads = vec![(Duration::ZERO, ms(1)); 20];
+    reads.push((us(49_600), us(100)));
+    reads.push((Duration::ZERO, ms(1)));
+    let rows = schedule(ms(50), &reads);
+    let printed: Vec<u128> = rows.iter().map(|r| r.0).collect();
+    assert_eq!(printed[19..], [950, 1049, 1050]);
+
+    // Every rate's slots, against reads that are on time, late into the end of their slot or
+    // past it, quick or slower than several slots.
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut rand = |below: u128| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        u128::from(seed >> 33) % below.max(1)
+    };
+    for hz in [1000.0, 300.0, 143.0, 20.0, 10.0, 3.0] {
+        let every = Duration::from_secs_f64(1.0 / hz);
+        let n = every.as_nanos();
+        let reads: Vec<(Duration, Duration)> = (0..2000)
+            .map(|_| {
+                let late = match rand(4) {
+                    0 => 0,
+                    1 => n - 1 - rand(1_000_000.min(n)),
+                    2 => rand(3 * n),
+                    _ => rand(n / 10),
+                };
+                let took = match rand(3) {
+                    0 => rand(3 * n),
+                    _ => rand(n / 20),
+                };
+                (
+                    Duration::from_nanos(late as u64),
+                    Duration::from_nanos(took as u64),
+                )
+            })
+            .collect();
+        let rows = schedule(every, &reads);
+        for (i, w) in rows.windows(2).enumerate() {
+            let ((t0, ended, due), (t1, ..)) = (w[0], w[1]);
+            let at = |t: u128| format!("{hz} Hz, line {i}: {t} ms then {t1} ms");
+            assert!(t1 > t0, "{}", at(t0));
+            assert!(t1 * 1_000_000 / n > t0 * 1_000_000 / n, "{}", at(t0));
+            assert!(due > ended, "{}: due {due:?}, ended {ended:?}", at(t0));
+            assert!(due <= ended + every + ms(1), "{}: a slot skipped", at(t0));
+            let k = due.as_nanos() / n;
+            assert!(
+                due.as_nanos() - k * n < 1_000_000,
+                "{}: off the slots",
+                at(t0)
+            );
+        }
+    }
 }
 
 #[test]
