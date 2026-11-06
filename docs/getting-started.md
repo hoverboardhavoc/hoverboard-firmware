@@ -65,7 +65,7 @@ Plug the SuperMini into the computer over USB. Put the Wi-Fi network and a name 
 file, `bridge.json`:
 
 ```json
-{ "device": { "name": "hoverboard-bridge-left" }, "wifi": { "ssid": "my-network", "pass": "my-password" } }
+{ "device": { "name": "hb-left" }, "wifi": { "ssid": "my-network", "pass": "my-password" } }
 ```
 
 Then install:
@@ -107,7 +107,7 @@ If a bridge already answers on the port, `bridge install` names it and asks befo
 ## 4. Flash the motor controllers
 
 Every command goes through a bridge, named by the link option before the command: Wi-Fi
-(`--tcp hoverboard-bridge-left.local:5333`), Bluetooth (`--device hoverboard-bridge-left`) or USB
+(`--tcp hb-left.local:5333`), Bluetooth (`--device hb-left`) or USB
 (`--serial <port>`).
 
 Flash each board through its own bridge, one board at a time. On a split pair, do these steps
@@ -118,8 +118,8 @@ it is named by its `uid`, the chip's factory serial number. To read it, name a b
 exist; the refusal names the chip on the bridge's SWD header:
 
 ```
-$ hoverboard-cli --tcp hoverboard-bridge-left.local:5333 board target-id x
-error: no node named x (nodes: hoverboard-bridge-left); this bridge's SWD target is 511e39363734360a30313337 (halted or not running?): name it by its uid prefix
+$ hoverboard-cli --tcp hb-left.local:5333 board target-id x
+error: no node named x (nodes: hb-left); this bridge's SWD target is 511e39363734360a30313337 (halted or not running?): name it by its uid prefix
 ```
 
 If the refusal names no SWD target, the bridge reads no chip: check that the board is powered and
@@ -128,8 +128,8 @@ as some stock firmware does. Wire NRST to GPIO5 and run `board recover`, which h
 reset, attaches, and halts it at its reset vector before its firmware runs:
 
 ```
-$ hoverboard-cli --tcp hoverboard-bridge-left.local:5333 board recover
-hoverboard-bridge-left: held in reset, attached, halted at the reset vector
+$ hoverboard-cli --tcp hb-left.local:5333 board recover
+hb-left: held in reset, attached, halted at the reset vector
 SWD target b37b41333235390839393638 (gd32f1x0 64 KiB)
 ```
 
@@ -138,7 +138,7 @@ The board stays halted, and the next step flashes it without letting the old fir
 **Flash it,** naming the board by its `uid` or its first 4 or more hex digits:
 
 ```
-hoverboard-cli --tcp hoverboard-bridge-left.local:5333 board update 511e3936 hoverboard-firmware-<commit>.hbfw
+hoverboard-cli --tcp hb-left.local:5333 board update 511e3936 hoverboard-firmware-<commit>.hbfw
 ```
 
 `board update` reads the chip on the bridge's SWD header and flashes the bundle's image built for
@@ -149,11 +149,11 @@ holds what the stock firmware left there, and the board refuses settings writes 
 erased. The board now answers a walk, so `machine nodes` gives its address:
 
 ```
-$ hoverboard-cli --tcp hoverboard-bridge-left.local:5333 machine nodes
+$ hoverboard-cli --tcp hb-left.local:5333 machine nodes
 address  class             uid                       name
-0x01     bridge            1463937736f0000000000000  hoverboard-bridge-left
+0x01     bridge            1463937736f0000000000000  hb-left
 0x02     motor controller  511e39363734360a30313337  Hoverboard
-$ hoverboard-cli --tcp hoverboard-bridge-left.local:5333 board erase 0x02
+$ hoverboard-cli --tcp hb-left.local:5333 board erase 0x02
 ```
 
 A stock board may have its flash read-protected. `board clear-protection <board>` removes the
@@ -172,8 +172,8 @@ Apply each file through the board's own bridge, then restart the board, since pi
 boot:
 
 ```
-hoverboard-cli --tcp hoverboard-bridge-left.local:5333 board apply 0x02 boards/<layout>/<role>.json
-hoverboard-cli --tcp hoverboard-bridge-left.local:5333 board reset 0x02
+hoverboard-cli --tcp hb-left.local:5333 board apply 0x02 boards/<layout>/<role>.json
+hoverboard-cli --tcp hb-left.local:5333 board reset 0x02
 ```
 
 `apply` checks the file against the board's chip before it writes anything, refuses a layout that
@@ -183,7 +183,7 @@ over its bridge, with its own file.
 With both boards configured, the link between them is up, and one bridge reaches the whole machine:
 
 ```
-hoverboard-cli --tcp hoverboard-bridge-left.local:5333 machine nodes
+hoverboard-cli --tcp hb-left.local:5333 machine nodes
 ```
 
 The files leave out what depends on the wheels and the machine: each motor's direction and side,
