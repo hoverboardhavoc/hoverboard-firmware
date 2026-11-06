@@ -51,7 +51,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Timer};
 use esp_hal::rng::Rng;
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{AuthenticationMethodConfig, Config, Interface, WifiController};
+use esp_radio::wifi::{AuthenticationMethod, Config, Interface, WifiController};
 use espsvc::WifiState;
 use heapless09::Vec;
 
@@ -109,20 +109,16 @@ pub fn set_state(s: WifiState) {
 }
 
 /// The station's configuration for the network `ssid` with password `pass`, both UTF-8
-/// (`hoverboard_bridge_core::node::Station::Join`). An empty password is an open network; any
-/// other joins WPA2 Personal or stronger. `None` for a name or password the driver refuses (a
-/// password of 1 to 7 bytes).
-pub fn config(ssid: &str, pass: &str) -> Option<Config> {
-    let auth = if pass.is_empty() {
-        AuthenticationMethodConfig::Open
+/// (`hoverboard_bridge_core::node::Station::Join`). An empty password is an open network.
+pub fn config(ssid: &str, pass: &str) -> Config {
+    let sta = StationConfig::default()
+        .with_ssid(ssid.into())
+        .with_password(pass.into());
+    Config::Station(if pass.is_empty() {
+        sta.with_auth_method(AuthenticationMethod::None)
     } else {
-        AuthenticationMethodConfig::Wpa2Personal(pass.try_into().ok()?)
-    };
-    Some(Config::Station(
-        StationConfig::default()
-            .with_ssid(ssid.try_into().ok()?)
-            .with_authentication(auth),
-    ))
+        sta
+    })
 }
 
 /// The station's state and, while it is up, its address.
@@ -168,20 +164,19 @@ pub static GDB_CLOSE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub async fn station(mut controller: WifiController<'static>, config: Config, power: u8) {
     // `wifi.tx_power`'s range, 8 to 84, is inside `i8`'s.
     let power = power as i8;
-    // `set_config` starts the driver the first time it switches it to station mode.
-    let mut started = false;
     loop {
-        if controller.is_connected() {
+        if matches!(controller.is_connected(), Ok(true)) {
             let _e = controller.wait_for_disconnect_async().await;
             boot!("Wi-Fi: dropped: {:?}", _e);
             Timer::after(REJOIN).await;
         }
-        if !started {
-            match controller.set_config(&config) {
-                Ok(()) => {
-                    started = true;
-                    boot!("Wi-Fi: started")
-                }
+        if !matches!(controller.is_started(), Ok(true)) {
+            let started = match controller.set_config(&config) {
+                Ok(()) => controller.start_async().await,
+                Err(e) => Err(e),
+            };
+            match started {
+                Ok(()) => boot!("Wi-Fi: started"),
                 Err(_e) => {
                     boot!("Wi-Fi: start failed: {:?}", _e);
                     Timer::after(REJOIN).await;
@@ -213,7 +208,7 @@ pub async fn station(mut controller: WifiController<'static>, config: Config, po
 
 /// The IP stack.
 #[embassy_executor::task]
-pub async fn net(mut runner: Runner<'static, Interface>) {
+pub async fn net(mut runner: Runner<'static, Interface<'static>>) {
     runner.run().await
 }
 

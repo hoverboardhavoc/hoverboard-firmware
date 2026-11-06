@@ -6,7 +6,7 @@ name: CI
 # The repository holds four Cargo workspaces, one per build chain (specs/repo-layout.md):
 # motorcontroller/ (the GD32 image, pinned nightly, thumbv7m by default), shared/ (the crates more
 # than one chain links, pinned nightly), tools/ (the host programs, pinned nightly) and bridge/ (the
-# ESP32-C3 image, 1.96). Each cargo step runs from inside its workspace, so that workspace's
+# ESP32-C3 image, 1.92). Each cargo step runs from inside its workspace, so that workspace's
 # rust-toolchain.toml and .cargo/ apply; the root holds no Cargo workspace.
 #
 # Nine checks:
@@ -38,7 +38,7 @@ name: CI
 # (motorcontroller/rust-toolchain.toml carries the why: the shipping image is built with -Z
 # build-std, worth -2,408 B of flashed span, and build-std is nightly-only). shared/ is on it too,
 # because its crates are compiled into the image by that compiler. The exception is the bridge/
-# workspace, which pins 1.96; its job is the one that compiles the shared crates it links on stable.
+# workspace, which pins 1.92; its job is the one that compiles the shared crates it links on stable.
 # Three consequences this file has to honour, in every job:
 #   - `dtolnay/rust-toolchain@<ref>` takes the toolchain from its REF, and that argument OVERRIDES
 #     rust-toolchain.toml. A job left on `@1.96.0` would silently keep building on stable while the
@@ -1247,10 +1247,10 @@ jobs:
           path: hoverboard-firmware/tools/target/dist/hoverboard-cli-${{ matrix.target }}
           if-no-files-found: error
 
-  # The hoverboard bridge (bridge/): its own workspace on its own toolchain, the 1.96 stable its
-  # rust-toolchain.toml pins with the riscv32imc target (esp-hal 1.2 and its siblings need 1.95 or
-  # later). This job is also the check that the shared/ crates
-  # the bridge links compile on stable 1.96, at the versions bridge/Cargo.lock pins; the shared
+  # The hoverboard bridge (bridge/): its own workspace on its own toolchain, the 1.92 stable its
+  # rust-toolchain.toml pins with the riscv32imc target (the esp-hal fork it patches in is not built
+  # on the motorcontroller workspace's nightly). This job is also the check that the shared/ crates
+  # the bridge links compile on stable 1.92, at the versions bridge/Cargo.lock pins; the shared
   # workspace itself runs on the nightly. The hardware-free core's host tests and clippy
   # (all targets) first, then the firmware's release build, then the two images with a pinned
   # espflash binary release: the merged install image for `bridge install` and the app image for
@@ -1269,10 +1269,10 @@ jobs:
         with:
           path: hoverboard-firmware
 
-      - name: Install Rust (the bridge's 1.96) + riscv32imc and host targets
+      - name: Install Rust (the bridge's 1.92) + riscv32imc and host targets
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.92"
           targets: riscv32imc-unknown-none-elf, x86_64-unknown-linux-gnu
           components: rust-src, rustfmt, clippy
 

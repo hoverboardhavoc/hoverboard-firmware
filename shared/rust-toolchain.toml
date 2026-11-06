@@ -3,7 +3,7 @@
 # and Cargo.lock pins the dependency versions motorcontroller/Cargo.lock ships. The host tests link
 # the prebuilt core of this toolchain: build-std is only the motorcontroller's image builds, so
 # rust-src is not needed here. The ESP32-C3 bridge (../bridge) also links some of these crates on
-# 1.96 stable, from its own lockfile; the bridge CI job is the check that they build there.
+# 1.92 stable, from its own lockfile; the bridge CI job is the check that they build there.
 [toolchain]
 channel = "nightly-2026-07-20"
 components = ["rustfmt", "clippy"]
