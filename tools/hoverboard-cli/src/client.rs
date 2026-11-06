@@ -335,6 +335,24 @@ impl<W: Wire> Client<W> {
         )
     }
 
+    /// `TARGET_CTRL` `ConnectUnderReset` (`specs/bridge-nrst.md` section 2): the bridge holds the
+    /// board in reset, attaches, and answers with the `TARGET_ID` it read once the core halted at
+    /// its reset vector. Sent once: each one resets the board.
+    pub fn connect_under_reset(&mut self) -> Result<TargetId, ClientError> {
+        self.request(
+            &Msg::TargetCtrl(Ctrl::ConnectUnderReset),
+            1,
+            REPLY,
+            |m| match *m {
+                Msg::TargetId(t) => Some(Ok(t)),
+                Msg::Result { op, status } if op == OP_TARGET_CTRL => {
+                    Some(Err(ClientError::Status(status)))
+                }
+                _ => None,
+            },
+        )
+    }
+
     /// `MEM_READ`, split into [`MEM_MAX`] pieces.
     pub fn read(&mut self, addr: u32, len: usize) -> Result<Vec<u8>, ClientError> {
         let mut out = Vec::with_capacity(len);

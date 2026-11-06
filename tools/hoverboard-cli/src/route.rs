@@ -9,13 +9,16 @@
 //! - Anything else walks, and a walk that finds no such node names the attached bridge's SWD
 //!   target. `board erase` never goes by `uid`, and `board halt` is refused over a route through
 //!   the board.
+//! - `board recover` takes no target: it acts on the SWD header of the bridge the link reaches
+//!   (`specs/bridge-nrst.md` section 3, [`recover`]).
 
-use espsvc::TargetId;
+use espsvc::{Status, TargetId};
 use net::pdu::NO_ADDRESS;
 use net::walk::CLASS_BRIDGE;
+use store::{Value, DEVICE_NAME};
 
 use crate::cli::Noun;
-use crate::client::Client;
+use crate::client::{Client, ClientError};
 use crate::nodes::{self, uid_hex, Walked};
 use crate::target::{self, Target};
 use crate::wire::Wire;
@@ -28,6 +31,9 @@ pub enum Purpose {
     Erase,
     /// `board halt`: refused over a route through the board ([`target::halt_bridge`]).
     Halt,
+    /// `board update`, `board flash`, `board clear-protection` and `board target-id`: a walk that
+    /// misses while the attached bridge reads no SWD target ends with [`RECOVER_HINT`].
+    Identify,
     /// Every other SWD command.
     Other,
 }
@@ -127,7 +133,7 @@ pub fn swd<W: Wire>(wire: &mut W, spec: &str, purpose: Purpose) -> Result<Route,
     {
         Ok(b) => b,
         Err(e) if target::names_none(spec, &walked.found) => {
-            return Err(missed(wire, &walked, read, e))
+            return Err(missed(wire, &walked, read, purpose, e))
         }
         Err(e) => return Err(e),
     };
@@ -161,7 +167,13 @@ pub fn swd<W: Wire>(wire: &mut W, spec: &str, purpose: Purpose) -> Result<Route,
 /// The walk's miss `e`, with the SWD target of the bridge this link reaches added when it is a
 /// bridge and reads one (`read`, or one `TARGET_ID` now). A halted board answers no walk, but the
 /// tool does not guess that the two are the same board.
-fn missed<W: Wire>(wire: &mut W, walked: &Walked, read: Option<TargetId>, e: String) -> String {
+fn missed<W: Wire>(
+    wire: &mut W,
+    walked: &Walked,
+    read: Option<TargetId>,
+    purpose: Purpose,
+    e: String,
+) -> String {
     let bridge = walked
         .topology
         .gateway
@@ -176,14 +188,81 @@ fn missed<W: Wire>(wire: &mut W, walked: &Walked, read: Option<TargetId>, e: Str
              prefix",
             uid_hex(&id.uid)
         ),
+        None if purpose == Purpose::Identify => with_recover_hint(e),
         None => e,
+    }
+}
+
+/// The end of a refusal from `board update`, `board flash`, `board clear-protection` and `board
+/// target-id` when the bridge reads no SWD target (`specs/bridge-nrst.md` section 3).
+pub const RECOVER_HINT: &str = "if the board is powered and wired, its firmware may block SWD: \
+                                wire NRST to GPIO5 and run board recover";
+
+/// `board recover` refused over a link that ends at a board.
+pub const RECOVER_AT_BOARD: &str =
+    "board recover acts on the bridge this link reaches; connect to the board's own bridge";
+
+/// `board recover` when the debug port does not answer with the board held in reset.
+pub const RECOVER_NO_ANSWER: &str = "no answer with the board held in reset: check that NRST is \
+                                     wired to GPIO5 and the board is powered";
+
+/// `e` with [`RECOVER_HINT`] at its end.
+pub fn with_recover_hint(e: String) -> String {
+    format!("{e}; {RECOVER_HINT}")
+}
+
+/// A bridge's refusal `e` of `board update`, `board flash`, `board clear-protection` or `board
+/// target-id` as text: [`RECOVER_HINT`] at its end when the bridge reads no SWD target.
+pub fn identify_refusal(e: &ClientError) -> String {
+    match e {
+        ClientError::Status(Status::NoTarget) | ClientError::Flash(_, Status::NoTarget) => {
+            with_recover_hint(e.to_string())
+        }
+        e => e.to_string(),
+    }
+}
+
+/// What `board recover` reached: the bridge's `device.name` (its address, or "the bridge", when it
+/// has none) and the SWD target it read with the board held in reset.
+#[derive(Debug)]
+pub struct Recovered {
+    /// The bridge.
+    pub bridge: String,
+    /// The board, halted at its reset vector.
+    pub id: TargetId,
+}
+
+/// `board recover` (`specs/bridge-nrst.md` section 3): `TARGET_CTRL` `ConnectUnderReset` to the
+/// bridge the link reaches, which holds the board on its SWD header in reset, attaches and halts it
+/// at its reset vector. Refused when the link ends at a board.
+pub fn recover<W: Wire>(wire: &mut W) -> Result<Recovered, String> {
+    let hello = nodes::hello(wire)?;
+    let src = hello.guest_addr();
+    if !attached_bridge(wire, src) {
+        return Err(RECOVER_AT_BOARD.into());
+    }
+    let bridge = nodes::read(wire, src, NO_ADDRESS, DEVICE_NAME.key())
+        .ok()
+        .and_then(|r| match r.value() {
+            Some(Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            hello
+                .gateway_addr()
+                .map_or_else(|| "the bridge".into(), |a| format!("{a:#04x}"))
+        });
+    match Client::addressed(wire, src, NO_ADDRESS).connect_under_reset() {
+        Ok(id) => Ok(Recovered { bridge, id }),
+        Err(ClientError::Status(Status::NoTarget)) => Err(RECOVER_NO_ANSWER.into()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use espsvc::{Msg, OP_TARGET_ID_REQ};
+    use espsvc::{Ctrl, Msg, Stage, OP_TARGET_CTRL, OP_TARGET_ID_REQ};
     use net::pdu::{Opcode, Pdu};
     use net::walk::{
         Identity, CFG_OK, CLASS_MOTOR, MCU_ESP32C3, MCU_F1X0, NB_ASSIGNED, NB_EMPTY, PORT_BLE,
@@ -361,13 +440,25 @@ mod tests {
                     b.extend_from_slice(n.name.as_bytes());
                     reply(Opcode::ConfigResp.to_u8(), n.addr, p.src, &b)
                 }
-                _ if p.opcode == OP_TARGET_ID_REQ => {
-                    // A motor controller drops the ESP commands.
-                    let Some(swd) = n.swd else { return };
-                    let m = Msg::TargetId(TargetId {
-                        uid: swd,
-                        ..TargetId::default()
-                    });
+                _ if p.opcode == OP_TARGET_ID_REQ
+                    || (p.opcode == OP_TARGET_CTRL
+                        && p.payload == [Ctrl::ConnectUnderReset as u8]) =>
+                {
+                    // A motor controller drops the ESP commands; a bridge that reads no SWD
+                    // target refuses with `NoTarget`.
+                    if n.class != CLASS_BRIDGE {
+                        return;
+                    }
+                    let m = match n.swd {
+                        Some(swd) => Msg::TargetId(TargetId {
+                            uid: swd,
+                            ..TargetId::default()
+                        }),
+                        None => Msg::Result {
+                            op: p.opcode,
+                            status: Status::NoTarget,
+                        },
+                    };
                     let mut buf = [0u8; espsvc::MAX_PDU];
                     let k = m.encode(n.addr, p.src, &mut buf).unwrap();
                     buf[..k].to_vec()
@@ -590,5 +681,69 @@ mod tests {
         assert_eq!(swd(&mut f, "0x03", Purpose::Other).unwrap_err(), refused);
         assert!(f.count(op(Opcode::ProbePorts)) > 1, "it walked");
         assert_eq!(f.first(op(Opcode::Identify)), Some(5), "{:02x?}", f.ops());
+    }
+
+    /// The master's firmware blocks SWD: it answers no walk, and its bridge reads no SWD target.
+    fn master_blocks_swd() -> Fleet {
+        let mut f = Fleet::offroad(0x03).master_halted();
+        f.nodes[1].swd = None;
+        f
+    }
+
+    /// `specs/bridge-nrst.md` section 5: `board recover` over a link that ends at a bridge sends
+    /// `ConnectUnderReset` to the attached bridge and returns its name and the uid it read; over a
+    /// link that ends at a board it is refused, and nothing is sent to the board.
+    #[test]
+    fn board_recover_acts_on_the_attached_bridge_only() {
+        let mut f = Fleet::offroad(0x03);
+        let r = recover(&mut f).unwrap();
+        assert_eq!(r.bridge, "offroad-master-bridge");
+        assert_eq!(r.id.uid, uid(MASTER));
+        assert_eq!(
+            f.ops(),
+            [
+                HELLO,
+                op(Opcode::Identify),
+                op(Opcode::ConfigRead),
+                OP_TARGET_CTRL
+            ]
+        );
+        assert!(f.sent.iter().all(|&(_, dst)| dst == NO_ADDRESS));
+
+        let mut f = Fleet::offroad(0x01);
+        assert_eq!(recover(&mut f).unwrap_err(), RECOVER_AT_BOARD);
+        assert_eq!(f.count(OP_TARGET_CTRL), 0);
+
+        // The bridge reads nothing even with the board held in reset: the wiring refusal.
+        let mut f = master_blocks_swd();
+        assert_eq!(recover(&mut f).unwrap_err(), RECOVER_NO_ANSWER);
+    }
+
+    /// `specs/bridge-nrst.md` section 5: `board update` and `board target-id` (`Purpose::Identify`)
+    /// end a miss with the recover hint when the attached bridge reads no SWD target; the other SWD
+    /// commands do not, and neither does a miss while the bridge reads one.
+    #[test]
+    fn a_miss_with_no_swd_target_ends_with_the_recover_hint() {
+        for spec in ["0x01", "offroad-master", "b37b"] {
+            let mut f = master_blocks_swd();
+            let e = swd(&mut f, spec, Purpose::Identify).unwrap_err();
+            assert!(e.ends_with(&format!("; {RECOVER_HINT}")), "{spec}: {e}");
+            let mut f = master_blocks_swd();
+            let e = swd(&mut f, spec, Purpose::Other).unwrap_err();
+            assert!(!e.contains("board recover"), "{spec}: {e}");
+        }
+        let mut f = Fleet::offroad(0x03).master_halted();
+        let e = swd(&mut f, "0x01", Purpose::Identify).unwrap_err();
+        assert!(!e.contains("board recover"), "{e}");
+        // After the route: a bridge refusal of NoTarget carries the hint, any other does not.
+        assert_eq!(
+            identify_refusal(&ClientError::Status(Status::NoTarget)),
+            format!("no target: SWD did not answer; {RECOVER_HINT}")
+        );
+        assert!(
+            identify_refusal(&ClientError::Flash(Stage::Erasing, Status::NoTarget))
+                .ends_with(RECOVER_HINT)
+        );
+        assert!(!identify_refusal(&ClientError::Status(Status::Armed)).contains("recover"));
     }
 }

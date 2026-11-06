@@ -168,6 +168,18 @@ fn refusal(c: &mut EspClient, e: ClientError) -> String {
     }
 }
 
+/// A bridge refusal of `board update`, `board flash`, `board clear-protection` or `board
+/// target-id` as text: [`refusal`]'s, with the recover hint at its end when the bridge reads no SWD
+/// target (`specs/bridge-nrst.md` section 3).
+fn identify_refusal(c: &mut EspClient, e: ClientError) -> String {
+    match e {
+        ClientError::Status(Status::NoTarget) | ClientError::Flash(_, Status::NoTarget) => {
+            route::identify_refusal(&e)
+        }
+        e => refusal(c, e),
+    }
+}
+
 fn print_id(id: &espsvc::TargetId) {
     let family = family_name(id.family);
     let uid: Vec<String> = id.uid.iter().map(|b| format!("{b:02x}")).collect();
@@ -1083,7 +1095,7 @@ impl fleet::Steps for Machine<'_> {
             ));
         }
         println!("{}", bundle::choice_line(&self.bundle.manifest, img, chip));
-        flash_board(&mut c, &self.plan.bins[&board.image])
+        flash_board(&mut c, &self.plan.bins[&board.image], refusal)
     }
 
     fn status(&mut self, link: &Link, board: &fleet::PlanBoard) -> Result<(), String> {
@@ -1447,17 +1459,20 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
         Swd::Update { bundle, .. } => Some(FlashFile::Bundle(read_bundle(bundle)?)),
         _ => None,
     };
-    let purpose = if *op == Swd::Ctrl(Ctrl::Halt) {
-        Purpose::Halt
-    } else {
-        Purpose::Other
+    let purpose = match op {
+        Swd::Ctrl(Ctrl::Halt) => Purpose::Halt,
+        Swd::TargetId | Swd::ClearProtection | Swd::Flash { .. } | Swd::Update { .. } => {
+            Purpose::Identify
+        }
+        _ => Purpose::Other,
     };
     let (mut c, _) = swd_route(link, spec, purpose)?;
     let e = |e: ClientError| e.to_string();
+    let no_target = |e: ClientError| route::identify_refusal(&e);
     match op {
-        Swd::TargetId => print_id(&c.target_id().map_err(e)?),
+        Swd::TargetId => print_id(&c.target_id().map_err(no_target)?),
         Swd::ClearProtection => {
-            let id = c.target_id().map_err(e)?;
+            let id = c.target_id().map_err(no_target)?;
             print_id(&id);
             if id.family == espsvc::FAMILY_UNSUPPORTED {
                 return Err(format!(
@@ -1532,7 +1547,7 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
             let image = match file.expect("read above") {
                 FlashFile::Bin(bin) => bin,
                 FlashFile::Bundle(b) => {
-                    let id = c.target_id().map_err(e)?;
+                    let id = c.target_id().map_err(no_target)?;
                     let (img, chip) = b.select(&id, want).map_err(|e| e.to_string())?;
                     println!("{}", bundle::choice_line(&b.manifest, img, chip));
                     let bin = b.prepare(img).map_err(|e| e.to_string())?;
@@ -1548,15 +1563,38 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
                     bin
                 }
             };
-            flash_board(&mut c, &image)?;
+            flash_board(&mut c, &image, identify_refusal)?;
         }
     }
     Ok(())
 }
 
+/// `board recover` (`specs/bridge-nrst.md` section 3): the bridge this link reaches holds its board
+/// in reset, attaches and halts it at the reset vector; print the uid and chip it read. The board
+/// stays halted for the next command.
+fn board_recover(link: &Link) -> Result<(), String> {
+    let mut wire = wire_on(link)?;
+    let r = route::recover(&mut wire)?;
+    println!(
+        "{}: held in reset, attached, halted at the reset vector",
+        r.bridge
+    );
+    println!(
+        "SWD target {} ({} {} KiB)",
+        nodes::uid_hex(&r.id.uid),
+        family_name(r.id.family).to_lowercase(),
+        r.id.flash_kib
+    );
+    Ok(())
+}
+
 /// Flash `image` through the bridge `c` reaches and wait for `booted`, printing the progress and
 /// each stage's time.
-fn flash_board(c: &mut EspClient, image: &[u8]) -> Result<(), String> {
+fn flash_board(
+    c: &mut EspClient,
+    image: &[u8],
+    refuse: fn(&mut EspClient, ClientError) -> String,
+) -> Result<(), String> {
     let t0 = Instant::now();
     let mut stage = None;
     let mut times = StageTimes::new();
@@ -1574,7 +1612,7 @@ fn flash_board(c: &mut EspClient, image: &[u8]) -> Result<(), String> {
             t0.elapsed().as_secs_f32()
         );
     })
-    .map_err(|x| refusal(c, x))?;
+    .map_err(|x| refuse(c, x))?;
     eprintln!();
     println!(
         "booted ({} B in {:.1} s)",
@@ -2240,6 +2278,7 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
         Command::Status { targets } => board_status_cmd(link, &targets)?,
         Command::Erase { target, yes } => board_erase(link, &target, yes)?,
         Command::Swd { target, op } => board_swd(link, &target, &op)?,
+        Command::Recover => board_recover(link)?,
         Command::Nodes => machine_nodes(link)?,
         Command::MachineGet { path } => machine_get(link, &path)?,
         Command::MachineSet { path, value, force } => machine_set(link, &path, &value, force)?,

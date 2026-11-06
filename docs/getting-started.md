@@ -41,6 +41,10 @@ Wire the SuperMini to the motor controller's SWD header:
 
 The SWD header's 3V3 pin stays unconnected. On a split pair, each board gets its own bridge.
 
+NRST is needed only to reach a board whose firmware blocks SWD: `board recover` (section 4) holds
+the board in reset through it while the bridge attaches. The bridge never drives the pin high and
+releases it except during `board recover`, so a board with NRST wired runs as one without.
+
 ### Power the bridge
 
 The SuperMini needs 5 V on its 5V pin or its USB-C port. Any 5 V source works as long as its ground
@@ -118,8 +122,18 @@ $ hoverboard-cli --tcp hoverboard-bridge-left.local:5333 board target-id x
 error: no node named x (nodes: hoverboard-bridge-left); this bridge's SWD target is 511e39363734360a30313337 (halted or not running?): name it by its uid prefix
 ```
 
-If the refusal ends at `no node named x (nodes: ...)`, with no SWD target, the bridge reads no chip:
-check that the board is powered and that SWCLK, SWDIO and GND are seated at both ends.
+If the refusal names no SWD target, the bridge reads no chip: check that the board is powered and
+that SWCLK, SWDIO and GND are seated at both ends. If they are, the board's firmware may block SWD,
+as some stock firmware does. Wire NRST to GPIO5 and run `board recover`, which holds the board in
+reset, attaches, and halts it at its reset vector before its firmware runs:
+
+```
+$ hoverboard-cli --tcp hoverboard-bridge-left.local:5333 board recover
+hoverboard-bridge-left: held in reset, attached, halted at the reset vector
+SWD target b37b41333235390839393638 (gd32f1x0 64 KiB)
+```
+
+The board stays halted, and the next step flashes it without letting the old firmware run.
 
 **Flash it,** naming the board by its `uid` or its first 4 or more hex digits:
 

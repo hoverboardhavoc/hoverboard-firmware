@@ -177,6 +177,10 @@ pub enum Command {
         /// What to do.
         op: Swd,
     },
+    /// `board recover`: hold the board on the attached bridge's SWD header in reset, attach and halt
+    /// it at its reset vector (`specs/bridge-nrst.md` section 3). It names no board: one whose
+    /// firmware blocks SWD answers neither a walk nor a `uid` read.
+    Recover,
     /// `machine nodes`: the walk, with each board's flags.
     Nodes,
     /// `machine get`: a machine field from every motor controller.
@@ -299,7 +303,7 @@ pub const USAGE: &str =
   board diff [--replace] <board> <file>... [--force] | status [<board>...] | compact <board>
   board fields --json | erase <board> [--yes] | clear-protection <board>
   board update <board> <bundle> [--image NAME] [--yes] | flash <board> <elf>
-  board disarm|halt|resume|reset|reset-halt <board> | target-id <board>
+  board disarm|halt|resume|reset|reset-halt <board> | target-id <board> | recover
   board read <board> <addr> <len> [--hz N] | write <board> <addr> <hex>
   machine nodes | get <path> | set <path> <value> [--force] | dump <file> [--from <board>]
   machine apply <file> [--map <uid>=<board>]... [--force]
@@ -692,6 +696,10 @@ fn node_command(
         }
         ("clear-protection", [t]) if board => swd(t, Swd::ClearProtection),
         ("target-id", [t]) if board => swd(t, Swd::TargetId),
+        ("recover", []) if board => {
+            ok(&[])?;
+            Ok(Command::Recover)
+        }
         (c, [t]) if board && ctrl(c).is_some() => swd(t, Swd::Ctrl(ctrl(c).expect("matched"))),
         ("read", [t, addr, len]) if board => {
             ok(&["--hz"])?;
@@ -915,6 +923,7 @@ mod tests {
                 }),
             ),
             ("id", "board target-id rover-left", swd(Swd::TargetId)),
+            ("recover", "board recover", Command::Recover),
             (
                 "watch",
                 "machine watch 2 0x01 rover-right",
@@ -1096,6 +1105,21 @@ mod tests {
         assert_eq!(cmd("board target-id 0x01 --hz 10"), Err(USAGE.into()));
     }
 
+    /// `specs/bridge-nrst.md` section 5: `board recover` takes no target, and a board named is a
+    /// usage error; `bridge recover` is no command.
+    #[test]
+    fn board_recover_takes_no_target() {
+        assert_eq!(cmd("board recover"), Ok(Command::Recover));
+        for line in [
+            "board recover rover-left",
+            "board recover 0x02",
+            "board recover b37b",
+            "bridge recover",
+        ] {
+            assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
+        }
+    }
+
     #[test]
     fn an_option_the_command_does_not_take_is_a_usage_error() {
         for line in [
@@ -1109,6 +1133,7 @@ mod tests {
             "bridge flash 0x03 fw.elf",
             "board info 0x01",
             "board update 0x01 b.hbfw --dirty",
+            "board recover --yes",
             "bridge update 0x03 b.bin --image x",
             "machine update b.hbfw --image x",
             "machine update b.hbfw --no-confirm",
