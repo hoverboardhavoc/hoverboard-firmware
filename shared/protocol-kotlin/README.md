@@ -89,7 +89,7 @@ compares it to the Kotlin:
 - `motorcontroller/hal/src/pincap.rs`: every chip's bonding, routes and ADC inputs, and the SWD pair
 - `motorcontroller/board/src/lib.rs`, `status.rs`: the dead-time floor, and the boot status record
   `board.status` carries (its one reason, entry size and cap)
-- `motorcontroller/orchestrator/src/events.rs`: the `fault` word's bits
+- `shared/linkctl/src/lib.rs`: the `fault` word's bits (`EV_*`, `FAULT_A_BITS`, `ARM_BLOCKING_BITS`)
 
 The firmware checks no configuration (`specs/config-read-once.md`): the CLI and the app check every
 write first. `checks/` is the app's port of the CLI's checks, and `checks/SharedCheckCasesTest` runs

@@ -1,0 +1,4 @@
+# The Xtensa toolchain, installed by espup (`espup install --targets esp32 --toolchain-version
+# 1.92.0.0`): rustc 1.92, the compiler the bridge's lulf/esp-hal fork is validated on.
+[toolchain]
+channel = "esp"

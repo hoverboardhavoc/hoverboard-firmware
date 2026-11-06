@@ -55,44 +55,13 @@
 //! was, at the tear). Counts saturate at 255 rather than wrapping, so a saturated counter reads as
 //! "at least 255", never as a small number.
 
-/// `comms_loss`: peer staleness past `CYCLIC_TIMEOUT_TICKS` (`fault_a`).
-pub const EV_COMMS_LOSS: u16 = 1 << 0;
-/// This board is latched STOPPED (`fault_a`). One producer: the run-time tilt cutout
-/// ([`Levels::tilt`], `specs/control.md` (l)).
-pub const EV_STOP_ALL: u16 = 1 << 1;
-/// `imu_loss`: `IMU_LOSS_THRESHOLD` consecutive failed reads on a configured IMU (`fault_a`).
-pub const EV_IMU_LOSS: u16 = 1 << 2;
-/// Motor 0's fault latch (`fault_a`).
-pub const EV_LATCH_A: u16 = 1 << 4;
-/// Motor 1's fault latch (the sole `fault_b` input).
-pub const EV_LATCH_B: u16 = 1 << 5;
-/// `mode_fault`: the control dispatch demoted the requested mode at the validation seam.
-pub const EV_MODE_FAULT: u16 = 1 << 6;
-/// The power-request level (button OR the remote mirror). Its FALL drives RUN -> SHUTDOWN.
-pub const EV_POWER_REQUEST: u16 = 1 << 7;
-/// Motor-side cause: hall dwell (`motor::FAULT_HALL` in the motor FAULT word) (`fault_a`).
-pub const EV_MOTOR_HALL: u16 = 1 << 8;
-/// Motor-side cause: the current-sense calibration was refused at init (`motor::FAULT_INIT_CAL`)
-/// (`fault_a`).
-pub const EV_MOTOR_CAL: u16 = 1 << 9;
-/// Motor-side cause: period-liveness loss (`motor::PeriodHealth`) (`fault_a`).
-pub const EV_MOTOR_PERIOD: u16 = 1 << 10;
-/// Motor-side cause: an arm attempt aborted before MOE and is held (`crate::arm` in the firmware)
-/// (`fault_a`).
-pub const EV_MOTOR_ARM: u16 = 1 << 11;
-/// The board's configuration did not all come up: its boot status record has an entry
-/// (`specs/configured-links.md` section 5, `STATUS_READ` for the detail). Set for the whole run
-/// from the boot fact ([`crate::BoardIdentity::config_fault`]). Not in [`FAULT_A_BITS`], so it gates
-/// nothing: an absent LED does not stop a board arming, and an absent motor is already an
-/// unconfigured one. It is on the wire so every fault display shows a configuration problem live.
-pub const EV_CONFIG: u16 = 1 << 12;
-/// The boards of the machine do not agree (`specs/machine-settings.md` section 4.2): a configured
-/// link has heard no peer since boot, or its peer's machine digest differs from this board's
-/// ([`crate::machine::Machine::disagrees`]). Not in [`FAULT_A_BITS`]: it blocks arming (the mode
-/// machine's OFF-inhibit) and does nothing else, so it never disengages a running machine.
-pub const EV_MACHINE: u16 = linkctl::CyclicState::FAULT_MACHINE;
-/// The four motor-side causes: the set `motor::motor_fault_level` returns.
-pub const EV_MOTOR_BITS: u16 = EV_MOTOR_HALL | EV_MOTOR_CAL | EV_MOTOR_PERIOD | EV_MOTOR_ARM;
+// The bit table is the meaning of `linkctl::CyclicState::fault`, so `linkctl` owns it; the
+// producers below set these bits.
+pub use linkctl::{
+    EV_COMMS_LOSS, EV_CONFIG, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B, EV_MACHINE, EV_MODE_FAULT,
+    EV_MOTOR_ARM, EV_MOTOR_BITS, EV_MOTOR_CAL, EV_MOTOR_HALL, EV_MOTOR_PERIOD, EV_POWER_REQUEST,
+    EV_STOP_ALL, FAULT_A_BITS,
+};
 
 /// The number of transition counters. Counters 0..=7 count bits 0..=7 of the level mask, except
 /// counter 3, which counts the motor union ([`counted`]).
@@ -112,15 +81,6 @@ pub const fn counted(mask: u16) -> u8 {
         low
     }
 }
-
-/// The `fault_a` group as a mask over [`Levels::mask`]: the producers whose level the mode
-/// machine folds into Fault A (`specs/sensing-and-safety.md`). [`Levels::fault_a`] is this mask
-/// applied, so the aggregate the machine consumes and the mask a peer reads out of
-/// `CYCLIC_STATE.fault` (`specs/rover-one-imu.md` section 4) cannot name different groups.
-/// [`EV_MODE_FAULT`] and [`EV_POWER_REQUEST`] are in the level mask and are not faults, which
-/// this constant states by leaving them out rather than by a comment at each consumer.
-pub const FAULT_A_BITS: u16 =
-    EV_COMMS_LOSS | EV_STOP_ALL | EV_IMU_LOSS | EV_LATCH_A | EV_MOTOR_BITS;
 
 /// One tick's gating-producer levels, named.
 ///

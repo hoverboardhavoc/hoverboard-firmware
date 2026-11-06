@@ -80,6 +80,15 @@ pub const fn is_esp_opcode(op: u8) -> bool {
     op >= 0x80 && op <= 0x9F
 }
 
+/// The bridge's GATT link service (`specs/hoverboard-bridge.md`, "The BLE link"):
+/// `4842e500-7a1d-4c0e-9d1b-35a1c0de0001`. The bridge serves it (`bridge/src/ble.rs`) and the
+/// handheld finds it by this UUID (`specs/handheld-remote.md` section 3.1).
+pub const LINK_SERVICE_UUID: u128 = 0x4842e500_7a1d_4c0e_9d1b_35a1c0de0001;
+/// The link service's `rx` characteristic (central to bridge, write without response).
+pub const LINK_RX_UUID: u128 = 0x4842e500_7a1d_4c0e_9d1b_35a1c0de0002;
+/// The link service's `tx` characteristic (bridge to central, notify).
+pub const LINK_TX_UUID: u128 = 0x4842e500_7a1d_4c0e_9d1b_35a1c0de0003;
+
 /// The largest PDU any link carries (`net::walk::MAX_PDU`).
 pub const MAX_PDU: usize = net::walk::MAX_PDU;
 /// Data bytes per `FLASH_CHUNK`: what is left of [`MAX_PDU`] after the header and the 4 B offset,

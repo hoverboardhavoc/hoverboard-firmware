@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use net::pdu::{Opcode, Pdu, NO_ADDRESS};
-use net::walk::{Controller, CLASS_BRIDGE};
+use net::pdu::{Opcode, Pdu};
+use net::walk::{Controller, PduBuf, CLASS_BRIDGE};
 pub use net::walk::{Identity, CLASS_MOTOR};
 use store::{Key, Type, Value, DEVICE_NAME};
 
@@ -239,7 +239,8 @@ fn describe(pdu: &[u8]) -> Option<String> {
     Some(format!("{:?} to {:#04x}", p.known()?, p.dst))
 }
 
-/// A `CONFIG_RESP`: its status, and the value's type tag and bytes when there is one.
+/// A `CONFIG_RESP`: its status, and the value's type tag and bytes when there is one. The owned
+/// form of [`net::walk::ConfigResp`], which decodes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigResp {
     /// The `CFG_*` status.
@@ -257,30 +258,23 @@ impl ConfigResp {
     }
 }
 
-/// Send request `op` with `payload` from `src` to `dst` and wait for the reply `answer` takes: a
-/// frame of opcode `reply`, addressed to `src`, from `dst`. A request to `0x00` is answered by the
-/// node on the tool's own link, whatever its address. Sent [`TRIES`] times, each waiting
-/// [`REPLY_WAIT`].
+/// Send the request `pdu` from `src` to `dst` (encoded by [`net::walk::request`], `None` when it
+/// did not fit one PDU) and wait for the reply `answer` takes: a `reply` frame to that request, as
+/// [`net::walk::is_reply`] matches it. Sent [`TRIES`] times, each waiting [`REPLY_WAIT`].
 fn ask<W: Wire, T>(
     wire: &mut W,
-    (op, reply): (Opcode, Opcode),
-    src: u8,
-    dst: u8,
-    payload: &[u8],
+    pdu: Option<PduBuf>,
+    reply: Opcode,
+    (src, dst): (u8, u8),
     answer: impl Fn(&[u8]) -> Option<T>,
 ) -> Result<T, String> {
-    let pdu = Pdu::from_op(op, src, dst, payload);
-    let mut buf = [0u8; net::walk::MAX_PDU];
-    let n = pdu
-        .encode(&mut buf)
-        .map_err(|_| "the value does not fit one PDU".to_string())?;
+    let pdu = pdu.ok_or_else(|| "the value does not fit one PDU".to_string())?;
     for _ in 0..TRIES {
-        wire.send(&buf[..n]);
+        wire.send(&pdu);
         let deadline = Instant::now() + REPLY_WAIT;
         while let Some(pkt) = wire.recv(deadline.saturating_duration_since(Instant::now())) {
             let Ok(p) = Pdu::decode(&pkt) else { continue };
-            let from = dst == NO_ADDRESS || p.src == dst;
-            if p.known() == Some(reply) && p.dst == src && from {
+            if net::walk::is_reply(&p, reply, src, dst) {
                 if let Some(t) = answer(p.payload) {
                     return Ok(t);
                 }
@@ -290,21 +284,21 @@ fn ask<W: Wire, T>(
     Err(format!("no {reply:?} from {dst:#04x}"))
 }
 
-/// Send a `CONFIG_*` request `op` with `payload` from `src` to `dst` and wait for the `CONFIG_RESP`
-/// whose first two bytes are `echo` (the key, or `[0, 0]` for the acks that name none).
+/// Send the `CONFIG_*` request `pdu` from `src` to `dst` and wait for the `CONFIG_RESP` whose first
+/// two bytes are `echo` (the key, or `[0, 0]` for the acks that name none), as
+/// [`net::walk::ConfigResp::answering`] matches it.
 fn exchange<W: Wire>(
     wire: &mut W,
-    op: Opcode,
+    pdu: Option<PduBuf>,
     src: u8,
     dst: u8,
-    payload: &[u8],
     echo: [u8; 2],
 ) -> Result<ConfigResp, String> {
-    ask(wire, (op, Opcode::ConfigResp), src, dst, payload, |p| {
-        (p.len() >= 4 && p[..2] == echo).then(|| ConfigResp {
-            status: p[2],
-            tag: p[3],
-            bytes: p[4..].to_vec(),
+    ask(wire, pdu, Opcode::ConfigResp, (src, dst), |p| {
+        net::walk::ConfigResp::echoing(p, echo).map(|r| ConfigResp {
+            status: r.status,
+            tag: r.tag,
+            bytes: r.bytes.to_vec(),
         })
     })
     .map_err(|_| format!("no CONFIG_RESP from {dst:#04x}"))
@@ -312,27 +306,15 @@ fn exchange<W: Wire>(
 
 /// `IDENTIFY` to `dst`: its `IDENTITY` (`specs/machine-settings.md` section 6.1).
 pub fn identify<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<Identity, String> {
-    ask(
-        wire,
-        (Opcode::Identify, Opcode::Identity),
-        src,
-        dst,
-        &[],
-        Identity::decode,
-    )
+    let pdu = net::walk::request(Opcode::Identify, src, dst, &[]);
+    ask(wire, pdu, Opcode::Identity, (src, dst), Identity::decode)
 }
 
 /// `STATUS_READ` to `dst`: the boot status record's entries, four bytes each
 /// (`specs/configured-links.md` section 5).
 pub fn status_read<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<Vec<u8>, String> {
-    ask(
-        wire,
-        (Opcode::StatusRead, Opcode::Status),
-        src,
-        dst,
-        &[],
-        |p| Some(p.to_vec()),
-    )
+    let pdu = net::walk::request(Opcode::StatusRead, src, dst, &[]);
+    ask(wire, pdu, Opcode::Status, (src, dst), |p| Some(p.to_vec()))
 }
 
 /// Send a `CONFIG_*` request for `key` and wait for its `CONFIG_RESP`.
@@ -344,9 +326,8 @@ fn config<W: Wire>(
     key: Key,
     value: &[u8],
 ) -> Result<ConfigResp, String> {
-    let mut payload = vec![key.field_id, key.index];
-    payload.extend_from_slice(value);
-    exchange(wire, op, src, dst, &payload, [key.field_id, key.index])
+    let pdu = net::walk::config_request(op, src, dst, key, value);
+    exchange(wire, pdu, src, dst, [key.field_id, key.index])
 }
 
 /// `CONFIG_READ` of `key` at `dst`.
@@ -384,7 +365,8 @@ pub fn unstore<W: Wire>(wire: &mut W, src: u8, dst: u8, key: Key) -> Result<Conf
 /// `CONFIG_COMPACT` at `dst` (`specs/cli-config.md` section 6.3): the status of its
 /// `[0, 0, status, 0]` ack.
 pub fn compact<W: Wire>(wire: &mut W, src: u8, dst: u8) -> Result<u8, String> {
-    exchange(wire, Opcode::ConfigCompact, src, dst, &[], [0, 0]).map(|r| r.status)
+    let pdu = net::walk::request(Opcode::ConfigCompact, src, dst, &[]);
+    exchange(wire, pdu, src, dst, [0, 0]).map(|r| r.status)
 }
 
 /// A directed `ASSIGN(egress, new_addr)` from `src` to `relay`, as the walk assigns a frontier node
@@ -471,6 +453,7 @@ pub fn parse_key(s: &str) -> Result<Key, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use net::pdu::NO_ADDRESS;
     use net::walk::{NB_ASSIGNED, NB_EMPTY, PORT_BLE, PORT_SWD, PORT_UART, PROTO_VER};
     use std::collections::VecDeque;
 

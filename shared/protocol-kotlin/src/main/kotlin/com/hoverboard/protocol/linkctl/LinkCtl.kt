@@ -488,43 +488,43 @@ data class CyclicState(
          */
         const val FLAG_PEER_SILENT = 1 shl 5
 
-        /** [fault] bit 0: comms loss. `motorcontroller/orchestrator/src/events.rs`, `EV_COMMS_LOSS`. */
+        /** [fault] bit 0: comms loss. `shared/linkctl/src/lib.rs`, `EV_COMMS_LOSS`. */
         const val EV_COMMS_LOSS = 1 shl 0
 
-        /** [fault] bit 1: latched stopped by the tilt cutout. `events.rs`, `EV_STOP_ALL`. */
+        /** [fault] bit 1: latched stopped by the tilt cutout. `shared/linkctl/src/lib.rs`, `EV_STOP_ALL`. */
         const val EV_STOP_ALL = 1 shl 1
 
-        /** [fault] bit 2: IMU loss. `events.rs`, `EV_IMU_LOSS`. */
+        /** [fault] bit 2: IMU loss. `shared/linkctl/src/lib.rs`, `EV_IMU_LOSS`. */
         const val EV_IMU_LOSS = 1 shl 2
 
-        /** [fault] bit 4: motor 0's fault latch. `events.rs`, `EV_LATCH_A`. */
+        /** [fault] bit 4: motor 0's fault latch. `shared/linkctl/src/lib.rs`, `EV_LATCH_A`. */
         const val EV_LATCH_A = 1 shl 4
 
-        /** [fault] bit 5: motor 1's fault latch. `events.rs`, `EV_LATCH_B`. */
+        /** [fault] bit 5: motor 1's fault latch. `shared/linkctl/src/lib.rs`, `EV_LATCH_B`. */
         const val EV_LATCH_B = 1 shl 5
 
-        /** [fault] bit 6: the mode fault; not a fault-A producer. `events.rs`, `EV_MODE_FAULT`. */
+        /** [fault] bit 6: the mode fault; not a fault-A producer. `shared/linkctl/src/lib.rs`, `EV_MODE_FAULT`. */
         const val EV_MODE_FAULT = 1 shl 6
 
-        /** [fault] bit 7: the power request; not a fault. `events.rs`, `EV_POWER_REQUEST`. */
+        /** [fault] bit 7: the power request; not a fault. `shared/linkctl/src/lib.rs`, `EV_POWER_REQUEST`. */
         const val EV_POWER_REQUEST = 1 shl 7
 
-        /** [fault] bit 8: motor-side hall dwell. `events.rs`, `EV_MOTOR_HALL`. */
+        /** [fault] bit 8: motor-side hall dwell. `shared/linkctl/src/lib.rs`, `EV_MOTOR_HALL`. */
         const val EV_MOTOR_HALL = 1 shl 8
 
-        /** [fault] bit 9: calibration refused at init. `events.rs`, `EV_MOTOR_CAL`. */
+        /** [fault] bit 9: calibration refused at init. `shared/linkctl/src/lib.rs`, `EV_MOTOR_CAL`. */
         const val EV_MOTOR_CAL = 1 shl 9
 
-        /** [fault] bit 10: period-liveness loss. `events.rs`, `EV_MOTOR_PERIOD`. */
+        /** [fault] bit 10: period-liveness loss. `shared/linkctl/src/lib.rs`, `EV_MOTOR_PERIOD`. */
         const val EV_MOTOR_PERIOD = 1 shl 10
 
-        /** [fault] bit 11: an arm attempt aborted before MOE. `events.rs`, `EV_MOTOR_ARM`. */
+        /** [fault] bit 11: an arm attempt aborted before MOE. `shared/linkctl/src/lib.rs`, `EV_MOTOR_ARM`. */
         const val EV_MOTOR_ARM = 1 shl 11
 
         /**
          * [fault] bit 12: a configured function did not come up at boot, so the board's
          * boot status record (`STATUS_READ`) has an entry (`specs/configured-links.md` section 5). Set for the whole
-         * run; not in [FAULT_A_BITS], so it blocks nothing. `events.rs`, `EV_CONFIG`.
+         * run; not in [FAULT_A_BITS], so it blocks nothing. `shared/linkctl/src/lib.rs`, `EV_CONFIG`.
          */
         const val EV_CONFIG = 1 shl 12
 
@@ -533,13 +533,13 @@ data class CyclicState(
          * section 4.2): a configured link has heard no peer since boot, or its peer's [machine]
          * digest differs. It blocks the board ARMING (the mode machine's off-inhibit) and does
          * nothing else: not in [FAULT_A_BITS] nor [ARM_BLOCKING_BITS], so it never disengages a
-         * running machine. `events.rs`, `EV_MACHINE`.
+         * running machine. `shared/linkctl/src/lib.rs`, `EV_MACHINE`.
          */
         const val EV_MACHINE = 1 shl 13
 
         /**
          * The FAULT-A group of the [fault] mask: comms loss, the tilt cutout, IMU loss, motor 0's
-         * latch and the four motor-side causes. `motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`
+         * latch and the four motor-side causes. `shared/linkctl/src/lib.rs`, `FAULT_A_BITS`
          * (bits 0, 1, 2, 4 and 8 to 11; bit 3 is retired).
          */
         const val FAULT_A_BITS =
@@ -553,7 +553,7 @@ data class CyclicState(
          * asserted (`motorcontroller/state/src/mode.rs`, `ModeMachine::tick`; `motorcontroller/orchestrator/src/events.rs`,
          * `Levels::fault_a` and `Levels::fault_b`), so this is [FAULT_A_BITS] or [EV_LATCH_B]: bits
          * 0, 1, 2, 4, 5 and 8 to 11. The remote app's fault lamps and its fault disarm read this and
-         * no literal (`specs/remote-ui.md` 3.1b).
+         * no literal (`specs/remote-ui.md` 3.1b). `shared/linkctl/src/lib.rs`, `ARM_BLOCKING_BITS`.
          */
         const val ARM_BLOCKING_BITS = FAULT_A_BITS or EV_LATCH_B
 

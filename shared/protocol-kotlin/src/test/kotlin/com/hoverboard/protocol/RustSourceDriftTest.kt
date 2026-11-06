@@ -1013,30 +1013,19 @@ class RustSourceDriftTest {
     }
 
     /**
-     * The `u16` level-mask constants (`motorcontroller/orchestrator/src/events.rs`, `EV_LATCH_B` and the bits
-     * beside it), evaluated: each is
-
-     * `1 << N`, an OR of constants declared before it (`EV_MOTOR_BITS`, `FAULT_A_BITS`), or a
-     * `linkctl::CyclicState` constant, read where the wire owns it (`EV_MACHINE` is
-     * `shared/linkctl/src/lib.rs`, `CyclicState::FAULT_MACHINE`, which the CLI reads too). A constant written in
-     * any other form fails by name in [bitValue] rather than dropping out.
+     * The `u16` level-mask constants of the `fault` word (`shared/linkctl/src/lib.rs`, `EV_LATCH_B`
+     * and the bits beside it), evaluated: each is `1 << N` or an OR of constants declared before it
+     * (`EV_MOTOR_BITS`, `FAULT_A_BITS`, `ARM_BLOCKING_BITS`). A constant written in any other form
+     * fails by name in [bitValue] rather than dropping out.
      */
     private fun rustLevelMasks(): Map<String, Int> {
-        val events = rust("motorcontroller/orchestrator/src/events.rs")
         val values = linkedMapOf<String, Int>()
-        for (m in findAll(events, """^pub\s+const\s+(\w+)\s*:\s*u16\s*=\s*([^;]+);""", "events.rs u16 masks")) {
+        for (m in findAll(linkctl, """^pub\s+const\s+(\w+)\s*:\s*u16\s*=\s*([^;]+);""", "linkctl u16 masks")) {
             val name = m.groupValues[1]
             val expr = m.groupValues[2].trim()
-            val wire = Regex("""^linkctl::CyclicState::(\w+)$""").find(expr)
-            values[name] = if (wire != null) {
-                val bit = wire.groupValues[1]
-                val decl = checkNotNull(
-                    Regex("""pub\s+const\s+$bit\s*:\s*u16\s*=\s*([^;]+);""").find(linkctl),
-                ) { "$name names CyclicState::$bit, which shared/linkctl/src/lib.rs does not declare as a u16" }
-                bitValue("CyclicState::$bit", decl.groupValues[1])
-            } else if (expr.contains('|')) {
+            values[name] = if (expr.contains('|')) {
                 expr.split('|').map { it.trim() }.fold(0) { acc, term ->
-                    acc or checkNotNull(values[term]) { "$name names $term, which events.rs has not declared above it" }
+                    acc or checkNotNull(values[term]) { "$name names $term, which linkctl has not declared above it" }
                 }
             } else {
                 bitValue(name, expr)
@@ -1047,17 +1036,19 @@ class RustSourceDriftTest {
 
     /**
      * `CyclicState.ARM_BLOCKING_BITS` is Fault A and Fault B: `FAULT_A_BITS | EV_LATCH_B`, as the
-     * Rust declares them (`motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`). The remote app's
+     * Rust declares them (`shared/linkctl/src/lib.rs`, `ARM_BLOCKING_BITS`). The remote app's
      * fault lamps and fault disarm read it, so a bit the firmware adds to either group has to reach
      * the app or fail here.
      */
     @Test
     fun armBlockingBitsAreFaultAAndFaultBInTheRustSource() {
         val masks = rustLevelMasks()
-        val faultA = checkNotNull(masks["FAULT_A_BITS"]) { "events.rs no longer declares FAULT_A_BITS" }
-        val latchB = checkNotNull(masks["EV_LATCH_B"]) { "events.rs no longer declares EV_LATCH_B" }
+        val faultA = checkNotNull(masks["FAULT_A_BITS"]) { "linkctl no longer declares FAULT_A_BITS" }
+        val latchB = checkNotNull(masks["EV_LATCH_B"]) { "linkctl no longer declares EV_LATCH_B" }
+        val blocking = checkNotNull(masks["ARM_BLOCKING_BITS"]) { "linkctl no longer declares ARM_BLOCKING_BITS" }
+        assertEquals(faultA or latchB, blocking, "linkctl's ARM_BLOCKING_BITS is not FAULT_A_BITS | EV_LATCH_B")
         assertEquals(faultA, CyclicState.FAULT_A_BITS, "FAULT_A_BITS drifted from the Rust")
-        assertEquals(faultA or latchB, CyclicState.ARM_BLOCKING_BITS, "ARM_BLOCKING_BITS drifted from the Rust")
+        assertEquals(blocking, CyclicState.ARM_BLOCKING_BITS, "ARM_BLOCKING_BITS drifted from the Rust")
     }
 
     /**
@@ -2583,7 +2574,7 @@ class RustSourceDriftTest {
     /**
      * Every single-bit `EV_*` level against the `CyclicState.EV_*` mirror, as an exact set by name
      * and value. The Rust is enumerated, so a bit the firmware adds to the `fault` word (bit 12,
-     * `EV_CONFIG` in `motorcontroller/orchestrator/src/events.rs`, was one) fails here until the
+     * `EV_CONFIG` in `shared/linkctl/src/lib.rs`, was one) fails here until the
      * Kotlin carries it. A composite mask (`EV_MOTOR_BITS`) is left out by its value, not its name.
      */
     @Test
@@ -2604,7 +2595,7 @@ class RustSourceDriftTest {
             "EV_CONFIG" to CyclicState.EV_CONFIG,
             "EV_MACHINE" to CyclicState.EV_MACHINE,
         )
-        assertEquals(rust, kotlin, "the fault word's bits drifted from events.rs")
+        assertEquals(rust, kotlin, "the fault word's bits drifted from linkctl")
         assertEquals(0, CyclicState.EV_CONFIG and CyclicState.ARM_BLOCKING_BITS, "EV_CONFIG blocks nothing")
         // EV_MACHINE refuses an arm through the mode machine's off-inhibit and disengages nothing,
         // so it is outside both aggregates (`orchestrator::lib`, `off_inhibit: ... || levels.machine`).

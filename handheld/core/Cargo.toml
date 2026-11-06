@@ -1,0 +1,21 @@
+[package]
+name = "handheld-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The hardware-free half of the handheld remote (specs/handheld-remote.md): the L2 byte adapter, the walk session, the touch classifier and lift state machine, the throttle mapping, the arm rules, the pump, the readings and the layout. no_std, host-tested."
+
+[dependencies]
+link = { path = "../../shared/link" }
+net = { path = "../../shared/net" }
+linkctl = { path = "../../shared/linkctl" }
+store = { path = "../../shared/store" }
+base = { path = "../../shared/base" }
+heapless = "0.8"
+libm = "0.2"
+embedded-io = "0.7"
+
+# The redraw measurement (`tests/redraw.rs`) compiles the binary's `src/panel.rs` for the host.
+[dev-dependencies]
+embedded-graphics = "0.8"
+u8g2-fonts = { version = "0.7", features = ["embedded_graphics_textstyle"] }

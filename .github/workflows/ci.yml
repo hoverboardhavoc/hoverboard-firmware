@@ -3,11 +3,12 @@ name: CI
 # Every job checks the firmware out into a `hoverboard-firmware/` subdirectory, the layout a sibling
 # checkout once needed, because every path below is written against it.
 #
-# The repository holds four Cargo workspaces, one per build chain (specs/repo-layout.md):
+# The repository holds five Cargo workspaces, one per build chain (specs/repo-layout.md):
 # motorcontroller/ (the GD32 image, pinned nightly, thumbv7m by default), shared/ (the crates more
-# than one chain links, pinned nightly), tools/ (the host programs, pinned nightly) and bridge/ (the
-# ESP32-C3 image, 1.96). Each cargo step runs from inside its workspace, so that workspace's
-# rust-toolchain.toml and .cargo/ apply; the root holds no Cargo workspace.
+# than one chain links, pinned nightly), tools/ (the host programs, pinned nightly), bridge/ (the
+# ESP32-C3 image, 1.96) and handheld/ (the ESP32 handheld remote, the esp-rs Xtensa 1.92.0.0). Each
+# cargo step runs from inside its workspace, so that workspace's rust-toolchain.toml and .cargo/
+# apply; the root holds no Cargo workspace.
 #
 # Nine checks:
 #   - lint: rustfmt over the motorcontroller, shared and tools workspaces (the bridge's runs in its
@@ -33,6 +34,8 @@ name: CI
 #   - run the remote app's unit tests (both variants) and detekt, and build the debug and
 #     instrumented-test APKs the bench smoke test installs. Those jobs and the drift gate have no
 #     Rust toolchain in them; the app jobs are the ones that need the Android SDK.
+#   - build the handheld remote (handheld/) on the esp-rs Xtensa toolchain: its core's host tests
+#     and clippy, its ESP32 image and the merged install image.
 #
 # TOOLCHAIN: every CARGO job runs the PINNED NIGHTLY nightly-2026-07-20, not stable
 # (motorcontroller/rust-toolchain.toml carries the why: the shipping image is built with -Z
@@ -1328,6 +1331,77 @@ jobs:
             hoverboard-firmware/bridge/target/img/bridge-esp32c3-install.bin
             hoverboard-firmware/bridge/target/img/bridge-esp32c3.bin
           retention-days: 1
+          if-no-files-found: error
+
+  # The handheld remote (handheld/, specs/handheld-remote.md section 6.6): its own workspace on the
+  # esp-rs Xtensa toolchain (rustc 1.92.0.0, handheld/rust-toolchain.toml's `esp` channel),
+  # installed by esp-rs/xtensa-toolchain at a pinned tag. rustfmt; the hardware-free core's host
+  # tests and clippy (all targets) on the host triple, which the esp toolchain carries; then the
+  # image for xtensa-esp32-none-elf, and the merged install image with the bridge job's pinned
+  # espflash. This job is also the check that the
+  # shared crates the handheld links build for Xtensa.
+  handheld:
+    name: Handheld remote (core tests + clippy, ESP32 image)
+    runs-on: ubuntu-latest
+    env:
+      ESPFLASH_VERSION: 4.6.0
+    defaults:
+      run:
+        working-directory: hoverboard-firmware/handheld
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: hoverboard-firmware
+
+      - name: Install the Xtensa toolchain (esp 1.92.0.0)
+        uses: esp-rs/xtensa-toolchain@v1.7.0
+        with:
+          version: "1.92.0.0"
+          buildtargets: esp32
+          default: false
+          override: false
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hoverboard-firmware/handheld
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: Core host tests
+        run: cargo test -p handheld-core --target ${{ env.HOST_TARGET }}
+
+      - name: Core clippy (all targets)
+        run: >
+          cargo clippy -p handheld-core
+          --target ${{ env.HOST_TARGET }}
+          --all-targets -- -D warnings
+
+      - name: Image
+        run: cargo image
+
+      - name: Install espflash (pinned binary release)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/espflash.zip" \
+            "https://github.com/esp-rs/espflash/releases/download/v${ESPFLASH_VERSION}/espflash-x86_64-unknown-linux-gnu.zip"
+          unzip -o "$RUNNER_TEMP/espflash.zip" -d "$RUNNER_TEMP/espflash"
+          chmod +x "$RUNNER_TEMP/espflash/espflash"
+          echo "$RUNNER_TEMP/espflash" >> "$GITHUB_PATH"
+
+      - name: Merged install image
+        run: |
+          mkdir -p target/img
+          espflash save-image --chip esp32 --merge --flash-size 4mb \
+            target/xtensa-esp32-none-elf/release/handheld target/img/handheld-install.bin
+          ls -l target/img/handheld-install.bin
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: handheld
+          path: hoverboard-firmware/handheld/target/img/handheld-install.bin
           if-no-files-found: error
 
   # Tier-2 gate: the real thumbv7m images running under the Unicorn emulator (the same images the bench
