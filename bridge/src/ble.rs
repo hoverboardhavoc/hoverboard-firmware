@@ -70,11 +70,19 @@ pub async fn run<C: Controller>(controller: C, name: &'static str, mac: [u8; 6])
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
 
-    let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+    // `name` passed `bridge_name_usable` or is the default, so the host takes it. Should it refuse
+    // one anyway, BLE stays off and everything else runs: the host's name cell is initialized once,
+    // so the server cannot be built a second time with another name.
+    let server = match Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
         name,
         appearance: &appearance::UNKNOWN,
-    }))
-    .unwrap();
+    })) {
+        Ok(server) => server,
+        Err(_e) => {
+            boot!("BLE: not started for the name {}: {}", name, _e);
+            return core::future::pending().await;
+        }
+    };
 
     boot!("BLE: advertising as {}", name);
     let _ = join(

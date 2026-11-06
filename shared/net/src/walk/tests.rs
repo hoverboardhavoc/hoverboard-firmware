@@ -717,8 +717,22 @@ fn a_bridge_refuses_a_name_it_cannot_advertise_and_keeps_the_old_one() {
     let w = m.config_write(b, DEVICE_NAME.key(), Value::Str(b"rover-esp"));
     assert_eq!(resp_status(&w), CFG_OK);
 
+    // The name that crashed a bridge at boot (`specs/bridge-name-limit.md`): 23 bytes, one past
+    // what the BLE host holds. Its twin of 22 is taken.
+    let w = m.config_write(b, DEVICE_NAME.key(), Value::Str(b"hoverboard-bridge-left"));
+    assert_eq!(resp_status(&w), CFG_OK);
+    assert_eq!(read_name(&mut m, b), b"hoverboard-bridge-left");
+    let w = m.config_write(b, DEVICE_NAME.key(), Value::Str(b"rover-esp"));
+    assert_eq!(resp_status(&w), CFG_OK);
+
     let too_long = [b'a'; BRIDGE_NAME_MAX + 1];
-    let unusable: [&[u8]; 4] = [b"Offroad master", &too_long, b"", "r\u{f8}ver".as_bytes()];
+    let unusable: [&[u8]; 5] = [
+        b"Offroad master",
+        &too_long,
+        b"hoverboard-bridge-right",
+        b"",
+        "r\u{f8}ver".as_bytes(),
+    ];
     for name in unusable {
         let w = m.config_write(b, DEVICE_NAME.key(), Value::Str(name));
         assert_eq!(resp_status(&w), CFG_BAD, "{name:?}");
@@ -736,11 +750,36 @@ fn a_bridge_refuses_a_name_it_cannot_advertise_and_keeps_the_old_one() {
     assert_eq!(resp_status(&ack), CFG_BAD);
     assert_eq!(read_name(&mut m, b), b"rover-esp");
 
-    // A board does not advertise its name and takes any string.
+    // A board does not advertise its name and takes any string, a 23-byte one included.
     let addr = m.live_addr(board);
     let w = m.config_write(addr, DEVICE_NAME.key(), Value::Str(b"Offroad master"));
     assert_eq!(resp_status(&w), CFG_OK);
     assert_eq!(read_name(&mut m, addr), b"Offroad master");
+    let w = m.config_write(
+        addr,
+        DEVICE_NAME.key(),
+        Value::Str(b"hoverboard-bridge-right"),
+    );
+    assert_eq!(resp_status(&w), CFG_OK);
+    assert_eq!(read_name(&mut m, addr), b"hoverboard-bridge-right");
+}
+
+#[test]
+fn a_bridge_name_is_at_most_what_the_ble_host_holds() {
+    // `trouble-host` holds the GATT Device Name in 22 bytes and refuses to build its server for a
+    // longer one (`specs/bridge-name-limit.md` section 1).
+    assert_eq!(BRIDGE_NAME_MAX, 22);
+    assert!(bridge_name_usable(b"hoverboard-bridge-left"));
+    assert!(bridge_name_usable(&[b'a'; 22]));
+    assert!(!bridge_name_usable(b"hoverboard-bridge-right"));
+    assert!(!bridge_name_usable(&[b'a'; 23]));
+    // The character rules are unchanged.
+    assert!(bridge_name_usable(b"a"));
+    assert!(bridge_name_usable(b"Rover-2"));
+    assert!(!bridge_name_usable(b""));
+    assert!(!bridge_name_usable(b"rover esp"));
+    assert!(!bridge_name_usable(b"rover_esp"));
+    assert!(!bridge_name_usable("r\u{f8}ver".as_bytes()));
 }
 
 // ---------------------------------------------------------------------------------------------------

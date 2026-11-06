@@ -535,7 +535,7 @@ fn bridge_install(
     let files = if files.is_empty() {
         None
     } else {
-        Some(load_files(files, false)?)
+        Some(load_files(files, Noun::Bridge, false)?)
     };
     if found {
         eprintln!("using {port}, the one ESP32-C3 USB port");
@@ -764,8 +764,9 @@ fn check_problems(problems: &[names::Problem], force: bool) -> Result<(), String
 }
 
 /// The board files of `board` and `bridge` commands, read and checked before any link is opened;
-/// the problems `--force` lets through are printed as warnings. A machine file is refused.
-fn load_files(paths: &[String], force: bool) -> Result<config::Files, String> {
+/// the problems `--force` lets through are printed as warnings. A machine file is refused. A
+/// bridge's files are also checked against what a bridge refuses ([`config::bridge_problems`]).
+fn load_files(paths: &[String], noun: Noun, force: bool) -> Result<config::Files, String> {
     let texts = paths
         .iter()
         .map(|p| {
@@ -774,7 +775,11 @@ fn load_files(paths: &[String], force: bool) -> Result<config::Files, String> {
                 .map_err(|e| format!("{p}: {e}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let files = config::read_files(&texts);
+    let mut files = config::read_files(&texts);
+    if noun == Noun::Bridge {
+        let refused = config::bridge_problems(&files.entries);
+        files.problems.extend(refused);
+    }
     check_problems(&files.problems, force)?;
     Ok(files)
 }
@@ -819,7 +824,7 @@ fn files_command(
     force: bool,
     yes: bool,
 ) -> Result<bool, String> {
-    let mut files = load_files(paths, force)?;
+    let mut files = load_files(paths, noun, force)?;
     let mut wire = wire_on(link)?;
     let (src, f) = reach(&mut wire, spec, noun)?;
     let mut b = Board {
@@ -1956,6 +1961,9 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
         } => {
             let (key, _) = names::parse_path(&path).map_err(|p| p.msg)?;
             check_problems(&names::write_checks(key), force)?;
+            if noun == Noun::Bridge {
+                check_problems(&config::bridge_set_problems(key, &value), force)?;
+            }
             let mut wire = wire_on(link)?;
             let (src, f) = reach(&mut wire, &target, noun)?;
             if noun == Noun::Board && checks::changes_leader(key) {
