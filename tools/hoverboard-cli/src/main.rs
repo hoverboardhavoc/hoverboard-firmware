@@ -77,7 +77,7 @@ use std::time::{Duration, Instant};
 
 use espsvc::{Ctrl, Status};
 use net::pdu::NO_ADDRESS;
-use net::walk::{Controller, CLASS_BRIDGE};
+use net::walk::{Controller, CLASS_BRIDGE, UID_LEN};
 
 use hoverboard_cli::bundle::{self, Bundle, FileKind, ImageKind, TreeEntry};
 use hoverboard_cli::checks;
@@ -1466,7 +1466,7 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
         }
         _ => Purpose::Other,
     };
-    let (mut c, _) = swd_route(link, spec, purpose)?;
+    let (mut c, r) = swd_route(link, spec, purpose)?;
     let e = |e: ClientError| e.to_string();
     let no_target = |e: ClientError| route::identify_refusal(&e);
     match op {
@@ -1544,10 +1544,18 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
                 Swd::Update { image, yes, .. } => (image.as_deref(), *yes),
                 _ => (None, false),
             };
+            // The `uid` of a board `board update` reaches that was not running this firmware, whose
+            // store is erased after the flash (`specs/board-update-store.md` section 1).
+            let mut foreign = None;
             let image = match file.expect("read above") {
                 FlashFile::Bin(bin) => bin,
                 FlashFile::Bundle(b) => {
                     let id = c.target_id().map_err(no_target)?;
+                    let (walked, ours) = runs_this_firmware(c, &r, &id.uid)?;
+                    c = walked;
+                    if !ours {
+                        foreign = Some(id.uid);
+                    }
                     let (img, chip) = b.select(&id, want).map_err(|e| e.to_string())?;
                     println!("{}", bundle::choice_line(&b.manifest, img, chip));
                     let bin = b.prepare(img).map_err(|e| e.to_string())?;
@@ -1564,6 +1572,16 @@ fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
                 }
             };
             flash_board(&mut c, &image, identify_refusal)?;
+            if let Some(uid) = foreign {
+                let uid = nodes::uid_hex(&uid);
+                c.store_erase().map_err(|x| {
+                    format!(
+                        "{uid}: flashed, but the store erase failed: {}",
+                        refusal(&mut c, x)
+                    )
+                })?;
+                println!("{uid}: was not running this firmware; its store was erased");
+            }
         }
     }
     Ok(())
@@ -1586,6 +1604,29 @@ fn board_recover(link: &Link) -> Result<(), String> {
         r.id.flash_kib
     );
     Ok(())
+}
+
+/// Whether the board a `board update` reached was running this firmware: a motor controller a walk
+/// found (`specs/board-update-store.md` section 1). The walk route checked the class, and a board
+/// the attached bridge's `PROBE_PORTS` names on its mailbox holds an address, which only this
+/// firmware takes. The `uid` route walks once over `c`'s link and looks for a motor controller
+/// reporting `uid`; the walk's `NODE_HELLO` grants a new guest address, so the client given back
+/// sends from it.
+fn runs_this_firmware(
+    mut c: EspClient,
+    r: &Route,
+    uid: &[u8; UID_LEN],
+) -> Result<(EspClient, bool), String> {
+    match r.via {
+        Via::Walk { .. } | Via::Mailbox { .. } => Ok((c, true)),
+        Via::Uid => {
+            let w = walk(c.wire())?;
+            let ours = motors(&w.found)
+                .iter()
+                .any(|f| f.identity.is_some_and(|i| i.uid == *uid));
+            Ok((Client::addressed(c.into_wire(), w.src, r.dst), ours))
+        }
+    }
 }
 
 /// Flash `image` through the bridge `c` reaches and wait for `booted`, printing the progress and
