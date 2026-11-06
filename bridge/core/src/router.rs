@@ -1,8 +1,9 @@
 //! The controller links' framing (`specs/hoverboard-bridge.md`, "The BLE link" and "The terminal tool"):
-//! the BLE link (L3 port 0) and the console (port 2) carry the same L2 stream. The console has two
-//! carriers, the C3's USB-Serial-JTAG and a client of the Wi-Fi console's TCP port, and both are
-//! served whenever present, each with its own stream. The GATT peripheral, the USB driver and the
-//! TCP listener are the firmware's (`bridge/src/ble.rs`, `usb.rs`, `wifi.rs`).
+//! the BLE link (L3 port 0) and the console (port 2) carry the same L2 stream. The console has
+//! 1 + [`TCP_CLIENTS`] carriers, the C3's USB-Serial-JTAG and up to [`TCP_CLIENTS`] clients of the
+//! Wi-Fi console's TCP port (`specs/bridge-clients.md` section 3.1), and every one is served
+//! whenever present, each with its own stream. The GATT peripheral, the USB driver and the TCP
+//! listener are the firmware's (`bridge/src/ble.rs`, `usb.rs`, `wifi.rs`).
 //!
 //! The bytes on each link are a byte stream: a phone or the CC2541-shaped central coalesces and
 //! splits them at arbitrary points, and so does a USB host or a TCP client. Each link feeds its own
@@ -26,19 +27,46 @@ pub const FRAME: usize = 128;
 const RX_BYTES: usize = 1024;
 const TX_BYTES: usize = 2048;
 
-/// A controller link of the bridge: the BLE port, and the console's two carriers.
+/// The most clients the Wi-Fi console serves at once, each a carrier of its own
+/// (`specs/bridge-clients.md` section 3.1).
+pub const TCP_CLIENTS: usize = 4;
+
+/// The number of controller links: BLE, the USB console and the TCP clients.
+pub const LINKS: usize = 2 + TCP_CLIENTS;
+
+/// A controller link of the bridge: the BLE port, and the console's carriers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Port {
     /// The GATT characteristic pair (L3 port 0).
-    Ble = 0,
+    Ble,
     /// The console on the USB-Serial-JTAG (L3 port 2).
-    Usb = 1,
-    /// The console on a client of the Wi-Fi console's TCP port (L3 port 2).
-    Tcp = 2,
+    Usb,
+    /// The console on TCP client `i` of the Wi-Fi console, `i` below [`TCP_CLIENTS`] (L3 port 2).
+    Tcp(u8),
+}
+
+impl Port {
+    /// The link's place in [`PORTS`].
+    pub const fn index(self) -> usize {
+        match self {
+            Port::Ble => 0,
+            Port::Usb => 1,
+            Port::Tcp(i) => 2 + i as usize,
+        }
+    }
 }
 
 /// Every controller link, in the order the node serves them.
-pub const PORTS: [Port; 3] = [Port::Ble, Port::Usb, Port::Tcp];
+pub const PORTS: [Port; LINKS] = {
+    let mut ports = [Port::Ble; LINKS];
+    ports[Port::Usb.index()] = Port::Usb;
+    let mut i = 0;
+    while i < TCP_CLIENTS {
+        ports[Port::Tcp(i as u8).index()] = Port::Tcp(i as u8);
+        i += 1;
+    }
+    ports
+};
 
 /// A port's bytes as a byte-stream serial: what arrives fills `rx`, what goes out drains `tx`.
 pub struct StreamSerial {
@@ -141,9 +169,9 @@ impl Attached {
     }
 }
 
-/// The controller links' streams.
+/// The controller links' streams, one per link, by [`Port::index`].
 pub struct Router {
-    ports: [Attached; 3],
+    ports: [Attached; LINKS],
     /// Bytes from a controller that did not fit its port's receive buffer.
     pub rx_overflow: u32,
 }
@@ -158,21 +186,21 @@ impl Router {
     /// A router with no controller attached.
     pub fn new() -> Self {
         Router {
-            ports: [Attached::new(), Attached::new(), Attached::new()],
+            ports: core::array::from_fn(|_| Attached::new()),
             rx_overflow: 0,
         }
     }
 
     /// A controller attached to `port` (a BLE central, a TCP client): start from a clean stream.
     pub fn connect(&mut self, port: Port) {
-        let p = &mut self.ports[port as usize];
+        let p = &mut self.ports[port.index()];
         p.reset();
         p.attached = true;
     }
 
     /// The controller on `port` went away: drop both directions' bytes and any partial frame.
     pub fn disconnect(&mut self, port: Port) {
-        let p = &mut self.ports[port as usize];
+        let p = &mut self.ports[port.index()];
         p.reset();
         p.attached = false;
     }
@@ -181,19 +209,32 @@ impl Router {
     /// bytes. For the USB console, whose host can go away mid-frame with no event: the frame's
     /// declared length would otherwise swallow the next host's first frames.
     pub fn drop_partial(&mut self, port: Port) {
-        let t = self.ports[port as usize].link.transport_mut();
+        let t = self.ports[port.index()].link.transport_mut();
         t.reset();
         t.serial_mut().rx.clear();
     }
 
     /// Free bytes in `port`'s receive buffer: what [`Router::on_bytes`] takes without overflow.
     pub fn room(&self, port: Port) -> usize {
-        RX_BYTES - self.ports[port as usize].link.transport().serial().rx.len()
+        RX_BYTES - self.ports[port.index()].link.transport().serial().rx.len()
     }
 
     /// Whether a controller is attached to `port`.
     pub fn attached(&self, port: Port) -> bool {
-        self.ports[port as usize].attached
+        self.ports[port.index()].attached
+    }
+
+    /// The controllers attached, as `ESP_INFO` reports them (`specs/bridge-clients.md` section
+    /// 3.5).
+    pub fn controllers(&self) -> espsvc::Controllers {
+        espsvc::Controllers {
+            ble: self.attached(Port::Ble),
+            usb: self.attached(Port::Usb),
+            tcp: PORTS
+                .iter()
+                .filter(|&&p| matches!(p, Port::Tcp(_)) && self.attached(p))
+                .count() as u8,
+        }
     }
 
     /// Bytes that arrived on `port`. A port with no controller attached is attached by its first
@@ -203,7 +244,7 @@ impl Router {
         if !self.attached(port) {
             self.connect(port);
         }
-        let rx = &mut self.ports[port as usize]
+        let rx = &mut self.ports[port.index()]
             .link
             .transport_mut()
             .serial_mut()
@@ -218,7 +259,7 @@ impl Router {
     /// The next bytes to send out of `port`, at most `out.len()` (a BLE notification, a USB
     /// packet, a TCP write); 0 when nothing is waiting.
     pub fn next_out(&mut self, port: Port, out: &mut [u8]) -> usize {
-        let tx = &mut self.ports[port as usize]
+        let tx = &mut self.ports[port.index()]
             .link
             .transport_mut()
             .serial_mut()
@@ -238,7 +279,7 @@ impl Router {
 
     /// The next complete packet from `port`'s controller, copied into `buf`; its length.
     pub fn recv(&mut self, port: Port, buf: &mut [u8]) -> Option<usize> {
-        self.ports[port as usize]
+        self.ports[port.index()]
             .link
             .poll_recv(buf)
             .map(|p| p.len())
@@ -246,6 +287,6 @@ impl Router {
 
     /// Send `packet` to `port`'s controller; nothing when none is attached.
     pub fn send(&mut self, port: Port, packet: &[u8]) {
-        self.ports[port as usize].send(packet);
+        self.ports[port.index()].send(packet);
     }
 }

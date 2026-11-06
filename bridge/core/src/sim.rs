@@ -1767,7 +1767,7 @@ impl SimBoard {
     pub fn ingest(&mut self, port: u8, frame: &[u8]) -> net::walk::Emits {
         let mut emits = net::walk::Emits::new();
         if let Ok(mut s) = store::Store::mount(&mut self.flash) {
-            if let Some(d) = self.resp.ingest(port, frame, &mut s, &mut emits) {
+            if let Some(d) = self.resp.ingest(port, port, frame, &mut s, &mut emits) {
                 self.got.push((d.opcode, d.src));
             }
         }

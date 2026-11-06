@@ -12,14 +12,15 @@
 //!   with the network (`hoverboard_bridge_core::node::tx_power`, `specs/bridge-onboarding.md`
 //!   section 2.4).
 //! - **Console.** TCP port [`CONSOLE_PORT`] carries the same L2 stream as the USB console, the
-//!   same L3 port (port 2) on a second carrier: both are served whenever present, a reply goes
-//!   back on the carrier its request came in on, and board packets go out on both. One client at
-//!   a time, and a listener is always open: two sockets take turns, one serving while the other
-//!   listens, so a client that connects as the previous one leaves is accepted (the listener is
-//!   listening again the moment a client leaves); a second connection while one is served is
-//!   accepted by the listening socket and closed at once. No authentication.
+//!   same L3 port (port 2), with each client a carrier of its own (`specs/bridge-clients.md`
+//!   section 3.1): every carrier is served whenever present, a reply goes back on the carrier its
+//!   request came in on, and the node routes board packets by the guest address each carrier
+//!   holds. Up to [`TCP_CLIENTS`] clients at once, on as many sockets: each accepts a client,
+//!   serves it and closes it, and every socket that is not serving listens, so a connection is
+//!   accepted while any socket is free. A connection while all of them serve finds no listener
+//!   and is refused. No authentication.
 //! - **GDB.** TCP port [`GDB_PORT`] carries the GDB remote serial protocol
-//!   (`specs/hoverboard-bridge.md`, "Debugging"), one client at a time like the console, its bytes
+//!   (`specs/hoverboard-bridge.md`, "Debugging"), one client at a time, its bytes
 //!   handed to the service loop's GDB server ([`GDB_EVENTS`], [`GDB_OUT`]). The server ends a
 //!   session from its side (`detach`, `kill`, a protocol error) through [`GDB_CLOSE`], after its
 //!   last reply is in [`GDB_OUT`]; the listener sends that reply, closes, and waits for the close
@@ -29,8 +30,9 @@
 //!   is announced as `_gdb._tcp`, from `edge-mdns`, restarted with the new address after each
 //!   rejoin.
 //!
-//! Bytes are not interpreted here: each listener's go to the service loop as [`TcpEvent::Data`],
-//! and the loop hands back what to send through [`OUT`] and [`GDB_OUT`].
+//! Bytes are not interpreted here: each listener's go to the service loop as [`TcpEvent::Data`]
+//! (with the console client's index on [`EVENTS`]), and the loop hands back what to send through
+//! each console client's [`OUT`] and through [`GDB_OUT`].
 
 use core::net::{Ipv4Addr, Ipv6Addr};
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -42,6 +44,7 @@ use edge_mdns::io::{self, IPV4_DEFAULT_SOCKET};
 use edge_mdns::HostAnswersMdnsHandler;
 use edge_nal::UdpSplit;
 use edge_nal_embassy::{Udp, UdpBuffers};
+use embassy_futures::join::join_array;
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_net::tcp::{State, TcpSocket};
 use embassy_net::{Runner, Stack};
@@ -54,6 +57,7 @@ use esp_radio::wifi::sta::StationConfig;
 use esp_radio::wifi::{AuthenticationMethodConfig, Config, Interface, WifiController};
 use espsvc::WifiState;
 use heapless09::Vec;
+pub use hoverboard_bridge_core::router::TCP_CLIENTS;
 
 /// The console's TCP port: the one the bench's serial-to-TCP relay used.
 pub const CONSOLE_PORT: u16 = 5333;
@@ -68,8 +72,10 @@ const CONSOLE_RX: usize = 4096;
 const GDB_RX: usize = 1024;
 /// Each socket's transmit buffer.
 const TX: usize = 2048;
+/// Each console client's outbound queue, in writes of up to [`PACKET`] bytes.
+const OUT_SLOTS: usize = 4;
 /// How long a served socket's close may take (its last bytes and FIN acknowledged, the client's
-/// FIN received) before it is aborted. The other socket is listening meanwhile.
+/// FIN received) before it is aborted. The other sockets are listening meanwhile.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often a socket that is mid-handshake is looked at again.
 const HANDSHAKE_POLL: Duration = Duration::from_millis(5);
@@ -83,9 +89,11 @@ const KEEP_ALIVE: Duration = Duration::from_secs(5);
 /// The mDNS answers' time to live.
 const MDNS_TTL: u32 = 120;
 
-/// What the console listener tells the service loop. A channel slot is the size of the largest
-/// variant whatever the variant sizes are, so the data variant is not boxed.
+/// What a listener tells the service loop. A channel slot is the size of the largest variant
+/// whatever the variant sizes are, so the data variant is not boxed. `Clone` for the service
+/// loop's look at the next console event before it takes it.
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub enum TcpEvent {
     /// A client connected.
     Open,
@@ -146,10 +154,13 @@ pub async fn watch(stack: Stack<'static>) {
     }
 }
 
-/// Console listener to service loop.
-pub static EVENTS: Channel<CriticalSectionRawMutex, TcpEvent, 8> = Channel::new();
-/// Service loop to console listener: bytes to send, one write each.
-pub static OUT: Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, 16> = Channel::new();
+/// Console listener to service loop: each event with the index of the client it is about, below
+/// [`TCP_CLIENTS`] (the node's `Port::Tcp`).
+pub static EVENTS: Channel<CriticalSectionRawMutex, (u8, TcpEvent), 8> = Channel::new();
+/// Service loop to console client `i`: bytes to send, one write each. A queue per client, so a
+/// client that reads slowly holds back its own replies and no other client's.
+pub static OUT: [Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, OUT_SLOTS>; TCP_CLIENTS] =
+    [const { Channel::new() }; TCP_CLIENTS];
 /// GDB listener to service loop. Fewer slots than the console's: each is a packet's worth of DRAM
 /// out of the main stack's share, and the service loop takes GDB's bytes every pass.
 pub static GDB_EVENTS: Channel<CriticalSectionRawMutex, TcpEvent, 4> = Channel::new();
@@ -217,11 +228,22 @@ pub async fn net(mut runner: Runner<'static, Interface>) {
     runner.run().await
 }
 
-/// Serve the console on [`CONSOLE_PORT`], one client at a time, forever.
+/// Serve the console on [`CONSOLE_PORT`], up to [`TCP_CLIENTS`] clients at once, forever.
 #[embassy_executor::task]
 pub async fn console(stack: Stack<'static>) {
-    boot!("TCP console listening on {}", CONSOLE_PORT);
-    listen::<_, _, CONSOLE_RX>(stack, CONSOLE_PORT, &EVENTS, &OUT, None).await
+    boot!(
+        "TCP console listening on {}, {} clients",
+        CONSOLE_PORT,
+        TCP_CLIENTS
+    );
+    let mut buffers = [([0u8; CONSOLE_RX], [0u8; TX]); TCP_CLIENTS];
+    let mut index = 0;
+    let clients = buffers.each_mut().map(|(rx, tx)| {
+        let client = console_client(stack, index, rx, tx);
+        index += 1;
+        client
+    });
+    join_array(clients).await;
 }
 
 /// Serve GDB on [`GDB_PORT`], one client at a time, forever.
@@ -231,13 +253,38 @@ pub async fn gdb(stack: Stack<'static>) {
     listen::<_, _, GDB_RX>(stack, GDB_PORT, &GDB_EVENTS, &GDB_OUT, Some(&GDB_CLOSE)).await
 }
 
+/// Console client `index`'s socket, over `rx` and `tx`: accept a client on [`CONSOLE_PORT`],
+/// carry its bytes to and from the service loop through [`EVENTS`] and its [`OUT`] until it
+/// leaves, close it, and listen again, forever.
+async fn console_client(stack: Stack<'static>, index: u8, rx: &mut [u8], tx: &mut [u8]) {
+    let mut socket = configured(TcpSocket::new(stack, rx, tx));
+    let out = &OUT[index as usize];
+    let tag = move |e| (index, e);
+    loop {
+        if !accept(&mut socket, CONSOLE_PORT).await {
+            socket.abort();
+            let _ = socket.flush().await;
+            Timer::after(Duration::from_millis(100)).await;
+            continue;
+        }
+        boot!("TCP {}: client {} connected", CONSOLE_PORT, index);
+        // Bytes queued for an earlier client are not this one's.
+        while out.try_receive().is_ok() {}
+        EVENTS.send(tag(TcpEvent::Open)).await;
+        let ended = serve(&mut socket, &EVENTS, tag, out, None).await;
+        EVENTS.send(tag(TcpEvent::Gone)).await;
+        boot!("TCP {}: client {} gone", CONSOLE_PORT, index);
+        finish(&mut socket, out, ended).await;
+    }
+}
+
 /// Accept one client at a time on `port` and carry its bytes to and from the service loop
 /// through `events` and `out`, until it leaves or `close` is signalled. `RX` is each socket's
 /// receive buffer.
 ///
 /// Two sockets take turns: while one serves a client the other listens, refusing a second client
 /// by closing it at once, and when the client leaves the listening one serves next, so `port`
-/// is never without a listener (`specs/hoverboard-bridge.md`, "The Wi-Fi console").
+/// is never without a listener (`specs/hoverboard-bridge.md`, "Debugging", "One client").
 async fn listen<const E: usize, const O: usize, const RX: usize>(
     stack: Stack<'static>,
     port: u16,
@@ -279,7 +326,7 @@ async fn listen<const E: usize, const O: usize, const RX: usize>(
                 let _ = spare.flush().await;
             }
         };
-        let ended = match select(serve(served, events, out, close), refuse).await {
+        let ended = match select(serve(served, events, |e| e, out, close), refuse).await {
             Either::First(ended) => ended,
             Either::Second(never) => never,
         };
@@ -348,10 +395,11 @@ async fn finish<const O: usize>(
 }
 
 /// Carry a client's bytes both ways until it goes away or `close` is signalled; true for the
-/// signal.
-async fn serve<const E: usize, const O: usize>(
+/// signal. Each event goes into `events` as `tag` makes it (the console adds the client's index).
+async fn serve<M, const E: usize, const O: usize>(
     socket: &mut TcpSocket<'_>,
-    events: &'static Channel<CriticalSectionRawMutex, TcpEvent, E>,
+    events: &'static Channel<CriticalSectionRawMutex, M, E>,
+    tag: impl Fn(TcpEvent) -> M,
     out: &'static Channel<CriticalSectionRawMutex, Vec<u8, PACKET>, O>,
     close: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
 ) -> bool {
@@ -363,7 +411,7 @@ async fn serve<const E: usize, const O: usize>(
                 Ok(0) | Err(_) => return,
                 Ok(n) => {
                     let data = Vec::from_slice(&buf[..n]).unwrap_or_default();
-                    events.send(TcpEvent::Data(data)).await;
+                    events.send(tag(TcpEvent::Data(data))).await;
                 }
             }
         }

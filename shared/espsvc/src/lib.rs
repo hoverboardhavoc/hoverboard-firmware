@@ -8,7 +8,7 @@
 //! | Opcode | Message | Payload |
 //! | --- | --- | --- |
 //! | `0x80` | [`Msg::InfoReq`] | none |
-//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 47 B |
+//! | `0x81` | [`Msg::Info`] | [`EspInfo`], 49 B |
 //! | `0x82` | [`Msg::TargetIdReq`] | none |
 //! | `0x83` | [`Msg::TargetId`] | [`TargetId`], 31 B |
 //! | `0x85` | [`Msg::ClearProtection`] | none |
@@ -305,7 +305,25 @@ pub struct EspInfo {
     /// The last time, in microseconds, from a GDB session's `DHCSR` poll seeing the core halted to
     /// `MOE` cleared (the armed-breakpoint rule, bench gate 9); [`MOE_CLEAR_NONE`] before any.
     pub moe_clear_us: u32,
+    /// The controllers attached (`specs/bridge-clients.md` section 3.5).
+    pub controllers: Controllers,
 }
+
+/// The controllers attached to a bridge, in `ESP_INFO` (`specs/bridge-clients.md` section 3.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Controllers {
+    /// A BLE central is connected.
+    pub ble: bool,
+    /// The USB console has carried bytes since the bridge booted (it has no disconnect event).
+    pub usb: bool,
+    /// The number of Wi-Fi console clients served.
+    pub tcp: u8,
+}
+
+/// `ESP_INFO`'s controllers byte: a BLE central is connected.
+const CONTROLLERS_BLE: u8 = 1 << 0;
+/// `ESP_INFO`'s controllers byte: the USB console has carried bytes since boot.
+const CONTROLLERS_USB: u8 = 1 << 1;
 
 /// A read the SWD engine saw fail parity, in `ESP_INFO`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -577,7 +595,7 @@ impl W<'_> {
     }
 }
 
-const INFO_LEN: usize = 47;
+const INFO_LEN: usize = 49;
 const TARGET_ID_LEN: usize = 31;
 
 impl<'a> Msg<'a> {
@@ -643,6 +661,10 @@ impl<'a> Msg<'a> {
                 w.put(&[ack]);
                 w.put(&data.to_le_bytes());
                 w.put(&[i.no_ack.map_or(ACK_NONE, |a| a & 7)]);
+                let c = i.controllers;
+                let flags = if c.ble { CONTROLLERS_BLE } else { 0 }
+                    | if c.usb { CONTROLLERS_USB } else { 0 };
+                w.put(&[flags, c.tcp]);
             }
             Msg::TargetId(t) => {
                 w.put(&t.dpidr.to_le_bytes());
@@ -739,6 +761,11 @@ impl<'a> Msg<'a> {
                         data: le32(&p[42..]),
                     }),
                     no_ack: (p[46] != ACK_NONE).then_some(p[46] & 7),
+                    controllers: Controllers {
+                        ble: p[47] & CONTROLLERS_BLE != 0,
+                        usb: p[47] & CONTROLLERS_USB != 0,
+                        tcp: p[48],
+                    },
                 })
             }
             OP_TARGET_ID_REQ => {

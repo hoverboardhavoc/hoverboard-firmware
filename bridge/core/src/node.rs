@@ -6,12 +6,15 @@
 //! | --- | --- | --- |
 //! | 0 | BLE | the GATT characteristic pair ([`Port::Ble`]) |
 //! | 1 | SWD mailbox | the board's RAM mailbox ([`MailboxPort`]) |
-//! | 2 | UART | the console: the USB-Serial-JTAG ([`Port::Usb`]) and the Wi-Fi console's TCP client ([`Port::Tcp`]) |
+//! | 2 | UART | the console: the USB-Serial-JTAG ([`Port::Usb`]) and the Wi-Fi console's TCP clients ([`Port::Tcp`]) |
 //!
 //! Every frame from a controller link or the mailbox goes through [`Responder::ingest`] with its
-//! ingress port, which learns its source, forwards it by the table (flooding an unknown `dst` to
-//! every port but the ingress one) and answers the walk and `CONFIG_*` opcodes addressed to the
-//! bridge. What it hands back is the bridge's to act on:
+//! ingress port and its carrier, which learns its source, forwards it by the table (flooding an
+//! unknown `dst` to every port but the ingress one) and answers the walk and `CONFIG_*` opcodes
+//! addressed to the bridge. The carrier is the holder of the guest address a `NODE_HELLO` from it
+//! is granted (`specs/bridge-clients.md` section 3.2): a carrier keeps its address across walks,
+//! and a TCP client or a BLE central that disconnects releases it ([`Node::disconnect`]). What the
+//! responder hands back is the bridge's to act on:
 //!
 //! - an ESP command whose `dst` is `0x00` on a controller link (the one peer, as in round 1) or the
 //!   bridge's own address from anywhere goes to the command service, and its replies go back on the
@@ -19,11 +22,13 @@
 //! - a dst-`0x00` `CYCLIC_STATE` from the mailbox (the board's telemetry for its one peer, its own
 //!   sample and its peer's forward) is re-published on every controller link with `src` unchanged.
 //!
-//! The responder's emissions go out by port. Port 2 is two carriers: a frame the forwarder sends
-//! out of it goes on both, and a reply the bridge makes to a request that came in on one of them goes
-//! back on that one. A forwarded frame never leaves by its ingress port, so an emission on port 2
-//! while ingesting a frame from port 2 is always the bridge's own reply; the `PORTS` reply to a
-//! `PROBE_PORTS`, which leaves after the probe window, goes where the probe came from.
+//! The responder's emissions go out by port, and port 2 is several carriers
+//! (`specs/bridge-clients.md` section 3.3). A forwarded frame never leaves by its ingress port, so
+//! an emission on a carrier's own port while ingesting a frame from it is always the bridge's own
+//! reply, and it goes back on that carrier. Any other emission addressed to a guest goes on the
+//! carrier that holds the guest's address ([`Responder::holder_of`]) and on no other; one to any
+//! other address goes on every carrier of its port. The `PORTS` replies after the probe window go
+//! by the holder.
 
 use espsvc::WifiState;
 use heapless::{String, Vec};
@@ -40,7 +45,7 @@ use store::{
 };
 
 use crate::mailbox::{MailboxPort, MAX_PACKET};
-use crate::router::{Port, Router, PORTS};
+use crate::router::{Port, Router, LINKS, PORTS};
 use crate::svc::{Identity, Platform, Service};
 use crate::swd::SwdPins;
 
@@ -48,7 +53,7 @@ use crate::swd::SwdPins;
 pub const L3_BLE: u8 = 0;
 /// L3 port 1: the board's mailbox.
 pub const L3_MAILBOX: u8 = 1;
-/// L3 port 2: the console, on its two carriers.
+/// L3 port 2: the console, on its carriers.
 pub const L3_CONSOLE: u8 = 2;
 const N_PORTS: u8 = 3;
 const PORT_KINDS: [u8; MAX_PORTS] = [PORT_BLE, PORT_SWD, PORT_UART, 0];
@@ -235,7 +240,7 @@ pub fn station<F: Flash>(store: &Store<'_, F>) -> Station {
 /// Where a frame arrived, and where a reply to it goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Carrier {
-    /// A controller link: BLE, or one of the console's two carriers.
+    /// A controller link: BLE, or one of the console's carriers.
     Link(Port),
     /// The board's mailbox.
     Mailbox,
@@ -246,8 +251,25 @@ impl Carrier {
     pub fn l3_port(self) -> u8 {
         match self {
             Carrier::Link(Port::Ble) => L3_BLE,
-            Carrier::Link(Port::Usb | Port::Tcp) => L3_CONSOLE,
+            Carrier::Link(Port::Usb | Port::Tcp(_)) => L3_CONSOLE,
             Carrier::Mailbox => L3_MAILBOX,
+        }
+    }
+
+    /// The carrier as the responder's guest-lease holder: a link's [`Port::index`], the mailbox
+    /// after the links.
+    pub fn holder(self) -> u8 {
+        match self {
+            Carrier::Link(l) => l.index() as u8,
+            Carrier::Mailbox => LINKS as u8,
+        }
+    }
+
+    /// The carrier whose [`Carrier::holder`] is `h`.
+    pub fn of_holder(h: u8) -> Option<Carrier> {
+        match PORTS.get(h as usize) {
+            Some(&l) => Some(Carrier::Link(l)),
+            None => (h as usize == LINKS).then_some(Carrier::Mailbox),
         }
     }
 }
@@ -257,8 +279,9 @@ pub struct Node<'f, F: Flash> {
     resp: Responder,
     store: Store<'f, F>,
     store_mounted: bool,
-    /// The in-flight `PROBE_PORTS`: the carrier it came on and when the window opened.
-    probe: Option<(Carrier, u64)>,
+    /// When the in-flight `PROBE_PORTS` window opened. Its `PORTS` replies go by the holder of
+    /// each requester's address, so no carrier is kept.
+    probe: Option<u64>,
     /// Where the flash job's reports go: the carrier the last `FLASH_BEGIN` came in on.
     job: Carrier,
 }
@@ -299,12 +322,21 @@ impl<'f, F: Flash> Node<'f, F> {
         self.resp.addr()
     }
 
-    /// The bridge as `ESP_INFO` reports it.
-    pub fn identity(&self) -> Identity {
+    /// The bridge as `ESP_INFO` reports it, with the controllers `router` has attached.
+    pub fn identity(&self, router: &Router) -> Identity {
         Identity {
             addr: self.addr(),
             store_mounted: self.store_mounted,
+            controllers: router.controllers(),
         }
+    }
+
+    /// The controller on `link` went away (a TCP client's `Gone`, BLE's `Disconnected`): its
+    /// stream is dropped and the guest address it held is free again (`specs/bridge-clients.md`
+    /// section 3.2).
+    pub fn disconnect(&mut self, router: &mut Router, link: Port) {
+        router.disconnect(link);
+        self.resp.release(Carrier::Link(link).holder());
     }
 
     /// The store, for reading the keys.
@@ -340,14 +372,14 @@ impl<'f, F: Flash> Node<'f, F> {
             self.ingest(Carrier::Mailbox, &buf[..n], router, port, svc);
         }
 
-        if let Some((from, since)) = self.probe {
+        if let Some(since) = self.probe {
             if !self.resp.probing() {
                 self.probe = None;
             } else if port.swd().now_us().saturating_sub(since) >= PROBE_WINDOW_US {
                 self.probe = None;
                 let mut emits = Emits::new();
                 self.resp.poll_probe(&mut emits);
-                send_emits(&emits, from, router, port);
+                send_emits(&self.resp, &emits, None, router, port);
             }
         }
 
@@ -373,13 +405,17 @@ impl<'f, F: Flash> Node<'f, F> {
         };
         let probing = self.resp.probing();
         let mut emits = Emits::new();
-        let delivered = self
-            .resp
-            .ingest(from.l3_port(), pkt, &mut self.store, &mut emits);
+        let delivered = self.resp.ingest(
+            from.l3_port(),
+            from.holder(),
+            pkt,
+            &mut self.store,
+            &mut emits,
+        );
         if !probing && self.resp.probing() {
-            self.probe = Some((from, port.swd().now_us()));
+            self.probe = Some(port.swd().now_us());
         }
-        send_emits(&emits, from, router, port);
+        send_emits(&self.resp, &emits, Some(from), router, port);
 
         let Some(d) = delivered else {
             return;
@@ -395,7 +431,7 @@ impl<'f, F: Flash> Node<'f, F> {
             if d.opcode == espsvc::OP_FLASH_BEGIN {
                 self.job = from;
             }
-            let me = self.identity();
+            let me = self.identity(router);
             let mut replies = Replies::new();
             svc.handle(&pdu, me, port, &mut |to, m| replies.push(me.addr, to, m));
             replies.send(from, router, port);
@@ -407,27 +443,47 @@ impl<'f, F: Flash> Node<'f, F> {
     }
 }
 
-/// Put the responder's emissions on their ports. `from` is the carrier of the frame that caused
-/// them: an emission on port 2 goes back on it when it is one of the console's carriers (the bridge's
-/// own reply), and on both console carriers otherwise.
+/// Put the responder's emissions on their carriers (`specs/bridge-clients.md` section 3.3). `from`
+/// is the carrier of the frame that caused them, `None` for the `PORTS` replies after the probe
+/// window:
+///
+/// 1. an emission on `from`'s own port is the bridge's reply to it (a forwarded frame never leaves
+///    by its ingress port), and goes back on `from`;
+/// 2. one addressed to a guest address a carrier holds goes on that carrier, when it is on the
+///    emission's port, and on no other;
+/// 3. any other goes on every carrier of its port.
 fn send_emits<P: SwdPins>(
+    resp: &Responder,
     emits: &Emits,
-    from: Carrier,
+    from: Option<Carrier>,
     router: &mut Router,
     port: &mut MailboxPort<P>,
 ) {
     for e in emits {
-        match e.port {
-            L3_BLE => router.send(Port::Ble, &e.bytes),
-            L3_MAILBOX => port.send(&e.bytes),
-            L3_CONSOLE => match from {
-                Carrier::Link(c @ (Port::Usb | Port::Tcp)) => router.send(c, &e.bytes),
-                _ => {
-                    router.send(Port::Usb, &e.bytes);
-                    router.send(Port::Tcp, &e.bytes);
+        if e.port == L3_MAILBOX {
+            port.send(&e.bytes);
+            continue;
+        }
+        if let Some(c @ Carrier::Link(l)) = from {
+            if c.l3_port() == e.port {
+                router.send(l, &e.bytes);
+                continue;
+            }
+        }
+        let holder = Pdu::decode(&e.bytes)
+            .ok()
+            .and_then(|p| resp.holder_of(p.dst))
+            .and_then(Carrier::of_holder);
+        match holder {
+            Some(c @ Carrier::Link(l)) if c.l3_port() == e.port => router.send(l, &e.bytes),
+            Some(_) => {}
+            None => {
+                for l in PORTS {
+                    if Carrier::Link(l).l3_port() == e.port {
+                        router.send(l, &e.bytes);
+                    }
                 }
-            },
-            _ => {}
+            }
         }
     }
 }

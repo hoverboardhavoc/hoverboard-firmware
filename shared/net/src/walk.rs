@@ -449,12 +449,27 @@ fn guest_slice(addr: u8) -> (u8, u8) {
     (first, (GUEST_LAST - first + 1).min(GUEST_SLICE))
 }
 
-/// One board's in-flight `PROBE_PORTS`: who to reply `PORTS` to, and the per-port neighbour states
-/// gathered from the probe replies (initialised to `empty`; a reply upgrades a slot).
+/// The most controllers one probe window answers (`specs/bridge-clients.md` section 3.4): a board's
+/// `PROBE_PORTS` comes from at most its ports' controllers, a bridge's from its carriers.
+pub const PROBE_REQUESTERS: usize = 4;
+
+/// One board's in-flight `PROBE_PORTS`: who to reply `PORTS` to (every requester whose
+/// `PROBE_PORTS` arrived while the window was open, the first one first), and the per-port
+/// neighbour states gathered from the probe replies (initialised to `empty`; a reply upgrades a
+/// slot).
 struct Probe {
-    reply_to: u8,
+    reply_to: [u8; PROBE_REQUESTERS],
+    n_requesters: u8,
     n_ports: u8,
     states: [(u8, u8); MAX_PORTS], // (neighbour_state, neighbour_addr)
+}
+
+/// One granted guest address and its holder: what the caller passes with each frame
+/// ([`Responder::ingest`]), a bridge's carrier or a board's L3 port.
+#[derive(Clone, Copy)]
+struct Lease {
+    addr: u8,
+    holder: u8,
 }
 
 /// The board-side walk responder. Wraps a [`Forwarder`] (so learning + forwarding run on the same
@@ -474,10 +489,15 @@ pub struct Responder {
     /// (`specs/configured-links.md` section 5): the node's own fact, never stored. Empty until
     /// [`Responder::set_status`], which is what a bridge answers.
     status: &'static [u8],
-    /// The next grant's offset inside this node's guest slice ([`guest_slice`]). The slice itself
-    /// is derived from the live address at each grant, so an `ASSIGN` or a boot-time restore moves
-    /// the allocator to the new slice with no further state.
+    /// Where the search for a new holder's slot starts, an offset inside this node's guest slice
+    /// ([`guest_slice`]). The slice itself is derived from the live address at each grant, so an
+    /// `ASSIGN` or a boot-time restore moves the allocator to the new slice.
     guest_slot: u8,
+    /// The guest addresses held, the one granted longest ago first (`specs/bridge-clients.md`
+    /// section 3.2); the first `n_leases` entries are live. All of them are in the slice of the
+    /// live address: an address change to another slice drops them.
+    leases: [Lease; GUEST_SLICE as usize],
+    n_leases: u8,
     probe: Option<Probe>,
     /// The R4 armed flag: while set, `apply_write` rejects with [`CFG_ARMED`] and `ASSIGN`-to-self
     /// refuses with [`STATUS_ERR`]. Sampled each loop
@@ -505,6 +525,8 @@ impl Responder {
             default_name: None,
             status: &[],
             guest_slot: 0,
+            leases: [Lease { addr: 0, holder: 0 }; GUEST_SLICE as usize],
+            n_leases: 0,
             probe: None,
             armed: false,
             config_persisted: false,
@@ -583,8 +605,85 @@ impl Responder {
     /// re-reads its address and resumes; `specs/l3.md`, "Recovery after a reboot").
     pub fn restore_addr<F: Flash>(&mut self, store: &Store<F>) {
         if let Ok((Value::U8(a), _)) = store.get_value(NODE_ADDRESS.key()) {
-            self.fwd.set_addr(a);
+            self.set_addr(a);
         }
+    }
+
+    /// Take `addr` as the live address. The guest leases are of the old address's slice, so they
+    /// are dropped when the slice changes; an address in the same slice keeps them.
+    fn set_addr(&mut self, addr: u8) {
+        if guest_slice(addr) != guest_slice(self.addr()) {
+            self.n_leases = 0;
+        }
+        self.fwd.set_addr(addr);
+    }
+
+    /// The live leases, the one granted longest ago first.
+    fn leases(&self) -> &[Lease] {
+        self.leases.get(..self.n_leases as usize).unwrap_or(&[])
+    }
+
+    /// Remove the lease at `i` from the table, returning its address.
+    fn drop_lease(&mut self, i: usize) -> u8 {
+        let n = self.n_leases as usize;
+        let addr = self.leases.get(i).map_or(0, |l| l.addr);
+        if i < n {
+            self.leases.copy_within(i + 1..n, i);
+            self.n_leases -= 1;
+        }
+        addr
+    }
+
+    /// The guest address for a `NODE_HELLO(kind=CONTROLLER)` from `holder` (`specs/bridge-clients.md`
+    /// section 3.2): the slot it holds again, else the next free slot in round-robin order from the
+    /// slot counter, else the slot granted longest ago, taken from its holder. The grant is the
+    /// holder's newest.
+    ///
+    /// Every grant is inside the slice, which lies inside the guest range. A grant that walked
+    /// past it would reach `0xFF` (broadcast), then `0x00` (no-address) and then the BOARD range,
+    /// where the forwarder's source-learning WOULD adopt it and a guest could capture a node's
+    /// route. The `%` also covers a counter carried over from an 8-address slice into the
+    /// 7-address top one after an address change.
+    fn grant(&mut self, holder: u8) -> u8 {
+        let (first, len) = guest_slice(self.addr());
+        let addr = match self.leases().iter().position(|l| l.holder == holder) {
+            Some(i) => self.drop_lease(i),
+            None => {
+                let free = (0..len)
+                    .map(|k| (self.guest_slot + k) % len)
+                    .find(|&slot| self.holder_of(first + slot).is_none());
+                match free {
+                    Some(slot) => {
+                        self.guest_slot = (slot + 1) % len;
+                        first + slot
+                    }
+                    None => self.drop_lease(0),
+                }
+            }
+        };
+        if let Some(l) = self.leases.get_mut(self.n_leases as usize) {
+            *l = Lease { addr, holder };
+            self.n_leases += 1;
+        }
+        addr
+    }
+
+    /// Free the guest slot `holder` holds, if any (a bridge carrier that disconnected,
+    /// `specs/bridge-clients.md` section 3.2). The slot is granted again only when the round-robin
+    /// search reaches it.
+    pub fn release(&mut self, holder: u8) {
+        if let Some(i) = self.leases().iter().position(|l| l.holder == holder) {
+            self.drop_lease(i);
+        }
+    }
+
+    /// The holder of guest address `addr`, or `None` when no holder has it
+    /// (`specs/bridge-clients.md` section 3.3: the bridge routes frames to a guest by it).
+    pub fn holder_of(&self, addr: u8) -> Option<u8> {
+        self.leases()
+            .iter()
+            .find(|l| l.addr == addr)
+            .map(|l| l.holder)
     }
 
     /// Is a `PROBE_PORTS` in flight (awaiting its probe replies / a tick to report)?
@@ -611,6 +710,8 @@ impl Responder {
 
     /// Ingest one received frame on `ingress`: learn + forward (multi-hop), and if it is for this node,
     /// handle the walk opcode. Emissions (forwarded frames + walk replies/probes) are appended to `out`.
+    /// `holder` is who sent it, the holder a guest grant goes to ([`Responder::holder_of`]): a
+    /// board passes the ingress port, a bridge its carrier.
     ///
     /// Returns the delivered-PDU hand-back (`specs/integration.md`): `Some` when the frame was
     /// delivered to this node but its opcode is not one the walk layer handles (a bounded copy;
@@ -619,6 +720,7 @@ impl Responder {
     pub fn ingest<F: Flash>(
         &mut self,
         ingress: u8,
+        holder: u8,
         frame: &[u8],
         store: &mut Store<F>,
         out: &mut Emits,
@@ -646,14 +748,19 @@ impl Responder {
         );
         if let Some(buf) = delivered {
             if let Ok(p) = Pdu::decode(&buf) {
-                return self.handle_local(ingress, &p, store, out);
+                return self.handle_local(ingress, holder, &p, store, out);
             }
         }
         None
     }
 
-    /// Complete an in-flight probe (the firmware poll's "probe window elapsed" tick): emit the `PORTS`
-    /// reply with the gathered per-port states, routed toward the controller.
+    /// Complete an in-flight probe (the firmware poll's "probe window elapsed" tick): emit a `PORTS`
+    /// reply with the gathered per-port states to each requester, routed toward it.
+    ///
+    /// Never inlined: it runs once per probe window, and inlined into a board's main loop, which
+    /// is linked in the hot flash window (`motorcontroller/firmware/memory.x`, `.hotcode`), its
+    /// loop over the requesters would grow that window.
+    #[inline(never)]
     pub fn poll_probe(&mut self, out: &mut Emits) {
         let Some(probe) = self.probe.take() else {
             return;
@@ -667,19 +774,22 @@ impl Responder {
             let _ = payload.push(state);
             let _ = payload.push(addr);
         }
-        let r = Pdu::from_op(Opcode::Ports, self.addr(), probe.reply_to, &payload);
-        self.fwd.originate(&r, &mut |port, f| emit(out, port, f));
+        for &to in probe.reply_to.iter().take(probe.n_requesters as usize) {
+            let r = Pdu::from_op(Opcode::Ports, self.addr(), to, &payload);
+            self.fwd.originate(&r, &mut |port, f| emit(out, port, f));
+        }
     }
 
     fn handle_local<F: Flash>(
         &mut self,
         ingress: u8,
+        holder: u8,
         pdu: &Pdu,
         store: &mut Store<F>,
         out: &mut Emits,
     ) -> Option<DeliveredPdu> {
         match Opcode::from_u8(pdu.opcode) {
-            Some(Opcode::NodeHello) => self.on_hello(ingress, pdu, out),
+            Some(Opcode::NodeHello) => self.on_hello(ingress, holder, pdu, out),
             Some(Opcode::ProbePorts) => self.on_probe_ports(pdu, out),
             Some(Opcode::Assign) => self.on_assign(pdu, store, out),
             Some(Opcode::ConfigRead) => self.on_config_read(pdu, store, out),
@@ -914,22 +1024,12 @@ impl Responder {
         self.fwd.originate(&r, &mut |port, f| emit(out, port, f));
     }
 
-    fn on_hello(&mut self, ingress: u8, pdu: &Pdu, out: &mut Emits) {
+    fn on_hello(&mut self, ingress: u8, holder: u8, pdu: &Pdu, out: &mut Emits) {
         if pdu.payload.len() == 1 {
             // A request ("identify yourself"): reply identity out the ingress port (toward the asker).
             let kind = pdu.payload[0];
             let your_addr = if kind == KIND_CONTROLLER {
-                let (first, len) = guest_slice(self.addr());
-                // Wrap WITHIN the slice, which lies inside the guest range. An unguarded `+ 1`
-                // would walk a grant into `0xFF` (broadcast), then `0x00` (no-address) and then
-                // the BOARD range, where the forwarder's source-learning WOULD adopt it and a guest
-                // could capture a node's route. One attach can burn several grants (a
-                // retransmitted hello is a fresh grant), so same-boot reconnect churn reaches the
-                // end of any finite counter. The `%` also covers a slot carried over from an
-                // 8-address slice into the 7-address top one after an address change.
-                let slot = self.guest_slot % len;
-                self.guest_slot = (slot + 1) % len;
-                first + slot
+                self.grant(holder)
             } else {
                 pdu::NO_ADDRESS
             };
@@ -951,10 +1051,27 @@ impl Responder {
         }
     }
 
+    /// `PROBE_PORTS`: open the probe window and probe every port, or, while one is open, join it
+    /// (`specs/bridge-clients.md` section 3.4). A joining requester sends no probe of its own (a
+    /// second round would race the first one's answers); it is added once, and dropped when
+    /// [`PROBE_REQUESTERS`] already wait, getting no `PORTS`.
     fn on_probe_ports(&mut self, pdu: &Pdu, out: &mut Emits) {
+        if let Some(p) = self.probe.as_mut() {
+            let n = p.n_requesters as usize;
+            if !p.reply_to.iter().take(n).any(|&a| a == pdu.src) {
+                if let Some(slot) = p.reply_to.get_mut(n) {
+                    *slot = pdu.src;
+                    p.n_requesters += 1;
+                }
+            }
+            return;
+        }
         let n = self.fwd.n_ports();
+        let mut reply_to = [0u8; PROBE_REQUESTERS];
+        reply_to[0] = pdu.src;
         self.probe = Some(Probe {
-            reply_to: pdu.src,
+            reply_to,
+            n_requesters: 1,
             n_ports: n,
             states: [(NB_EMPTY, 0u8); MAX_PORTS],
         });
@@ -987,7 +1104,7 @@ impl Responder {
             } else {
                 match store.set_value(NODE_ADDRESS.key(), Value::U8(new_addr)) {
                     Ok(()) => {
-                        self.fwd.set_addr(new_addr);
+                        self.set_addr(new_addr);
                         STATUS_OK
                     }
                     // Same contract as the CONFIG_WRITE arm below: `Full` means "compact() then
@@ -997,7 +1114,7 @@ impl Responder {
                     Err(DynError::Store(StoreError::Full)) => match store.compact() {
                         Ok(()) => match store.set_value(NODE_ADDRESS.key(), Value::U8(new_addr)) {
                             Ok(()) => {
-                                self.fwd.set_addr(new_addr);
+                                self.set_addr(new_addr);
                                 STATUS_OK
                             }
                             Err(_) => STATUS_ERR,

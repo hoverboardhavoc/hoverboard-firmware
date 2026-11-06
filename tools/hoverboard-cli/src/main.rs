@@ -254,6 +254,7 @@ fn print_info(i: &espsvc::EspInfo) {
         "gdb         {}",
         if i.gdb { "connected" } else { "not connected" }
     );
+    println!("controllers {}", install::controllers_text(i));
     match i.moe_clear_us {
         espsvc::MOE_CLEAR_NONE => println!("moe clear   none yet"),
         us => println!("moe clear   {us} us from the halt seen to MOE cleared"),

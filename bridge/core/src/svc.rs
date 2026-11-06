@@ -45,6 +45,8 @@ pub struct Identity {
     pub addr: u8,
     /// Whether its store mounted at boot.
     pub store_mounted: bool,
+    /// The controllers attached to it (`specs/bridge-clients.md` section 3.5).
+    pub controllers: espsvc::Controllers,
 }
 
 /// The app slot the bridge runs from.
@@ -382,6 +384,7 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
                     store_mounted: me.store_mounted,
                     gdb: self.gdb.connected,
                     moe_clear_us: self.gdb.moe_clear_us,
+                    controllers: me.controllers,
                 };
                 reply(out, src, Msg::Info(info));
             }
