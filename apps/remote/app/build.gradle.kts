@@ -13,8 +13,8 @@ android {
         applicationId = "com.hoverboardhavoc.remote"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 20264500
+        versionName = "2026.45.0"
 
         // The bench smoke test (`src/androidTest/`, `specs/bench-ci.md` section 5), run on the bench
         // phone with `am instrument` against the real app and the real BLE transport.
