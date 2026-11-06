@@ -289,6 +289,28 @@ pub fn pin_text(port: u8, pin: u8) -> String {
     format!("P{}{pin}", port_letter(port))
 }
 
+/// The port and pin a pin token names (`specs/cli-onboarding.md` part C): `P`, the port letter `A`
+/// to `F`, the pin number 0 to 15 with no leading zero, and nothing else (`PA2`, `PC13`). `None`
+/// for anything else.
+pub fn pin_token(s: &str) -> Option<(u8, u8)> {
+    let rest = s.strip_prefix('P')?;
+    let mut chars = rest.chars();
+    let port = chars.next().filter(|c| ('A'..='F').contains(c))?;
+    let digits = chars.as_str();
+    let ok = !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'));
+    let pin: u8 = digits.parse().ok().filter(|p| ok && *p <= 15)?;
+    Some((port as u8 - b'A', pin))
+}
+
+/// Whether `v` is a pin token for a pin key: a file or command-line value the CLI resolves
+/// against the board's chip before it is encoded (`crate::checks::resolve`).
+pub fn is_token(key: Key, v: &Json) -> bool {
+    row_of(key).is_some_and(|r| r.kind == Kind::Pin)
+        && v.as_str().is_some_and(|s| pin_token(s).is_some())
+}
+
 /// A port number as a file writes it: `0` is `"A"`.
 fn port_letter(port: u8) -> String {
     char::from(b'A' + port.min(25)).to_string()
@@ -544,6 +566,14 @@ pub fn encode(
         }
     };
     let int = match (row.map(|r| r.kind), v) {
+        (Some(Kind::Pin), Json::String(t)) if pin_token(t).is_some() => {
+            return Err(bad(
+                "a pin object: a token is resolved against the board's chip",
+            ));
+        }
+        (Some(Kind::Pin), Json::String(_)) => {
+            return Err(bad("a pin token (PA2) or a pin object"));
+        }
         (Some(Kind::Pin), _) => {
             return pin_bytes(storage, v)
                 .map(|b| (Some(b), warn))
@@ -1015,7 +1045,16 @@ mod tests {
         };
         assert_eq!(
             stop(k(0x40, 0), json!("PC13")),
-            "motors[0].hall.a: a pin object, {\"port\": \"A\", \"pin\": 8, ...}, not \"PC13\""
+            "motors[0].hall.a: a pin object: a token is resolved against the board's chip, not \
+             \"PC13\""
+        );
+        assert_eq!(
+            stop(k(0x40, 0), json!("pc13")),
+            "motors[0].hall.a: a pin token (PA2) or a pin object, not \"pc13\""
+        );
+        assert_eq!(
+            stop(k(0x40, 0), json!(13)),
+            "motors[0].hall.a: a pin object, {\"port\": \"A\", \"pin\": 8, ...}, not 13"
         );
         assert_eq!(
             stop(k(0x40, 0), json!({"port": "G", "pin": 1})),
@@ -1033,6 +1072,24 @@ mod tests {
             stop(k(0x49, 0), json!({"port": "A", "pin": 0})),
             "motors[0].current.phase_a: an adc channel, not {\"port\":\"A\",\"pin\":0}"
         );
+    }
+
+    /// `specs/cli-onboarding.md` test C1: the token grammar.
+    #[test]
+    fn a_pin_token_is_p_the_port_and_the_pin() {
+        assert_eq!(pin_token("PA2"), Some((0, 2)));
+        assert_eq!(pin_token("PC13"), Some((2, 13)));
+        assert_eq!(pin_token("PF0"), Some((5, 0)));
+        assert_eq!(pin_token("PB15"), Some((1, 15)));
+        for bad in [
+            "pa2", "Pa2", "PA16", "PZ1", "PG1", "A2", "PA 2", "PA", "P2", "PA02", "PA2x", "PA-1",
+            " PA2", "",
+        ] {
+            assert_eq!(pin_token(bad), None, "{bad:?}");
+        }
+        assert!(is_token(k(0x40, 0), &Json::from("PC13")));
+        assert!(!is_token(k(0x40, 0), &Json::from("pc13")));
+        assert!(!is_token(k(0x20, 0), &Json::from("PC13")), "not a pin key");
     }
 
     /// Encode then show back: the file form of `v` for `key`.
@@ -1120,7 +1177,7 @@ mod tests {
         };
         assert_eq!(
             stop(k(0x10, 0), json!("PC9")),
-            "links[0].rx: a pin object, {\"port\": \"A\", \"pin\": 8, ...}, not \"PC9\""
+            "links[0].rx: a pin object: a token is resolved against the board's chip, not \"PC9\""
         );
         assert_eq!(
             stop(k(0x20, 0), json!("balanse")),

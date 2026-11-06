@@ -243,7 +243,8 @@ impl FileReader<'_> {
         }
         // A named key's value is checked now, before the board is read; an id the table does not
         // name takes the type the board reports, so its value is checked after the read.
-        if let Some(row) = row_of(key) {
+        // A pin token is resolved once the board's chip is known (`crate::checks::resolve`).
+        if let Some(row) = row_of(key).filter(|_| !crate::names::is_token(key, v)) {
             match encode(key, row.storage, v) {
                 Ok((_, warn)) => warn.into_iter().for_each(|p| self.problem(p)),
                 Err(p) => self.problem(p),
@@ -334,11 +335,35 @@ pub fn read_board<W: Wire>(
     Ok((reads, unknown))
 }
 
+/// How a dump writes a board's pins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pins {
+    /// The board's chip is known: a pin is its token where resolving the token on that chip gives
+    /// back the stored bytes (`crate::checks::token_of`), else its object
+    /// (`specs/cli-onboarding.md` part C, "Output").
+    Chip(hal::pincap::Chip),
+    /// Every pin as its object. `remaps` is a board whose chip routes by the AFIO remap (the
+    /// GD32F10x, `IDENTITY`'s family), whose pins carry no `af` in a file
+    /// (`specs/config-read-once.md` section 3).
+    Objects {
+        /// The chip routes by its remap.
+        remaps: bool,
+    },
+}
+
+impl Pins {
+    fn remaps(self) -> bool {
+        match self {
+            Pins::Chip(c) => c.remaps(),
+            Pins::Objects { remaps } => remaps,
+        }
+    }
+}
+
 /// The board's stored keys as a file (`specs/cli-config.md` section 2): every `CFG_OK` answer
-/// among [`dump_keys`] at its path, nothing else. `remaps` is a board whose chip routes by the AFIO
-/// remap (the GD32F10x, `IDENTITY`'s family), whose pins carry no `af` in a file
-/// (`specs/config-read-once.md` section 3).
-pub fn to_file(reads: &Reads, remaps: bool) -> Json {
+/// among [`dump_keys`] at its path, nothing else, its pins as `pins` says.
+pub fn to_file(reads: &Reads, pins: Pins) -> Json {
+    let stored = state_after(reads, &Plan::default());
     let mut top = Map::new();
     let mut arrays: BTreeMap<&str, Vec<Map<String, Json>>> = BTreeMap::new();
     for key in dump_keys() {
@@ -346,8 +371,14 @@ pub fn to_file(reads: &Reads, remaps: bool) -> Json {
             continue;
         };
         let row = row_of(key).expect("a table key");
-        let mut v = to_json(Some(row), r.tag, &r.bytes);
-        if remaps && row.storage == Type::PinAf {
+        let token = match pins {
+            Pins::Chip(chip) if row.kind == store::Kind::Pin => {
+                crate::checks::token_of(chip, key, &r.bytes, &stored)
+            }
+            _ => None,
+        };
+        let mut v = token.map_or_else(|| to_json(Some(row), r.tag, &r.bytes), Json::String);
+        if pins.remaps() && row.storage == Type::PinAf {
             if let Json::Object(o) = &mut v {
                 o.remove("af");
             }
@@ -948,10 +979,26 @@ pub fn config_write<W: Wire>(
         None => Type::from_tag(before.tag)
             .ok_or_else(|| format!("{}: the board reports no type", path_of(key)))?,
     };
-    let value = crate::names::from_text(row, storage, text);
+    let mut value = crate::names::from_text(row, storage, text);
+    let (reads, _) = read_board(b, &table_keys())?;
+    if let Some(chip) = chip.filter(|_| crate::names::is_token(key, &value)) {
+        let mut entries = vec![Entry { key, value }];
+        let stored = state_after(&reads, &Plan::default());
+        crate::checks::resolve(chip, &mut entries, &stored)
+            .map_err(|e| format!("{}: {e}", b.name))?;
+        if let Some(e) = entries.get(1) {
+            return Err(format!(
+                "{}: {}: {text} needs {} {}: write it first, or give the pin as an object",
+                b.name,
+                path_of(key),
+                path_of(e.key),
+                e.value
+            ));
+        }
+        value = entries.remove(0).value;
+    }
     let (bytes, warn) = encode(key, storage, &value).map_err(|p| p.msg)?;
     stop_on(&warn, force)?;
-    let (reads, _) = read_board(b, &table_keys())?;
     let plan = Plan {
         steps: vec![Step {
             key,
@@ -1127,7 +1174,7 @@ mod tests {
         let mut lp = staged();
         let mut b = board(&mut lp);
         let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
-        let dumped = to_file(&reads, false);
+        let dumped = to_file(&reads, Pins::Objects { remaps: false });
         assert_eq!(
             dumped,
             json!({
@@ -1146,6 +1193,56 @@ mod tests {
         assert!(!plan.changes());
         assert_eq!(lp.writes, before, "nothing written");
         assert_eq!(lines, ["rover-left: 0 changed, 0 pinned, 11 unchanged"]);
+    }
+
+    /// `f` with its tokens resolved on `chip` against the board's store.
+    fn resolved(lp: &mut Loop, chip: hal::pincap::Chip, mut f: Files) -> Files {
+        let reads = records(lp);
+        let stored = state_after(&reads, &Plan::default());
+        crate::checks::resolve(chip, &mut f.entries, &stored).unwrap();
+        f
+    }
+
+    /// `specs/cli-onboarding.md` test C4: a board holding the split 2.x.20 store dumps its pins as
+    /// tokens, the same file from either chip, and applying the dump writes nothing; a pin whose
+    /// stored `af` the table would not give dumps as its object.
+    #[test]
+    fn a_dump_writes_a_pin_as_its_token_where_the_token_resolves_back() {
+        use hal::pincap::Chip;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../boards/split/2.x.20/master.json"
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        let tokens: Json = serde_json::from_str(&text).unwrap();
+        let mut dumps = Vec::new();
+        for chip in [Chip::Gd32f130c8, Chip::Gd32f103c8] {
+            let mut lp = Loop::new();
+            let f = resolved(&mut lp, chip, files(&[("master.json", tokens.clone())]));
+            run(&mut lp, &f, false).unwrap();
+            let mut b = board(&mut lp);
+            let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
+            let dumped = to_file(&reads, Pins::Chip(chip));
+            assert_eq!(dumped, tokens, "{}", chip.name());
+            let before = lp.writes;
+            let f = resolved(&mut lp, chip, files(&[("dump.json", dumped.clone())]));
+            let (plan, _) = run(&mut lp, &f, false).unwrap();
+            assert!(!plan.changes(), "{}", chip.name());
+            assert_eq!(lp.writes, before, "{}: nothing written", chip.name());
+            dumps.push(serde_json::to_string_pretty(&dumped).unwrap());
+        }
+        assert_eq!(dumps[0], dumps[1], "the same text from either chip");
+        // USART1's TX is AF1 on PA2 on the GD32F130: a stored AF0 is no token's.
+        let mut lp = Loop::new();
+        let link = json!({ "links": [{ "tx": { "port": "A", "pin": 2, "af": 0 }, "rx": "PA3", "usart": 1 }] });
+        let f = resolved(&mut lp, Chip::Gd32f130c8, files(&[("link.json", link)]));
+        run(&mut lp, &f, false).unwrap();
+        let mut b = board(&mut lp);
+        let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
+        assert_eq!(
+            to_file(&reads, Pins::Chip(Chip::Gd32f130c8))["links"][0],
+            json!({ "tx": { "port": "A", "pin": 2, "af": 0 }, "rx": "PA3", "usart": 1 })
+        );
     }
 
     /// `specs/machine-settings.md` sections 3.1 and 6.2: the regrouped node paths, `links` as an
@@ -1173,7 +1270,10 @@ mod tests {
         assert_eq!(r.bytes, [0b101], "button b0 and pad B b2");
 
         let mut b = board(&mut lp);
-        let dumped = to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false);
+        let dumped = to_file(
+            &read_board(&mut b, &dump_keys()).unwrap().0,
+            Pins::Objects { remaps: false },
+        );
         assert_eq!(dumped, layout);
         let f = files(&[("dump.json", dumped)]);
         let (plan, _) = run(&mut lp, &f, false).unwrap();
@@ -1185,7 +1285,10 @@ mod tests {
         run(&mut lp, &files(&[("l.json", link0.clone())]), false).unwrap();
         let mut b = board(&mut lp);
         assert_eq!(
-            to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false),
+            to_file(
+                &read_board(&mut b, &dump_keys()).unwrap().0,
+                Pins::Objects { remaps: false },
+            ),
             link0
         );
     }
@@ -1207,7 +1310,10 @@ mod tests {
         assert_eq!(r.bytes, [0xA0, 0x0F, 30]);
 
         let mut b = board(&mut lp);
-        let dumped = to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false);
+        let dumped = to_file(
+            &read_board(&mut b, &dump_keys()).unwrap().0,
+            Pins::Objects { remaps: false },
+        );
         assert_eq!(dumped, layout);
         let (plan, _) = run(&mut lp, &files(&[("dump.json", dumped)]), false).unwrap();
         assert!(!plan.changes(), "{:?}", plan.steps);
@@ -1269,7 +1375,10 @@ mod tests {
         let mut source = staged();
         let dumped = {
             let mut b = board(&mut source);
-            to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false)
+            to_file(
+                &read_board(&mut b, &dump_keys()).unwrap().0,
+                Pins::Objects { remaps: false },
+            )
         };
         // The same layout plus records from an earlier life, a board-owned one among them.
         let mut target = staged();
@@ -1683,7 +1792,7 @@ mod tests {
         let mut b = board(&mut lp);
         let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
         assert_eq!(reads[&pass].status, CFG_SECRET);
-        let dumped = to_file(&reads, false);
+        let dumped = to_file(&reads, Pins::Objects { remaps: false });
         assert_eq!(dumped, json!({ "wifi": { "ssid": "bench" } }));
         let notes = left_out("rover-left", &reads);
         assert_eq!(
@@ -1793,7 +1902,50 @@ mod tests {
             );
         }
         let (reads, _) = read_board(&mut b, &dump_keys()).unwrap();
-        assert_eq!(to_file(&reads, false), json!({}));
+        assert_eq!(to_file(&reads, Pins::Objects { remaps: false }), json!({}));
+    }
+
+    /// `specs/cli-onboarding.md` part C and bench gate G4 on the host: `board set` takes a pin as
+    /// its token, resolved on the board's chip with the group's stored instance, and refuses one it
+    /// cannot resolve.
+    #[test]
+    fn board_set_takes_a_pin_token() {
+        use hal::pincap::Chip;
+        for chip in [Chip::Gd32f103c8, Chip::Gd32f130c8] {
+            let mut lp = Loop::new();
+            let mut b = board(&mut lp);
+            let w = config_write(
+                &mut b,
+                store::BOARD_SELF_HOLD.key(),
+                "PB12",
+                false,
+                Some(chip),
+            )
+            .unwrap();
+            assert_eq!(
+                w.line,
+                "rover-left: power.self_hold: none (default) -> PB12"
+            );
+            let e = config_write(&mut b, store::LINK_TX.at(0).key(), "PA2", false, Some(chip))
+                .unwrap_err();
+            assert_eq!(
+                e,
+                "rover-left: links[0].tx: give links[0].usart to resolve PA2"
+            );
+        }
+        // On the GD32F130 the token takes the table's AF, on the instance the board stores.
+        let mut lp = Loop::new();
+        let link = json!({ "links": [{
+            "tx": { "port": "A", "pin": 2, "af": 1 },
+            "rx": { "port": "A", "pin": 3, "af": 1 },
+            "usart": 1,
+        }] });
+        run(&mut lp, &files(&[("link.json", link)]), false).unwrap();
+        let mut b = board(&mut lp);
+        let f130 = Some(Chip::Gd32f130c8);
+        let w = config_write(&mut b, store::LINK_RX.at(0).key(), "PA3", false, f130).unwrap();
+        assert_eq!(w.line, "rover-left: links[0].rx: PA3 af1 -> PA3 af1");
+        assert_eq!(w.changed, None);
     }
 
     #[test]

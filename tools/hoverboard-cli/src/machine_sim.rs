@@ -1,16 +1,12 @@
-//! `machine update` end to end against a simulated machine of two pairs
-//! (`specs/firmware-bundle.md` sections 4.3 and 6): two bridges, each with the real links, node,
-//! mailbox port and command service of `hoverboard_bridge_core`, each in front of a simulated
-//! GD32 whose firmware end of the mailbox and walk responder answer as a board does, the two boards
-//! linked by UART. Each bridge serves its console on its own local TCP port, and the bridges' own
-//! links are opened by name through that map, so the run takes the real path: the plan over the
-//! given link, each pair over its own bridge's port with the given link's pair last, the bridge's
-//! update and reboot (its connection ends and the CLI reconnects), the board's flash routed by its
-//! `uid`, its `STATUS_READ`, and the report.
+//! A simulated machine of two pairs: two bridges, each with the real links, node, mailbox port and
+//! command service of `hoverboard_bridge_core`, each in front of a simulated GD32 whose firmware
+//! end of the mailbox and walk responder answer as a board does, the two boards linked by UART.
+//! Each bridge serves its console on its own local TCP port, so a command takes the real path over
+//! a link to one of them. The tests run `board update` over the master's bridge.
 
 use std::io::{ErrorKind, Read};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +14,7 @@ use hoverboard_bridge_core::mailbox::MailboxPort;
 use hoverboard_bridge_core::node::{default_name, Node, PROBE_WINDOW_US};
 use hoverboard_bridge_core::router::{Port, Router};
 use hoverboard_bridge_core::sim::{
-    running_board, Family, Firmware, Gd32, OtaState, RamFlash, SimBoard, SimPins, SimPlatform,
+    running_board, Family, Firmware, Gd32, RamFlash, SimBoard, SimPins, SimPlatform,
 };
 use hoverboard_bridge_core::svc::{Build, ImageBuffer, Service};
 use hoverboard_bridge_core::update::Update;
@@ -30,15 +26,11 @@ use super::*;
 #[path = "../tests/common/mod.rs"]
 mod common;
 
-/// The order the bridges rebooted into their updates in.
-static REBOOTS: AtomicUsize = AtomicUsize::new(0);
-
-/// The commit both simulated bridges were built from, before the update.
+/// The commit both simulated bridges were built from.
 const OLD: u32 = 0x50a4_6c91;
 
 /// One bridge and the board on its mailbox.
 struct Side {
-    name: &'static str,
     router: Router,
     node: Node<'static, RamFlash>,
     port: MailboxPort<SimPins<Gd32>>,
@@ -48,11 +40,6 @@ struct Side {
     /// Frames the other board sent on the UART, not yet taken in.
     uart_in: Vec<Vec<u8>>,
     sock: Option<TcpStream>,
-    /// Connections accepted, and reboots into an update.
-    connections: usize,
-    reboots: usize,
-    /// When it rebooted, in [`REBOOTS`] order.
-    rebooted: Option<usize>,
 }
 
 fn service(platform: SimPlatform) -> Service<'static, SimPlatform> {
@@ -85,7 +72,6 @@ impl Side {
         g.uid = [board; 12];
         g.family = family;
         Side {
-            name,
             router: Router::new(),
             node: Node::new(keys, true, 0x0001, mac, default),
             port,
@@ -94,9 +80,6 @@ impl Side {
             board: SimBoard::holding(board),
             uart_in: Vec::new(),
             sock: None,
-            connections: 0,
-            reboots: 0,
-            rebooted: None,
         }
     }
 
@@ -159,8 +142,7 @@ impl Side {
         false
     }
 
-    /// Take a waiting client when none is connected, move bytes both ways, and reboot the bridge
-    /// when an update asks for it: the client's connection ends there.
+    /// Take a waiting client when none is connected, and move bytes both ways.
     fn serve(&mut self, listener: &TcpListener) -> bool {
         let mut moved = false;
         if self.sock.is_none() {
@@ -169,7 +151,6 @@ impl Side {
                 s.set_nonblocking(false).unwrap();
                 self.router.connect(Port::Tcp);
                 self.sock = Some(s);
-                self.connections += 1;
             }
         }
         let Some(sock) = self.sock.as_mut() else {
@@ -197,17 +178,6 @@ impl Side {
             let _ = sock.write_all(&out[..k]);
             moved = true;
         }
-        if self.svc.reboot_requested() {
-            // The bootloader picks the slot; the bridge starts over with its store and its board.
-            self.sock = None;
-            let mut platform = std::mem::take(self.svc.platform());
-            platform.reset();
-            self.svc = service(platform);
-            self.router = Router::new();
-            self.reboots += 1;
-            self.rebooted = Some(REBOOTS.fetch_add(1, Ordering::Relaxed));
-            return true;
-        }
         if closed {
             self.sock = None;
             self.router.disconnect(Port::Tcp);
@@ -220,32 +190,15 @@ impl Side {
 /// on the server's thread).
 #[derive(Debug)]
 struct After {
-    name: &'static str,
-    connections: usize,
-    reboots: usize,
-    rebooted: Option<usize>,
-    slot1: Vec<u8>,
-    selected: Option<(u8, OtaState)>,
     flash: Vec<u8>,
     booted: bool,
 }
 
 impl Side {
     fn after(mut self) -> After {
-        let p = self.svc.platform();
-        let (slot1, selected) = (p.slots[1].clone(), p.selected);
         let g = self.gd32();
         let (flash, booted) = (g.flash_bytes(), g.mailbox().magic() == swd_mailbox::MAGIC);
-        After {
-            name: self.name,
-            connections: self.connections,
-            reboots: self.reboots,
-            rebooted: self.rebooted,
-            slot1,
-            selected,
-            flash,
-            booted,
-        }
+        After { flash, booted }
     }
 }
 
@@ -290,7 +243,7 @@ fn app_image() -> Vec<u8> {
 }
 
 /// A bundle of both mainboard images and the bridge's app image, written to a file.
-fn bundle_file(app: &[u8]) -> (String, Vec<u8>, Vec<u8>) {
+fn bundle_file(app: &[u8], tag: &str) -> (String, Vec<u8>, Vec<u8>) {
     let firmware = include_str!("../../../motorcontroller/firmware/Cargo.toml");
     let bridge = include_str!("../../../bridge/Cargo.toml");
     let f130 = common::flashable_elf(&[0x11, 0x22, 0x33, 0x44]);
@@ -321,7 +274,7 @@ fn bundle_file(app: &[u8]) -> (String, Vec<u8>, Vec<u8>) {
         "2026-11-02T08:00:00Z",
     )
     .unwrap();
-    let path = std::env::temp_dir().join(format!("machine-update-sim-{}.hbfw", std::process::id()));
+    let path = std::env::temp_dir().join(format!("{tag}-{}.hbfw", std::process::id()));
     std::fs::write(&path, z).unwrap();
     (
         path.to_str().unwrap().to_string(),
@@ -330,23 +283,20 @@ fn bundle_file(app: &[u8]) -> (String, Vec<u8>, Vec<u8>) {
     )
 }
 
-#[test]
-fn machine_update_takes_each_pair_over_its_own_bridge_and_the_given_link_last() {
-    let app = app_image();
-    let (path, f103_bin, f130_bin) = bundle_file(&app);
+/// Run `command` over the master's bridge of the rover's layout: the slave board 0x01 on bridge
+/// 0x02, the master board 0x03 on bridge 0x04, the boards linked by UART; the master a GD32F103,
+/// the slave a GD32F130. The command's outcome and the two sides after it.
+fn on_master(
+    command: impl FnOnce(&Link) -> Result<(), String>,
+) -> (Result<(), String>, [After; 2]) {
     let listeners = [
         TcpListener::bind("127.0.0.1:0").unwrap(),
         TcpListener::bind("127.0.0.1:0").unwrap(),
     ];
-    let ports: Vec<String> = listeners
-        .iter()
-        .map(|l| l.local_addr().unwrap().to_string())
-        .collect();
+    let port = listeners[1].local_addr().unwrap().to_string();
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let server = std::thread::spawn(move || {
-        // The rover's layout: the slave board 0x01 on bridge 0x02, the master board 0x03 on
-        // bridge 0x04, the boards linked by UART; the master a GD32F103, the slave a GD32F130.
         let mut sides = [
             Side::new("rover-slave", 0x01, 0x02, 0x01, Family::F1x0),
             Side::new("rover-master", 0x02, 0x04, 0x03, Family::F10x),
@@ -354,52 +304,27 @@ fn machine_update_takes_each_pair_over_its_own_bridge_and_the_given_link_last() 
         serve(&mut sides, &listeners, &flag);
         sides.map(Side::after)
     });
-
-    // The given link is the master's bridge; the slave's is opened by its name.
-    let given = Link::Tcp(ports[1].clone());
-    let names = [
-        ("rover-slave", ports[0].clone()),
-        ("rover-master", ports[1].clone()),
-    ];
-    let opened = std::cell::RefCell::new(Vec::new());
-    let by_name = |name: &str, addr: u8| -> Result<Link, String> {
-        opened.borrow_mut().push(name.to_string());
-        let (_, port) = names
-            .iter()
-            .find(|(n, _)| *n == name)
-            .ok_or_else(|| format!("{name}.local: no address"))?;
-        let link = Link::Tcp(port.clone());
-        reaches(&link, addr)?;
-        Ok(link)
-    };
-    let code = machine_update_with(&given, &path, true, &by_name);
+    let r = command(&Link::Tcp(port));
     stop.store(true, Ordering::Relaxed);
-    let sides = server.join().unwrap();
-    let _ = std::fs::remove_file(&path);
-    assert_eq!(code, Ok(0), "every pair done");
+    (r, server.join().unwrap())
+}
 
-    // Only the slave's bridge went by name: the master's pair used the given link.
-    assert!(
-        opened.borrow().iter().all(|n| n == "rover-slave"),
-        "{:?}",
-        opened.borrow()
-    );
-    assert!(!opened.borrow().is_empty());
-    // The slave's pair first, the given link's (the master's) last.
-    assert!(
-        sides[0].rebooted < sides[1].rebooted,
-        "the given link's bridge last"
-    );
-    for s in &sides {
-        let name = s.name;
-        // Each bridge rebooted once into its update and was reconnected to after it.
-        assert_eq!(s.reboots, 1, "{name}");
-        assert_eq!(&s.slot1[..app.len()], &app[..], "{name}: the new slot");
-        assert_eq!(s.selected, Some((1, OtaState::Valid)), "{name}: confirmed");
-        assert!(s.connections >= 3, "{name}: {} connections", s.connections);
-        assert!(s.booted, "{name}: its board booted");
+#[test]
+fn board_update_flashes_the_image_for_the_boards_chip_through_its_bridge() {
+    let (path, f103_bin, _) = bundle_file(&app_image(), "board-update-sim");
+    let op = Swd::Update {
+        bundle: path.clone(),
+        image: None,
+        yes: true,
+    };
+    // Named by its `uid` prefix, and with no target (`specs/cli-onboarding.md` part B): the board
+    // on the attached bridge's SWD header.
+    for target in [Some("03030303"), None] {
+        let (r, sides) = on_master(|link| board_swd(link, target, &op));
+        assert_eq!(r, Ok(()), "{target:?}");
+        let m = &sides[1];
+        assert_eq!(&m.flash[..f103_bin.len()], &f103_bin[..], "{target:?}");
+        assert!(m.booted, "{target:?}: its board booted");
     }
-    // Each board got the image for its chip, through its own bridge.
-    assert_eq!(&sides[0].flash[..f130_bin.len()], &f130_bin[..]);
-    assert_eq!(&sides[1].flash[..f103_bin.len()], &f103_bin[..]);
+    let _ = std::fs::remove_file(&path);
 }

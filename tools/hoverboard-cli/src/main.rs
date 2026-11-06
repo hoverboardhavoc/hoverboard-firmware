@@ -32,6 +32,9 @@
 //! address is on its mailbox, and found by the walk otherwise. `board erase` goes only through the
 //! board's own bridge, the one this link reaches, and `board halt` never over a route through the
 //! board it halts. `board read --hz` routes once and reads at that rate until interrupted.
+//! Given no board, an SWD command acts on the SWD target of the bridge this link reaches, with no
+//! walk, and `board erase` on the board on that bridge's mailbox (`specs/cli-onboarding.md` part B);
+//! a link that ends at a board is refused.
 //!
 //! The `machine` commands act on every motor controller the walk finds: `nodes` lists the walk and
 //! marks each board from its `CYCLIC_STATE` and boot report; `get` and `set` a machine field;
@@ -59,14 +62,6 @@
 //! `--yes`; a single app image is sent with no question. `bridge install` makes a SuperMini a bridge
 //! over its own USB port (`specs/bridge-onboarding.md` section 3), from a bundle's
 //! `bridge-install` image or a merged install image.
-//!
-//! `machine update` (`specs/firmware-bundle.md` section 4.3) walks the machine over the given link,
-//! pairs each board with the bridge wired to it, reads every `ESP_INFO` and `TARGET_ID` and chooses
-//! every image before it asks once. Then it takes one pair at a time over that bridge's own link
-//! (`<name>.local:5333`, else BLE by name; the given link for its own bridge, which goes last):
-//! the bridge's update, a reconnect after its reboot, the board's update routed by its `uid`, and
-//! its boot report. It stops at the first failure, prints what was done, failed and not started,
-//! and reports each bridge's commit and the machine digests over the given link.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write as _};
@@ -86,7 +81,6 @@ use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTi
 use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::erase;
-use hoverboard_cli::fleet;
 use hoverboard_cli::guest::{self, Drive, Tally, Wheel, WheelTarget, STOP_REPEATS};
 use hoverboard_cli::install::{self, Answered, Given, Guard};
 use hoverboard_cli::machine::{self, MachineFile};
@@ -101,7 +95,7 @@ use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 mod ble;
 
 #[cfg(test)]
-mod machine_update_sim;
+mod machine_sim;
 
 /// What a build without the `ble` cargo feature (the bench Pi's) says for a BLE link or `scan`
 /// (`specs/bridge-onboarding.md` section 4.2).
@@ -832,7 +826,7 @@ fn files_command(
     force: bool,
     yes: bool,
 ) -> Result<bool, String> {
-    let files = load_files(paths, force)?;
+    let mut files = load_files(paths, force)?;
     let mut wire = wire_on(link)?;
     let (src, f) = reach(&mut wire, spec, noun)?;
     let mut b = Board {
@@ -843,11 +837,16 @@ fn files_command(
         class: class_of(noun),
     };
     let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
+    let chip = if noun == Noun::Board {
+        resolve_tokens(&mut *b.wire, f.addr, &mut files, &reads)?
+    } else {
+        None
+    };
     let replace = matches!(mode, Mode::Replace | Mode::Diff { replace: true });
     let plan = config::plan(&files, &reads, &unknown, replace).map_err(joined)?;
     let none = BTreeMap::new();
     if noun == Noun::Board && !matches!(mode, Mode::Diff { .. }) {
-        check_board(&mut *b.wire, f.addr, &files, &reads, &plan)?;
+        check_board(&mut *b.wire, f.addr, chip, &files, &reads, &plan)?;
         if plan_changes_leader(&plan) {
             let w = walk(&mut *b.wire)?;
             check_leader_on(&mut *b.wire, &w, &[(f.addr, &plan)])?;
@@ -973,288 +972,6 @@ fn drive_wheels(wire: &mut impl Wire, targets: &[String]) -> Result<(u8, Vec<Whe
     Ok((src, wheels))
 }
 
-/// The bridge's TCP console port (`specs/hoverboard-bridge.md`, "The Wi-Fi console").
-const CONSOLE_PORT: u16 = 5333;
-/// How long `machine update` waits for a flashed board's boot report.
-const STATUS_WAIT: Duration = Duration::from_secs(10);
-/// How long `machine update`'s report walks again for a node the plan walked.
-const REPORT_WAIT: Duration = Duration::from_secs(20);
-
-/// Whether the node that answers an attach on `link` holds `addr`.
-fn reaches(link: &Link, addr: u8) -> Result<(), String> {
-    let mut wire = wire_on(link)?;
-    let at = attach(&mut wire)?;
-    match at.node {
-        Some(a) if a == addr => Ok(()),
-        Some(a) => Err(format!("the node there holds {a:#04x}, not {addr:#04x}")),
-        None => Err(format!("the node there holds no address, not {addr:#04x}")),
-    }
-}
-
-/// The direct link to the bridge `name` at `addr` (`specs/firmware-bundle.md` section 4.3, step 2):
-/// its TCP console at `<name>.local:5333`, else, with the `ble` feature, BLE by that name.
-fn bridge_link(name: &str, addr: u8) -> Result<Link, String> {
-    let tcp = Link::Tcp(format!("{name}.local:{CONSOLE_PORT}"));
-    let tried = match reaches(&tcp, addr) {
-        Ok(()) => return Ok(tcp),
-        Err(e) => format!("TCP {name}.local:{CONSOLE_PORT}: {e}"),
-    };
-    #[cfg(feature = "ble")]
-    {
-        let ble = Link::Ble(Some(name.to_string()));
-        match reaches(&ble, addr) {
-            Ok(()) => Ok(ble),
-            Err(e) => Err(format!("{tried}; BLE {name}: {e}")),
-        }
-    }
-    #[cfg(not(feature = "ble"))]
-    Err(format!("{tried}; no BLE in this build"))
-}
-
-/// How `machine update` opens a bridge's own link from its `device.name` and address:
-/// [`bridge_link`], or the simulated machine's ports in the tests.
-type ByName<'a> = &'a dyn Fn(&str, u8) -> Result<Link, String>;
-
-/// `machine update`'s device steps on the real links.
-struct Machine<'a> {
-    given: &'a Link,
-    by_name: ByName<'a>,
-    bundle: &'a Bundle,
-    plan: &'a fleet::Plan,
-}
-
-impl fleet::Steps for Machine<'_> {
-    type Link = Link;
-
-    fn open(&mut self, pair: &fleet::Pair) -> Result<Link, String> {
-        let b = &pair.bridge;
-        println!("== {}", pair.label());
-        if pair.given {
-            reaches(self.given, b.addr)?;
-            return Ok(self.given.clone());
-        }
-        let link = (self.by_name)(&b.name, b.addr)?;
-        eprintln!("{}: reached on its own link", b.name);
-        Ok(link)
-    }
-
-    fn bridge(&mut self, link: &Link, pair: &fleet::Pair) -> Result<(), String> {
-        let spec = format!("{:#04x}", pair.bridge.addr);
-        let mut c = bridge_client(link, &spec, false)?;
-        let before = info_or_note(&mut c)?;
-        let img = self
-            .bundle
-            .manifest
-            .images
-            .iter()
-            .find(|i| i.name == pair.bridge.image)
-            .expect("the plan's image");
-        let (file, version) = self.bundle.bridge_file(img)?;
-        let version = version.expect("an app image has a version");
-        send_bridge_image(c, link, &spec, file, version, before, false)
-    }
-
-    fn rejoin(&mut self, pair: &fleet::Pair) -> Result<Link, String> {
-        let b = &pair.bridge;
-        let t0 = Instant::now();
-        loop {
-            let link = if pair.given {
-                reaches(self.given, b.addr).map(|()| self.given.clone())
-            } else {
-                (self.by_name)(&b.name, b.addr)
-            };
-            match link {
-                Ok(l) => return Ok(l),
-                Err(e) if t0.elapsed() >= UPDATE_REBOOT => {
-                    return Err(format!(
-                        "{} did not answer within {} s of its update ({e})",
-                        b.name,
-                        UPDATE_REBOOT.as_secs()
-                    ))
-                }
-                Err(_) => std::thread::sleep(RECONNECT_GAP),
-            }
-        }
-    }
-
-    fn board(&mut self, link: &Link, board: &fleet::PlanBoard) -> Result<(), String> {
-        let uid = nodes::uid_hex(&board.uid);
-        let (mut c, r) = swd_route(link, &uid, Purpose::Other)?;
-        if !matches!(r.via, Via::Uid) {
-            return Err(format!(
-                "{} is not the SWD target of the bridge on this link",
-                board.name
-            ));
-        }
-        let id = c.target_id().map_err(|e| e.to_string())?;
-        let (img, chip) = self.bundle.select(&id, None).map_err(|e| e.to_string())?;
-        if img.name != board.image || chip != board.chip {
-            return Err(format!(
-                "{}: TARGET_ID now matches {} ({chip}), not the plan's {} ({})",
-                board.name, img.name, board.image, board.chip
-            ));
-        }
-        println!("{}", bundle::choice_line(&self.bundle.manifest, img, chip));
-        flash_board(&mut c, &self.plan.bins[&board.image], refusal)
-    }
-
-    fn status(&mut self, link: &Link, board: &fleet::PlanBoard) -> Result<(), String> {
-        let t0 = Instant::now();
-        loop {
-            let read = wire_on(link).and_then(|mut wire| {
-                let src = attach(&mut wire)?.guest;
-                board_status(&mut wire, src, board.addr)
-                    .ok_or_else(|| format!("{}: no STATUS answer", board.name))
-            });
-            match read {
-                Ok(v) => {
-                    let lines = hoverboard_cli::status::lines(&board.name, &v, |_| None);
-                    for l in &lines {
-                        println!("{l}");
-                    }
-                    return if v.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(lines.join("; "))
-                    };
-                }
-                Err(e) if t0.elapsed() >= STATUS_WAIT => return Err(e),
-                Err(_) => std::thread::sleep(RECONNECT_GAP),
-            }
-        }
-    }
-}
-
-/// `machine update` (`specs/firmware-bundle.md` section 4.3): open and check the bundle, walk and
-/// plan over the given link, ask once, take each pair over its bridge's own link with the given
-/// link's pair last, stop at the first failure, and report over the given link. Exits 1 unless
-/// every pair is done.
-fn machine_update(link: &Link, path: &str, yes: bool) -> Result<u8, String> {
-    machine_update_with(link, path, yes, &bridge_link)
-}
-
-/// [`machine_update`], with each bridge's own link opened by `by_name`.
-fn machine_update_with(link: &Link, path: &str, yes: bool, by_name: ByName) -> Result<u8, String> {
-    let b = read_bundle(path)?;
-    let mut wire = wire_on(link)?;
-    let w = walk(&mut wire)?;
-    let src = w.src;
-    let gateway = w.topology.gateway;
-    let dst = |a: u8| if gateway == Some(a) { NO_ADDRESS } else { a };
-    let plan = {
-        let wire = std::cell::RefCell::new(&mut wire);
-        fleet::plan(
-            &w,
-            &b,
-            |bridge| {
-                let mut w = wire.borrow_mut();
-                Client::addressed(&mut **w, src, dst(bridge))
-                    .info_if_decodes()
-                    .map_err(|e| e.to_string())
-            },
-            |bridge, _board| {
-                let mut w = wire.borrow_mut();
-                Client::addressed(&mut **w, src, dst(bridge))
-                    .target_id()
-                    .map_err(|e| e.to_string())
-            },
-        )?
-    };
-    drop(wire);
-    for l in fleet::plan_lines(&plan) {
-        println!("{l}");
-    }
-    ask(
-        yes,
-        "Update every bridge and board above?",
-        "nothing updated",
-    )?;
-    let mut steps = Machine {
-        given: link,
-        by_name,
-        bundle: &b,
-        plan: &plan,
-    };
-    let outcomes = fleet::run(&plan, &mut steps);
-    println!("== outcome");
-    for l in fleet::outcome_lines(&plan, &outcomes) {
-        println!("{l}");
-    }
-    println!("== report");
-    if let Err(e) = machine_report(link, &w.found, &plan, &outcomes) {
-        println!("report: {e}");
-    }
-    Ok(u8::from(!fleet::all_done(&outcomes)))
-}
-
-/// `machine update`'s report over the given link (section 4.3, step 5): each bridge's commit from
-/// `ESP_INFO`, each board's image, and whether the boards' machine digests agree.
-fn machine_report(
-    link: &Link,
-    planned: &[Found],
-    plan: &fleet::Plan,
-    outcomes: &[fleet::Outcome],
-) -> Result<(), String> {
-    // A board that has just booted may not answer the first walk, nor the boards beyond it: walk
-    // again until every node the plan walked is found, or REPORT_WAIT has passed.
-    let t0 = Instant::now();
-    let (mut wire, w) = loop {
-        let mut wire = wire_on(link)?;
-        let w = walk(&mut wire)?;
-        let all = planned
-            .iter()
-            .all(|p| w.found.iter().any(|f| f.addr == p.addr));
-        if all || t0.elapsed() >= REPORT_WAIT {
-            break (wire, w);
-        }
-        std::thread::sleep(RECONNECT_GAP);
-    };
-    let missing: Vec<String> = planned
-        .iter()
-        .filter(|p| !w.found.iter().any(|f| f.addr == p.addr))
-        .map(node_name)
-        .collect();
-    if !missing.is_empty() {
-        println!(
-            "not found by the walk within {} s: {}",
-            REPORT_WAIT.as_secs(),
-            missing.join(", ")
-        );
-    }
-    let src = w.src;
-    let gateway = w.topology.gateway;
-    for f in w.found.iter().filter(|f| f.class() == Some(CLASS_BRIDGE)) {
-        let dst = if gateway == Some(f.addr) {
-            NO_ADDRESS
-        } else {
-            f.addr
-        };
-        let commit = match Client::addressed(&mut wire, src, dst).info_if_decodes() {
-            Ok(Some(i)) => format!("commit {:08x}", i.commit),
-            Ok(None) => "ESP_INFO has another layout".into(),
-            Err(e) => format!("no ESP_INFO ({e})"),
-        };
-        println!("bridge {}: {commit}", node_name(f));
-    }
-    for (pair, o) in plan.pairs.iter().zip(outcomes) {
-        if let Some(d) = &pair.board {
-            let state = if *o == fleet::Outcome::Done {
-                format!("runs {}", d.image)
-            } else {
-                "not updated".into()
-            };
-            println!("board  {}: {state}", d.name);
-        }
-    }
-    let heard = listen(&mut wire);
-    let digests: Vec<(String, Option<u16>)> = motors(&w.found)
-        .into_iter()
-        .map(|f| (node_name(f), heard.last(f.addr).map(|s| s.machine)))
-        .collect();
-    println!("{}", machine::digest_line(&digests));
-    Ok(())
-}
-
 /// Listen for `CYCLIC_STATE` for [`LISTEN`].
 fn listen(wire: &mut impl Wire) -> Tally {
     let mut tally = Tally::new();
@@ -1269,11 +986,25 @@ fn listen(wire: &mut impl Wire) -> Tally {
 
 /// The client to the bridge wired to the board `spec` names, for an SWD command for `purpose`, and
 /// the route it took ([`route::swd`]): by the `uid` the attached bridge reads over SWD, by the
-/// attached bridge's mailbox for an address, or by the walk.
-fn swd_route(link: &Link, spec: &str, purpose: Purpose) -> Result<(EspClient, Route), String> {
+/// attached bridge's mailbox for an address, or by the walk. With no `spec`, the attached bridge's
+/// SWD target, or for `board erase` the board on its mailbox ([`route::attached`]).
+fn swd_route(
+    link: &Link,
+    spec: Option<&str>,
+    purpose: Purpose,
+) -> Result<(EspClient, Route), String> {
     let mut wire = wire_on(link)?;
-    let r = route::swd(&mut wire, spec, purpose)?;
+    let r = match spec {
+        Some(spec) => route::swd(&mut wire, spec, purpose)?,
+        None => route::attached(&mut wire, purpose)?,
+    };
+    let spec = spec.unwrap_or_default();
     match &r.via {
+        Via::Attached(id) => eprintln!(
+            "{} is the SWD target of the bridge this link reaches, guest {:#04x}",
+            nodes::uid_hex(&id.uid),
+            r.src
+        ),
         Via::Uid => eprintln!(
             "{spec} is the SWD target of the bridge this link reaches, guest {:#04x}",
             r.src
@@ -1307,12 +1038,35 @@ fn chip_on(wire: &mut impl Wire, addr: u8) -> Result<hal::pincap::Chip, String> 
     })
 }
 
-/// The board checks of a plan (`specs/config-read-once.md` section 4), with the chip read when the
-/// plan changes a key the pin checks read or the files carry a pin, whose `af` form is checked
-/// whether or not it changes.
+/// Resolve the pin tokens `files` carry for the board at `addr` (`specs/cli-onboarding.md` part
+/// C), against its chip, read once there is a token, and the board's `reads` before the write.
+/// The chip when it was read.
+fn resolve_tokens(
+    wire: &mut impl Wire,
+    addr: u8,
+    files: &mut config::Files,
+    reads: &config::Reads,
+) -> Result<Option<hal::pincap::Chip>, String> {
+    if !files
+        .entries
+        .iter()
+        .any(|e| names::is_token(e.key, &e.value))
+    {
+        return Ok(None);
+    }
+    let chip = chip_on(wire, addr)?;
+    let stored = config::state_after(reads, &config::Plan::default());
+    checks::resolve(chip, &mut files.entries, &stored)?;
+    Ok(Some(chip))
+}
+
+/// The board checks of a plan (`specs/config-read-once.md` section 4), with the chip (`known`, or
+/// read now) when the plan changes a key the pin checks read or the files carry a pin, whose `af`
+/// form is checked whether or not it changes.
 fn check_board(
     wire: &mut impl Wire,
     addr: u8,
+    known: Option<hal::pincap::Chip>,
     files: &config::Files,
     reads: &config::Reads,
     plan: &config::Plan,
@@ -1323,7 +1077,10 @@ fn check_board(
         .any(|s| hoverboard_cli::checks::needs_chip(s.key))
         || hoverboard_cli::checks::first_pin(&files.entries).is_some()
     {
-        Some(chip_on(wire, addr)?)
+        Some(match known {
+            Some(c) => c,
+            None => chip_on(wire, addr)?,
+        })
     } else {
         None
     };
@@ -1383,6 +1140,19 @@ fn plan_changes_leader(plan: &config::Plan) -> bool {
     plan.steps.iter().any(|s| checks::changes_leader(s.key))
 }
 
+/// How a dump of the board `f` writes its pins: as tokens where they resolve back, on the chip
+/// `TARGET_ID` through its bridge reports; as objects, with a note, when the chip cannot be read
+/// (`specs/cli-onboarding.md` part C, "Output").
+fn dump_pins(wire: &mut impl Wire, f: &Found) -> config::Pins {
+    match chip_on(wire, f.addr) {
+        Ok(chip) => config::Pins::Chip(chip),
+        Err(e) => {
+            eprintln!("{}: pins written as objects: {e}", node_name(f));
+            config::Pins::Objects { remaps: remaps(f) }
+        }
+    }
+}
+
 /// Whether a node's chip routes by the AFIO remap (the GD32F10x), from its `IDENTITY` family: its
 /// pins carry no `af` in a file (`specs/config-read-once.md` section 3).
 fn remaps(f: &Found) -> bool {
@@ -1392,7 +1162,7 @@ fn remaps(f: &Found) -> bool {
 /// `board erase` (`specs/hoverboard-bridge.md`, "Erasing the store"): print what the erase loses
 /// that a dump leaves out, ask, send `STORE_ERASE` through the board's own bridge, wait for the
 /// board's mailbox, and give the board its old address back out the bridge's mailbox port.
-fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
+fn board_erase(link: &Link, spec: Option<&str>, yes: bool) -> Result<(), String> {
     let (mut c, r) = swd_route(link, spec, Purpose::Erase)?;
     let src = r.src;
     let (board, bridge, mailbox) = match r.via {
@@ -1411,7 +1181,7 @@ fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
             bridge,
             port,
         } => (target::at(&walked.found, board)?.clone(), bridge, port),
-        Via::Uid => unreachable!("board erase never routes by uid"),
+        Via::Uid | Via::Attached(_) => unreachable!("board erase never routes by uid"),
     };
     let name = node_name(&board);
     let mut on = Board {
@@ -1451,8 +1221,9 @@ fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// A board's SWD command through the bridge wired to it.
-fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
+/// A board's SWD command through the bridge wired to it; with no `spec`, through the attached
+/// bridge to its SWD target.
+fn board_swd(link: &Link, spec: Option<&str>, op: &Swd) -> Result<(), String> {
     // Read the file before the link, so a refused image or a damaged bundle costs no connection.
     let file = match op {
         Swd::Flash { file } => Some(FlashFile::Bin(read_elf(file)?)),
@@ -1892,7 +1663,8 @@ fn machine_dump(link: &Link, out: &str, from: Option<&str>) -> Result<(), String
         for l in config::left_out(&node_name(f), reads) {
             eprintln!("{l}");
         }
-        boards.push((uid, reads.clone(), remaps(f)));
+        let pins = dump_pins(&mut wire, f);
+        boards.push((uid, reads.clone(), pins));
     }
     let copies: Vec<(String, config::Reads)> = each
         .iter()
@@ -1979,7 +1751,7 @@ fn machine_files(
             println!("{}: no entry in {path}; left alone", node_name(f));
             continue;
         }
-        let files = file.board_files(entry);
+        let mut files = file.board_files(entry);
         let mut b = Board {
             wire: &mut wire,
             src: w.src,
@@ -1988,12 +1760,14 @@ fn machine_files(
             class: CLASS_MOTOR,
         };
         let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
+        let chip = resolve_tokens(&mut *b.wire, f.addr, &mut files, &reads)
+            .map_err(|e| format!("{}: {e}", node_name(f)))?;
         // A board with no entry gets the machine section merged, never replaced, and its report
         // names only the machine fields it keeps.
         let replace = replace_all && entry.is_some();
         let mut plan = config::plan(&files, &reads, &unknown, replace).map_err(joined)?;
         if !diff {
-            check_board(&mut *b.wire, f.addr, &files, &reads, &plan)
+            check_board(&mut *b.wire, f.addr, chip, &files, &reads, &plan)
                 .map_err(|e| format!("{}: {e}", node_name(f)))?;
         }
         if entry.is_none() {
@@ -2244,7 +2018,11 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
                 .values()
                 .filter(|r| r.status == net::walk::CFG_OK)
                 .count();
-            let text = serde_json::to_string_pretty(&config::to_file(&reads, remaps(&f)))
+            let pins = match noun {
+                Noun::Board => dump_pins(&mut *b.wire, &f),
+                _ => config::Pins::Objects { remaps: remaps(&f) },
+            };
+            let text = serde_json::to_string_pretty(&config::to_file(&reads, pins))
                 .map_err(|e| e.to_string())?
                 + "\n";
             match out {
@@ -2276,8 +2054,8 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             config_outcome(status)?;
         }
         Command::Status { targets } => board_status_cmd(link, &targets)?,
-        Command::Erase { target, yes } => board_erase(link, &target, yes)?,
-        Command::Swd { target, op } => board_swd(link, &target, &op)?,
+        Command::Erase { target, yes } => board_erase(link, target.as_deref(), yes)?,
+        Command::Swd { target, op } => board_swd(link, target.as_deref(), &op)?,
         Command::Recover => board_recover(link)?,
         Command::Nodes => machine_nodes(link)?,
         Command::MachineGet { path } => machine_get(link, &path)?,
@@ -2362,7 +2140,6 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             yes,
             no_confirm,
         } => bridge_update(link, &target, &file, yes, no_confirm)?,
-        Command::MachineUpdate { bundle, yes } => return machine_update(link, &bundle, yes),
         Command::BridgeInstall { image, files, yes } => bridge_install(given, &image, &files, yes)?,
         c @ (Command::FirmwareInfo { .. } | Command::FirmwarePack { .. }) => {
             firmware_cmd(&given, &c)?

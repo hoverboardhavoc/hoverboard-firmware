@@ -764,8 +764,7 @@ jobs:
   # The firmware bundle (specs/firmware-bundle.md section 5): every image a commit builds, the two
   # board ELFs from the build job (`firmware-elfs`) and the bridge's two images from the bridge job
   # (`bridge-images`), in one .hbfw (a zip of the files and a manifest), which `hoverboard-cli board
-  # update`, `bridge update`, `bridge install` and `machine update` take and pick each device's
-  # image from. The packer is the CLI itself, built here without BLE (it needs no radio, and the
+  # update`, `bridge update` and `bridge install` take and pick each device's image from. The packer is the CLI itself, built here without BLE (it needs no radio, and the
   # D-Bus headers BLE wants are not installed). It reads each image's table from its crate's
   # Cargo.toml and a board image's guards from tools/image-guard-syms.sh, strips the ELFs' debug
   # sections, and refuses an image its install command would refuse (the guards and the layout
