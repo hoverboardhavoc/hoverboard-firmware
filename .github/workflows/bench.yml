@@ -47,7 +47,7 @@ permissions:
 jobs:
   ci-run:
     name: Wait for the commit's CI artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
       run-id: ${{ steps.wait.outputs.run-id }}
@@ -167,7 +167,7 @@ jobs:
     name: Open an issue for a failed nightly run
     needs: [ci-run, bench]
     if: failure() && github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       issues: write
       actions: read

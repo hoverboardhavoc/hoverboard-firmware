@@ -39,7 +39,7 @@ env:
 jobs:
   build:
     name: Build twice and compare
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -108,7 +108,7 @@ jobs:
   sign:
     name: Sign (the only job with the key)
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.build.outputs.version }}
     steps:
@@ -151,7 +151,7 @@ jobs:
   verify:
     name: F-Droid's check (apksigcopier compare)
     needs: [build, sign]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Download both
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -175,7 +175,7 @@ jobs:
   release:
     name: Publish the GitHub release
     needs: [build, verify]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:

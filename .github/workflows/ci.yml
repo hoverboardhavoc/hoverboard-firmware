@@ -67,6 +67,9 @@ env:
   # (thumbv7m-none-eabi). GitHub Linux runners are x86_64.
   HOST_TARGET: x86_64-unknown-linux-gnu
 
+# Linux jobs run on ubuntu-24.04, not ubuntu-latest: ubuntu-latest moves to a new image on GitHub's
+# schedule, and the first 26.04 runners (2026-11-06) failed `apt-get update` on Microsoft's package
+# source (403), failing jobs at random. Moving to a new image is a PR of its own.
 jobs:
   # Format + lint gates, first so an unformatted commit fails fast (rustfmt is a pure-source check,
   # no build). Clippy runs over BOTH surfaces CI builds, in the motorcontroller workspace and in the
@@ -87,7 +90,7 @@ jobs:
   # bridge workspace's rustfmt and clippy run in the bridge job, which carries its toolchain.
   lint:
     name: rustfmt + clippy (motorcontroller, shared, tools)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -236,7 +239,7 @@ jobs:
   # symbols, the hot window, panic reachability and the flashed-span ceiling.
   build:
     name: Build (thumbv7m-none-eabi)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -665,7 +668,7 @@ jobs:
   # pages, the SRAM less the SWD mailbox) and never gated.
   mm32-size:
     name: MM32SPIN05 mainboard firmware (CI-only size build, never flashed)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -727,7 +730,7 @@ jobs:
   # mainboard-gd32f103rc image is not in it: its second motor is what it is for.
   size-vs-main:
     name: One-motor images no larger than main
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -772,7 +775,7 @@ jobs:
   pack:
     name: Firmware bundle (pack the board and bridge images)
     needs: [build, bridge]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -834,7 +837,7 @@ jobs:
     name: Attach the bundle and the CLIs to the release (on tag)
     if: startsWith(github.ref, 'refs/tags/')
     needs: [pack, hoverboard-cli, hoverboard-cli-pi]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -876,7 +879,7 @@ jobs:
   # motorcontroller/.cargo/config.toml. The HAL is not linked on the host target.
   host-tests:
     name: Host tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -922,7 +925,7 @@ jobs:
   # the parser and its fixtures ship together.
   tool-tests:
     name: Tool test suites (python + bash)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -1022,7 +1025,7 @@ jobs:
   # here in tools/ on the host target. The tests are pure host unit tests (no openocd, no probe).
   swd-bridge-tests:
     name: swd-bridge tests (HostMailbox <-> Mailbox agreement)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -1065,7 +1068,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             ext: ""
           - os: macos-latest
@@ -1165,7 +1168,7 @@ jobs:
   # no Bluetooth adapter. Nothing here runs the binary; the bench gate does.
   hoverboard-cli-pi:
     name: hoverboard-cli (bench Pi, arm-unknown-linux-gnueabihf, no BLE)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PI_TARGET: arm-unknown-linux-gnueabihf
     defaults:
@@ -1227,7 +1230,7 @@ jobs:
   # `bridge update`, which the pack job puts in the firmware bundle.
   bridge:
     name: Hoverboard bridge (core tests + clippy, release images)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       ESPFLASH_VERSION: 4.6.0
     defaults:
@@ -1308,7 +1311,7 @@ jobs:
   # directory is cached here too.
   emulator-tests:
     name: Emulator tests (Unicorn, tier 2)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -1368,7 +1371,7 @@ jobs:
   # and carries golden-trace's clippy (the lint job covers its rustfmt).
   golden-traces:
     name: Golden register traces (vendor libraries vs HAL)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware
@@ -1460,7 +1463,7 @@ jobs:
   # tree's one Android app, pays that cost in its own job at the end of this file.
   kotlin-protocol-drift:
     name: Kotlin protocol mirror (firmware drift gate)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware/shared/protocol-kotlin
@@ -1565,7 +1568,7 @@ jobs:
   # this job installs Gradle 8.14, the wrapper's version.
   remote-app-fdroid:
     name: Remote app (F-Droid build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout firmware
         uses: actions/checkout@v7
@@ -1599,7 +1602,7 @@ jobs:
   # out of one Gradle invocation, so they carry the same debug key, which `am instrument` requires.
   remote-app-apks:
     name: Remote app (debug and instrumented-test APKs)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware/apps/remote
@@ -1634,7 +1637,7 @@ jobs:
 
   remote-app-tests:
     name: Remote app (unit tests, both variants, + detekt)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: hoverboard-firmware/apps/remote
