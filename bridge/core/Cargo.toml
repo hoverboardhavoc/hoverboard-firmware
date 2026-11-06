@@ -31,4 +31,4 @@ gdbstub = { version = "0.7.10", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # Parses the GDB target description and memory map in the tests.
-roxmltree = "0.20"
+roxmltree = "0.21"
