@@ -12,13 +12,15 @@
 //! GDB's `load` ([`crate::gdb`]) fills the same image buffer and runs the same [`FlashJob`], with
 //! [`Finish::Halt`] and its result kept for the GDB session instead of sent as `FLASH_STATUS`.
 
-use espsvc::{BulkRx, Ctrl, EspInfo, Msg, Stage, Status, WifiState, CHIP_ESP32C3, MEM_MAX};
+use espsvc::{
+    BulkRx, Ctrl, EspInfo, Msg, Stage, Status, TargetId, WifiState, CHIP_ESP32C3, MEM_MAX,
+};
 use net::pdu::{Pdu, NO_ADDRESS};
 use sha2::{Digest, Sha256};
 
 use crate::flash::{self, Finish, FlashError, FlashJob, MAX_IMAGE};
 use crate::mailbox::MailboxPort;
-use crate::swd::SwdPins;
+use crate::swd::{Swd, SwdPins};
 use crate::target::{self, TargetError};
 use crate::update::{Step, Update};
 
@@ -131,6 +133,16 @@ fn reply(out: Out, dst: u8, m: Msg) {
 
 fn result(out: Out, dst: u8, op: u8, status: Status) {
     reply(out, dst, Msg::Result { op, status });
+}
+
+/// A `TARGET_CTRL` action over the port as it is: connect if not connected, then `f`. Every action
+/// but [`Ctrl::ConnectUnderReset`], which makes its own connect with NRST held.
+fn on_port<P: SwdPins>(
+    swd: &mut Swd<P>,
+    f: impl FnOnce(&mut Swd<P>) -> Result<(), TargetError>,
+) -> Result<Option<TargetId>, TargetError> {
+    target::ensure_connected(swd).map_err(TargetError::Swd)?;
+    f(swd).map(|()| None)
 }
 
 fn target_status(e: TargetError) -> Status {
@@ -404,19 +416,25 @@ impl<'a, Pl: Platform> Service<'a, Pl> {
             Msg::FlashChunk { offset, data } => self.chunk(port, out, src, offset, data),
             Msg::TargetCtrl(c) => {
                 let swd = port.swd();
-                let r = target::ensure_connected(swd)
-                    .map_err(TargetError::Swd)
-                    .and_then(|_| match c {
-                        Ctrl::Disarm => target::disarm(swd),
-                        Ctrl::Halt => target::halt(swd),
-                        Ctrl::Resume => target::resume(swd).map_err(TargetError::Swd),
-                        Ctrl::Reset => target::reset(swd).map_err(TargetError::Swd),
-                        Ctrl::ResetHalt => target::reset_halt(swd),
-                    });
+                let swd_err = |r: Result<(), crate::swd::SwdError>| r.map_err(TargetError::Swd);
+                let r = match c {
+                    Ctrl::Disarm => on_port(swd, target::disarm),
+                    Ctrl::Halt => on_port(swd, target::halt),
+                    Ctrl::Resume => on_port(swd, |s| swd_err(target::resume(s))),
+                    Ctrl::Reset => on_port(swd, |s| swd_err(target::reset(s))),
+                    Ctrl::ResetHalt => on_port(swd, target::reset_halt),
+                    // No connect first: NRST goes low before the first transfer, and the uid the
+                    // bridge reads comes back as `TARGET_ID`.
+                    Ctrl::ConnectUnderReset => target::connect_under_reset(swd).map(Some),
+                };
                 if let Err(TargetError::Swd(_)) = r {
                     port.swd().forget();
                 }
-                result(out, src, op, r.map_or_else(target_status, |()| Status::Ok));
+                match r {
+                    Ok(Some(id)) => reply(out, src, Msg::TargetId(id)),
+                    Ok(None) => result(out, src, op, Status::Ok),
+                    Err(e) => result(out, src, op, target_status(e)),
+                }
             }
             Msg::MemRead { addr, len } => {
                 if len as usize > MEM_MAX {

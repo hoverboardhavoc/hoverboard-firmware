@@ -85,6 +85,7 @@ fn every_message_round_trips_inside_one_pdu() {
             status: Status::Ok,
         },
         Msg::TargetCtrl(Ctrl::ResetHalt),
+        Msg::TargetCtrl(Ctrl::ConnectUnderReset),
         Msg::MemRead {
             addr: 0x2000_0000,
             len: 56,
@@ -442,4 +443,13 @@ fn the_app_version_is_read_from_an_esp32c3_image_and_nothing_else() {
     // A board image starts with its stack pointer, not a bridge image header.
     let board = [0x00u8, 0x20, 0x00, 0x20, 0x01, 0x01, 0x00, 0x08];
     assert_eq!(app_version(&[&board[..], &[0; 120]].concat()), None);
+}
+
+/// `specs/bridge-nrst.md` section 2: `ConnectUnderReset` is the sixth action, wire byte 5, and 6 is
+/// still no action.
+#[test]
+fn connect_under_reset_is_ctrl_five() {
+    assert_eq!(Ctrl::ConnectUnderReset as u8, 5);
+    assert_eq!(Ctrl::from_u8(5), Some(Ctrl::ConnectUnderReset));
+    assert_eq!(Ctrl::from_u8(6), None);
 }
