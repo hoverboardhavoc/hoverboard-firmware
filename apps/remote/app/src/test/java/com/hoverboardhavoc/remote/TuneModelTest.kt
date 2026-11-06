@@ -32,9 +32,14 @@ class TuneModelTest {
     private val gv = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GV)
     private val speedMax = Gains.key(Gains.CONTROL_REFERENCE, Gains.SPEED_MAX)
 
-    /** Every key the live lane carries: the four gains, then the reference row. */
+    /**
+     * Every key the live lane carries: the four gains, the reference row, then the heading hold's
+     * turn gains and turn reference row (`specs/heading-hold.md` section 10).
+     */
     private val allKeys = (0 until Gains.COUNT).map { Gains.key(Gains.CONTROL_SF_GAINS, it) } +
-        Gains.REFERENCE_DEFAULT.indices.map { Gains.key(Gains.CONTROL_REFERENCE, it) }
+        Gains.REFERENCE_DEFAULT.indices.map { Gains.key(Gains.CONTROL_REFERENCE, it) } +
+        (0 until Gains.TURN_COUNT).map { Gains.key(Gains.CONTROL_TURN_GAINS, it) } +
+        Gains.TURN_REFERENCE_DEFAULT.indices.map { Gains.key(Gains.CONTROL_TURN_REFERENCE, it) }
     private val maxKeys = (0 until Gains.COUNT).map { Key(Fields.CONTROL_GAIN_MAX.id, it) }
 
     @Test

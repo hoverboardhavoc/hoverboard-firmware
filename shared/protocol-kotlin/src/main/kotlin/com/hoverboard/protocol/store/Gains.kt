@@ -168,12 +168,30 @@ object Gains {
         fun step(index: Int): Long = CAPS[index].toLong()
 
         /**
+         * The per-pass step of the word at [key], or null for a word the ramp does not carry: the
+         * two reference rows, which the firmware applies on the next tick (`specs/heading-hold.md`
+         * section 6), and any key outside the lane.
+         */
+        fun step(key: Key): Long? = when (key.fieldId) {
+            CONTROL_SF_GAINS -> CAPS.getOrNull(key.index)
+            CONTROL_TURN_GAINS -> TURN_CAPS.getOrNull(key.index)
+            else -> null
+        }?.toLong()
+
+        /**
          * The longest the ramp can take, in milliseconds, to carry gain [index] across [distance]
          * counts: `ceil(distance / step)` passes, rounded up to whole milliseconds.
          */
-        fun boundMs(index: Int, distance: Int): Long {
+        fun boundMs(index: Int, distance: Int): Long = passesMs(step(index), distance)
+
+        /**
+         * [boundMs] for the word at [key], a balance gain or a turn gain; null for a word the ramp
+         * does not carry ([step]).
+         */
+        fun boundMs(key: Key, distance: Int): Long? = step(key)?.let { passesMs(it, distance) }
+
+        private fun passesMs(step: Long, distance: Int): Long {
             if (distance <= 0) return 0
-            val step = step(index)
             val passes = (distance + step - 1) / step
             return (passes * MS_PER_S + PASS_HZ - 1) / PASS_HZ
         }

@@ -38,7 +38,7 @@ class TuneReferenceTest {
         val rig = shownTune()
         val keys = rig.state.referenceKeys
 
-        assertEquals(keys, rig.transport.tuneReads.takeLast(keys.size).map { it.second })
+        assertEquals(keys, rig.transport.tuneReads.map { it.second }.filter { it in keys })
         assertEquals(START_REFERENCE, keys.map { rig.state.gains.staged[it] })
         assertEquals(START_REFERENCE, keys.map { rig.state.gains.flash[it] })
         assertEquals(

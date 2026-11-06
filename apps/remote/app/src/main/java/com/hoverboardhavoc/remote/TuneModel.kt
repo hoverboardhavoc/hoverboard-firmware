@@ -84,7 +84,8 @@ sealed interface TuneNotice {
  *   the staged value (the firmware's ramp, [Gains.Ramp]), set when the staged value changed and
  *   cleared once the bound has elapsed. A derived bound, never an observation.
  * @param maxima per gain index, the board's `CONTROL_GAIN_MAX` as read from it; an index absent
- *   until read. The four gains only: the reference row's bounds are compiled.
+ *   until read. The four balance gains only: the reference row's and the turn rows' bounds are
+ *   compiled (`specs/heading-hold.md` section 6).
  * @param bounds the drive bounds as STORED on this board (`specs/remote-ui.md` 3.3b), by key; a key
  *   absent until read. There is one value each and no staged counterpart: they are not on the live
  *   tune lane, so what is written is flash and the board takes it up at its next arm.
@@ -98,11 +99,15 @@ data class BoardGains(
     val bounds: Map<Key, Int> = emptyMap(),
 ) {
     /**
-     * The inclusive lower bound of the value at [key]: [Gains.MIN] for a gain, the compiled
-     * [Gains.REFERENCE_MINIMA] for a reference word (`speed_slew`'s floor is 1).
+     * The inclusive lower bound of the value at [key]: [Gains.MIN] for a gain (a balance gain or a
+     * turn gain), the compiled minima for a reference word (`speed_slew`'s and `rate_slew`'s floor
+     * is 1).
      */
-    fun min(key: Key): Int =
-        if (key.fieldId == Gains.CONTROL_REFERENCE) Gains.REFERENCE_MINIMA[key.index] else Gains.MIN
+    fun min(key: Key): Int = when (key.fieldId) {
+        Gains.CONTROL_REFERENCE -> Gains.REFERENCE_MINIMA[key.index]
+        Gains.CONTROL_TURN_REFERENCE -> Gains.TURN_REFERENCE_MINIMA[key.index]
+        else -> Gains.MIN
+    }
 
     /**
      * The inclusive upper bound of the value at [key], which is a different fact for the two rows
@@ -114,14 +119,17 @@ data class BoardGains(
      * backstop either way.
      *
      * A reference word takes [Gains.REFERENCE_MAXIMA], COMPILED into the firmware
-     * (`control::config::sf::REFERENCE_MAX`) and so the same on every board.
+     * (`control::config::sf::REFERENCE_MAX`) and so the same on every board. The turn rows are
+     * compiled too ([Gains.TURN_GAIN_MAXIMA], [Gains.TURN_REFERENCE_MAXIMA]): `turn_max` bounds the
+     * differential whatever the gain, so there is no stored maximum to read
+     * (`specs/heading-hold.md` section 6).
      */
-    fun max(key: Key): Int =
-        if (key.fieldId == Gains.CONTROL_REFERENCE) {
-            Gains.REFERENCE_MAXIMA[key.index]
-        } else {
-            maxOf(maxima[key.index] ?: Gains.DEFAULT_MAX[key.index], Gains.MIN)
-        }
+    fun max(key: Key): Int = when (key.fieldId) {
+        Gains.CONTROL_REFERENCE -> Gains.REFERENCE_MAXIMA[key.index]
+        Gains.CONTROL_TURN_GAINS -> Gains.TURN_GAIN_MAXIMA[key.index]
+        Gains.CONTROL_TURN_REFERENCE -> Gains.TURN_REFERENCE_MAXIMA[key.index]
+        else -> maxOf(maxima[key.index] ?: Gains.DEFAULT_MAX[key.index], Gains.MIN)
+    }
 
     /** Whether [key]'s staged value differs from flash (a reboot would revert it). Known only when both are read. */
     fun unsaved(key: Key): Boolean {
@@ -183,7 +191,16 @@ data class TuneState(
     /** The reference row's two keys, `[speed_max, speed_slew]` (`specs/state-feedback.md` section 4). */
     val referenceKeys: List<Key> get() = REFERENCE_KEYS
 
-    /** Every key the screen writes over the live tune lane: the gains, then the reference row. */
+    /**
+     * The heading hold's five live keys, `[gh, ghv, gff, rate_max, rate_slew]`: the turn gains,
+     * then the turn reference row (`specs/heading-hold.md` sections 6 and 10).
+     */
+    val turnKeys: List<Key> get() = TURN_KEYS
+
+    /**
+     * Every key the screen writes over the live tune lane, eleven in all: the gains, the reference
+     * row, then the turn section's five. The order the read pass and the poll take them in.
+     */
     val liveKeys: List<Key> get() = LIVE_KEYS
 
     /** The live-lane keys whose staged value differs from flash, which is what Save and Revert act on. */
@@ -204,7 +221,9 @@ data class TuneState(
     private companion object {
         val GAIN_KEYS = (0 until Gains.COUNT).map { Gains.key(Gains.CONTROL_SF_GAINS, it) }
         val REFERENCE_KEYS = Gains.REFERENCE_DEFAULT.indices.map { Gains.key(Gains.CONTROL_REFERENCE, it) }
-        val LIVE_KEYS = GAIN_KEYS + REFERENCE_KEYS
+        val TURN_KEYS = (0 until Gains.TURN_COUNT).map { Gains.key(Gains.CONTROL_TURN_GAINS, it) } +
+            Gains.TURN_REFERENCE_DEFAULT.indices.map { Gains.key(Gains.CONTROL_TURN_REFERENCE, it) }
+        val LIVE_KEYS = GAIN_KEYS + REFERENCE_KEYS + TURN_KEYS
     }
 }
 
@@ -280,7 +299,8 @@ interface TuneActions {
 
 /**
  * The Tune screen's model (`specs/remote-ui.md` section 3.3, `specs/state-feedback.md` section 10):
- * the four state-feedback gains and the two reference words of one named board over the live tune
+ * the four state-feedback gains, the two reference words and the heading hold's five words
+ * (`specs/heading-hold.md` section 10) of one named board over the live tune
  * lane (`TUNE_READ` / `TUNE_WRITE`, RAM only), their stored copies over the config lane
  * (`CONFIG_READ`, and `CONFIG_WRITE` for SAVE), and the drive bounds, which are stored values only.
  *
@@ -288,8 +308,8 @@ interface TuneActions {
  * writes), and ENGAGED (what the law multiplies now), which no wire key carries. The firmware ramps
  * engaged toward staged by a fixed cap per RUN pass, so after a staged value changes this model
  * marks the gain converging for the bound the ramp guarantees ([Gains.Ramp]) and clears the mark
- * when it elapses. That is all it claims: it never says engaged equals staged. The reference row is
- * not ramped and carries no mark.
+ * when it elapses. That is all it claims: it never says engaged equals staged. The turn gains ramp
+ * the same way at their own caps; neither reference row is ramped, and neither carries a mark.
  *
  * STAGED is what the board last REPORTED (`specs/state-feedback.md` section 10, "Live readback"):
  * a value this model sent is never displayed as the board's. Every settled write is followed by a
@@ -505,11 +525,13 @@ class TuneModel(
     }
 
     /**
-     * Read every value on the live tune lane, all six staged then all six flash: the four gains and
-     * the two reference words. Then the four gain maxima and the drive bounds.
+     * Read every value on the live tune lane, all eleven staged then all eleven flash: the four
+     * gains, the two reference words and the turn section's five. Then the four gain maxima and the
+     * drive bounds.
      *
-     * No maximum is read for the reference row: its bounds are compiled into the firmware
-     * ([Gains.REFERENCE_MAXIMA]), so there is nothing on the board to ask for.
+     * No maximum is read for the reference row or the turn rows: their bounds are compiled into the
+     * firmware ([Gains.REFERENCE_MAXIMA], [Gains.TURN_GAIN_MAXIMA], [Gains.TURN_REFERENCE_MAXIMA]),
+     * so there is nothing on the board to ask for.
      *
      * The order is the point: the two lanes answer with byte-identical `CONFIG_RESP`s, so a late
      * duplicate reply to a `TUNE_READ` would be taken as the answer to a `CONFIG_READ` of the same key
@@ -879,7 +901,7 @@ class TuneModel(
      * the row shows the read that follows.
      */
     private fun sent(node: Int, key: Key, v: Int) {
-        if (key.fieldId != Gains.CONTROL_SF_GAINS) return
+        if (Gains.Ramp.step(key) == null) return
         val id = node to key
         sentSinceRead += id
         val old = _state.value.boards[node]?.staged?.get(key) ?: return
@@ -888,17 +910,17 @@ class TuneModel(
     }
 
     /**
-     * Record that [node]'s [key] READ as [v]. When that changes a known staged GAIN, the running law
-     * has a new target to ramp to: mark it converging for the ramp's bound across every value read
-     * or sent since the mark was last clear.
+     * Record that [node]'s [key] READ as [v]. When that changes a known staged GAIN (a balance gain
+     * or a turn gain), the running law has a new target to ramp to: mark it converging for the
+     * ramp's bound across every value read or sent since the mark was last clear.
      *
-     * A reference word is recorded and nothing more: the reference row is not ramped, so a write is
-     * live on the next tick and there is no interval to mark.
+     * A reference word, of either reference row, is recorded and nothing more: neither is ramped,
+     * so a write is live on the next tick and there is no interval to mark.
      */
     private fun staged(node: Int, key: Key, v: Int) {
         val old = _state.value.boards[node]?.staged?.get(key)
         update(node) { it.copy(staged = it.staged + (key to v)) }
-        if (key.fieldId != Gains.CONTROL_SF_GAINS) return
+        if (Gains.Ramp.step(key) == null) return
         val id = node to key
         // A read of the value already shown, with nothing sent since, is a poll finding nothing new:
         // it moves no target and must not re-arm the mark.
@@ -909,7 +931,7 @@ class TuneModel(
         hulls[id] = span
         val distance = maxOf(abs(v - span.first), abs(v - span.last))
         if (distance == 0) return
-        val bound = Gains.Ramp.boundMs(key.index, distance)
+        val bound = Gains.Ramp.boundMs(key, distance) ?: return
         val token = ++nextToken
         markTokens[id] = token
         update(node) { it.copy(converging = it.converging + (key to bound)) }
@@ -963,9 +985,10 @@ class TuneModel(
 
         /**
          * The live-readback cadence: one round of `TUNE_READ`s of every live-lane key per second
-         * while the screen is shown (`specs/state-feedback.md` section 10). Six reads of 13 bytes
-         * each, about 80 B/s for the round's second while it runs; a round that finds the lane
-         * taken is skipped, not queued.
+         * while the screen is shown (`specs/state-feedback.md` section 10). Eleven reads of 13
+         * bytes each since the turn section (`specs/heading-hold.md` section 10), about 143 B/s
+         * for the round's second while it runs; a round that finds the lane taken is skipped, not
+         * queued.
          */
         const val POLL_INTERVAL_MS = 1_000L
     }

@@ -206,17 +206,31 @@
     <!-- %1$s and %2$s are the compiled bounds of the word. -->
     <string name="tune_reference_range">%1$s to %2$s, the same on every board: this limit is built into the firmware rather than stored on the board.</string>
     <string name="tune_reference_entry_invalid">Type a whole number from %1$s to %2$s.</string>
+    <!-- The heading hold's five live words (specs/heading-hold.md section 10): the same RAM lane and Save as the gains. -->
+    <string name="tune_turn_title">Heading hold</string>
+    <string name="tune_turn_body">How the leader holds and turns the machine\'s heading: three gains and the stick\'s turn rate. RAM values like the gains, so Save is what keeps them; without it a power cycle brings back the flash value each row shows. They do nothing while the turn limit below is 0.</string>
+    <string name="tune_turn_armed">Armed: these work armed, like the gains. The three gains ramp to a new value; the two rate words are used on the next step.</string>
+    <string name="tune_turn_gh">gh (counts per edge)</string>
+    <string name="tune_turn_gh_note">Heading: pulls the machine back to the heading it should have; counts per edge of heading error.</string>
+    <string name="tune_turn_ghv">ghv (counts per sixteenth of a count)</string>
+    <string name="tune_turn_ghv_note">Heading rate: damps the turn; counts per sixteenth of a count of heading-rate error.</string>
+    <string name="tune_turn_gff">gff (counts per sixteenth of a count)</string>
+    <string name="tune_turn_gff_note">Stick feedforward: torque at the stick before the error builds; counts per sixteenth of a count of asked-for rate. 0 is loop only.</string>
+    <string name="tune_turn_rate_max">rate_max (sixteenths of a count per wheel)</string>
+    <string name="tune_turn_rate_max_note">The turn rate full stick asks for, sixteenths of a count per wheel. 0 is a dead steer axis and the machine holds its heading.</string>
+    <string name="tune_turn_rate_slew">rate_slew (1/4096 count per control step)</string>
+    <string name="tune_turn_rate_slew_note">How fast the asked-for turn rate follows the stick, and the stop ramp.</string>
 
-    <!-- The drive bounds (specs/remote-ui.md 3.3b): the turn limit and its rate and the position
-         clamp, on the Tune screen by the owner's decision, written to flash and taken up at the
+    <!-- The drive bounds (specs/remote-ui.md 3.3b): the turn limit, the heading clamp
+         (specs/heading-hold.md section 6) and the position clamp, on the Tune screen by the owner's decision, written to flash and taken up at the
          next arm. -->
-    <string name="tune_bounds_title">Turn limits and position clamp</string>
-    <string name="tune_bounds_body">How hard the stick may turn the machine, and how far the balance law pulls it back to where it was. These are stored on the board, unlike the values above, so each one is written when you let go of its slider and the board starts using it the next time it is armed.</string>
+    <string name="tune_bounds_title">Turn and position limits</string>
+    <string name="tune_bounds_body">How much torque the heading hold may turn the machine with, how far off its heading it is pulled back from, and how far the balance law pulls it back to where it was. These are stored on the board, unlike the values above, so each one is written when you let go of its slider and the board starts using it the next time it is armed.</string>
     <string name="tune_bounds_armed">Armed: these are stored values and the board refuses to store anything while armed. Disarm below to change them, then arm again.</string>
     <string name="tune_bound_turn_max">Turn limit (torque counts)</string>
-    <string name="tune_bound_turn_max_note">How hard the two wheels are driven apart with the stick all the way over, in the counts the wheels take torque in, where the top of the range below is everything one wheel has. 0 drives straight and ignores steering. Only a machine set to one rigid frame steers at all.</string>
-    <string name="tune_bound_turn_slew">Turn rate (torque counts per step)</string>
-    <string name="tune_bound_turn_slew_note">How far the turn may move in one control step. The boards take %1$d steps a second, so against a 12000 turn limit, 240 reaches full lock in a fifth of a second and 24 takes two seconds.</string>
+    <string name="tune_bound_turn_max_note">The heading hold\'s authority: the most it may drive the two wheels apart by, in the counts the wheels take torque in, where the top of the range below is everything one wheel has. 0 is no turning torque at all, whatever the turn gains above. Only the leader of a machine set to one rigid frame turns at all.</string>
+    <string name="tune_bound_head_clamp">Heading clamp (hall edges)</string>
+    <string name="tune_bound_head_clamp_note">How far off its heading the heading hold pulls the machine back from: turned further than this, it returns exactly this far and no further. 45 is about 50 degrees on the rover.</string>
     <string name="tune_bound_pos_clamp">Position clamp (hall edges)</string>
     <string name="tune_bound_pos_clamp_note">How far the position term pulls the machine back: pushed further than this, it returns exactly this far and no further. One edge is 5.76 mm on the rover\'s wheel, so 45 is 0.26 m. 0 turns the position term off.</string>
     <string name="tune_bound_unread">Not read from this board.</string>

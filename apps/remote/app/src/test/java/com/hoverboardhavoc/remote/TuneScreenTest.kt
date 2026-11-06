@@ -259,7 +259,7 @@ class TuneScreenTest {
         inBound(SetupFields.POS_CLAMP, s(R.string.setup_range, "0", "450")).assertExists()
         inBound(SetupFields.POS_CLAMP, s(R.string.setup_effect_arm)).assertExists()
         inBound(SetupFields.TURN_MAX, s(R.string.setup_range, "0", "28500")).assertExists()
-        inBound(SetupFields.TURN_SLEW, s(R.string.setup_range, "1", "1000")).assertExists()
+        inBound(SetupFields.HEAD_CLAMP, s(R.string.setup_range, "0", "450")).assertExists()
     }
 
     /** Letting go of a bound slider is the write, and the value sent is where the finger left it. */

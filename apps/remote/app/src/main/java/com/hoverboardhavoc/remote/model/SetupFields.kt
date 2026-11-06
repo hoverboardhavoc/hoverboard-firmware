@@ -201,13 +201,6 @@ private const val U32_MAX = 0xFFFF_FFFFL
  * the test fields are hidden.
  */
 object SetupFields {
-    /**
-     * The control tick, passes per second (`Gains.Ramp.PASS_HZ`, the mirror of the firmware's
-     * `TICK_HZ`): the rate the two slew rows are stated per, so a caption can say what a per-tick
-     * number does in a second without retyping the rate.
-     */
-    val CONTROL_HZ: Int = Gains.Ramp.PASS_HZ
-
     private val motorMethods = listOf(
         Choice(Fields.MotorMethod.SIX_STEP, R.string.setup_choice_six_step),
         Choice(Fields.MotorMethod.SINE, R.string.setup_choice_sine),
@@ -529,25 +522,29 @@ object SetupFields {
     }
 
     /**
-     * `CONTROL_DRIVE_TURN` index 0 (`turn_max`): how hard the two wheels are driven apart with the
-     * stick at full travel, in the counts the wheels take torque in. 0 drives straight, and only a
-     * machine set to one rigid frame steers at all.
+     * `CONTROL_TURN_CLAMP` index 0 (`turn_max`): the heading hold's authority, the most the
+     * differential may drive the two wheels apart by, in the counts the wheels take torque in
+     * (`specs/heading-hold.md` section 6). 0 is no differential at all, whatever the turn gains.
      *
      * One of [DRIVE_BOUNDS], so it has no Setup group: the Tune screen owns these rows
-     * (`specs/remote-ui.md` 3.3b). The range is the clamp the firmware applies as it reads the word,
-     * so a value the board would silently narrow cannot be sent, and the default is shown because
-     * it is the shipped state the first edit departs from.
+     * (`specs/remote-ui.md` 3.3b). The range is the clamp the firmware applies as it reads the word
+     * (`control::turn::clamp`, mirrored as [Fields.TURN_MAX]), so a value the board would silently
+     * narrow cannot be sent, and the default is shown because it is the shipped state the first
+     * edit departs from.
      */
     val TURN_MAX = SetupField(
-        Fields.CONTROL_DRIVE_TURN.at(0), 0, R.string.tune_bound_turn_max, null,
+        Fields.CONTROL_TURN_CLAMP.at(0), 0, R.string.tune_bound_turn_max, null,
         Editor.Range(Fields.TURN_MAX), note = R.string.tune_bound_turn_max_note, showDefault = true,
     )
 
-    /** `CONTROL_DRIVE_TURN` index 1 (`turn_slew`): counts the turn may move per control tick. */
-    val TURN_SLEW = SetupField(
-        Fields.CONTROL_DRIVE_TURN.at(1), 1, R.string.tune_bound_turn_slew, null,
-        Editor.Range(Fields.TURN_SLEW), note = R.string.tune_bound_turn_slew_note,
-        noteArgs = listOf(CONTROL_HZ), showDefault = true,
+    /**
+     * `CONTROL_TURN_CLAMP` index 1 (`head_clamp`): the bound on the heading error, hall edges
+     * (`specs/heading-hold.md` section 4). Turned further off its heading than this, the machine is
+     * pulled back exactly this far. [TURN_MAX]'s kind of row, over [Fields.HEAD_CLAMP].
+     */
+    val HEAD_CLAMP = SetupField(
+        Fields.CONTROL_TURN_CLAMP.at(1), 1, R.string.tune_bound_head_clamp, null,
+        Editor.Range(Fields.HEAD_CLAMP), note = R.string.tune_bound_head_clamp_note, showDefault = true,
     )
 
     /**
@@ -593,15 +590,16 @@ object SetupFields {
     val BRIDGE: List<SetupField> = listOf(DEVICE_NAME)
 
     /**
-     * The three drive bounds, in screen order: the turn limit and its rate, then the position clamp
-     * (`specs/remote-ui.md` 3.3b, `specs/state-feedback.md` section 10).
+     * The three drive bounds, in screen order: the heading hold's authority and its heading-error
+     * clamp, then the position clamp (`specs/remote-ui.md` 3.3b, `specs/state-feedback.md` section
+     * 10, `specs/heading-hold.md` section 10).
      *
      * The TUNE screen's rows, not Setup's, by the owner's decision of 2026-10-23: they are set
      * while a machine is being tuned, beside the gains and the stick, and the alternative was a
      * debug probe. So they are absent from [ALL], which is the Setup screen's list and what it
      * reads from the board; the Tune model reads and writes these three itself.
      */
-    val DRIVE_BOUNDS: List<SetupField> = listOf(TURN_MAX, TURN_SLEW, POS_CLAMP)
+    val DRIVE_BOUNDS: List<SetupField> = listOf(TURN_MAX, HEAD_CLAMP, POS_CLAMP)
 
     /** Every row, in screen order within each group. */
     val ALL: List<SetupField> = listOf(

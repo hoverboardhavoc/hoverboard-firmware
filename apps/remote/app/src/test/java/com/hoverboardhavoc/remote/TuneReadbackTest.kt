@@ -26,6 +26,7 @@ class TuneReadbackTest {
     private val gp = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GP)
     private val gr = Gains.key(Gains.CONTROL_SF_GAINS, Gains.GR)
     private val speedMax = Gains.key(Gains.CONTROL_REFERENCE, Gains.SPEED_MAX)
+    private val rateMax = Gains.key(Gains.CONTROL_TURN_REFERENCE, Gains.RATE_MAX)
 
     /** One poll period and a tick: a round has gone out. */
     private val period = TuneModel.POLL_INTERVAL_MS + 1
@@ -38,8 +39,11 @@ class TuneReadbackTest {
         // A RAM write over SWD: the app sent nothing and is told nothing.
         rig.transport.shadow[board to gp] = 350
         rig.transport.shadow[board to speedMax] = 0
+        rig.transport.shadow[board to rateMax] = 0
         advanceTimeBy(period)
         runCurrent()
+
+        assertEquals(0, rig.state.gains.staged[rateMax], "a turn word was not polled")
 
         assertEquals(350, rig.state.gains.staged[gp])
         assertEquals(0, rig.state.gains.staged[speedMax])
@@ -58,6 +62,9 @@ class TuneReadbackTest {
         runCurrent()
 
         val polled = rig.transport.tuneReads.drop(tuneReads)
+        // Eleven keys a round: the four gains, the reference row and the heading hold's five
+        // (`specs/heading-hold.md` section 10).
+        assertEquals(11, rig.state.liveKeys.size)
         assertEquals(List(3) { rig.state.liveKeys }.flatten().map { board to it }, polled)
         assertEquals(reads, rig.transport.reads.size, "the poll read the config lane")
     }

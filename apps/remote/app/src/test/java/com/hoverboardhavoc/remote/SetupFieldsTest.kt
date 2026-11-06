@@ -3,6 +3,8 @@ package com.hoverboardhavoc.remote
 import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.l3.CONFIG_VALUE_MAX
 import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Names
 import com.hoverboard.protocol.store.Value
 import com.hoverboardhavoc.remote.model.Editor
 import com.hoverboardhavoc.remote.model.SetupFields
@@ -141,5 +143,20 @@ class SetupFieldsTest {
         // Two bytes per character in UTF-8: half as many characters fit.
         assertNull(f.parse("\u00e9".repeat(CONFIG_VALUE_MAX / 2 + 1)))
         assertFalse(f.accepts(Value.Str("n".repeat(CONFIG_VALUE_MAX + 1))))
+    }
+
+    /**
+     * `machine.turn` is the three-row object of `specs/heading-hold.md` section 6 (gains, reference,
+     * clamp) through the NAMES mirror, which is what the machine file and the board-status lines
+     * print; the drive bounds' two turn rows are the clamp row's indices.
+     */
+    @Test
+    fun theTurnIsThreeRowsUnderMachineTurn() {
+        assertEquals("machine.turn.gains[0]", Names.pathOf(Key(Fields.CONTROL_TURN_GAINS.id, 0)))
+        assertEquals("machine.turn.gains[2]", Names.pathOf(Key(Fields.CONTROL_TURN_GAINS.id, 2)))
+        assertEquals("machine.turn.reference[1]", Names.pathOf(Key(Fields.CONTROL_TURN_REFERENCE.id, 1)))
+        assertEquals("machine.turn.clamp[0]", Names.pathOf(SetupFields.TURN_MAX.key))
+        assertEquals("machine.turn.clamp[1]", Names.pathOf(SetupFields.HEAD_CLAMP.key))
+        assertNull(Names.byId(0x2B), "the retired turn row is still named")
     }
 }
