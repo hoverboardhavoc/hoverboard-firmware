@@ -149,10 +149,16 @@ fn check(filter: &str) -> Result<bool, String> {
             continue;
         }
         let scope = v.scope(target)?;
+        let counts = v.write_counts(target)?;
         for chip in &v.chips {
             let image = &images[chip];
             let outcome = trace_of(image, &hal::entry(&v.id), v, target).map(|h| {
-                compare::compare(v.mode, &scope.narrow(&h), &scope.narrow(&vendor), target)
+                let mut o =
+                    compare::compare(v.mode, &scope.narrow(&h), &scope.narrow(&vendor), target);
+                let miscounted = compare::write_counts(&h, &counts, target);
+                o.matched &= miscounted.is_empty();
+                o.diff.extend(miscounted);
+                o
             });
             match outcome {
                 Ok(o) if o.matched => {

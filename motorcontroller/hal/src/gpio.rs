@@ -126,9 +126,12 @@ impl<MODE> Pin<MODE> {
         }
     }
 
-    /// As a push-pull output.
+    /// As a push-pull output. On the GD32F10x a JTAG-only pin (PA15, PB3, PB4) is freed first
+    /// ([`crate::afio`]), keeping SWD.
     #[inline]
     pub fn into_push_pull_output(self) -> Pin<Output<PushPull>> {
+        #[cfg(hal_gpio = "crl")]
+        crate::afio::free_if_jtag(self.port_base, self.pin);
         configure_output(self.port_base, self.pin);
         Pin::new(self.port_base, self.pin)
     }

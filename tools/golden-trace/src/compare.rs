@@ -11,6 +11,10 @@
 //!
 //! A vector narrows the comparison to the accesses inside its `assert_only` ranges, or outside its
 //! `ignore` ranges, before either mode runs.
+//!
+//! Beside the comparison, a vector's `hal_writes` counts the HAL's own writes to a register
+//! ([`write_counts`]): a property of the HAL that no vendor trace states, such as a field the HAL
+//! writes once where the vendor call writes it twice.
 
 use std::collections::BTreeMap;
 
@@ -140,6 +144,25 @@ fn final_state(hal: &[Access], vendor: &[Access], target: &Target) -> Outcome {
         matched: diff.is_empty(),
         diff,
     }
+}
+
+/// The `hal_writes` check: for each `(address, count)` in `want`, the HAL trace must write that
+/// address exactly `count` times. One line per address that differs; empty when all agree.
+pub fn write_counts(hal: &[Access], want: &[(u32, usize)], target: &Target) -> Vec<String> {
+    want.iter()
+        .filter_map(|&(addr, n)| {
+            let got = hal
+                .iter()
+                .filter(|a| a.op == Op::Write && a.addr == addr)
+                .count();
+            (got != n).then(|| {
+                format!(
+                    "hal_writes {}: {n} writes expected, the HAL made {got}",
+                    target.symbolise(addr)
+                )
+            })
+        })
+        .collect()
 }
 
 /// An ordered comparison, reported as a line diff over the longest common subsequence: `-` is an
@@ -308,6 +331,20 @@ mod tests {
         assert!(compare(Mode::FinalState, &state_last, &command_last, &t).matched);
         let other = vec![w(4, 0x4001_2408, 0x9800)];
         assert!(!compare(Mode::FinalState, &other, &command_last, &t).matched);
+    }
+
+    #[test]
+    fn write_counts_count_the_hals_writes_per_address() {
+        let t = target();
+        // `base` writes APB2EN once and GPIOA CTL0 once; its reads do not count.
+        assert!(write_counts(&base(), &[(0x4002_1018, 1), (0x4001_0800, 1)], &t).is_empty());
+        let twice = write_counts(&base(), &[(0x4002_1018, 2)], &t);
+        assert_eq!(
+            twice,
+            ["hal_writes <RCU_BASE>+0x18: 2 writes expected, the HAL made 1"]
+        );
+        assert_eq!(write_counts(&base(), &[(0x4002_1000, 0)], &t).len(), 0);
+        assert_eq!(write_counts(&base(), &[(0x4002_1000, 1)], &t).len(), 1);
     }
 
     #[test]
