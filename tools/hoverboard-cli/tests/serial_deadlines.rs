@@ -219,3 +219,82 @@ fn a_port_that_does_not_read_ends_every_command_within_its_deadline() {
     assert_eq!(r.unwrap(), "no Identity from 0x01");
     assert_eq!(f.as_deref(), Some(DOES_NOT_READ));
 }
+
+/// The C3's USB port under `bridge install` with a [`Deaf`] console: the ROM loader is a stub
+/// that records the image and stops the install there.
+struct DeafUsb {
+    written: Arc<Mutex<Option<usize>>>,
+}
+
+impl hoverboard_cli::install::Port for DeafUsb {
+    fn name(&self) -> &str {
+        NAME
+    }
+    fn open(&mut self) -> Result<Box<dyn hoverboard_cli::wire::ByteLink>, String> {
+        Ok(Box::new(Serial::over(Box::new(Deaf::default()), NAME)))
+    }
+    fn write_image(&mut self, image: &[u8]) -> Result<(), String> {
+        *self.written.lock().unwrap() = Some(image.len());
+        Err("the ROM loader (stubbed)".into())
+    }
+    fn reset(&mut self) -> Result<(), String> {
+        unreachable!("the install stops at the ROM loader")
+    }
+}
+
+#[test]
+fn bridge_install_gives_up_on_a_bridge_that_does_not_read_and_writes_the_image() {
+    use hoverboard_cli::guest::HELLO_WAIT;
+    use hoverboard_cli::install::{self, IMAGE_LEN};
+    use hoverboard_cli::transport::WRITE_WAIT;
+
+    // At a terminal: the probe gives up, the question names the port, a yes writes the image.
+    let written = Arc::new(Mutex::new(None));
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (w, q) = (written.clone(), asked.clone());
+    let limit = WRITE_WAIT + HELLO_WAIT + Duration::from_secs(1);
+    let (r, took) = within("the install's probe", limit, move || {
+        let mut port = DeafUsb { written: w };
+        install::install(&mut port, &[0xE9; 16], None, false, true, |s: &str| {
+            q.lock().unwrap().push(s.to_string());
+            true
+        })
+    });
+    assert_eq!(r.unwrap_err(), "the ROM loader (stubbed)");
+    assert!(took >= HELLO_WAIT, "{took:?}");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["no bridge answers on /dev/ttyACM9; erase it and install?"]
+    );
+    assert_eq!(*written.lock().unwrap(), Some(16));
+
+    // A no installs nothing.
+    let written = Arc::new(Mutex::new(None));
+    let w = written.clone();
+    let (r, _) = within("the install's probe", limit, move || {
+        install::install(&mut DeafUsb { written: w }, &[], None, false, true, |_| {
+            false
+        })
+    });
+    assert_eq!(r.unwrap_err(), "nothing installed");
+    assert_eq!(*written.lock().unwrap(), None);
+
+    // With --yes, or without a terminal: no question.
+    for (yes, terminal) in [(true, true), (false, false)] {
+        let written = Arc::new(Mutex::new(None));
+        let w = written.clone();
+        let (r, _) = within("the install's probe", limit, move || {
+            let image = vec![0xE9; IMAGE_LEN];
+            install::install(
+                &mut DeafUsb { written: w },
+                &image,
+                None,
+                yes,
+                terminal,
+                |_| panic!("asked with yes={yes}, terminal={terminal}"),
+            )
+        });
+        assert_eq!(r.unwrap_err(), "the ROM loader (stubbed)");
+        assert_eq!(*written.lock().unwrap(), Some(IMAGE_LEN));
+    }
+}
