@@ -1508,8 +1508,8 @@ jobs:
 
       # Caches the Gradle user home (distribution + dependencies) across runs, and validates the
       # committed gradle-wrapper.jar against Gradle's published checksums. Ours is the official
-      # 8.14 wrapper jar (sha256 7d3a4ac4...df296172, checked against
-      # services.gradle.org/distributions/gradle-8.14-wrapper.jar.sha256), so that check passes.
+      # 9.8.2 wrapper jar (sha256 3b8a2577...7ce68e98, checked against
+      # services.gradle.org/distributions/gradle-9.8.2-wrapper.jar.sha256), so that check passes.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
@@ -1583,7 +1583,7 @@ jobs:
   # The app built the way F-Droid builds it: fdroidserver's `fdroid build` on this commit, from the
   # metadata in apps/remote/fdroid/ (tools/fdroid-build.sh). F-Droid's scanner strips the binaries
   # the metadata's scandelete names and the gradle-wrapper.jar, then builds with its own Gradle, so
-  # this job installs Gradle 8.14, the wrapper's version.
+  # this job installs Gradle 9.8.2, the wrapper's version.
   remote-app-fdroid:
     name: Remote app (F-Droid build)
     runs-on: ubuntu-24.04
@@ -1599,10 +1599,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle 8.14
+      - name: Set up Gradle 9.8.2
         uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: '8.14'
+          gradle-version: '9.8.2'
 
       - name: Install fdroidserver
         run: pipx install fdroidserver
@@ -1677,7 +1677,7 @@ jobs:
       # Same action as the protocol job, for the same two reasons: it caches the Gradle user home
       # (distribution plus dependencies, which for an Android/Compose/Robolectric build is most of
       # the wall clock on a cold runner) and it validates the committed wrapper jar. This wrapper is
-      # the same official 8.14 one that module uses.
+      # the same official 9.8.2 one that module uses.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 

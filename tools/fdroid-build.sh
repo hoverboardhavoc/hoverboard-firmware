@@ -5,7 +5,7 @@
 #
 # Usage: tools/fdroid-build.sh [WORKDIR]      (default WORKDIR: target/fdroid)
 #
-# Needs `fdroid` (fdroidserver) on PATH, a JDK 17, ANDROID_HOME, and a Gradle 8.14 binary in GRADLE
+# Needs `fdroid` (fdroidserver) on PATH, a JDK 17, ANDROID_HOME, and a Gradle 9.8.2 binary in GRADLE
 # or on PATH: F-Droid's scanner deletes the committed gradle-wrapper.jar before it builds, so the
 # wrapper cannot run. Commit first; uncommitted changes are not built.
 set -euo pipefail
@@ -15,7 +15,7 @@ app=com.hoverboardhavoc.remote
 work=${1:-$repo/target/fdroid}
 gradle=${GRADLE:-$(command -v gradle || true)}
 if [ -z "$gradle" ]; then
-  echo "fdroid-build: no Gradle; set GRADLE to a Gradle 8.14 binary" >&2
+  echo "fdroid-build: no Gradle; set GRADLE to a Gradle 9.8.2 binary" >&2
   exit 1
 fi
 sha=$(git -C "$repo" rev-parse HEAD)

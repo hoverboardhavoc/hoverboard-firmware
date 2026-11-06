@@ -1,5 +1,5 @@
 [versions]
-agp = "8.9.1"
+agp = "9.5.1"
 kotlin = "2.4.21"
 detekt = "1.23.8"
 composeRules = "0.6.8"
@@ -66,7 +66,6 @@ roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "robora
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 detekt = { id = "io.gitlab.arturbosch.detekt", version.ref = "detekt" }
 roborazzi = { id = "io.github.takahirom.roborazzi", version.ref = "roborazzi" }
