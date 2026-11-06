@@ -38,6 +38,24 @@ pub trait Bus {
     fn read(&mut self, addr: u32, size: u32) -> Option<u32>;
     /// Write; `false` is a bus error.
     fn write(&mut self, addr: u32, size: u32, val: u32) -> bool;
+    /// NRST pulled low (`true`) or released (`false`).
+    fn nrst(&mut self, _asserted: bool) {}
+    /// Whether the debug port answers at all: a board whose running firmware has taken the SWD
+    /// pins does not.
+    fn answers(&self) -> bool {
+        true
+    }
+}
+
+/// One edge on NRST, as [`SimPins`] saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NrstEdge {
+    /// Pulled low (`true`) or released (`false`).
+    pub asserted: bool,
+    /// The port's decoded requests ([`SimPins::requests`]) at the edge.
+    pub requests: u64,
+    /// The simulated clock at the edge.
+    pub at_us: u64,
 }
 
 /// Fault injection rates, in parts per thousand of requests.
@@ -132,6 +150,12 @@ pub struct SimPins<B: Bus> {
     pub noacks: u64,
     /// DP `ABORT` writes with DAPABORT set.
     pub dapaborts: u64,
+    /// NRST is pulled low.
+    pub nrst: bool,
+    /// Every NRST edge, in order.
+    pub nrst_log: Vec<NrstEdge>,
+    /// The simulated clock at the first request the port decoded with NRST pulled low.
+    pub first_held_request_us: Option<u64>,
 }
 
 const DPIDR: u32 = 0x1BA0_1477;
@@ -164,6 +188,9 @@ impl<B: Bus> SimPins<B> {
             noack_release: None,
             noacks: 0,
             dapaborts: 0,
+            nrst: false,
+            nrst_log: Vec::new(),
+            first_held_request_us: None,
         }
     }
 
@@ -182,6 +209,11 @@ impl<B: Bus> SimPins<B> {
     /// Advance the simulated clock (a delay the engine's caller takes).
     pub fn sleep_us(&mut self, us: u64) {
         self.t_us += us;
+    }
+
+    /// The simulated clock.
+    pub fn t_us_now(&self) -> u64 {
+        self.t_us
     }
 
     fn line_bit(&mut self, b: bool) {
@@ -219,8 +251,11 @@ impl<B: Bus> SimPins<B> {
             && ((req >> 1 & 1) + (req >> 2 & 1) + (req >> 3 & 1) + (req >> 4 & 1)) & 1 == parity
             && req & 0x40 == 0
             && req & 0x80 != 0;
-        if !ok || !self.selected || self.inject.dead {
+        if !ok || !self.selected || self.inject.dead || !self.bus.answers() {
             return Phase::Lost;
+        }
+        if self.nrst && self.first_held_request_us.is_none() {
+            self.first_held_request_us = Some(self.t_us);
         }
         let is_idcode = !ap && read && a == 0;
         if self.needs_idcode && !is_idcode {
@@ -340,6 +375,22 @@ impl<B: Bus> SimPins<B> {
 }
 
 impl<B: Bus> SwdPins for SimPins<B> {
+    fn assert_reset(&mut self, asserted: bool) {
+        if asserted != self.nrst {
+            self.nrst = asserted;
+            self.nrst_log.push(NrstEdge {
+                asserted,
+                requests: self.requests,
+                at_us: self.t_us,
+            });
+            self.bus.nrst(asserted);
+        }
+    }
+
+    fn delay_us(&mut self, us: u32) {
+        self.sleep_us(us as u64);
+    }
+
     fn swdio_out(&mut self) {
         if !self.host_drives && self.phase == Phase::Lost {
             // The turnaround and the three ACK bits come first; the rest followed the ACK.
@@ -626,6 +677,14 @@ pub struct Gd32 {
     pub moe_stuck: bool,
     /// System resets since the model was built.
     pub resets: u32,
+    /// NRST is held low: the core does not run, and only the debug registers (the system control
+    /// space) answer on the bus.
+    pub nrst_held: bool,
+    /// The running firmware takes the SWD pins: the debug port answers only while NRST is held or
+    /// the core is halted (a stock board that blocks SWD, `specs/bridge-nrst.md`).
+    pub blocks_swd: bool,
+    /// The core never halts on the reset vector catch.
+    pub never_halts: bool,
     /// The flash size register, KiB.
     pub flash_kib: u16,
     /// Bus writes into the store's pages (the last two), which the tool must never make.
@@ -714,6 +773,9 @@ impl Gd32 {
             cchp7: 0,
             moe_stuck: false,
             resets: 0,
+            nrst_held: false,
+            blocks_swd: false,
+            never_halts: false,
             flash_kib: part.flash_kib,
             store_writes: 0,
             regs: [0; 21],
@@ -814,7 +876,7 @@ impl Gd32 {
         self.cchp = 0;
         self.cchp7 = 0;
         self.loader = None;
-        self.halted = self.debugen && self.demcr & 1 != 0;
+        self.halted = self.debugen && self.demcr & 1 != 0 && !self.never_halts;
         // The core starts from the vector table: the stack pointer, the reset handler, Thumb.
         let word = |i: usize| self.flash[2 * i] as u32 | (self.flash[2 * i + 1] as u32) << 16;
         self.regs[13] = word(0);
@@ -1021,6 +1083,11 @@ impl Gd32 {
         self.halted = true;
     }
 
+    /// `DEMCR`.
+    pub fn demcr(&self) -> u32 {
+        self.demcr
+    }
+
     /// `DEMCR.TRCENA`, which powers the DWT.
     pub fn dwt_trcena(&self) -> u32 {
         self.demcr & 1 << 24
@@ -1099,6 +1166,9 @@ impl Bus for Gd32 {
         if let Some(log) = self.reads.as_mut() {
             log.push(addr);
         }
+        if self.nrst_held && !in_scs(addr) {
+            return None;
+        }
         let v = if self.mm32() {
             self.mm32_read(addr)
         } else {
@@ -1110,10 +1180,32 @@ impl Bus for Gd32 {
     }
 
     fn write(&mut self, addr: u32, size: u32, val: u32) -> bool {
+        if self.nrst_held && !in_scs(addr) {
+            return false;
+        }
         let ok = self.bus_write(addr, size, val);
         self.run_loader();
         ok
     }
+
+    fn nrst(&mut self, asserted: bool) {
+        self.nrst_held = asserted;
+        if asserted {
+            self.halted = false;
+            self.loader = None;
+        } else {
+            self.reset();
+        }
+    }
+
+    fn answers(&self) -> bool {
+        !self.blocks_swd || self.nrst_held || self.halted
+    }
+}
+
+/// The Cortex-M3 system control space, whose debug registers answer while NRST is held.
+fn in_scs(addr: u32) -> bool {
+    (0xE000_E000..0xE000_F000).contains(&addr)
 }
 
 impl Gd32 {

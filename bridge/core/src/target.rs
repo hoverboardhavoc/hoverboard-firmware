@@ -599,7 +599,7 @@ pub fn read_core_reg<M: MemPort>(m: &mut M, sel: u32) -> Result<u32, PortError<M
     Ok(m.read_word(DCRDR)?)
 }
 
-/// `SYSRESETREQ` (the fleet's boards do not wire NRST).
+/// `SYSRESETREQ`: it works on every board, NRST wired or not.
 pub fn reset<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), SwdError> {
     swd.write_word(AIRCR, SYSRESETREQ)
 }
@@ -625,4 +625,59 @@ pub fn reset_halt<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), TargetError> {
 /// Clear `C_DEBUGEN` and leave the core running.
 pub fn release<P: SwdPins>(swd: &mut Swd<P>) -> Result<(), SwdError> {
     swd.write_word(DHCSR, DBGKEY)
+}
+
+/// How long NRST is held before the debug port is touched, in microseconds: GD32 NRST needs far
+/// less, and this also covers a board-side capacitor on the line.
+pub const NRST_PULSE_US: u32 = 10_000;
+/// How long the core has after NRST is released to report halted at the reset vector, in
+/// microseconds.
+pub const NRST_HALT_US: u64 = 100_000;
+
+/// Connect under reset (`specs/bridge-nrst.md` section 2), for a board whose firmware blocks SWD:
+/// pull NRST low for [`NRST_PULSE_US`], connect with it held, enable halting debug and set
+/// `VC_CORERESET`, release NRST, poll `S_HALT` for up to [`NRST_HALT_US`], clear the vector catch,
+/// set the debug hold, and identify the target. The core is left halted at its reset vector, before
+/// any of the board's firmware has run.
+///
+/// Nothing reads the board's layout or disarms its timers first, as [`reset_halt`] does: a board
+/// whose firmware blocks SWD gives nothing to read, and a board held in reset drives no gate.
+///
+/// NRST is released on every path. A debug port that does not answer under reset is
+/// [`TargetError::Swd`]; a core that does not report halted in time is [`TargetError::Timeout`].
+pub fn connect_under_reset<P: SwdPins>(swd: &mut Swd<P>) -> Result<TargetId, TargetError> {
+    swd.forget();
+    swd.assert_reset(true);
+    swd.delay_us(NRST_PULSE_US);
+    let caught = catch_reset_vector(swd);
+    swd.assert_reset(false);
+    let demcr = caught?;
+    let halted = wait_halted_us(swd, NRST_HALT_US);
+    swd.write_word(DEMCR, demcr & !VC_CORERESET)?;
+    halted?;
+    debug_hold(swd)?;
+    Ok(identify(swd)?)
+}
+
+/// With NRST held: connect, enable halting debug with a halt request, and set `VC_CORERESET`.
+/// Returns `DEMCR` as it was.
+fn catch_reset_vector<P: SwdPins>(swd: &mut Swd<P>) -> Result<u32, SwdError> {
+    swd.connect()?;
+    swd.write_word(DHCSR, DBGKEY | C_DEBUGEN | C_HALT)?;
+    let demcr = swd.read_word(DEMCR)?;
+    swd.write_word(DEMCR, demcr | VC_CORERESET)?;
+    Ok(demcr)
+}
+
+/// Poll `S_HALT` until it is set or `us` has passed.
+fn wait_halted_us<P: SwdPins>(swd: &mut Swd<P>, us: u64) -> Result<(), TargetError> {
+    let since = swd.now_us();
+    loop {
+        if halted(swd)? {
+            return Ok(());
+        }
+        if swd.now_us().saturating_sub(since) >= us {
+            return Err(TargetError::Timeout);
+        }
+    }
 }

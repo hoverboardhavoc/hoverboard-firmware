@@ -115,6 +115,9 @@ fn name(store: &store::Store<'_, KeysFlash>, default: &[u8]) -> &'static str {
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+    // The SWD pins first, before the scheduler, the radio or any service: this releases NRST
+    // (`specs/bridge-nrst.md` section 1), and until here GPIO5 is in its power-on default.
+    let swd_pins = EspPins::new(p.GPIO5, p.GPIO6, p.GPIO7);
     #[cfg(feature = "boot-log")]
     esp_println::logger::init_logger(log::LevelFilter::Info);
     boot!(
@@ -186,7 +189,7 @@ async fn main(spawner: Spawner) {
 
     // The SWD side and the USB console first: they need no radio, and a radio that fails to come
     // up leaves them working.
-    let mut swd = Swd::new(EspPins::new(p.GPIO6, p.GPIO7), SwdConfig::default());
+    let mut swd = Swd::new(swd_pins, SwdConfig::default());
     let khz = swd.measure_khz(20_000);
     boot!("SWD clock {} kHz", khz);
     // The service's state is placed in statics, not moved by value into the task: a task's

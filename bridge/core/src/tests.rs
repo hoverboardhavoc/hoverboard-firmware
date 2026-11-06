@@ -3869,3 +3869,204 @@ fn the_boot_name_falls_back_for_a_stored_name_it_cannot_advertise() {
         b"Offroad master"
     );
 }
+
+// ---- connect under reset (`specs/bridge-nrst.md`) ----
+
+/// What the service answered a `TARGET_CTRL` with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CtrlReply {
+    Id(espsvc::TargetId),
+    Status(Status),
+}
+
+/// Send `TARGET_CTRL c` (or, with `None`, `TARGET_ID`) through the service and return its one reply.
+fn target_ctrl(
+    port: &mut MailboxPort<SimPins<Gd32>>,
+    svc: &mut Service<SimPlatform>,
+    c: Option<espsvc::Ctrl>,
+) -> CtrlReply {
+    let req = encode(&c.map_or(Msg::TargetIdReq, Msg::TargetCtrl), 0x80);
+    let me = Identity {
+        addr: 0,
+        store_mounted: true,
+    };
+    let mut got = Vec::new();
+    svc.handle(&Pdu::decode(&req).unwrap(), me, port, &mut |dst, m| {
+        assert_eq!(dst, 0x80);
+        got.push(match *m {
+            Msg::TargetId(id) => CtrlReply::Id(id),
+            Msg::Result { status, .. } => CtrlReply::Status(status),
+            ref m => panic!("unexpected reply {m:?}"),
+        });
+    });
+    assert_eq!(got.len(), 1, "one reply");
+    got[0]
+}
+
+/// A running F1x0 board whose firmware takes the SWD pins: the debug port answers only while NRST
+/// is held or the core is halted.
+fn swd_blocking_board() -> MailboxPort<SimPins<Gd32>> {
+    let mut s = board(Family::F1x0, Inject::default(), 3);
+    let g = model(&mut s);
+    g.load(&image(64));
+    g.power_cycle();
+    g.blocks_swd = true;
+    MailboxPort::new(s)
+}
+
+/// NRST's edges alternate from asserted, and it ends released: the pin is only ever pulled low or
+/// let go, never driven high (`SwdPins::assert_reset` has no other state).
+fn assert_nrst_pulsed_once(pins: &SimPins<Gd32>) {
+    let edges: Vec<bool> = pins.nrst_log.iter().map(|e| e.asserted).collect();
+    assert_eq!(edges, [true, false], "{:?}", pins.nrst_log);
+    assert!(!pins.nrst && !pins.bus.nrst_held, "released at the end");
+}
+
+/// Test 1: a target that answers only under reset is reached, halted at its reset vector before any
+/// of its firmware runs, its uid returned; NRST goes low before the first SWD transfer and is held
+/// 10 ms first; `VC_CORERESET` is set at the release and cleared after the halt; the debug hold is
+/// set; `Resume` then lets the old firmware run.
+#[test]
+fn connect_under_reset_reaches_a_board_that_blocks_swd() {
+    use espsvc::Ctrl;
+    let mut port = swd_blocking_board();
+    let mut svc = service();
+    // The ordinary paths read nothing.
+    assert_eq!(
+        target_ctrl(&mut port, &mut svc, None),
+        CtrlReply::Status(Status::NoTarget)
+    );
+    assert_eq!(
+        target_ctrl(&mut port, &mut svc, Some(Ctrl::ResetHalt)),
+        CtrlReply::Status(Status::NoTarget)
+    );
+    assert!(port.swd().pins().nrst_log.is_empty());
+
+    let before = port.swd().pins().requests;
+    let resets = model(port.swd()).resets;
+    let uid = model(port.swd()).uid;
+    let reply = target_ctrl(&mut port, &mut svc, Some(Ctrl::ConnectUnderReset));
+    let CtrlReply::Id(id) = reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!((id.uid, id.family, id.flash_kib), (uid, FAMILY_F1X0, 64));
+
+    let pins = port.swd().pins();
+    assert_nrst_pulsed_once(pins);
+    let (low, high) = (pins.nrst_log[0], pins.nrst_log[1]);
+    assert_eq!(
+        low.requests, before,
+        "NRST low before the first SWD transfer"
+    );
+    assert!(
+        high.requests > before,
+        "the debug port was set up with NRST held"
+    );
+    let first = pins.first_held_request_us.expect("a transfer under reset");
+    assert!(
+        first >= low.at_us + target::NRST_PULSE_US as u64,
+        "held 10 ms first"
+    );
+
+    let g = model(port.swd());
+    assert_eq!(g.resets, resets + 1, "one reset: the NRST release");
+    assert!(g.halted, "halted");
+    assert_ne!(
+        g.dfsr & target::dfsr::VCATCH,
+        0,
+        "by the reset vector catch"
+    );
+    assert_eq!(g.regs[15], 0x0800_0108, "at the reset vector");
+    assert_eq!(g.demcr() & 1, 0, "VC_CORERESET cleared after the halt");
+    assert_eq!(g.dbg_ctl0 & GD_HOLD, GD_HOLD, "the debug hold set");
+
+    // The board stays reachable while halted, and `Resume` runs the old firmware.
+    assert!(matches!(
+        target_ctrl(&mut port, &mut svc, None),
+        CtrlReply::Id(_)
+    ));
+    // The model takes the pins the instant the core runs, before the write's check reads
+    // `CTRL/STAT`; a firmware takes them only once its startup code reaches the pin setup.
+    model(port.swd()).blocks_swd = false;
+    assert_eq!(
+        target_ctrl(&mut port, &mut svc, Some(Ctrl::Resume)),
+        CtrlReply::Status(Status::Ok)
+    );
+    let g = model(port.swd());
+    assert!(!g.halted);
+    assert_eq!(g.resets, resets + 1);
+    assert_eq!(
+        port.swd().pins().nrst_log.len(),
+        2,
+        "no other action touches NRST"
+    );
+}
+
+/// Test 2: a target that never answers, even under reset: `NoTarget`, NRST released.
+#[test]
+fn connect_under_reset_with_no_target_answers_no_target_and_releases_nrst() {
+    let mut s = board(Family::F1x0, Inject::default(), 4);
+    s.pins().inject.dead = true;
+    let mut port = MailboxPort::new(s);
+    let mut svc = service();
+    assert_eq!(
+        target_ctrl(&mut port, &mut svc, Some(espsvc::Ctrl::ConnectUnderReset)),
+        CtrlReply::Status(Status::NoTarget)
+    );
+    assert_nrst_pulsed_once(port.swd().pins());
+    assert_eq!(port.swd().dpidr(), None, "the engine forgot the connection");
+}
+
+/// Test 3: a target that answers but never halts: `Timeout` after 100 ms, NRST released and the
+/// vector catch cleared.
+#[test]
+fn connect_under_reset_that_never_halts_times_out_and_releases_nrst() {
+    let mut s = board(Family::F1x0, Inject::default(), 5);
+    model(&mut s).never_halts = true;
+    let mut port = MailboxPort::new(s);
+    let mut svc = service();
+    assert_eq!(
+        target_ctrl(&mut port, &mut svc, Some(espsvc::Ctrl::ConnectUnderReset)),
+        CtrlReply::Status(Status::Timeout)
+    );
+    let pins = port.swd().pins();
+    assert_nrst_pulsed_once(pins);
+    assert!(
+        pins.t_us_now() >= pins.nrst_log[1].at_us + target::NRST_HALT_US,
+        "polled for 100 ms"
+    );
+    let g = model(port.swd());
+    assert!(!g.halted);
+    assert_eq!(g.demcr() & 1, 0, "VC_CORERESET cleared");
+}
+
+/// Tests 4 and 5: the pin starts released, and no other action, a flash or an identify touches it.
+#[test]
+fn nothing_but_connect_under_reset_touches_nrst() {
+    use espsvc::Ctrl;
+    let (mut port, mut fw) = booted(Family::F1x0, Inject::default());
+    assert!(!port.swd().pins().nrst, "released from the start");
+    attach(&mut port, &mut fw);
+    let mut svc = service();
+    assert!(matches!(
+        target_ctrl(&mut port, &mut svc, None),
+        CtrlReply::Id(_)
+    ));
+    for c in [
+        Ctrl::Disarm,
+        Ctrl::Halt,
+        Ctrl::Resume,
+        Ctrl::Reset,
+        Ctrl::ResetHalt,
+        Ctrl::Resume,
+    ] {
+        assert_eq!(
+            target_ctrl(&mut port, &mut svc, Some(c)),
+            CtrlReply::Status(Status::Ok),
+            "{c:?}"
+        );
+    }
+    run_job(port.swd(), &image(2048)).unwrap();
+    assert!(port.swd().pins().nrst_log.is_empty());
+    assert!(!port.swd().pins().nrst);
+}

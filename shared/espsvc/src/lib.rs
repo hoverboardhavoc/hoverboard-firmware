@@ -205,6 +205,10 @@ pub enum Ctrl {
     Reset = 3,
     /// Disarm, set the debug hold, reset and halt at the reset vector.
     ResetHalt = 4,
+    /// Connect under reset through NRST, halt at the reset vector and set the debug hold, for a
+    /// board whose firmware blocks SWD (`specs/bridge-nrst.md`). Answered with [`Msg::TargetId`]
+    /// on success and with [`Msg::Result`] otherwise.
+    ConnectUnderReset = 5,
 }
 
 impl Ctrl {
@@ -216,6 +220,7 @@ impl Ctrl {
             2 => Ctrl::Resume,
             3 => Ctrl::Reset,
             4 => Ctrl::ResetHalt,
+            5 => Ctrl::ConnectUnderReset,
             _ => return None,
         })
     }

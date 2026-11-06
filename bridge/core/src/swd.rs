@@ -27,9 +27,15 @@
 
 use core::fmt;
 
-/// The pin and time operations the engine needs. On the ESP32-C3 these are GPIO6 (SWCLK) and GPIO7
-/// (SWDIO) through the GPIO set/clear registers; in the host tests, a simulated target.
+/// The pin and time operations the engine needs. On the ESP32-C3 these are GPIO6 (SWCLK), GPIO7
+/// (SWDIO) through the GPIO set/clear registers and GPIO5 (NRST, open-drain); in the host tests, a
+/// simulated target.
 pub trait SwdPins {
+    /// Pull NRST low (`true`) or release it (`false`). The pin is open-drain and never driven
+    /// high: released, the board's own pull-up holds the line (`specs/bridge-nrst.md` section 1).
+    fn assert_reset(&mut self, asserted: bool);
+    /// Wait `us` microseconds without touching SWCLK or SWDIO.
+    fn delay_us(&mut self, us: u32);
     /// Drive SWDIO from the host.
     fn swdio_out(&mut self);
     /// Release SWDIO (the target drives it).
@@ -261,6 +267,16 @@ impl<P: SwdPins> Swd<P> {
     /// Monotonic microseconds from the pins' clock.
     pub fn now_us(&mut self) -> u64 {
         self.pins.now_us()
+    }
+
+    /// Pull NRST low or release it ([`SwdPins::assert_reset`]).
+    pub fn assert_reset(&mut self, asserted: bool) {
+        self.pins.assert_reset(asserted)
+    }
+
+    /// Wait without touching the SWD lines ([`SwdPins::delay_us`]).
+    pub fn delay_us(&mut self, us: u32) {
+        self.pins.delay_us(us)
     }
 
     /// Measure the clock: time `clocks` idle cycles (SWDIO driven low, which is idle at any point
