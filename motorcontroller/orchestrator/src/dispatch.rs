@@ -881,6 +881,10 @@ fn cyclic_state<const M: usize>(state: &OrchestratorState<M>) -> CyclicState {
     if state.rider_present {
         flags |= CyclicState::FLAG_RIDER;
     }
+    // The bridge is live: the arm layer's record, not the mode (`specs/arm-confirmed.md` section 1).
+    if state.moe {
+        flags |= CyclicState::FLAG_MOE;
+    }
     let producer = state.ctl.dispatch.mode();
     match producer {
         Producer::Leader => flags |= CyclicState::FLAG_LEADER,

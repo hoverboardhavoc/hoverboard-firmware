@@ -1483,6 +1483,15 @@ mod firmware {
                             arm::hw::refused(),
                         )
                 });
+        // `EV_NO_MOTOR` (`specs/arm-confirmed.md` section 2): no motor of this board was brought
+        // up, which holds the mode machine in OFF. Every motor's bring-up fact, so a two-motor
+        // board with either motor up can arm.
+        shell.orch.no_motor = !motor::OBS_STATE
+            .iter()
+            .any(|state| motor::obs_configured(state.load(Ordering::Relaxed)));
+        // `FLAG_MOE` (`specs/arm-confirmed.md` section 1): the arm layer's own record that MOE is
+        // set, as the last enact left it. The cyclic this pass builds reports it.
+        shell.orch.moe = arm::hw::armed();
         // The hard over-current trip: the ISR counts trips per motor, and a change since the last
         // run raises that motor's fault latch through its seam. The latch consumes the code this
         // same pass and reaches `fault_a` (motor 0) or `fault_b` (motor 1), so it is NOT folded
