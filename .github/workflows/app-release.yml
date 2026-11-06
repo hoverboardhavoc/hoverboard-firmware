@@ -1,6 +1,6 @@
 name: App release
 
-# The app's signed release for F-Droid's reproducible build. For an `app-v<version>` tag:
+# The app's signed release for F-Droid's reproducible build. For a `v<version>` tag:
 #
 # 1. build: the tag's version matches the app's versionName, and the release APK built with Gradle is
 #    identical byte for byte to the one fdroidserver's `fdroid build` makes (tools/fdroid-build.sh),
@@ -14,16 +14,17 @@ name: App release
 #    points `Binaries:` at it and publishes it when its own build matches.
 #
 # Every action is pinned to a commit and every Python package to a version, so a moved tag or a new
-# upload cannot change what runs. A tag pushed after this workflow exists runs it; an older tag is
-# released by hand with `gh workflow run app-release.yml -f tag=app-v<version>`.
+# upload cannot change what runs. A tag pushed by hand runs it. tag-release.yml, which makes the
+# tags, starts it with `gh workflow run app-release.yml -f tag=v<version>`, the same command that
+# releases an older tag by hand.
 
 on:
   push:
-    tags: ['app-v*']
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'The app-v<version> tag to release'
+        description: 'The v<version> tag to release'
         required: true
 
 permissions:
@@ -53,8 +54,8 @@ jobs:
         id: version
         working-directory: hoverboard-firmware
         run: |
-          case "$TAG" in app-v*) ;; *) echo "not an app-v tag: $TAG" >&2; exit 1 ;; esac
-          want="${TAG#app-v}"
+          case "$TAG" in v[0-9]*) ;; *) echo "not a v<version> tag: $TAG" >&2; exit 1 ;; esac
+          want="${TAG#v}"
           have=$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' apps/remote/app/build.gradle.kts)
           if [ "$want" != "$have" ]; then
             echo "$TAG names version $want, but apps/remote/app/build.gradle.kts has versionName $have" >&2

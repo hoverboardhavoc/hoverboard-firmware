@@ -1,0 +1,48 @@
+name: Tag release
+
+# When main's app version changes (a merged release PR from release.yml), tag that commit
+# v<versionName> and start the release: CI's release job (the bundle and the CLIs) and
+# app-release.yml (the signed APK). A tag pushed with the workflow token starts no workflow, so
+# this one dispatches both on the tag. F-Droid's checkupdates finds the tag on its own.
+#
+# A Dependabot PR that edits the same file leaves the version alone, so its tag already exists
+# and this does nothing.
+
+on:
+  push:
+    branches: [main]
+    paths: ['apps/remote/app/build.gradle.kts']
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    name: Tag the version and start the release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tag and dispatch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^ *versionName = "\(.*\)"$/\1/p' apps/remote/app/build.gradle.kts)
+          tag="v$version"
+          if ! [[ "$version" =~ ^[0-9]{4}\.[1-9][0-9]?\.(0|[1-9][0-9]*)$ ]]; then
+            echo "versionName $version is not <ISO year>.<ISO week>.<n>; no tag"
+            exit 0
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag exists; nothing to do"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+          echo "tagged $GITHUB_SHA as $tag"
+          gh workflow run ci.yml -R "$GITHUB_REPOSITORY" --ref "$tag"
+          gh workflow run app-release.yml -R "$GITHUB_REPOSITORY" -f tag="$tag"

@@ -1,0 +1,72 @@
+name: Release
+
+# Start a release: run this from the Actions tab with a one-line changelog. It opens the version
+# bump PR; merging that PR tags the release (tag-release.yml), which builds and publishes it.
+#
+# The version is the ISO week, `<ISO year>.<ISO week>.<n>`: the first release in week 45 of 2026 is
+# 2026.45.0, a second one that week 2026.45.1. `date +%G.%V` gives the ISO week-year, so the days of
+# a week that straddles New Year share its year, and the week loses `%V`'s leading zero because a
+# semver part may not start with 0. versionCode is year * 10000 + week * 100 + n (2026.45.0 is
+# 20264500). Both stay literals in apps/remote/app/build.gradle.kts, because F-Droid's checkupdates
+# reads versionCode from the source at the tag.
+#
+# A PR or push made with the workflow token starts no workflow, so this one dispatches CI on the
+# bump branch itself; the repository must allow Actions to create pull requests (Settings, Actions,
+# General).
+
+on:
+  workflow_dispatch:
+    inputs:
+      changelog:
+        description: 'What changed, one line (the F-Droid changelog for this version)'
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  bump:
+    name: Open the version bump PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Bump, commit and open the PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          gradle=apps/remote/app/build.gradle.kts
+          year=$(date -u +%G)
+          week=$((10#$(date -u +%V)))
+          n=0
+          while git rev-parse -q --verify "refs/tags/v$year.$week.$n" >/dev/null; do n=$((n + 1)); done
+          version="$year.$week.$n"
+          code=$((year * 10000 + week * 100 + n))
+          old=$(sed -n 's/^ *versionCode = \([0-9]*\)$/\1/p' "$gradle")
+          if [ "$code" -le "$old" ]; then
+            echo "versionCode $code for $version is not above the current $old" >&2
+            exit 1
+          fi
+          sed -i "s/^\( *versionCode = \)[0-9]*$/\1$code/; s/^\( *versionName = \)\".*\"$/\1\"$version\"/" "$gradle"
+          grep -q "versionCode = $code\$" "$gradle" && grep -q "versionName = \"$version\"\$" "$gradle"
+          printf '%s\n' "$CHANGELOG" > "fastlane/metadata/android/en-US/changelogs/$code.txt"
+
+          branch="release/v$version"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git add "$gradle" "fastlane/metadata/android/en-US/changelogs/$code.txt"
+          git commit -m "release: $version" -m "$CHANGELOG"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "release: $version" --body "$(printf \
+            'Sets the app to versionName %s, versionCode %s, with the changelog\n\n> %s\n\nMerging this tags v%s (tag-release.yml), which publishes the release.' \
+            "$version" "$code" "$CHANGELOG" "$version")"
+          gh workflow run ci.yml --ref "$branch"

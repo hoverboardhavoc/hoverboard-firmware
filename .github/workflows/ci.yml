@@ -57,6 +57,9 @@ name: CI
 on:
   push:
   pull_request:
+  # tag-release.yml runs this on a release tag, and release.yml on its bump branch: a tag or branch
+  # pushed with the workflow token starts no workflow by itself.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

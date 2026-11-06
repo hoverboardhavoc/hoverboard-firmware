@@ -28,6 +28,6 @@ Builds:
       - bridge/loader
 
 AutoUpdateMode: Version
-UpdateCheckMode: Tags ^app-v
+UpdateCheckMode: Tags ^v[0-9]
 CurrentVersion: '@VERSION_NAME@'
 CurrentVersionCode: @VERSION_CODE@
