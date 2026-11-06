@@ -24,6 +24,12 @@ use crate::names::{
 use crate::nodes::{self, parse_key, status_name, ConfigResp};
 use crate::wire::Wire;
 
+/// Every problem of a refused plan, one per line.
+pub fn joined(p: Vec<Problem>) -> String {
+    let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
+    msgs.join("\nerror: ")
+}
+
 /// One board as the configuration commands reach it: the link, the tool's guest address, the
 /// board's address, and the name every line about it starts with (its `device.name`).
 pub struct Board<'w, W: Wire> {

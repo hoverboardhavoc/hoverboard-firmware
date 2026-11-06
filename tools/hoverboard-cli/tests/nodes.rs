@@ -1529,3 +1529,63 @@ fn a_tune_is_set_and_read_by_event_on_one_board() {
     assert_eq!(out.trim(), "Hoverboard: tone.horn = \"1047/50 0/25\"");
     server.join().unwrap();
 }
+
+/// The C3's USB port under `bridge install`, its console reached over the simulated machine's TCP
+/// console; the ROM loader and the reset are stubs that count their calls.
+struct SimUsb {
+    addr: String,
+    calls: Vec<&'static str>,
+}
+
+impl hoverboard_cli::install::Port for SimUsb {
+    fn name(&self) -> &str {
+        "/dev/ttyACM0"
+    }
+    fn open(&mut self) -> Result<Box<dyn hoverboard_cli::wire::ByteLink>, String> {
+        Ok(Box::new(hoverboard_cli::transport::Tcp::connect(
+            &self.addr,
+        )?))
+    }
+    fn write_image(&mut self, _image: &[u8]) -> Result<(), String> {
+        self.calls.push("write");
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<(), String> {
+        self.calls.push("reset");
+        Ok(())
+    }
+}
+
+#[test]
+fn bridge_install_ends_after_the_join_wait_when_the_bridge_never_joins() {
+    use hoverboard_cli::install::{self, JOIN_WAIT};
+    use std::time::Instant;
+
+    // The simulated bridge's station never comes up. Three connections: the guard's probe, the
+    // first boot and the join wait.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || serve(listener, 3));
+    let files = hoverboard_cli::config::read_files(&[(
+        "wifi.json".to_string(),
+        r#"{ "wifi": { "ssid": "bench", "pass": "wrongpass" } }"#.to_string(),
+    )]);
+    assert!(files.problems.is_empty());
+
+    let mut port = SimUsb {
+        addr,
+        calls: Vec::new(),
+    };
+    let t0 = Instant::now();
+    let r = install::install(&mut port, &[], Some(&files), true, false, |q| {
+        panic!("asked {q}")
+    });
+    let took = t0.elapsed();
+    assert_eq!(
+        r.unwrap_err(),
+        "did not join bench in 30 s; check the network name, the password and wifi.tx_power"
+    );
+    assert_eq!(port.calls, ["write", "reset"]);
+    assert!(took >= JOIN_WAIT, "{took:?}");
+    assert!(took < JOIN_WAIT + Duration::from_secs(10), "{took:?}");
+}
