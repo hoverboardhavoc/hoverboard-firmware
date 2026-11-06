@@ -384,6 +384,28 @@ async fn serve<const E: usize, const O: usize>(
     matches!(select3(reader, writer, closed).await, Either3::Third(()))
 }
 
+/// esp-hal's generator as the `rand_core` 0.10 generator edge-mdns takes (esp-hal implements
+/// only `rand_core` 0.6 and 0.9). It cannot fail.
+#[derive(Clone, Copy)]
+struct MdnsRng(Rng);
+
+impl rand_core::TryRng for MdnsRng {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.0.random())
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok((u64::from(self.0.random()) << 32) | u64::from(self.0.random()))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.read(dst);
+        Ok(())
+    }
+}
+
 /// Answer mDNS queries for `<name>.local` with the station's address, forever.
 #[embassy_executor::task]
 pub async fn mdns(stack: Stack<'static>, name: &'static str, rng: Rng) {
@@ -429,7 +451,7 @@ pub async fn mdns(stack: Stack<'static>, name: &'static str, rng: Rng) {
             send,
             &recv_buf,
             &send_buf,
-            rng,
+            MdnsRng(rng),
             &signal,
         );
         // Until the address goes (a drop, a new lease), then again with the next one.
