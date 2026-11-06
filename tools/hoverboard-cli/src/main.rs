@@ -436,14 +436,7 @@ fn send_bridge_image(
     }
     c.confirm().map_err(e)?;
     let after = info_or_note(&mut c)?;
-    if let (Some(b), Some(a)) = (&before, &after) {
-        if a.slot == b.slot {
-            return Err(format!(
-                "the bridge did not boot the new image: it runs {}",
-                slot_name(a)
-            ));
-        }
-    }
+    install::check_confirmed(before.as_ref(), after.as_ref())?;
     eprintln!("confirmed");
     if let Some(a) = &after {
         print_info(a);
