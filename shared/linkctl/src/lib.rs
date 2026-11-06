@@ -703,7 +703,8 @@ impl DriveCmd {
 /// and the firmware and the Kotlin mirror had to move together or the drift gate fails the build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inputs {
-    /// Button bits: [`Self::BUTTON_POWER`] (bit0), [`Self::BUTTON_HORN`] (bit1).
+    /// Button bits: [`Self::BUTTON_POWER`] (bit0), [`Self::BUTTON_HORN`] (bit1),
+    /// [`Self::BUTTON_OBSERVER`] (bit2).
     pub buttons: u8,
     /// Rider bits: [`Self::RIDER_PRESENT`] (bit0).
     pub rider: u8,
@@ -719,6 +720,9 @@ impl Inputs {
     /// `buttons` bit1: the horn (level, `specs/tones.md` section 4.3): the board plays its horn
     /// tune while the mirror it consumes carries it.
     pub const BUTTON_HORN: u8 = 1 << 1;
+    /// `buttons` bit2: observer source request (level): the FOC commutates from the flux
+    /// observer's angle while it is held (`specs/flux-observer.md`, "S4, first slice").
+    pub const BUTTON_OBSERVER: u8 = 1 << 2;
 
     /// `rider` bit0: rider present.
     pub const RIDER_PRESENT: u8 = 1 << 0;
@@ -731,6 +735,11 @@ impl Inputs {
     /// Horn level (`buttons` bit1).
     pub const fn horn(&self) -> bool {
         self.buttons & Self::BUTTON_HORN != 0
+    }
+
+    /// Observer-source level (`buttons` bit2).
+    pub const fn observer_request(&self) -> bool {
+        self.buttons & Self::BUTTON_OBSERVER != 0
     }
 
     /// Rider-present level (`rider` bit0).
@@ -819,7 +828,7 @@ impl FocTrace {
     pub const FLAG_HALL_FAULT: u8 = 1 << 0;
     /// `flags` bit 1: this window tracked.
     pub const FLAG_TRACKED: u8 = 1 << 1;
-    /// `flags` bit 2: the observer is the angle source (0 until S4).
+    /// `flags` bit 2: the observer is the angle source (the window's last period drove from it).
     pub const FLAG_OBSERVER_SOURCE: u8 = 1 << 2;
     /// `flags` bit 3: the front end was in its interpolation window at the close.
     pub const FLAG_IN_WINDOW: u8 = 1 << 3;
@@ -1555,15 +1564,25 @@ mod tests {
             rider: 0,
         };
         assert!(!i.power_request());
+        assert!(!i.observer_request());
         assert!(!i.rider_present());
         i.buttons = Inputs::BUTTON_POWER;
         i.rider = Inputs::RIDER_PRESENT;
         assert!(i.power_request());
+        assert!(!i.observer_request(), "bit0 is not the observer");
         assert!(i.rider_present());
-        // Only bit0 is defined on each byte.
-        i.buttons = 0xFE;
+        i.buttons = Inputs::BUTTON_OBSERVER;
+        assert!(i.observer_request());
+        assert!(!i.power_request(), "bit2 is not the power request");
+        assert!(!i.horn(), "bit2 is not the horn");
+        i.buttons = Inputs::BUTTON_HORN;
+        assert!(!i.observer_request(), "bit1 is not the observer");
+        // Bits 0 to 2 are defined on `buttons`, bit0 on `rider`.
+        i.buttons = 0xF8;
         i.rider = 0xFE;
         assert!(!i.power_request());
+        assert!(!i.horn());
+        assert!(!i.observer_request());
         assert!(!i.rider_present());
     }
 

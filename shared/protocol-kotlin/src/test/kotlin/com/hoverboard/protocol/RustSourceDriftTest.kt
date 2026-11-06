@@ -1031,6 +1031,7 @@ class RustSourceDriftTest {
             "CyclicState::FLAG_LOCKDOWN" to CyclicState.FLAG_LOCKDOWN,
             "Inputs::BUTTON_POWER" to Inputs.BUTTON_POWER,
             "Inputs::BUTTON_HORN" to Inputs.BUTTON_HORN,
+            "Inputs::BUTTON_OBSERVER" to Inputs.BUTTON_OBSERVER,
             "Inputs::RIDER_PRESENT" to Inputs.RIDER_PRESENT,
             "FocTrace::FLAG_HALL_FAULT" to FocTrace.FLAG_HALL_FAULT,
             "FocTrace::FLAG_TRACKED" to FocTrace.FLAG_TRACKED,

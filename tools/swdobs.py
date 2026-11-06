@@ -139,7 +139,7 @@ W_FOC_TRACK = 53        # the window's angle-error mean i16 | its spread i16 << 
 #                         (observer minus hall, less the offset and the bin's leak lead).
 W_FOC_FLUX = 54         # the window's RMS flux magnitude u16, microvolt-seconds | the tracking
 #                         word << 16: bits 16-23 the lock bin (255 none), 24 this window tracked,
-#                         25 the observer is the angle source (0 in S1), 26 the front end in its
+#                         25 the observer is the angle source (the OBS button), 26 the front end in its
 #                         interpolation window at the close.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.

@@ -217,7 +217,7 @@ fn parts(f: &[u8]) -> (u8, u8, Vec<u8>) {
 
 #[test]
 fn drive_sends_throttle_at_20_hz_and_power_at_2_hz_to_each_node() {
-    let mut d = Drive::new(0x88, vec![w(0x01, 0), w(0x02, 0)], 500);
+    let mut d = Drive::new(0x88, vec![w(0x01, 0), w(0x02, 0)], 500, false);
     let mut sent = Vec::new();
     let mut at = Duration::ZERO;
     while at < ms(1000) {
@@ -251,7 +251,7 @@ fn drive_sends_throttle_at_20_hz_and_power_at_2_hz_to_each_node() {
         }
     }
     // The first frames go out at once, power before throttle.
-    let first: Vec<_> = Drive::new(0x88, vec![w(0x01, 0)], 500)
+    let first: Vec<_> = Drive::new(0x88, vec![w(0x01, 0)], 500, false)
         .due(Duration::ZERO)
         .iter()
         .map(|f| parts(f).0)
@@ -261,7 +261,7 @@ fn drive_sends_throttle_at_20_hz_and_power_at_2_hz_to_each_node() {
 
 #[test]
 fn a_late_drive_call_sends_once_and_resumes_the_cadence() {
-    let mut d = Drive::new(0x88, vec![w(0x01, 0)], 500);
+    let mut d = Drive::new(0x88, vec![w(0x01, 0)], 500, false);
     assert_eq!(d.due(Duration::ZERO).len(), 2);
     // 300 ms late: one throttle frame, not six.
     let late = d.due(ms(350));
@@ -273,7 +273,7 @@ fn a_late_drive_call_sends_once_and_resumes_the_cadence() {
 
 #[test]
 fn the_stop_round_is_neutral_then_power_0_to_each_node() {
-    let d = Drive::new(0x88, vec![w(0x01, 0), w(0x02, 0)], 500);
+    let d = Drive::new(0x88, vec![w(0x01, 0), w(0x02, 0)], 500, false);
     let round: Vec<_> = d.stop().iter().map(|f| parts(f)).collect();
     assert_eq!(round.len(), 4);
     for (i, (op, dst, payload)) in round.iter().enumerate() {
@@ -285,6 +285,43 @@ fn the_stop_round_is_neutral_then_power_0_to_each_node() {
             assert_eq!(*op, OP_INPUTS);
             let p = Inputs::decode(payload).unwrap();
             assert!(!p.power_request() && !p.rider_present());
+        }
+    }
+}
+
+/// `machine drive --observer` (`specs/flux-observer.md`, "S4, first slice"): every `INPUTS` while
+/// driving carries the observer request beside power, and the stop round clears both.
+#[test]
+fn drive_observer_sets_bit_1_in_every_inputs_and_the_stop_clears_it() {
+    let mut d = Drive::new(0x88, vec![w(0x01, 0), w(0x02, 0)], 2500, true);
+    let mut inputs = 0;
+    let mut at = Duration::ZERO;
+    while at < ms(2000) {
+        for f in d.due(at) {
+            let (op, _, payload) = parts(&f);
+            if op == OP_INPUTS {
+                let i = Inputs::decode(&payload).unwrap();
+                assert!(i.power_request() && i.observer_request());
+                assert_eq!(i.buttons, Inputs::BUTTON_POWER | Inputs::BUTTON_OBSERVER);
+                inputs += 1;
+            }
+        }
+        at += ms(10);
+    }
+    assert_eq!(inputs, 2 * 4, "two nodes at 2 Hz for 2 s");
+    for f in d.stop() {
+        let (op, _, payload) = parts(&f);
+        if op == OP_INPUTS {
+            let i = Inputs::decode(&payload).unwrap();
+            assert!(!i.power_request() && !i.observer_request());
+        }
+    }
+    // Without the flag the bit is never set.
+    let mut plain = Drive::new(0x88, vec![w(0x01, 0)], 2500, false);
+    for f in plain.due(Duration::ZERO) {
+        let (op, _, payload) = parts(&f);
+        if op == OP_INPUTS {
+            assert!(!Inputs::decode(&payload).unwrap().observer_request());
         }
     }
 }
@@ -360,7 +397,7 @@ fn drive_targets_expand_to_wheels_by_each_boards_motor_count() {
 /// round is a neutral per wheel, then one power 0.
 #[test]
 fn drive_sends_one_drive_cmd_per_wheel_and_one_inputs_per_node() {
-    let mut d = Drive::new(0x88, vec![w(0x01, 0), w(0x01, 1)], 700);
+    let mut d = Drive::new(0x88, vec![w(0x01, 0), w(0x01, 1)], 700, false);
     let first: Vec<_> = d.due(Duration::ZERO).iter().map(|f| parts(f)).collect();
     assert_eq!(first.len(), 3);
     assert_eq!((first[0].0, first[0].1), (OP_INPUTS, 0x01));

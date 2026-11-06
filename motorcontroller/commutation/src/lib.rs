@@ -362,6 +362,16 @@ impl Commutator {
         }
     }
 
+    /// The hall angle the angle path aligned on the last step: the front end's published angle
+    /// plus this motor's [`angle_path_offset`]. It is the angle the arms indexed unless the FOC arm
+    /// took the observer's ([`Commutator::step`]'s `source`), and it is what the flux observer is
+    /// compared against either way (`specs/flux-observer.md`, "The angle to compare against" and
+    /// "S4, first slice").
+    #[inline]
+    pub fn theta(&self) -> u16 {
+        self.front.comm.angle.wrapping_add(self.angle_offset)
+    }
+
     /// One per-PWM-period step: step the shared front-end once, then dispatch to the active arm.
     ///
     /// - `raw_hall`: the three raw hall levels (0/1) this period.
@@ -377,6 +387,11 @@ impl Commutator {
     /// - `hold`: whether either of `currents` is a held sample rather than this period's
     ///   (`firmware::motor::SampleHold`, `specs/foc-torque.md` section 14). Consumed ONLY by the
     ///   FOC arm, which then acts on its last fresh rotor-frame pair with its integrators held.
+    /// - `source`: the flux observer's angle when the rider holds the observer button
+    ///   (`specs/flux-observer.md`, "S4, first slice"), `None` otherwise. Consumed ONLY by the FOC
+    ///   arm, which then runs both Park transforms at it in place of the hall angle; six-step and
+    ///   sine ignore it. The front end steps either way, so a `None` on the next period is the hall
+    ///   angle again with nothing to re-align.
     pub fn step(
         &mut self,
         raw_hall: [u8; 3],
@@ -384,6 +399,7 @@ impl Commutator {
         demand: i32,
         drive: bool,
         hold: bool,
+        source: Option<u16>,
     ) -> MotorOutput {
         let rotor = self.front.step(raw_hall);
         // The angle the angle-path arms index: the front-end's published angle plus this motor's
@@ -397,7 +413,13 @@ impl Commutator {
             MethodState::Sine => {
                 sine::sine_step(angle.wrapping_add(SINE_PHASE_OFFSET_DEFAULT), demand)
             }
-            MethodState::Foc(st) => foc::foc_step(st, angle, currents, demand, drive, hold),
+            MethodState::Foc(st) => {
+                let theta = match source {
+                    Some(obs) => obs,
+                    None => angle,
+                };
+                foc::foc_step(st, theta, currents, demand, drive, hold)
+            }
         }
     }
 }

@@ -849,6 +849,50 @@ fn the_reset_empties_the_table_and_the_lock() {
     assert_eq!(t.word(4), 1 | 1 << 16);
 }
 
+/// The source angle is the angle the last step computed, word 52's high half, less the offset,
+/// with no step of its own: reading it does not move the observer.
+#[test]
+fn the_source_angle_is_the_last_steps_angle_less_the_offset() {
+    let mut p = plant_params(true);
+    let mut obs = FluxObserver::new();
+    let mut last = 0u16;
+    for n in 0..200i32 {
+        let x = ObserverInput {
+            v: ((n * 37 % 4000 - 2000) as i16, (n * 91 % 4000 - 2000) as i16),
+            i: (100, -50),
+            theta: 0,
+            kv: 40_000,
+            speed: 3,
+            hall_fault: false,
+            drive: true,
+        };
+        assert_eq!(
+            obs.source_angle(&p),
+            last,
+            "the angle at the start of period {n}"
+        );
+        last = obs.step(&p, &x);
+    }
+    let before = obs;
+    p.offset = 5_461;
+    assert_eq!(obs.source_angle(&p), last.wrapping_sub(5_461));
+    assert_eq!(obs, before, "reading it changes nothing");
+    // Suspended: the last integrated angle holds.
+    obs.step(
+        &p,
+        &ObserverInput {
+            v: (0, 0),
+            i: (0, 0),
+            theta: 0,
+            kv: 0,
+            speed: 0,
+            hall_fault: false,
+            drive: true,
+        },
+    );
+    assert_eq!(obs.source_angle(&p), last.wrapping_sub(5_461));
+}
+
 /// The three published words pack as `specs/flux-observer.md` lays them out.
 #[test]
 fn the_published_words_pack_as_the_spec_lays_them_out() {
@@ -863,9 +907,15 @@ fn the_published_words_pack_as_the_spec_lays_them_out() {
     };
     assert_eq!(pack_angles(&w), 0xABCD_1234);
     assert_eq!(pack_track(&w), 300 << 16 | 0xFFFE);
-    assert_eq!(pack_flux(&w, 7, false), (7 | 1 << 8) << 16 | 21_000);
+    assert_eq!(pack_flux(&w, 7, false, false), (7 | 1 << 8) << 16 | 21_000);
     assert_eq!(
-        pack_flux(&ObserverWindow::default(), LOCK_NONE, true),
+        pack_flux(&ObserverWindow::default(), LOCK_NONE, false, true),
         (255 | 1 << 10) << 16
     );
+    // Bit 9: the window's last period drove from the observer (S4's source button).
+    assert_eq!(
+        pack_flux(&w, 7, true, false),
+        (7 | 1 << 8 | 1 << 9) << 16 | 21_000
+    );
+    assert_eq!(TRACK_SOURCE, 1 << 9);
 }

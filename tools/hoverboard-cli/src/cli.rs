@@ -236,6 +236,10 @@ pub enum Command {
         /// The wheels: `<board>` for all its motors, `<board>:<motor>` for one; every wheel of
         /// every motor controller when empty.
         targets: Vec<String>,
+        /// `--observer`: the `INPUTS` carry the observer source request (`buttons` bit 2) while
+        /// driving, so the bench presses the app's OBS button without the phone
+        /// (`specs/flux-observer.md`, "S4, first slice").
+        observer: bool,
     },
     /// `board trace` (`specs/flux-observer.md`, "Two instruments read it"): the `FOC_TRACE`
     /// subscription, a line a frame, and the CSV.
@@ -324,7 +328,7 @@ pub const USAGE: &str =
   machine apply <file> [--map <uid>=<board>]... [--force]
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
   machine diff [--replace] [<file>] [--map <uid>=<board>]... [--force]
-  machine watch <secs> [<board>...] [--json] | drive <value> <secs> [<board>[:<motor>]...]
+  machine watch <secs> [<board>...] [--json] | drive <value> <secs> [<board>[:<motor>]...] [--observer]
   machine update <bundle> [--yes]
   bridge info <bridge> | update <bridge> <bundle|bin> [--yes] [--no-confirm]
   bridge install <bundle|image> [<file>...] [--yes]
@@ -341,6 +345,7 @@ const FLAGS: &[&str] = &[
     "--no-confirm",
     "--dirty",
     "--reset",
+    "--observer",
 ];
 /// The command options that take a value.
 const VALUED: &[&str] = &[
@@ -602,13 +607,14 @@ fn command(pos: &[&str], o: &Opts) -> Result<Command, String> {
             }
         }
         ["machine", "drive", value, secs, targets @ ..] => {
-            ok(&[])?;
+            ok(&["--observer"])?;
             Command::Drive {
                 value: value
                     .parse()
                     .map_err(|_| format!("not a drive value (-32768..32767): {value}"))?,
                 secs: parse_secs(secs)?,
                 targets: owned(targets),
+                observer: o.has("--observer"),
             }
         }
         _ => return usage(),
@@ -1008,6 +1014,17 @@ mod tests {
                     value: -300,
                     secs: 2,
                     targets: Vec::new(),
+                    observer: false,
+                },
+            ),
+            (
+                "drive",
+                "machine drive 2500 10 offroad-master:0 --observer",
+                Command::Drive {
+                    value: 2500,
+                    secs: 10,
+                    targets: vec![s("offroad-master:0")],
+                    observer: true,
                 },
             ),
             (

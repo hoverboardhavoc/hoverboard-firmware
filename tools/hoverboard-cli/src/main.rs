@@ -2402,6 +2402,7 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             value,
             secs,
             targets,
+            observer,
         } => {
             let stop = Arc::new(AtomicBool::new(false));
             let flag = stop.clone();
@@ -2409,7 +2410,7 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
                 .map_err(|e| e.to_string())?;
             let mut wire = wire_on(link)?;
             let (src, wheels) = drive_wheels(&mut wire, &targets)?;
-            let mut drive = Drive::new(src, wheels, value);
+            let mut drive = Drive::new(src, wheels, value, observer);
             let (tally, elapsed) = session(
                 &mut wire,
                 Tally::new(),

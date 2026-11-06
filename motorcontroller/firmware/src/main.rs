@@ -1154,7 +1154,7 @@ mod firmware {
         foc_track: u32,
         /// Word 54 ([`motor::OBS_FOC_FLUX`]): the window's RMS flux magnitude, microvolt-seconds,
         /// low half; the tracking word high half: bits 16..23 the lock bin (255 none), 24 this
-        /// window tracked, 25 the observer is the angle source (0 in S1), 26 the front end in its
+        /// window tracked, 25 the observer is the angle source (the OBS button), 26 the front end in its
         /// interpolation window at the close.
         foc_flux: u32,
     }
@@ -1659,6 +1659,13 @@ mod firmware {
             .observer
             .bus_scale(local_word, shell.orch.block.battery);
         motor::OBS_BUS.store(bus.pack(), Ordering::Relaxed);
+        // The observer-source level (`specs/flux-observer.md`, "S4, first slice"): the mirror's
+        // bit 1 while it is fresh and its owner's, to every motor; the period ISR acts on it on a
+        // FOC motor only.
+        let source = shell.orch.inbox.remote_observer_request();
+        for word in &motor::OBSERVER_SOURCE {
+            word.store(source, Ordering::Relaxed);
+        }
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
         if shell.cyclic_out.is_some() {
             shell.cyclic_more = more;

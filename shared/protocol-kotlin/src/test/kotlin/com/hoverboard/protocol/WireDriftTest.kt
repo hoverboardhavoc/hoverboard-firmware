@@ -418,7 +418,7 @@ class WireDriftTest {
     /**
      * Flag and action bit values, all in `shared/linkctl/src/lib.rs`: `CyclicState::FLAG_RIDER` /
      * `CyclicState::FLAG_LEADER` / `CyclicState::FLAG_FOLLOWER` / `CyclicState::FLAG_LOCKDOWN`,
-     * `Inputs::BUTTON_POWER` /
+     * `Inputs::BUTTON_POWER` / `Inputs::BUTTON_OBSERVER` /
      * `Inputs::RIDER_PRESENT`; and the
      * fault-A group of the cyclic fault mask, `motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`.
      */
@@ -455,6 +455,7 @@ class WireDriftTest {
         )
         assertEquals(0x01, Inputs.BUTTON_POWER, "shared/linkctl/src/lib.rs, Inputs::BUTTON_POWER")
         assertEquals(0x02, Inputs.BUTTON_HORN, "shared/linkctl/src/lib.rs, Inputs::BUTTON_HORN")
+        assertEquals(0x04, Inputs.BUTTON_OBSERVER, "shared/linkctl/src/lib.rs, Inputs::BUTTON_OBSERVER")
         assertEquals(0x01, Inputs.RIDER_PRESENT, "shared/linkctl/src/lib.rs, Inputs::RIDER_PRESENT")
     }
 

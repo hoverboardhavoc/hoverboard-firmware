@@ -274,7 +274,8 @@ pub struct ObserverInput {
     /// The conditioned phase currents `(ia, ib)` the arm was handed: the pair after the sample
     /// hold (`specs/flux-observer.md`, "Which currents on a held period").
     pub i: (i16, i16),
-    /// The angle the inverse Park used.
+    /// The hall angle the angle path aligned this period ([`crate::Commutator::theta`]): the
+    /// angle the inverse Park used, unless the observer was the source.
     pub theta: u16,
     /// This period's bus scale ([`bus_kv`]); 0 suspends.
     pub kv: i32,
@@ -349,6 +350,22 @@ impl FluxObserver {
             n: 0,
             fault: false,
         }
+    }
+
+    /// The angle the FOC arm takes as its source while the rider holds the observer button
+    /// (`specs/flux-observer.md`, "S4, first slice"): the angle the last [`FluxObserver::step`]
+    /// computed (the last one integrated while suspended), in `theta`'s frame with the motor's
+    /// quarter turn applied (word 52's high half), less `p.offset`, the word that places the halls'
+    /// frame against the observer's, so the angle that drives is the one the verdict judges
+    /// against `theta`. At the default offset of 0 it is word 52's high half.
+    ///
+    /// Read before this period's step, it is the integrator's angle at the START of the period,
+    /// from the samples up to the last one: it lags the rotor by one period of rotation (2.25
+    /// electrical degrees at 100 Hz electrical), where the hall front end's angle is this period's
+    /// interpolation. No second `atan2`.
+    #[inline(always)]
+    pub fn source_angle(&self, p: &ObserverParams) -> u16 {
+        self.angle.wrapping_sub(p.offset)
     }
 
     /// The flux, 1/16 microvolt-second, stock frame.
@@ -614,7 +631,8 @@ pub fn track_byte(w: u32, min_windows: u16) -> u8 {
 
 /// Word 54's high half, bit 8: this window tracked.
 pub const TRACK_TRACKED: u16 = 1 << 8;
-/// Word 54's high half, bit 9: the observer is the angle source (0 until S4).
+/// Word 54's high half, bit 9: the observer is the angle source (the window's last period drove
+/// from it).
 pub const TRACK_SOURCE: u16 = 1 << 9;
 /// Word 54's high half, bit 10: the front end was in its interpolation window at the close.
 pub const TRACK_IN_WINDOW: u16 = 1 << 10;
@@ -631,11 +649,13 @@ pub fn pack_track(w: &ObserverWindow) -> u32 {
     w.mean as u16 as u32 | (w.spread as u16 as u32) << 16
 }
 
-/// Word 54: the RMS flux low; the lock bin, the tracked bit and the in-window bit high.
+/// Word 54: the RMS flux low; the lock bin, the tracked bit, the source bit (`source`: the
+/// window's last period drove from the observer) and the in-window bit high.
 #[inline]
-pub fn pack_flux(w: &ObserverWindow, lock: u8, in_window: bool) -> u32 {
+pub fn pack_flux(w: &ObserverWindow, lock: u8, source: bool, in_window: bool) -> u32 {
     let hi = lock as u16
         | if w.tracked { TRACK_TRACKED } else { 0 }
+        | if source { TRACK_SOURCE } else { 0 }
         | if in_window { TRACK_IN_WINDOW } else { 0 };
     w.flux as u32 | (hi as u32) << 16
 }

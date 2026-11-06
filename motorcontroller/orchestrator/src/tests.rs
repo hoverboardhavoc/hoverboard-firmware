@@ -924,6 +924,76 @@ fn the_stale_release_is_attributed_to_power_request() {
 }
 
 #[test]
+fn the_observer_bit_is_a_fresh_owner_scoped_level() {
+    // `INPUTS.buttons` bit 2 (`specs/flux-observer.md`, "S4, first slice"): the power bit's
+    // shape. Never received reads released.
+    let mut s = fresh();
+    assert!(!s.inbox.remote_observer_request(), "no mirror: released");
+
+    // Fresh: the bit as the owner states it, independent of the power bit.
+    s.inbox.accept(
+        CTRL,
+        mirror(Inputs::BUTTON_POWER | Inputs::BUTTON_OBSERVER, 0),
+    );
+    assert!(s.inbox.remote_observer_request());
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_POWER, 0));
+    assert!(!s.inbox.remote_observer_request(), "the owner released it");
+    s.inbox.accept(CTRL, mirror(Inputs::BUTTON_OBSERVER, 0));
+    assert!(s.inbox.remote_observer_request());
+    assert!(
+        !s.inbox.remote_power_request(),
+        "bit 1 is not the power bit"
+    );
+
+    // Stale: held to the timeout's edge, released one tick past it, so a dead controller leaves
+    // the halls driving.
+    run_ticks(&mut s, INPUTS_TIMEOUT_TICKS as usize);
+    assert!(
+        s.inbox.remote_observer_request(),
+        "the edge tick is still fresh"
+    );
+    run_ticks(&mut s, 1);
+    assert!(s.inbox.remote_stale());
+    assert!(
+        !s.inbox.remote_observer_request(),
+        "a stale mirror reads released"
+    );
+
+    // Owner scoped: another node's demand stream does not keep the owner's bit alive.
+    s.inbox.accept(
+        CTRL,
+        mirror(Inputs::BUTTON_POWER | Inputs::BUTTON_OBSERVER, 0),
+    );
+    for _ in 0..40 {
+        s.inbox.accept(OTHER, demand(400));
+        run_ticks(&mut s, DEMAND_GAP_TICKS);
+    }
+    assert!(
+        s.inbox.remote_stale(),
+        "OTHER's demand is not CTRL's presence"
+    );
+    assert!(!s.inbox.remote_observer_request());
+
+    // And the owner's demand stream does: it refreshes the mirror without rewriting it.
+    s.inbox.accept(
+        CTRL,
+        mirror(Inputs::BUTTON_POWER | Inputs::BUTTON_OBSERVER, 0),
+    );
+    for _ in 0..40 {
+        s.inbox.accept(CTRL, demand(400));
+        run_ticks(&mut s, DEMAND_GAP_TICKS);
+    }
+    assert!(s.inbox.remote_observer_request(), "held by its owner");
+
+    // A new owner's `INPUTS` without the bit takes the mirror and the level with it.
+    s.inbox.accept(OTHER, mirror(Inputs::BUTTON_POWER, 0));
+    assert!(
+        !s.inbox.remote_observer_request(),
+        "the latest owner's level"
+    );
+}
+
+#[test]
 fn mirror_staleness_edges_and_never_received() {
     let mut s = fresh();
     assert!(s.inbox.remote_stale(), "never received = stale");

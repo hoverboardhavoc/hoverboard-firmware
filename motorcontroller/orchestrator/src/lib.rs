@@ -547,6 +547,16 @@ impl<const M: usize> LinkInbox<M> {
         self.fresh_remote().map(|i| i.horn()).unwrap_or(false)
     }
 
+    /// The remote observer-source mirror bit (`INPUTS.buttons` bit 2, level,
+    /// `specs/flux-observer.md`, "S4, first slice"): while set, the FOC commutates from the flux
+    /// observer's angle. The power bit's shape and scoping: a stale mirror reads RELEASED, so a
+    /// dead controller leaves the halls driving.
+    pub fn remote_observer_request(&self) -> bool {
+        self.fresh_remote()
+            .map(|i| i.observer_request())
+            .unwrap_or(false)
+    }
+
     /// The remote rider-present mirror bit (`INPUTS.rider` bit 0, level). A stale mirror reads
     /// NO RIDER, for the same reason the power bit does: it is a permissive level (it folds in by
     /// OR with the local pads, `dispatch::rider_level`), so holding it true on a dead link would

@@ -309,8 +309,10 @@ pub fn pack_trace(w: &TraceWords, bins: &[u32; BINS], min_windows: u16, motor: u
         held_b: (w.hold >> 8) as u8,
         coasted: (w.hold >> 16) as u8,
         cause: (w.hold >> 24) as u8,
-        flags: flag(w.fault & motor::FAULT_HALL != 0, FocTrace::FLAG_HALL_FAULT)
-            | flag(hi & obs::TRACK_TRACKED != 0, FocTrace::FLAG_TRACKED)
+        flags: flag(
+            w.fault & motor::FAULT_HALL_DECODED != 0,
+            FocTrace::FLAG_HALL_FAULT,
+        ) | flag(hi & obs::TRACK_TRACKED != 0, FocTrace::FLAG_TRACKED)
             | flag(hi & obs::TRACK_SOURCE != 0, FocTrace::FLAG_OBSERVER_SOURCE)
             | flag(hi & obs::TRACK_IN_WINDOW != 0, FocTrace::FLAG_IN_WINDOW),
         method: (w.state >> 16) as u8,
@@ -413,6 +415,23 @@ mod tests {
         assert!(!o.reconcile(f), "nothing moved the second time");
     }
 
+    /// The source button's proof (`specs/flux-observer.md`, "S4, first slice", "The proof that it
+    /// is the observer driving"): `motors.<i>.observer.shadow[4]`, the offset, takes a tune-lane
+    /// write and reaches the parameters the ISR's source angle subtracts, on each motor's own key.
+    #[test]
+    fn the_offset_is_a_live_word_the_source_angle_reads() {
+        let mut o = ObserverLoop::of_stored([defaults(); motor::COUNT], None);
+        for m in 0..motor::COUNT {
+            let key = OBSERVER_SHADOW.at_motor(m as u8, 4).key().index;
+            o.set(OBSERVER_SHADOW.id(), key, 5_461).unwrap();
+            assert_eq!(o.params()[m].offset, 5_461, "motor {m}");
+            o.set(OBSERVER_SHADOW.id(), key, 16_384).unwrap();
+            assert_eq!(o.params()[m].offset, 16_384);
+            o.set(OBSERVER_SHADOW.id(), key, 0).unwrap();
+            assert_eq!(o.params()[m].offset, 0);
+        }
+    }
+
     /// The parameters come out of the live words through the commutation crate's derivation, at
     /// the arm row's calibration and the bring-up's dead time.
     #[test]
@@ -502,7 +521,7 @@ mod tests {
             track: motor::pack_i16_pair(-273, 182),
             flux: (((4 | obs::TRACK_TRACKED | obs::TRACK_IN_WINDOW) as u32) << 16) | 21_000,
             speed: -7,
-            fault: motor::FAULT_HALL,
+            fault: motor::FAULT_HALL | motor::FAULT_HALL_DECODED,
             state: motor::pack_obs_state(3, [true; 3], 2, 0),
             periods: 0x1234 << 6 | 17,
         };
@@ -547,5 +566,43 @@ mod tests {
             0,
         );
         assert_eq!(f.speed, i16::MAX);
+    }
+
+    /// The frame's `observer_source` column follows word 54's bit 9, and its `hall_fault` column
+    /// is the front end's decoded fault, which the latch masks while the observer drives
+    /// (`specs/flux-observer.md`, "S4, first slice").
+    #[test]
+    fn the_frame_says_which_angle_drove_and_the_decoded_hall_fault() {
+        let w = TraceWords {
+            dq: 0,
+            ref_vq: 0,
+            hold: 0,
+            angles: 0,
+            track: 0,
+            flux: (((obs::LOCK_NONE as u16 | obs::TRACK_SOURCE) as u32) << 16) | 21_000,
+            speed: 0,
+            fault: motor::hall_fault_bits(true, true),
+            state: motor::pack_obs_state(0, [true; 3], 2, 0),
+            periods: 0,
+        };
+        let bins = [0u32; BINS];
+        let f = pack_trace(&w, &bins, 64, 0);
+        assert_eq!(
+            f.flags,
+            FocTrace::FLAG_OBSERVER_SOURCE | FocTrace::FLAG_HALL_FAULT,
+            "the source drove and the halls are out, with the latch clear"
+        );
+        assert_eq!(motor::hall_fault_bits(true, true) & motor::FAULT_HALL, 0);
+        let f = pack_trace(
+            &TraceWords {
+                flux: 21_000,
+                fault: 0,
+                ..w
+            },
+            &bins,
+            64,
+            0,
+        );
+        assert_eq!(f.flags, 0, "the halls drove, no fault");
     }
 }
