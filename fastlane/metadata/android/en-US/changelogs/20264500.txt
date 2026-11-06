@@ -1,0 +1,1 @@
+New version scheme (year.week.n). Built with Kotlin 2.4, AGP 9.5 and Compose BOM 2026.09; no user-facing changes.
