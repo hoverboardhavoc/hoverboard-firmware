@@ -43,11 +43,30 @@ fn write_pcf0(mask: u32, value: u32) {
     pcf0.write(kept | (value & mask) | SWJ.load(Ordering::Relaxed));
 }
 
-/// Free the JTAG-only pins (PA15, PB3, PB4) and keep SWD.
+/// Free the JTAG-only pins (PA15, PB3, PB4) and keep SWD. Writes `PCF0` only the first time:
+/// once the field is configured, every later `PCF0` write carries it ([`write_pcf0`]).
 pub(crate) fn set_swj_sw_only(rcu_base: u32) {
+    if SWJ.load(Ordering::Relaxed) == PCF0_SWJ_SW_ONLY {
+        return;
+    }
     enable_clock(rcu_base);
     SWJ.store(PCF0_SWJ_SW_ONLY, Ordering::Relaxed);
     write_pcf0(0, 0);
+}
+
+/// Free the JTAG-only pins when pin `pin` of the port at `port_base` is one of them: PA15 (JTDI),
+/// PB3 (JTDO) or PB4 (NJTRST), which stay JTAG pins and ignore their GPIO mode until `SWJ_CFG`
+/// frees them (`specs/battery-gauge.md` section 4). The output setup calls it before it writes the
+/// pin's mode.
+pub(crate) fn free_if_jtag(port_base: u32, pin: u8) {
+    let jtag = match port_base {
+        GPIOA_BASE => pin == 15,
+        GPIOB_BASE => pin == 3 || pin == 4,
+        _ => false,
+    };
+    if jtag {
+        set_swj_sw_only(RCU_BASE);
+    }
 }
 
 /// TIMER1 partial remap 0: CH0 on PA15, CH1 on PB3.
@@ -80,4 +99,16 @@ pub fn remap(label: PeriphLabel, value: u8) {
 const RCU_BASE: u32 = match crate::descriptor::DESCRIPTOR.addrs.get(PeriphLabel::Rcu) {
     Some(b) => b,
     None => panic!("every descriptor carries the RCU base"),
+};
+
+/// GPIO port A's base, from the descriptor.
+const GPIOA_BASE: u32 = match crate::descriptor::DESCRIPTOR.addrs.get(PeriphLabel::Gpioa) {
+    Some(b) => b,
+    None => panic!("every descriptor carries GPIO port A"),
+};
+
+/// GPIO port B's base, from the descriptor.
+const GPIOB_BASE: u32 = match crate::descriptor::DESCRIPTOR.addrs.get(PeriphLabel::Gpiob) {
+    Some(b) => b,
+    None => panic!("every descriptor carries GPIO port B"),
 };

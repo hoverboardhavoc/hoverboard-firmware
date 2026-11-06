@@ -18,6 +18,9 @@
 //! [reset_overrides]                # replaces the family table's reset seed for this run
 //! "<RCU_BASE>+0x04" = 0
 //!
+//! [hal_writes]                     # optional: how many times the HAL writes each register
+//! "<AFIO_BASE>+0x04" = 1
+//!
 //! [vendor]
 //! body = '''C statements against the family's vendor library'''
 //! prelude = '''optional C at file scope, e.g. #include "system_mm32spin0x_q.c"'''
@@ -76,6 +79,9 @@ pub struct Vector {
     pub read_responses: BTreeMap<String, Response>,
     /// Reset seeds replaced for this run.
     pub reset_overrides: BTreeMap<String, u32>,
+    /// How many times the HAL writes each register, by the address expression in the file
+    /// ([`crate::compare::write_counts`]).
+    pub hal_writes: BTreeMap<String, usize>,
     /// `assert_only` entries, if any.
     pub assert_only: Vec<String>,
     /// `ignore` entries, if any.
@@ -106,6 +112,8 @@ struct RawVector {
     read_responses: BTreeMap<String, RawResponse>,
     #[serde(default)]
     reset_overrides: BTreeMap<String, u32>,
+    #[serde(default)]
+    hal_writes: BTreeMap<String, usize>,
     vendor: RawVendor,
     hal: RawHal,
 }
@@ -182,6 +190,7 @@ impl Vector {
             description: raw.description,
             read_responses,
             reset_overrides: raw.reset_overrides,
+            hal_writes: raw.hal_writes,
             assert_only: raw.assert_only,
             ignore: raw.ignore,
             vendor_body: raw.vendor.body,
@@ -220,6 +229,19 @@ impl Vector {
                     .resolve(k)
                     .map_err(|e| format!("{}: read_responses: {e}", self.id))?;
                 Ok((addr, v.clone()))
+            })
+            .collect()
+    }
+
+    /// The `hal_writes` counts by address.
+    pub fn write_counts(&self, target: &Target) -> Result<Vec<(u32, usize)>, String> {
+        self.hal_writes
+            .iter()
+            .map(|(k, n)| {
+                let addr = target
+                    .resolve(k)
+                    .map_err(|e| format!("{}: hal_writes: {e}", self.id))?;
+                Ok((addr, *n))
             })
             .collect()
     }
@@ -284,6 +306,8 @@ assert_only = ["<RCU_BASE>+0x00"]
 "<RCU_BASE>+0x00" = { or = 0x2 }
 "<RCU_BASE>+0x04" = [1, 2]
 "<RCU_BASE>+0x08" = 7
+[hal_writes]
+"<RCU_BASE>+0x00" = 1
 [vendor]
 body = "RCU_CTL0 |= 1U;"
 [hal]
@@ -302,6 +326,7 @@ pending = "nothing"
             Response::Sequence(vec![1, 2])
         );
         assert_eq!(v.read_responses["<RCU_BASE>+0x08"], Response::Value(7));
+        assert_eq!(v.hal_writes["<RCU_BASE>+0x00"], 1);
         assert_eq!(v.hal, HalSide::Pending("nothing".into()));
         assert_eq!(v.vendor_trace_path(), Path::new("t/x.vendor.trace"));
     }
@@ -333,6 +358,7 @@ pending = "nothing"
             v.scope(&t).unwrap();
             v.responses(&t).unwrap();
             v.overrides(&t).unwrap();
+            v.write_counts(&t).unwrap();
             let trace = std::fs::read_to_string(v.vendor_trace_path())
                 .unwrap_or_else(|e| panic!("{}: no vendor trace: {e}", v.id));
             crate::trace::parse(&trace, &t).unwrap_or_else(|e| panic!("{}: {e}", v.id));

@@ -73,6 +73,7 @@ compile_error!(
 );
 
 mod arm;
+mod gauge;
 mod layout;
 mod motor;
 mod odometer;
@@ -85,6 +86,7 @@ mod tones;
 mod firmware {
 
     use crate::arm;
+    use crate::gauge;
     use crate::guest_tx::{
         emit_mailbox_samples, encode_cyclic, more_motors, GuestSlots, GuestStaged, MoreMotors,
         OWN_LEN,
@@ -637,17 +639,24 @@ mod firmware {
         /// once at boot and stepped by this task alone after it.
         #[cfg(feature = "gd32f103rc")]
         dc_link: [Option<motor::DcLinkLimit>; motor::COUNT],
-        /// The tone player (`specs/tones.md` section 4.2), stepped once per served tick.
-        player: tones::Player,
-        /// The battery alarm's two filtered levels (section 4.4).
-        alarm: tones::BatteryAlarm,
+        /// The battery alarm's two filtered levels (`specs/tones.md` section 4.4) and their two
+        /// readers, the tone player (section 4.2) and the battery gauge
+        /// (`specs/battery-gauge.md`), stepped once per served tick.
+        indicators: gauge::Indicators,
+        /// The battery gauge's LEDs, green, orange and red (`specs/battery-gauge.md` section 4),
+        /// `None` where not stored.
+        leds: [Option<LedPin>; 3],
         /// `machine.battery.warn`, centivolts, read once at boot (`<= 0` = no warning).
         battery_warn: i16,
     }
 
+    /// A battery-gauge LED: a push-pull output, driven low (off) at boot.
+    type LedPin = hal::Pin<hal::Output<hal::PushPull>>;
+
     /// The three tunes as the player reads them: the store's current bytes of each index of the tone field,
-    /// borrowed for the one call (`specs/tones.md` section 4.2).
-    struct StoreTunes<'a>(&'a Store<'static, FmcFlash>);
+    /// borrowed for the one call (`specs/tones.md` section 4.2). No store reads as three empty
+    /// tunes, which sound nothing.
+    struct StoreTunes<'a>(Option<&'a Store<'static, FmcFlash>>);
 
     /// Each event's tune, the tone field at that event's index, by the event's discriminant: an
     /// indexed load rather than a match.
@@ -660,38 +669,50 @@ mod firmware {
 
     impl tones::Tunes for StoreTunes<'_> {
         fn with<R>(&self, e: tones::Event, f: impl FnOnce(&[u8]) -> R) -> R {
-            f(self.0.get_bytes(TUNES[e as usize]))
+            f(self.0.map_or(&[][..], |s| s.get_bytes(TUNES[e as usize])))
         }
     }
 
-    /// One served tick of the tones (`specs/tones.md` section 4): the battery alarm's levels from
-    /// the block's effective battery word against the floor in force and the boot-read warning,
-    /// the horn from the `INPUTS` mirror, then the player, whose period goes to the period ISR.
+    /// One served tick of the battery alarm and its two readers (`specs/battery-gauge.md` section
+    /// 4, `specs/tones.md` section 4): the alarm's levels from the block's effective battery word
+    /// against the floor in force and the boot-read warning, stepped once; the player, with the
+    /// horn from the `INPUTS` mirror, whose period goes to the period ISR; and the gauge, whose
+    /// LEDs are written only where their level changed. A write is the port's set/reset register
+    /// (`OutputPin`), so it never races the period ISR's buzzer writes on the same port.
     ///
     /// `#[inline(never)]` with no `#[link_section]`, the `re_read_arm_values` placement: it runs
     /// once per tick but reads the store only at a note start, so it stays out of the F1x0's
     /// zero-wait window that the 16 kHz and 250 Hz paths need.
     #[inline(never)]
-    fn tone_tick(shell: &mut Shell, dt_ticks: u32) {
+    fn indicator_tick(shell: &mut Shell, dt_ticks: u32) {
         let dt_ms = dt_ticks.saturating_mul(tones::TICK_MS);
-        let (battery_critical, battery_low) = shell.alarm.step(
-            shell.orch.block.battery,
-            shell.orch.ctl.dispatch.battery_floor(),
-            shell.battery_warn,
-            dt_ms,
-        );
-        let levels = tones::Levels {
+        let input = gauge::TickIn {
+            word: shell.orch.block.battery,
+            floor: shell.orch.ctl.dispatch.battery_floor(),
+            warn: shell.battery_warn,
             horn: shell.orch.inbox.remote_horn(),
-            battery_critical,
-            battery_low,
+            stored: shell
+                .leds
+                .iter()
+                .rev()
+                .fold(0, |m, l| m << 1 | u8::from(l.is_some())),
         };
-        // SAFETY: main-thread context (a dispatch callback), the `STORE` discipline: the borrow
-        // ends with this statement and the loop holds none across `dispatch()`.
-        let p = match unsafe { (*addr_of_mut!(STORE)).as_ref() } {
-            Some(store) => shell.player.tick(levels, dt_ms, &StoreTunes(store)),
-            None => 0,
+        let out = {
+            // SAFETY: main-thread context (a dispatch callback), the `STORE` discipline: the
+            // borrow ends with this block and the loop holds none across `dispatch()`.
+            let store = unsafe { (*addr_of_mut!(STORE)).as_ref() };
+            shell.indicators.tick(&input, dt_ms, &StoreTunes(store))
         };
-        motor::TONE_PERIOD.store(p, Ordering::Relaxed);
+        motor::TONE_PERIOD.store(out.period, Ordering::Relaxed);
+        for (i, led) in shell.leds.iter_mut().enumerate() {
+            if let Some(pin) = led.as_mut().filter(|_| out.changed & 1 << i != 0) {
+                let _ = if out.lit & 1 << i != 0 {
+                    pin.set_high()
+                } else {
+                    pin.set_low()
+                };
+            }
+        }
     }
 
     /// The shell static. `None` until the boot path builds it (the state is not
@@ -1608,10 +1629,10 @@ mod firmware {
         // payload is built inside the pass below.
         shell.orch.odometer = ODOMETER_TOTAL.load(Ordering::Relaxed);
         let out = control_task(&mut shell.orch, sample.as_ref(), dt_ticks);
-        // The tones, after the pass that wrote this tick's battery word and mirror. A catch-up run
-        // has no elapsed time to play.
+        // The tones and the battery gauge, after the pass that wrote this tick's battery word and
+        // mirror. A catch-up run has no elapsed time to play or blink.
         if served {
-            tone_tick(shell, dt_ticks);
+            indicator_tick(shell, dt_ticks);
         }
         // The base, and on a two-motor image motor 1's block from this same pass's rows.
         let more = more_motors(&shell.orch);
@@ -1823,6 +1844,7 @@ mod firmware {
         config_fault: bool,
         machine: orchestrator::Machine,
         battery_warn: i16,
+        leds: [Option<LedPin>; 3],
     ) {
         let imu_configured = imu_dev.is_some();
         // SAFETY: single-threaded boot (only the DMA RX ISR is live, and it reaches only the
@@ -1863,8 +1885,8 @@ mod firmware {
                 last_trips: [0; motor::COUNT],
                 #[cfg(feature = "gd32f103rc")]
                 dc_link: [None; motor::COUNT],
-                player: tones::Player::new(PERIOD_HZ),
-                alarm: tones::BatteryAlarm::new(),
+                indicators: gauge::Indicators::new(PERIOD_HZ),
+                leds,
                 battery_warn,
             });
         }
@@ -2487,6 +2509,17 @@ mod firmware {
             let _ = p.set_low();
             p
         });
+        // The battery gauge's LEDs (`specs/battery-gauge.md` section 4), each on its stored pin as
+        // the buzzer: a push-pull output driven low (off), handed to the shell before the tick
+        // source exists. On the GD32F10x the HAL frees PA15, PB3 and PB4 from the JTAG-DP for an
+        // LED there, keeping SWD.
+        let leds = layout.leds.map(|led| {
+            led.map(|[port, pin]| {
+                let mut p = chip.pin(hal::PinId { port, pin }).into_push_pull_output();
+                let _ = p.set_low();
+                p
+            })
+        });
         // Every motor the image drives (`motor::COUNT`), each recorded at its own index: a motor
         // that fails a step is `NotUp` there and the other comes up alone, except that motor 1
         // rides on motor 0 (`specs/twelve-fet.md` section 5.5).
@@ -2571,6 +2604,7 @@ mod firmware {
             orchestrator::Machine::new(orchestrator::Digests::of(store), configured),
             // The low-battery warning threshold (`specs/tones.md` section 4.4), boot-read.
             store.get(store::BOARD_BATTERY_WARN),
+            leds,
         );
         // 2b. The arm-row function, once (`specs/config-read-once.md` section 5, boot step 5): the
         //     control and motor values the board runs until the next arm re-reads them, installed

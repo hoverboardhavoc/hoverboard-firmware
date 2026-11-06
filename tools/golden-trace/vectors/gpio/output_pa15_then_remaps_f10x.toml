@@ -1,0 +1,56 @@
+# Mode: final_state. Expected end state:
+#   GPIOA CTL1 = 0x34444444 (PA15 output push-pull 50 MHz)
+#   GPIOB CTL0 = 0x4444B444 (PB3 AF push-pull 50 MHz, TIMER1_CH1)
+#   AFIO PCF0  = 0x02000104: SWJ_CFG = 0b010 | TIMER1_REMAP = 0b01 | USART0_REMAP
+# ignore RCU: the HAL enables each port clock as part of the setup; the vendor body enables only
+# AFIO.
+#
+# The vendor body makes the SWJ call last, for route_general_pwm_pin_pb3_f10x's reason: each vendor
+# remap after it ORs 0b111 into the write-only field, so only with it last does the final write
+# name the configuration.
+#
+# hal_writes: three PCF0 writes, one per change. The output setup writes SWJ_CFG; the PWM route's
+# own SWJ call finds it configured and writes nothing; the TIMER1 and USART0 remaps each write
+# their field and carry SWJ_CFG = 0b010 (motorcontroller/hal/src/afio.rs, write_pcf0).
+description = """
+A JTAG pin set up as a GPIO output on the GD32F10x (PA15, as an LED of the battery gauge,
+specs/battery-gauge.md section 4) frees the JTAG pins; a later TIMER1 remap (the PWM route to
+PB3) and a later USART0 remap keep SWJ_CFG at 0b010, so neither takes PA15, PB3 or PB4 back for
+the JTAG-DP.
+
+Vendor: rcu_periph_clock_enable(RCU_AF); gpio_init(OUT_PP, 50MHZ) on PA15;
+        gpio_pin_remap_config(GPIO_TIMER1_PARTIAL_REMAP0, ENABLE);
+        gpio_pin_remap_config(GPIO_USART0_REMAP, ENABLE); gpio_init(AF_PP, 50MHZ) on PB3;
+        gpio_pin_remap_config(GPIO_SWJ_SWDPENABLE_REMAP, ENABLE).
+HAL: chip.pin(PA15).into_push_pull_output(); chip.route_general_pwm_pin(PB3);
+     afio::remap(Usart0, 1).
+"""
+family = "gd32f10x"
+mode = "final_state"
+ignore = ["<RCU_BASE>"]
+
+[hal_writes]
+"<AFIO_BASE>+0x04" = 3
+
+[vendor]
+body = '''
+    rcu_periph_clock_enable(RCU_AF);
+    gpio_init(GPIOA, GPIO_MODE_OUT_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_15);
+    gpio_pin_remap_config(GPIO_TIMER1_PARTIAL_REMAP0, ENABLE);
+    gpio_pin_remap_config(GPIO_USART0_REMAP, ENABLE);
+    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_3);
+    gpio_pin_remap_config(GPIO_SWJ_SWDPENABLE_REMAP, ENABLE);
+'''
+
+[hal]
+body = '''
+    use hal::{Chip, PeriphLabel, PinAf, PinId};
+
+    pub fn body() {
+        // SAFETY: the vector owns the whole chip.
+        let chip = unsafe { Chip::steal() };
+        let _ = chip.pin(PinId { port: 0, pin: 15 }).into_push_pull_output();
+        chip.route_general_pwm_pin(PinAf { port: 1, pin: 3, af: 0 }); // PB3 = TIMER1_CH1
+        hal::afio::remap(PeriphLabel::Usart0, 1);
+    }
+'''
