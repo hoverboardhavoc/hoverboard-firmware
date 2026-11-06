@@ -18,7 +18,7 @@ use crate::wire::Wire;
 /// far board cross the mailbox and the inter-board UART.
 pub const REPLY_WAIT: Duration = Duration::from_secs(3);
 /// How many times a walk or configuration request is sent before giving up.
-const TRIES: u32 = 3;
+pub const TRIES: u32 = 3;
 /// The longest one wait for a packet inside the walk, so a resend is not late by much.
 const POLL: Duration = Duration::from_millis(50);
 
