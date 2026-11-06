@@ -24,6 +24,7 @@ import com.hoverboard.protocol.store.Gains
 import com.hoverboard.protocol.store.Key
 import com.hoverboard.protocol.store.Value
 import com.hoverboardhavoc.remote.ble.LinkConfig
+import com.hoverboardhavoc.remote.model.ArmPhase
 import com.hoverboardhavoc.remote.model.BatteryReading
 import com.hoverboardhavoc.remote.model.ConnectionState
 import com.hoverboardhavoc.remote.model.DriveInForce
@@ -476,7 +477,7 @@ class ScreenshotTest {
         val targets = DriveTargets(DriveMode.BOUND, wheels(*boards.toIntArray()))
         return UiState(
             connectionState = ConnectionState.CONNECTED,
-            armed = armed,
+            armPhase = if (armed) ArmPhase.ARMED else ArmPhase.IDLE,
             nodes = boards.map { NodeInfo(it, Walk.CLASS_MOTOR, BOARD_NAME) },
             attachedNode = 0x01,
             selected = 0x01,
