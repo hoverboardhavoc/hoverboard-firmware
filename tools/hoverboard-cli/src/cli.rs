@@ -1,6 +1,7 @@
 //! The command line (`specs/machine-settings.md` section 6.3): the link options, then the noun the
-//! command acts on (`board`, `machine` or `bridge`) and its verb; `scan` stands outside, since it
-//! runs before there is a machine. [`parse`] reads it into a [`Command`] before any link is opened.
+//! command acts on (`board`, `machine`, `bridge`, or the link kind `usb` or `ble` for `scan`,
+//! `specs/cli-discovery.md`) and its verb. [`parse`] reads it into a [`Command`] before any link is
+//! opened.
 
 use std::time::Duration;
 
@@ -100,11 +101,14 @@ pub enum Swd {
 /// One command, its arguments read and checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// `scan`: the BLE advertisers.
-    Scan {
+    /// `ble scan`: the BLE advertisers.
+    BleScan {
         /// How long to listen.
         secs: u64,
     },
+    /// `usb scan`: every port with the C3's USB ids, its MAC and the bridge that answers there
+    /// (`specs/cli-discovery.md` section 1). Takes no link option.
+    UsbScan,
     /// `board fields --json`: the name table.
     Fields,
     /// `board get` / `bridge get`: one field.
@@ -293,7 +297,7 @@ pub struct Invocation {
 /// The usage text every usage error is.
 pub const USAGE: &str =
     "usage: hoverboard-cli [--device NAME|ADDR | --serial DEVICE | --tcp HOST:PORT] <command>
-  scan [--secs N]
+  usb scan | ble scan [--secs N]
   board get <board> <path> | set <board> <path> <value> [--force] | dump <board> [<file>]
   board apply <board> <file>... [--force] | replace <board> <file>... [--yes] [--force]
   board diff [--replace] <board> <file>... [--force] | status [<board>...] | compact <board>
@@ -410,10 +414,11 @@ pub fn parse(args: &[String]) -> (bool, Result<Invocation, String>) {
     if let Some(e) = early {
         return (is_diff, Err(e));
     }
-    (
-        is_diff,
-        command(&pos, &opts).map(|command| Invocation { link, command }),
-    )
+    let command = match command(&pos, &opts) {
+        Ok(Command::UsbScan) if link.is_some() => Err("usb scan opens every port itself".into()),
+        c => c,
+    };
+    (is_diff, command.map(|command| Invocation { link, command }))
 }
 
 fn usage<T>() -> Result<T, String> {
@@ -488,9 +493,13 @@ fn command(pos: &[&str], o: &Opts) -> Result<Command, String> {
             .collect()
     };
     Ok(match pos {
-        ["scan"] => {
+        ["usb", "scan"] => {
+            ok(&[])?;
+            Command::UsbScan
+        }
+        ["ble", "scan"] => {
             ok(&["--secs"])?;
-            Command::Scan {
+            Command::BleScan {
                 secs: o.secs.map_or(Ok(5), parse_secs)?,
             }
         }
@@ -778,7 +787,7 @@ mod tests {
             op,
         };
         let table: Vec<(&str, &str, Command)> = vec![
-            ("scan", "scan --secs 3", Command::Scan { secs: 3 }),
+            ("scan", "ble scan --secs 3", Command::BleScan { secs: 3 }),
             ("nodes", "machine nodes", Command::Nodes),
             (
                 "status",
@@ -992,6 +1001,8 @@ mod tests {
         }
         // The flat words and --node are gone.
         for old in [
+            "scan",
+            "scan --secs 3",
             "nodes",
             "status",
             "name 0x01 x",
@@ -1114,7 +1125,8 @@ mod tests {
             "machine update b.hbfw --no-confirm",
             "machine update",
             "machine nodes --yes",
-            "scan --yes",
+            "ble scan --yes",
+            "usb scan --secs 3",
             "board erase 0x01 --image x",
             "board flash 0x01 fw.hbfw --dirty",
             "firmware info b.hbfw --yes",
@@ -1190,6 +1202,25 @@ mod tests {
         assert_eq!(p("--tcp a --tcp b machine diff"), (true, false));
         assert_eq!(p("board diff"), (true, false));
         assert_eq!(p("board apply x f.json --bogus"), (false, false));
+    }
+
+    /// `specs/cli-discovery.md` sections 1 and 2: `usb scan` takes no link option, `ble scan` takes
+    /// `--secs` or listens 5 s.
+    #[test]
+    fn the_scans_under_their_link_kind() {
+        assert_eq!(cmd("usb scan"), Ok(Command::UsbScan));
+        assert_eq!(cmd("ble scan"), Ok(Command::BleScan { secs: 5 }));
+        assert_eq!(cmd("ble scan --secs=2"), Ok(Command::BleScan { secs: 2 }));
+        for link in ["--serial /dev/ttyACM0", "--tcp h:1", "--device hb-right"] {
+            assert_eq!(
+                cmd(&format!("{link} usb scan")),
+                Err("usb scan opens every port itself".into()),
+                "{link}"
+            );
+        }
+        for line in ["usb", "ble", "usb scan x", "ble scan x", "usb list"] {
+            assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
+        }
     }
 
     #[test]

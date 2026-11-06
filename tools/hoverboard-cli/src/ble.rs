@@ -1,4 +1,4 @@
-//! The BLE link (`--device`, and the default with no link given) and `scan`, through
+//! The BLE link (`--device`, and the default with no link given) and `ble scan`, through
 //! [`btleplug`](https://github.com/deviceplug/btleplug): the `ble` cargo feature
 //! (`specs/bridge-onboarding.md` section 4.2). A build without it (the bench Pi's) refuses both.
 
@@ -167,7 +167,7 @@ pub fn connect(device: Option<&str>) -> Result<Ble, String> {
     })
 }
 
-/// `scan`: the advertisers seen in `secs`, as (name, address).
+/// `ble scan`: the advertisers seen in `secs`, as (name, address).
 pub fn scan_names(secs: u64) -> Result<Vec<(String, String)>, String> {
     let rt = Runtime::new().map_err(|e| e.to_string())?;
     let found = rt.block_on(scan(secs))?;

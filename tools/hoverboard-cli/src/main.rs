@@ -1,10 +1,10 @@
 //! `hoverboard-cli`: talk to a hoverboard bridge over BLE, its USB console, or that console through
 //! a TCP relay. BLE is the `ble` cargo feature, on by default; a build without it (the bench Pi's)
-//! refuses `--device` and `scan`.
+//! refuses `--device` and `ble scan`.
 //!
 //! Every command starts with the noun it acts on (`specs/machine-settings.md` section 6.3): `board`
-//! (one motor controller), `machine` (every motor controller) or `bridge`; the link options come
-//! before it, and `scan` stands outside. `hoverboard-cli` with no command prints the whole grammar
+//! (one motor controller), `machine` (every motor controller) or `bridge`, or the link kind
+//! (`usb`, `ble`) for `scan` (`specs/cli-discovery.md`); the link options come before it. `hoverboard-cli` with no command prints the whole grammar
 //! ([`cli::USAGE`]).
 //!
 //! ```text
@@ -95,6 +95,7 @@ use hoverboard_cli::nodes::{self, class_name, Found, Walked, CLASS_MOTOR};
 use hoverboard_cli::route::{self, Purpose, Route, Via};
 use hoverboard_cli::target::{self, check_class, class_of, label, node_name, Target};
 use hoverboard_cli::transport::{Serial, Tcp};
+use hoverboard_cli::usb;
 use hoverboard_cli::wire::{ByteLink, Framed, Wire};
 
 #[cfg(feature = "ble")]
@@ -103,11 +104,11 @@ mod ble;
 #[cfg(test)]
 mod machine_update_sim;
 
-/// What a build without the `ble` cargo feature (the bench Pi's) says for a BLE link or `scan`
+/// What a build without the `ble` cargo feature (the bench Pi's) says for a BLE link or `ble scan`
 /// (`specs/bridge-onboarding.md` section 4.2).
 #[cfg(not(feature = "ble"))]
 const NO_BLE: &str = "this hoverboard-cli is built without the ble feature: no BLE link \
-                      (--device, or no link given) and no scan; reach the bridge with --serial \
+                      (--device, or no link given) and no ble scan; reach the bridge with --serial \
                       or --tcp";
 
 /// The BLE link to the advertiser `device` names, or the first `hb-bridge-` one.
@@ -122,13 +123,13 @@ fn ble_link(_device: Option<&str>) -> Result<Box<dyn ByteLink>, String> {
     Err(NO_BLE.into())
 }
 
-/// `scan`'s advertisers, as (name, address).
+/// `ble scan`'s advertisers, as (name, address).
 #[cfg(feature = "ble")]
 fn scan_names(secs: u64) -> Result<Vec<(String, String)>, String> {
     ble::scan_names(secs)
 }
 
-/// `scan`: refused, naming the feature.
+/// `ble scan`: refused, naming the feature.
 #[cfg(not(feature = "ble"))]
 fn scan_names(_secs: u64) -> Result<Vec<(String, String)>, String> {
     Err(NO_BLE.into())
@@ -460,14 +461,7 @@ type OnPort = (EspClient, u8, String, Option<espsvc::EspInfo>);
 fn bridge_on(port: &str, wait: Duration) -> Option<OnPort> {
     let link: Box<dyn ByteLink> = Box::new(Serial::open(port).ok()?);
     let mut wire = Framed::new(link);
-    let src = guest::attach(&mut wire, 1, wait)?.guest;
-    let name = match nodes::read(&mut wire, src, NO_ADDRESS, store::DEVICE_NAME.key())
-        .ok()?
-        .value()
-    {
-        Some(store::Value::Str(s)) => String::from_utf8_lossy(s).into_owned(),
-        _ => "the bridge".to_string(),
-    };
+    let (src, name) = usb::attached_name(&mut wire, wait)?;
     let mut c = Client::addressed(wire, src, NO_ADDRESS);
     let info = c.info_if_decodes().ok().flatten();
     Some((c, src, name, info))
@@ -2116,12 +2110,20 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
     let link = inv.link.clone().unwrap_or(Link::Ble(None));
     let link = &link;
     match inv.command {
-        Command::Scan { secs } => {
+        Command::BleScan { secs } => {
             if !matches!(link, Link::Ble(_)) {
-                return Err("scan is BLE only".into());
+                return Err("ble scan is BLE only".into());
             }
             for (name, addr) in scan_names(secs)? {
                 println!("{addr}  {name}");
+            }
+        }
+        Command::UsbScan => {
+            for line in usb::scan_lines(&install::host_ports(), |port| {
+                let link: Box<dyn ByteLink> = Box::new(Serial::open(port).ok()?);
+                usb::attached_name(&mut Framed::new(link), HELLO_WAIT).map(|(_, name)| name)
+            }) {
+                println!("{line}");
             }
         }
         Command::Fields => {
