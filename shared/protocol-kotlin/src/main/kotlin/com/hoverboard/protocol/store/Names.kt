@@ -8,10 +8,11 @@ package com.hoverboard.protocol.store
  */
 object Names {
     /**
-     * How a named field is indexed (`store::Index`): one value, an array, one per motor, one per
-     * link, or one per name ([Name.names]).
+     * How a named field is indexed (`store::Index`): one value, an array, one per motor, an array
+     * per motor (motor m's element e at key index `m * n + e`), one per link, or one per name
+     * ([Name.names]).
      */
-    enum class IndexKind { SINGLE, ARRAY, MOTOR, LINK, NAMED }
+    enum class IndexKind { SINGLE, ARRAY, MOTOR, MOTOR_ARRAY, LINK, NAMED }
 
     /** How a file writes a field's value (`store::Kind`). */
     enum class Kind { PIN, INT, BOOL, ENUM, BITS, STR, TUNE }
@@ -32,7 +33,7 @@ object Names {
 
     /** The object arrays a file holds, by index kind (`store::Index::array`). */
     fun arrayOf(index: IndexKind): String? = when (index) {
-        IndexKind.MOTOR -> "motors"
+        IndexKind.MOTOR, IndexKind.MOTOR_ARRAY -> "motors"
         IndexKind.LINK -> "links"
         IndexKind.SINGLE, IndexKind.ARRAY, IndexKind.NAMED -> null
     }
@@ -64,6 +65,9 @@ object Names {
 
     private fun array(f: IndexedFieldDef, path: String, kind: Kind = Kind.INT, labels: List<Pair<Int, String>> = emptyList()) =
         Name(f.id, path, IndexKind.ARRAY, kind, labels)
+
+    private fun motorArray(f: IndexedFieldDef, path: String, kind: Kind = Kind.INT) =
+        Name(f.id, path, IndexKind.MOTOR_ARRAY, kind)
 
     private fun link(id: Int, path: String, kind: Kind) = Name(id, path, IndexKind.LINK, kind)
 
@@ -155,7 +159,12 @@ object Names {
         motor(Fields.MOTOR_DC_LINK_LIMIT, "current.dc_link.limit"),
         pin(Fields.MOTOR_BREAK_PIN, "gate.break.pin", IndexKind.MOTOR),
         motor(Fields.MOTOR_BREAK_ENABLE, "gate.break.enable", Kind.BOOL),
+        motorArray(Fields.OBSERVER_MODEL, "observer.model"),
+        motorArray(Fields.OBSERVER_SHADOW, "observer.shadow"),
     )
+
+    /** A per-motor family's values per motor (the handle's `N`), 1 for any other row. */
+    fun perMotor(id: Int): Int = Fields.INDEXED.values.firstOrNull { it.id == id }?.size ?: 1
 
     /** The row for field [id], or null when the table names none. */
     fun byId(id: Int): Name? = ALL.firstOrNull { it.id == id }
@@ -165,13 +174,14 @@ object Names {
 
     /**
      * The path [key] prints as, the CLI's `path_of`: `machine.mode`, `battery_sense.cal[1]`,
-     * `motors[0].hall.a`, `links[0].tx`, `tone.horn`, or the raw `0x99.0` for an id the table does
-     * not name.
+     * `motors[0].hall.a`, `motors[1].observer.shadow[4]`, `links[0].tx`, `tone.horn`, or the raw
+     * `0x99.0` for an id the table does not name.
      */
     fun pathOf(key: Key): String {
         val r = byId(key.fieldId) ?: return "0x%02x.%d".format(key.fieldId, key.index)
         return when (r.index) {
             IndexKind.MOTOR, IndexKind.LINK -> "${arrayOf(r.index)}[${key.index}].${r.path}"
+            IndexKind.MOTOR_ARRAY -> perMotor(r.id).let { n -> "motors[${key.index / n}].${r.path}[${key.index % n}]" }
             IndexKind.SINGLE -> if (key.index == 0) r.path else "${r.path}[${key.index}]"
             IndexKind.ARRAY -> "${r.path}[${key.index}]"
             IndexKind.NAMED -> r.names.getOrNull(key.index)?.let { "${r.path}.$it" } ?: "${r.path}[${key.index}]"

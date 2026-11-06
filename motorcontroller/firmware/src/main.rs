@@ -75,6 +75,7 @@ compile_error!(
 mod arm;
 mod layout;
 mod motor;
+mod observer;
 mod odometer;
 /// The host tests' in-RAM `store::Flash`, one copy for the whole crate (see the module).
 #[cfg(test)]
@@ -629,6 +630,14 @@ mod firmware {
         /// publishes the raw counter and this task decides when a shortfall has lasted long enough
         /// to be a fault.
         period_health: motor::PeriodHealth,
+        /// The flux observer's live words and the facts its parameters are derived from
+        /// (`crate::observer`): the tune lane writes them, a persisted write reconciles them, the
+        /// arm row gives them the calibration, and every change installs the derived parameters
+        /// into the period ISR (`motor::hw::install_observer`).
+        observer: crate::observer::ObserverLoop,
+        /// The `FOC_TRACE` subscription (`specs/link-control.md`, "`TRACE_SET`"): set by the
+        /// hand-back's `TRACE_SET`, read by the service loop's emitter ([`emit_trace`]).
+        trace: linkctl::TraceSubscription,
         /// The period ISR's over-current trip count as of the previous control run: a change
         /// raises the motor-0 fault latch (`specs/motor-integration.md`, "The hard trip").
         last_trips: [u32; motor::COUNT],
@@ -1131,6 +1140,23 @@ mod firmware {
         imu_retries: u8,
         /// The rest of word 51, published zero so the word reads clean out of `.uninit`.
         pad_51: [u8; 3],
+        /// The flux observer in shadow (`specs/flux-observer.md`, "What it publishes"), motor 0's,
+        /// three words closed at the 64-period window beside words 47 to 50, each published by one
+        /// relaxed store in the period ISR. Appended LAST, offset-preserving, at words 52 to 54.
+        ///
+        /// Word 52 ([`motor::OBS_FOC_ANGLES`]): `theta` at the close, the front end's angle plus
+        /// the alignment, the angle the inverse Park used, low half; the observer's angle high
+        /// half; both `u16`, 65536 a revolution. 0 unless FOC.
+        foc_angles: u32,
+        /// Word 53 ([`motor::OBS_FOC_TRACK`]): the window's angle-error mean (observer minus hall,
+        /// less the offset and the bin's leak lead) low half, its spread high half, `i16` angle
+        /// units.
+        foc_track: u32,
+        /// Word 54 ([`motor::OBS_FOC_FLUX`]): the window's RMS flux magnitude, microvolt-seconds,
+        /// low half; the tracking word high half: bits 16..23 the lock bin (255 none), 24 this
+        /// window tracked, 25 the observer is the angle source (the OBS button), 26 the front end in its
+        /// interpolation window at the close.
+        foc_flux: u32,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1236,8 +1262,12 @@ mod firmware {
         // Word 51: the IMU bring-up's attempt count, low byte.
         assert!(offset_of!(CtrlObs, imu_retries) == 0xCC);
         assert!(offset_of!(CtrlObs, pad_51) == 0xCD);
-        // And no tail padding hiding a mis-sized field: 52 words (208 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 52 * 4);
+        // Words 52-54: the flux observer in shadow, angles, then error, then flux and tracking.
+        assert!(offset_of!(CtrlObs, foc_angles) == 0xD0);
+        assert!(offset_of!(CtrlObs, foc_track) == 0xD4);
+        assert!(offset_of!(CtrlObs, foc_flux) == 0xD8);
+        // And no tail padding hiding a mis-sized field: 55 words (220 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 55 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1386,6 +1416,12 @@ mod firmware {
                 .write_volatile(motor::OBS_FOC_HOLD[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).imu_retries).write_volatile(IMU_RETRIES.load(Ordering::Relaxed));
             addr_of_mut!((*p).pad_51).write_volatile([0; 3]);
+            addr_of_mut!((*p).foc_angles)
+                .write_volatile(motor::OBS_FOC_ANGLES[0].load(Ordering::Relaxed));
+            addr_of_mut!((*p).foc_track)
+                .write_volatile(motor::OBS_FOC_TRACK[0].load(Ordering::Relaxed));
+            addr_of_mut!((*p).foc_flux)
+                .write_volatile(motor::OBS_FOC_FLUX[0].load(Ordering::Relaxed));
         }
     }
 
@@ -1615,6 +1651,21 @@ mod firmware {
         }
         // The base, and on a two-motor image motor 1's block from this same pass's rows.
         let more = more_motors(&shell.orch);
+        // The flux observer's bus scale for the coming periods (`specs/flux-observer.md`,
+        // "Voltage sensing"): a sensing board's own count through its calibration, else the
+        // effective word the pass just chose, 0 while that is unknown.
+        let local_word = shell.orch.vbatt.map_or(0, |v| v.word());
+        let bus = shell
+            .observer
+            .bus_scale(local_word, shell.orch.block.battery);
+        motor::OBS_BUS.store(bus.pack(), Ordering::Relaxed);
+        // The observer-source level (`specs/flux-observer.md`, "S4, first slice"): the mirror's
+        // bit 1 while it is fresh and its owner's, to every motor; the period ISR acts on it on a
+        // FOC motor only.
+        let source = shell.orch.inbox.remote_observer_request();
+        for word in &motor::OBSERVER_SOURCE {
+            word.store(source, Ordering::Relaxed);
+        }
         shell.cyclic_out = cyclic_tx(&shell.orch, shell.addressed);
         if shell.cyclic_out.is_some() {
             shell.cyclic_more = more;
@@ -1765,6 +1816,7 @@ mod firmware {
                     accepted_offsets: None,
                     #[cfg(feature = "gd32f103rc")]
                     dc_link: None,
+                    dead_time: 0,
                 })
             }),
             bias,
@@ -1777,6 +1829,14 @@ mod firmware {
         }
         // Installs each motor that has a runtime, all in one critical section.
         motor::hw::install_rederived(&r.motor);
+        // The flux observer's parameters at the calibration just read and the bring-up's dead
+        // time (`specs/flux-observer.md`, "Units": `R` and `L` are pre-scaled at arm time).
+        shell.observer.set_motor_facts(
+            values.current_cal,
+            boot.map(|b| b.map(|b| b.dead_time)),
+            values.direction_byte.map(motor::requested_direction),
+        );
+        motor::hw::install_observer(&shell.observer.params());
         if let (Some(dev), Some(cfg)) = (shell.imu.as_mut(), r.imu) {
             // Reinstalls the axis permutation; touches no bus.
             dev.set_config(cfg);
@@ -1823,6 +1883,7 @@ mod firmware {
         config_fault: bool,
         machine: orchestrator::Machine,
         battery_warn: i16,
+        observer: crate::observer::ObserverLoop,
     ) {
         let imu_configured = imu_dev.is_some();
         // SAFETY: single-threaded boot (only the DMA RX ISR is live, and it reaches only the
@@ -1866,6 +1927,8 @@ mod firmware {
                 player: tones::Player::new(PERIOD_HZ),
                 alarm: tones::BatteryAlarm::new(),
                 battery_warn,
+                observer,
+                trace: linkctl::TraceSubscription::new(),
             });
         }
     }
@@ -1977,6 +2040,10 @@ mod firmware {
         };
         // SAFETY: main-thread context (the loop's drain), same discipline as the callbacks.
         if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
+            if let linkctl::Payload::TraceSet(t) = payload {
+                trace_set(shell, t);
+                return;
+            }
             if let (linkctl::Payload::CyclicState(c), Some(link)) =
                 (&payload, ingress.checked_sub(PORT_IDX_LINK0))
             {
@@ -1986,6 +2053,59 @@ mod firmware {
             // to the node that armed the board, so a second controller's traffic cannot hold a
             // rider's arm alive (`LinkInbox::refreshes_mirror`).
             shell.orch.inbox.accept(d.src, payload);
+        }
+    }
+
+    /// A `TRACE_SET` (`specs/link-control.md`, "`TRACE_SET` (0x16, 2 B)"): the subscription at
+    /// this tick, refused for a motor this board did not bring up, and the reset bit handed to the
+    /// period ISR as a clear of that motor's tracking table at its next window close. Out of line:
+    /// it runs on a subscriber's 2 Hz keepalive, not in the loop's steady pass.
+    #[inline(never)]
+    fn trace_set(shell: &mut Shell, t: linkctl::TraceSet) {
+        let up = motor::OBS_STATE
+            .get(t.motor as usize)
+            .is_some_and(|s| motor::obs_configured(s.load(Ordering::Relaxed)));
+        let now = TICK_COUNT.load(Ordering::Relaxed);
+        if let Some(m) = shell.trace.apply(t, now, up) {
+            if let Some(r) = motor::OBS_TRACK_RESET.get(m as usize) {
+                r.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The `FOC_TRACE` emitter (`specs/link-control.md`, "Emission"): on the first pass after a
+    /// window close whose counter is the divisor past the last emission, one frame of the
+    /// subscribed motor to the attached host (`dst` 0x00) on the mailbox port, all-or-nothing into
+    /// the ring (a refused frame counts in word 34 and is dropped). Gated on a host draining the
+    /// ring AND a live subscription: with either missing, nothing is packed and nothing written.
+    /// Out of line, off the service loop's zero-wait placement.
+    #[inline(never)]
+    fn emit_trace(mailbox: &mut MailboxLink, src: u8, pdu: &mut [u8]) {
+        if !mailbox.transport().serial().outbound_has_consumer() {
+            return;
+        }
+        // SAFETY: main-thread context, after dispatch returned; the borrow ends with this function,
+        // and nothing it calls touches the shell.
+        let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
+            return;
+        };
+        let window = crate::observer::trace_window(motor::PERIODS[0].load(Ordering::Relaxed));
+        let Some(m) = shell.trace.due(window, TICK_COUNT.load(Ordering::Relaxed)) else {
+            return;
+        };
+        let m = m as usize;
+        let frame = crate::observer::trace_frame(m, shell.observer.min_windows(m));
+        let mut payload = [0u8; linkctl::FocTrace::LEN];
+        let n = frame.encode(&mut payload);
+        if let Ok(p) = net::Pdu::new(
+            linkctl::OP_FOC_TRACE,
+            src,
+            net::pdu::NO_ADDRESS,
+            &payload[..n],
+        ) {
+            if let Ok(len) = p.encode(pdu) {
+                let _ = mailbox.send(&pdu[..len]);
+            }
         }
     }
 
@@ -2014,18 +2134,42 @@ mod firmware {
         let Some(shell) = (unsafe { (*addr_of_mut!(SHELL)).as_mut() }) else {
             return;
         };
+        // The flux observer owns its two fields' keys (`specs/flux-observer.md`, "Fields"): live in
+        // RAM, the parameters re-derived and installed on a write, no flash touched. The gain
+        // shadow owns the rest.
+        let observer = crate::observer::ObserverLoop::owns(key.field_id);
+        let o = &mut shell.observer;
         let gains = &mut shell.orch.ctl.gains;
         let (status, value) = match op {
             net::TuneOp::Refuse(status) => (status, None),
-            net::TuneOp::Read => match gains.get(key.field_id, key.index) {
-                Some(v) => (net::walk::CFG_OK, Some(v)),
-                None => (net::walk::CFG_UNKNOWN_KEY, None),
-            },
-            net::TuneOp::Write(v) => match gains.set(key.field_id, key.index, v) {
-                Ok(()) => (net::walk::CFG_OK, Some(v)),
-                Err(control::TuneError::UnknownKey) => (net::walk::CFG_UNKNOWN_KEY, None),
-                Err(control::TuneError::OutOfRange) => (net::walk::CFG_BAD, None),
-            },
+            net::TuneOp::Read => {
+                let v = if observer {
+                    o.get(key.field_id, key.index)
+                } else {
+                    gains.get(key.field_id, key.index)
+                };
+                match v {
+                    Some(v) => (net::walk::CFG_OK, Some(v)),
+                    None => (net::walk::CFG_UNKNOWN_KEY, None),
+                }
+            }
+            net::TuneOp::Write(v) => {
+                let r = if observer {
+                    o.set(key.field_id, key.index, v)
+                } else {
+                    gains.set(key.field_id, key.index, v)
+                };
+                match r {
+                    Ok(()) => {
+                        if observer {
+                            motor::hw::install_observer(&o.params());
+                        }
+                        (net::walk::CFG_OK, Some(v))
+                    }
+                    Err(control::TuneError::UnknownKey) => (net::walk::CFG_UNKNOWN_KEY, None),
+                    Err(control::TuneError::OutOfRange) => (net::walk::CFG_BAD, None),
+                }
+            }
         };
         responder.reply_tune(d.src, key, status, value, out);
     }
@@ -2054,6 +2198,20 @@ mod firmware {
         if let Some(shell) = unsafe { (*addr_of_mut!(SHELL)).as_mut() } {
             shell.orch.ctl.gains.reconcile(fresh);
             shell.orch.machine.persisted(digests);
+            observer_persisted(&mut shell.observer, store);
+        }
+    }
+
+    /// The flux observer's share of a persisted write: re-read its two fields, move the words
+    /// flash moved, and install the parameters when any did. Out of line, off the service loop's
+    /// zero-wait placement: it runs on a config write only.
+    #[inline(never)]
+    fn observer_persisted<F: store::Flash>(
+        o: &mut crate::observer::ObserverLoop,
+        store: &Store<F>,
+    ) {
+        if o.reconcile(crate::observer::read(store)) {
+            motor::hw::install_observer(&o.params());
         }
     }
 
@@ -2571,6 +2729,18 @@ mod firmware {
             orchestrator::Machine::new(orchestrator::Digests::of(store), configured),
             // The low-battery warning threshold (`specs/tones.md` section 4.4), boot-read.
             store.get(store::BOARD_BATTERY_WARN),
+            // The flux observer's two fields, read once, and the battery calibration its bus
+            // scale converts with on a sensing board; the arm row below gives them the current
+            // calibration and installs the parameters.
+            crate::observer::ObserverLoop::of_stored(
+                crate::observer::read(store),
+                layout.battery.map(|_| {
+                    (
+                        store.get(BOARD_BATTERY_CAL.at(0)),
+                        store.get(BOARD_BATTERY_CAL.at(1)),
+                    )
+                }),
+            ),
         );
         // 2b. The arm-row function, once (`specs/config-read-once.md` section 5, boot step 5): the
         //     control and motor values the board runs until the next arm re-reads them, installed
@@ -3088,6 +3258,10 @@ mod firmware {
                     );
                 }
             }
+
+            // 8c. The FOC trace, on a subscription (`specs/link-control.md`, "`FOC_TRACE`"): one
+            //     frame on the first pass after the window that falls due, into the same ring.
+            emit_trace(mailbox_link, responder.addr(), &mut pdu);
 
             // Sample the mailbox port's dropped-frame count into its OBS crossing, the same
             // read-through-the-link the inter-board port gets above. Sampled HERE, after the last

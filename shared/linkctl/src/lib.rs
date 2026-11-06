@@ -2,8 +2,9 @@
 //! Link-control payload codec (`specs/link-control.md`).
 //!
 //! The three inter-board control payload families ([`CyclicState`], [`DriveCmd`], [`Inputs`])
-//! that ride L3 PDUs in the reserved control opcode block `0x10..0x2F`, plus the supervision
-//! timeout constants. An L7 payload here is the payload of one L3 PDU
+//! and the trace pair ([`FocTrace`], [`TraceSet`], with the board's [`TraceSubscription`]) that
+//! ride L3 PDUs in the reserved control opcode block `0x10..0x2F`, plus the supervision timeout
+//! constants. An L7 payload here is the payload of one L3 PDU
 //! (`[opcode][src][dst][payload...]`, one PDU per L2 packet); this crate owns only the payload
 //! bytes. `shared/net` keeps forwarding the block by `dst` without interpreting it, and
 //! `motorcontroller/control` / `motorcontroller/state` keep consuming plain words: these types never leak into
@@ -52,6 +53,14 @@ pub const OP_DRIVE_CMD: u8 = 0x11;
 
 /// `INPUTS` opcode: controller/peer -> board, on demand.
 pub const OP_INPUTS: u8 = 0x12;
+
+/// `FOC_TRACE` opcode: board -> controller, on a `TRACE_SET` subscription, every Nth 64-period
+/// window close, on the mailbox port only (`specs/link-control.md`, "`FOC_TRACE` (0x15, 46 B)").
+pub const OP_FOC_TRACE: u8 = 0x15;
+
+/// `TRACE_SET` opcode: controller -> board, the trace subscription and its keepalive
+/// (`specs/link-control.md`, "`TRACE_SET` (0x16, 2 B)").
+pub const OP_TRACE_SET: u8 = 0x16;
 
 // --- Supervision timeouts (the link-loss fault producer's constants) ---------------------------
 
@@ -131,6 +140,13 @@ pub const INPUTS_TIMEOUT_TICKS: u32 = 375;
 // The ordering above, held by the compiler rather than by whoever edits the numbers next: link
 // loss must zero the demand before it releases the bridge.
 const _: () = assert!(INPUTS_TIMEOUT_TICKS > DRIVE_TIMEOUT_TICKS);
+
+/// The trace subscription's expiry, in 250 Hz ticks (1.5 s): a subscription lasts this long from
+/// the last `TRACE_SET` with a non-zero divisor (`specs/link-control.md`, "`TRACE_SET`"), so a
+/// killed tool, a phone that left its scope screen or a dropped link stops the stream by itself. A
+/// subscriber renews at 2 Hz. The `INPUTS` figure, for the same reason (a level with an expiry),
+/// and not a safety bound: the stream drives nothing.
+pub const TRACE_TIMEOUT_TICKS: u32 = 375;
 
 // --- Codec plumbing ----------------------------------------------------------------------------
 
@@ -687,7 +703,8 @@ impl DriveCmd {
 /// and the firmware and the Kotlin mirror had to move together or the drift gate fails the build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inputs {
-    /// Button bits: [`Self::BUTTON_POWER`] (bit0), [`Self::BUTTON_HORN`] (bit1).
+    /// Button bits: [`Self::BUTTON_POWER`] (bit0), [`Self::BUTTON_HORN`] (bit1),
+    /// [`Self::BUTTON_OBSERVER`] (bit2).
     pub buttons: u8,
     /// Rider bits: [`Self::RIDER_PRESENT`] (bit0).
     pub rider: u8,
@@ -703,6 +720,9 @@ impl Inputs {
     /// `buttons` bit1: the horn (level, `specs/tones.md` section 4.3): the board plays its horn
     /// tune while the mirror it consumes carries it.
     pub const BUTTON_HORN: u8 = 1 << 1;
+    /// `buttons` bit2: observer source request (level): the FOC commutates from the flux
+    /// observer's angle while it is held (`specs/flux-observer.md`, "S4, first slice").
+    pub const BUTTON_OBSERVER: u8 = 1 << 2;
 
     /// `rider` bit0: rider present.
     pub const RIDER_PRESENT: u8 = 1 << 0;
@@ -715,6 +735,11 @@ impl Inputs {
     /// Horn level (`buttons` bit1).
     pub const fn horn(&self) -> bool {
         self.buttons & Self::BUTTON_HORN != 0
+    }
+
+    /// Observer-source level (`buttons` bit2).
+    pub const fn observer_request(&self) -> bool {
+        self.buttons & Self::BUTTON_OBSERVER != 0
     }
 
     /// Rider-present level (`rider` bit0).
@@ -742,6 +767,276 @@ impl Inputs {
     }
 }
 
+// --- FOC_TRACE (46 B): the FOC loop and the flux observer's shadow, one window a frame -------------
+
+/// One closed 64-period window of one motor's FOC loop and flux observer (`specs/link-control.md`,
+/// "`FOC_TRACE` (0x15, 46 B)"; `specs/flux-observer.md`): the quantities the period ISR publishes
+/// at the window close (`CTRL_OBS` words 48 to 50 and 52 to 54, that motor's) and the tracking
+/// table. Built by the board's loop pass on a subscription ([`TraceSubscription`]); consumed by
+/// `hoverboard-cli board trace` and the app's FOC scope screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocTrace {
+    /// The 64-period window counter at the close, wrapping.
+    pub window: u16,
+    /// Window mean `id`, current counts.
+    pub id: i16,
+    /// Window mean `iq`, current counts.
+    pub iq: i16,
+    /// The closing period's `iq` reference.
+    pub iq_ref: i16,
+    /// Window mean `vq` after the circular limit, voltage counts.
+    pub vq: i16,
+    /// `theta` at the close: the front end's angle plus the alignment, 65536 a revolution.
+    pub hall_angle: u16,
+    /// The observer's angle at the close, same units.
+    pub obs_angle: u16,
+    /// The window's angle-error mean, observer minus hall, angle units.
+    pub err_mean: i16,
+    /// The window's largest excursion from that mean, angle units.
+    pub err_spread: i16,
+    /// The window's RMS flux magnitude, microvolt-seconds.
+    pub flux_mag: u16,
+    /// The front end's latched signed speed, edges per 320-period window.
+    pub speed: i16,
+    /// Periods `phase_a` was held this window.
+    pub held_a: u8,
+    /// Periods `phase_b` was held.
+    pub held_b: u8,
+    /// Floated periods.
+    pub coasted: u8,
+    /// The hold cause byte.
+    pub cause: u8,
+    /// [`Self::FLAG_HALL_FAULT`], [`Self::FLAG_TRACKED`], [`Self::FLAG_OBSERVER_SOURCE`],
+    /// [`Self::FLAG_IN_WINDOW`].
+    pub flags: u8,
+    /// The commutation method byte (2 FOC); the FOC and observer fields are 0 in another.
+    pub method: u8,
+    /// The lock bin, 1..=15, or 255 for none.
+    pub lock_bin: u8,
+    /// Which motor's fields these are.
+    pub motor: u8,
+    /// Per speed bin, windows tracked over windows seen in 0.4 percent steps (0..=250), or 255
+    /// while the bin is not measured.
+    pub track: [u8; 16],
+}
+
+impl FocTrace {
+    /// On-wire length of the committed prefix.
+    pub const LEN: usize = 46;
+
+    /// `flags` bit 0: the front end's hall fault.
+    pub const FLAG_HALL_FAULT: u8 = 1 << 0;
+    /// `flags` bit 1: this window tracked.
+    pub const FLAG_TRACKED: u8 = 1 << 1;
+    /// `flags` bit 2: the observer is the angle source (the window's last period drove from it).
+    pub const FLAG_OBSERVER_SOURCE: u8 = 1 << 2;
+    /// `flags` bit 3: the front end was in its interpolation window at the close.
+    pub const FLAG_IN_WINDOW: u8 = 1 << 3;
+
+    /// Encode into `out`, returning the byte count ([`Self::LEN`]).
+    pub fn encode(&self, out: &mut [u8]) -> usize {
+        debug_assert!(out.len() >= Self::LEN);
+        let words = [
+            self.window,
+            self.id as u16,
+            self.iq as u16,
+            self.iq_ref as u16,
+            self.vq as u16,
+            self.hall_angle,
+            self.obs_angle,
+            self.err_mean as u16,
+            self.err_spread as u16,
+            self.flux_mag,
+            self.speed as u16,
+        ];
+        for (k, w) in words.iter().enumerate() {
+            out[2 * k..2 * k + 2].copy_from_slice(&w.to_le_bytes());
+        }
+        out[22..30].copy_from_slice(&[
+            self.held_a,
+            self.held_b,
+            self.coasted,
+            self.cause,
+            self.flags,
+            self.method,
+            self.lock_bin,
+            self.motor,
+        ]);
+        out[30..46].copy_from_slice(&self.track);
+        Self::LEN
+    }
+
+    /// Decode the committed prefix; ignore trailing bytes.
+    pub fn decode(b: &[u8]) -> Result<FocTrace, DecodeError> {
+        if b.len() < Self::LEN {
+            return Err(DecodeError::TooShort);
+        }
+        let mut track = [0u8; 16];
+        track.copy_from_slice(&b[30..46]);
+        Ok(FocTrace {
+            window: rd_u16(b, 0),
+            id: rd_i16(b, 2),
+            iq: rd_i16(b, 4),
+            iq_ref: rd_i16(b, 6),
+            vq: rd_i16(b, 8),
+            hall_angle: rd_u16(b, 10),
+            obs_angle: rd_u16(b, 12),
+            err_mean: rd_i16(b, 14),
+            err_spread: rd_i16(b, 16),
+            flux_mag: rd_u16(b, 18),
+            speed: rd_i16(b, 20),
+            held_a: b[22],
+            held_b: b[23],
+            coasted: b[24],
+            cause: b[25],
+            flags: b[26],
+            method: b[27],
+            lock_bin: b[28],
+            motor: b[29],
+            track,
+        })
+    }
+}
+
+// --- TRACE_SET (2 B): the trace subscription ---------------------------------------------------
+
+/// The trace subscription and its keepalive (`specs/link-control.md`, "`TRACE_SET` (0x16, 2 B)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceSet {
+    /// Bits 0..6: emit `FOC_TRACE` every this many window closes, 0 = off; the board clamps 1..4
+    /// to [`Self::DIVISOR_MIN`]. Bit 7 ([`Self::RESET`]): clear the selected motor's tracking
+    /// table before applying.
+    pub divisor: u8,
+    /// The motor to trace.
+    pub motor: u8,
+}
+
+impl TraceSet {
+    /// On-wire length of the committed prefix.
+    pub const LEN: usize = 2;
+
+    /// `divisor` bit 7: clear the tracking table first, with any divisor, 0 included.
+    pub const RESET: u8 = 1 << 7;
+    /// `divisor` bits 0..6.
+    pub const DIVISOR_MASK: u8 = 0x7F;
+    /// The smallest divisor the board runs (50 Hz): a divisor of 1 to 4 reads as this.
+    pub const DIVISOR_MIN: u8 = 5;
+
+    /// Encode into `out`, returning the byte count ([`Self::LEN`]).
+    pub fn encode(&self, out: &mut [u8]) -> usize {
+        debug_assert!(out.len() >= Self::LEN);
+        out[0] = self.divisor;
+        out[1] = self.motor;
+        Self::LEN
+    }
+
+    /// Decode the committed prefix; ignore trailing bytes.
+    pub fn decode(b: &[u8]) -> Result<TraceSet, DecodeError> {
+        if b.len() < Self::LEN {
+            return Err(DecodeError::TooShort);
+        }
+        Ok(TraceSet {
+            divisor: b[0],
+            motor: b[1],
+        })
+    }
+
+    /// Whether the reset bit is set.
+    pub const fn reset(&self) -> bool {
+        self.divisor & Self::RESET != 0
+    }
+
+    /// The divisor the board runs: 0 off, 1..4 clamped up to [`Self::DIVISOR_MIN`].
+    pub const fn effective_divisor(&self) -> u8 {
+        let d = self.divisor & Self::DIVISOR_MASK;
+        if d != 0 && d < Self::DIVISOR_MIN {
+            Self::DIVISOR_MIN
+        } else {
+            d
+        }
+    }
+}
+
+/// The board's one trace subscription (`specs/link-control.md`, "`TRACE_SET`"): a LEVEL with an
+/// expiry, latest-wins across subscribers, and the emission cadence over the window counter. Pure:
+/// the loop pass hands it the tick and the window, and acts on what it returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceSubscription {
+    /// The effective divisor, 0 = off.
+    divisor: u8,
+    motor: u8,
+    /// The tick of the last `TRACE_SET` with a non-zero divisor.
+    renewed: u32,
+    /// The window counter of the last emission, `None` before the first of this subscription.
+    last: Option<u16>,
+}
+
+impl Default for TraceSubscription {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TraceSubscription {
+    /// No subscription.
+    pub const fn new() -> Self {
+        TraceSubscription {
+            divisor: 0,
+            motor: 0,
+            renewed: 0,
+            last: None,
+        }
+    }
+
+    /// Apply a `TRACE_SET` heard at tick `now`; `motor_up` says whether this board brought its
+    /// `motor` up. A motor it has not is refused with no change at all, the reset bit included.
+    /// Returns the motor whose tracking table to clear when the reset bit was set.
+    pub fn apply(&mut self, s: TraceSet, now: u32, motor_up: bool) -> Option<u8> {
+        if !motor_up {
+            return None;
+        }
+        let d = s.effective_divisor();
+        if d == 0 {
+            self.divisor = 0;
+        } else {
+            if !self.active(now) {
+                self.last = None;
+            }
+            self.divisor = d;
+            self.motor = s.motor;
+            self.renewed = now;
+        }
+        s.reset().then_some(s.motor)
+    }
+
+    /// Whether a subscription is live at tick `now`: a non-zero divisor renewed less than
+    /// [`TRACE_TIMEOUT_TICKS`] ago.
+    pub fn active(&self, now: u32) -> bool {
+        self.divisor != 0 && now.wrapping_sub(self.renewed) < TRACE_TIMEOUT_TICKS
+    }
+
+    /// The effective divisor, 0 = off.
+    pub fn divisor(&self) -> u8 {
+        self.divisor
+    }
+
+    /// The emission decision at tick `now` with the window counter at `window`: the motor to emit
+    /// for when the subscription is live and `window` is the divisor or more past the last
+    /// emission (or this subscription has emitted none), which it records; `None` otherwise.
+    pub fn due(&mut self, window: u16, now: u32) -> Option<u8> {
+        if !self.active(now) {
+            return None;
+        }
+        match self.last {
+            Some(l) if window.wrapping_sub(l) < self.divisor as u16 => None,
+            _ => {
+                self.last = Some(window);
+                Some(self.motor)
+            }
+        }
+    }
+}
+
 // --- Dispatch ----------------------------------------------------------------------------------
 
 /// A decoded control-block payload, tagged by family.
@@ -753,10 +1048,14 @@ pub enum Payload {
     DriveCmd(DriveCmd),
     /// [`OP_INPUTS`].
     Inputs(Inputs),
+    /// [`OP_TRACE_SET`].
+    TraceSet(TraceSet),
 }
 
 /// Decode a delivered control-block PDU payload by opcode (the firmware's routing entry for the
-/// `0x10..0x2F` hand-back, `specs/integration.md`). Returns `None` for an opcode this crate does
+/// `0x10..0x2F` hand-back, `specs/integration.md`). The families a board consumes: `FOC_TRACE` is
+/// a board's to send and a host's to read ([`FocTrace::decode`]), so a board image carries no
+/// decoder for it and it reads here as unallocated. Returns `None` for an opcode this crate does
 /// not allocate, a payload shorter than an append-tolerant family's committed prefix, or a
 /// `CYCLIC_STATE` payload that is neither [`CyclicState::ENCODED_LEN`] nor
 /// [`CyclicState::TWO_MOTOR_LEN`]: the delivery class is best-effort, so the PDU is simply
@@ -766,6 +1065,7 @@ pub fn decode(opcode: u8, payload: &[u8]) -> Option<Payload> {
         OP_CYCLIC_STATE => CyclicState::decode(payload).ok().map(Payload::CyclicState),
         OP_DRIVE_CMD => DriveCmd::decode(payload).ok().map(Payload::DriveCmd),
         OP_INPUTS => Inputs::decode(payload).ok().map(Payload::Inputs),
+        OP_TRACE_SET => TraceSet::decode(payload).ok().map(Payload::TraceSet),
         _ => None,
     }
 }
@@ -783,8 +1083,16 @@ mod tests {
         assert_eq!(OP_CYCLIC_STATE, 0x10);
         assert_eq!(OP_DRIVE_CMD, 0x11);
         assert_eq!(OP_INPUTS, 0x12);
-        // All three live in the reserved control block 0x10..0x2F.
-        for op in [OP_CYCLIC_STATE, OP_DRIVE_CMD, OP_INPUTS] {
+        assert_eq!(OP_FOC_TRACE, 0x15);
+        assert_eq!(OP_TRACE_SET, 0x16);
+        // All five live in the reserved control block 0x10..0x2F.
+        for op in [
+            OP_CYCLIC_STATE,
+            OP_DRIVE_CMD,
+            OP_INPUTS,
+            OP_FOC_TRACE,
+            OP_TRACE_SET,
+        ] {
             assert!((0x10..0x2F).contains(&op));
         }
     }
@@ -795,6 +1103,7 @@ mod tests {
         assert_eq!(CYCLIC_TIMEOUT_TICKS, 25);
         assert_eq!(DRIVE_TIMEOUT_TICKS, 50);
         assert_eq!(INPUTS_TIMEOUT_TICKS, 375);
+        assert_eq!(TRACE_TIMEOUT_TICKS, 375);
     }
 
     #[test]
@@ -802,6 +1111,8 @@ mod tests {
         assert_eq!(CyclicState::LEN, 16);
         assert_eq!(DriveCmd::LEN, 6);
         assert_eq!(Inputs::LEN, 2);
+        assert_eq!(FocTrace::LEN, 46);
+        assert_eq!(TraceSet::LEN, 2);
     }
 
     /// The appended block's length and the `CYCLIC_STATE` payload's one on-wire length, against
@@ -1253,15 +1564,25 @@ mod tests {
             rider: 0,
         };
         assert!(!i.power_request());
+        assert!(!i.observer_request());
         assert!(!i.rider_present());
         i.buttons = Inputs::BUTTON_POWER;
         i.rider = Inputs::RIDER_PRESENT;
         assert!(i.power_request());
+        assert!(!i.observer_request(), "bit0 is not the observer");
         assert!(i.rider_present());
-        // Only bit0 is defined on each byte.
-        i.buttons = 0xFE;
+        i.buttons = Inputs::BUTTON_OBSERVER;
+        assert!(i.observer_request());
+        assert!(!i.power_request(), "bit2 is not the power request");
+        assert!(!i.horn(), "bit2 is not the horn");
+        i.buttons = Inputs::BUTTON_HORN;
+        assert!(!i.observer_request(), "bit1 is not the observer");
+        // Bits 0 to 2 are defined on `buttons`, bit0 on `rider`.
+        i.buttons = 0xF8;
         i.rider = 0xFE;
         assert!(!i.power_request());
+        assert!(!i.horn());
+        assert!(!i.observer_request());
         assert!(!i.rider_present());
     }
 
@@ -1329,5 +1650,248 @@ mod tests {
         );
         assert_eq!(decode(OP_DRIVE_CMD, &buf[..DriveCmd::LEN - 1]), None);
         assert_eq!(decode(OP_INPUTS, &buf[..Inputs::LEN - 1]), None);
+    }
+
+    // -- FOC_TRACE and TRACE_SET (`specs/link-control.md`; `specs/flux-observer.md`) -----------
+
+    fn trace_sample() -> FocTrace {
+        FocTrace {
+            window: 0x1234,
+            id: -2,
+            iq: 300,
+            iq_ref: 0x0102,
+            vq: -31_999,
+            hall_angle: 0xABCD,
+            obs_angle: 0xA0B0,
+            err_mean: -273,
+            err_spread: 182,
+            flux_mag: 21_000,
+            speed: -7,
+            held_a: 18,
+            held_b: 27,
+            coasted: 5,
+            cause: 0x2A,
+            flags: FocTrace::FLAG_TRACKED | FocTrace::FLAG_IN_WINDOW,
+            method: 2,
+            lock_bin: 4,
+            motor: 1,
+            track: [
+                255, 255, 255, 255, 250, 249, 0, 125, 1, 2, 3, 4, 5, 6, 7, 255,
+            ],
+        }
+    }
+
+    #[test]
+    fn foc_trace_encodes_to_the_pinned_bytes_and_back() {
+        let t = trace_sample();
+        let mut buf = [0u8; FocTrace::LEN];
+        assert_eq!(t.encode(&mut buf), FocTrace::LEN);
+        assert_eq!(
+            buf,
+            [
+                0x34, 0x12, // window
+                0xFE, 0xFF, // id -2
+                0x2C, 0x01, // iq 300
+                0x02, 0x01, // iq_ref 0x0102
+                0x01, 0x83, // vq -31999
+                0xCD, 0xAB, // hall_angle
+                0xB0, 0xA0, // obs_angle
+                0xEF, 0xFE, // err_mean -273
+                0xB6, 0x00, // err_spread 182
+                0x08, 0x52, // flux_mag 21000
+                0xF9, 0xFF, // speed -7
+                18, 27, 5, 0x2A, // held_a, held_b, coasted, cause
+                0x0A, 2, 4, 1, // flags, method, lock_bin, motor
+                255, 255, 255, 255, 250, 249, 0, 125, 1, 2, 3, 4, 5, 6, 7,
+                255, // track, from 30
+            ]
+        );
+        assert_eq!(FocTrace::decode(&buf), Ok(t));
+        // The board's dispatch does not take it: a board sends `FOC_TRACE`, never consumes it.
+        assert_eq!(decode(OP_FOC_TRACE, &buf), None);
+        // The committed prefix: a byte short is refused, a trailing byte is ignored.
+        assert_eq!(
+            FocTrace::decode(&buf[..FocTrace::LEN - 1]),
+            Err(DecodeError::TooShort)
+        );
+        let mut long = [0u8; FocTrace::LEN + 1];
+        long[..FocTrace::LEN].copy_from_slice(&buf);
+        assert_eq!(FocTrace::decode(&long), Ok(t));
+    }
+
+    #[test]
+    fn trace_set_encodes_to_the_pinned_bytes_and_back() {
+        let s = TraceSet {
+            divisor: TraceSet::RESET | 25,
+            motor: 1,
+        };
+        let mut buf = [0u8; TraceSet::LEN];
+        assert_eq!(s.encode(&mut buf), TraceSet::LEN);
+        assert_eq!(buf, [0x99, 0x01]);
+        assert_eq!(decode(OP_TRACE_SET, &buf), Some(Payload::TraceSet(s)));
+        assert_eq!(decode(OP_TRACE_SET, &buf[..1]), None);
+        assert!(s.reset());
+        assert_eq!(s.effective_divisor(), 25);
+    }
+
+    /// A divisor of 1 to 4 reads as 5; 0 is off; above 4 is itself; the reset bit is not part of
+    /// it.
+    #[test]
+    fn a_divisor_of_one_to_four_reads_as_five() {
+        for d in 1..=4u8 {
+            let s = TraceSet {
+                divisor: d,
+                motor: 0,
+            };
+            assert_eq!(s.effective_divisor(), 5, "{d}");
+            let s = TraceSet {
+                divisor: d | TraceSet::RESET,
+                motor: 0,
+            };
+            assert_eq!(s.effective_divisor(), 5, "{d} with reset");
+        }
+        for (d, want) in [
+            (0u8, 0u8),
+            (5, 5),
+            (6, 6),
+            (25, 25),
+            (0x7F, 0x7F),
+            (0x80, 0),
+        ] {
+            assert_eq!(
+                TraceSet {
+                    divisor: d,
+                    motor: 0
+                }
+                .effective_divisor(),
+                want,
+                "{d}"
+            );
+        }
+    }
+
+    /// The subscription lasts 1.5 s from the last `TRACE_SET` with a non-zero divisor, and a
+    /// renewal inside it keeps it; a divisor of 0 ends it at once.
+    #[test]
+    fn the_subscription_expires_at_one_and_a_half_seconds_and_renews() {
+        let mut sub = TraceSubscription::new();
+        assert!(!sub.active(0));
+        let on = TraceSet {
+            divisor: 5,
+            motor: 0,
+        };
+        assert_eq!(sub.apply(on, 1000, true), None);
+        assert!(sub.active(1000));
+        assert!(sub.active(1000 + TRACE_TIMEOUT_TICKS - 1));
+        assert!(!sub.active(1000 + TRACE_TIMEOUT_TICKS));
+        // Renewed at 2 Hz (125 ticks) it never lapses.
+        let mut t = 1000;
+        for _ in 0..20 {
+            t += 125;
+            sub.apply(on, t, true);
+            assert!(sub.active(t + 124));
+        }
+        // Across the tick counter's wrap.
+        sub.apply(on, u32::MAX - 10, true);
+        assert!(sub.active(5));
+        // Off at once.
+        sub.apply(
+            TraceSet {
+                divisor: 0,
+                motor: 0,
+            },
+            t + 1,
+            true,
+        );
+        assert!(!sub.active(t + 1));
+        assert_eq!(sub.divisor(), 0);
+    }
+
+    /// The reset bit applies with any divisor, 0 included, and names the motor in the frame; a
+    /// motor the board did not bring up is refused with no change and no reset.
+    #[test]
+    fn the_reset_bit_applies_with_a_divisor_of_zero_and_a_motor_not_up_is_refused() {
+        let mut sub = TraceSubscription::new();
+        let reset_only = TraceSet {
+            divisor: TraceSet::RESET,
+            motor: 0,
+        };
+        assert_eq!(sub.apply(reset_only, 10, true), Some(0));
+        assert!(
+            !sub.active(10),
+            "a reset with divisor 0 subscribes to nothing"
+        );
+        sub.apply(
+            TraceSet {
+                divisor: 10,
+                motor: 0,
+            },
+            20,
+            true,
+        );
+        assert_eq!(
+            sub.apply(
+                TraceSet {
+                    divisor: TraceSet::RESET | 10,
+                    motor: 1
+                },
+                30,
+                false
+            ),
+            None,
+            "motor 1 not up: refused, no reset"
+        );
+        assert!(sub.active(30));
+        assert_eq!(sub.due(100, 30), Some(0), "still motor 0");
+        assert_eq!(
+            sub.apply(
+                TraceSet {
+                    divisor: TraceSet::RESET | 10,
+                    motor: 1
+                },
+                40,
+                true
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            sub.due(110, 40),
+            Some(1),
+            "the new motor from the next window"
+        );
+    }
+
+    /// The emission cadence: the first window of a subscription, then every `divisor` windows,
+    /// across the counter's wrap; nothing once expired.
+    #[test]
+    fn the_emission_is_every_divisor_windows() {
+        let mut sub = TraceSubscription::new();
+        sub.apply(
+            TraceSet {
+                divisor: 5,
+                motor: 0,
+            },
+            0,
+            true,
+        );
+        let emitted: std::vec::Vec<u16> = (0xFFF0u16..=0xFFFF)
+            .chain(0..20)
+            .filter(|w| sub.due(*w, 1).is_some())
+            .collect();
+        assert_eq!(emitted, [0xFFF0, 0xFFF5, 0xFFFA, 0xFFFF, 4, 9, 14, 19]);
+        // The same window twice emits once.
+        assert_eq!(sub.due(24, 1), Some(0));
+        assert_eq!(sub.due(24, 1), None);
+        assert_eq!(sub.due(100, TRACE_TIMEOUT_TICKS), None, "expired");
+        // A fresh subscription after an expiry emits at its first window.
+        sub.apply(
+            TraceSet {
+                divisor: 5,
+                motor: 0,
+            },
+            1000,
+            true,
+        );
+        assert_eq!(sub.due(25, 1000), Some(0));
     }
 }

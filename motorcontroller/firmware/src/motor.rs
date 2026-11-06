@@ -126,7 +126,7 @@ pub static PERIODS: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 #[cfg_attr(feature = "gd32f103rc", used)]
 pub static EDGES: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
 /// Motor fault bits ([`FAULT_HALL`], [`FAULT_DUTY_RANGE`], [`FAULT_DEMAND_STALE`],
-/// [`FAULT_INIT_CAL`], [`FAULT_METHOD`]). Written by the period ISR (sticky within a boot), seeded
+/// [`FAULT_INIT_CAL`], [`FAULT_METHOD`], [`FAULT_HALL_DECODED`]). Written by the period ISR (sticky within a boot), seeded
 /// by the bring-up with the two bits it can raise before the ISR exists.
 #[cfg_attr(feature = "gd32f103rc", used)]
 pub static FAULT: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
@@ -202,6 +202,37 @@ pub const FAULT_INIT_CAL: u32 = 1 << 3;
 /// `EV_MODE_FAULT`). The refused-cal half of the demotion keeps its own teeth, because
 /// [`FAULT_INIT_CAL`] IS a producer, so that board does not arm at all.
 pub const FAULT_METHOD: u32 = 1 << 4;
+
+/// The front end's hall fault as decoded, whether or not the latch took it
+/// ([`hall_fault_bits`]): the `FOC_TRACE` frame's `hall_fault` column. Not a
+/// [`motor_fault_level`] producer; [`FAULT_HALL`] is.
+pub const FAULT_HALL_DECODED: u32 = 1 << 5;
+
+/// The [`FAULT`] bits a period's hall-fault reading raises (`specs/flux-observer.md`, "S4, first
+/// slice", "The halls while the level is held"): [`FAULT_HALL_DECODED`] whenever the front end's
+/// latched `hall_fault` is set, and [`FAULT_HALL`], the motor's fault latch and a
+/// [`motor_fault_level`] producer, only while the observer is not the angle source. So a wheel
+/// commutated from the observer keeps turning with the hall plug out, and releasing the level
+/// with the fault still decoded latches it on the next period. The front end's fault is sticky,
+/// so nothing is lost by masking it for as long as the level is held.
+#[inline(always)]
+pub const fn hall_fault_bits(hall_fault: bool, observer_source: bool) -> u32 {
+    if !hall_fault {
+        0
+    } else if observer_source {
+        FAULT_HALL_DECODED
+    } else {
+        FAULT_HALL | FAULT_HALL_DECODED
+    }
+}
+
+/// Whether the period commutates from the flux observer's angle (`specs/flux-observer.md`, "S4,
+/// first slice"): the rider's level ([`OBSERVER_SOURCE`]) on a motor whose method is FOC. Six-step
+/// and sine ignore the level.
+#[inline(always)]
+pub const fn observer_drives(level: bool, foc: bool) -> bool {
+    level && foc
+}
 
 /// `OBS_STATE` flag: the motor was brought up (the plan carried a motor and every step succeeded).
 pub const OBS_CONFIGURED: u32 = 1 << 0;
@@ -519,6 +550,42 @@ pub static OBS_FOC_REF: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT
 /// boot. Written by the period ISR at each window boundary, in every method.
 #[cfg_attr(feature = "gd32f103rc", used)]
 pub static OBS_FOC_HOLD: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
+/// The flux observer's angles at the window close (`specs/flux-observer.md`, "What it publishes",
+/// `CTRL_OBS` word 52; [`commutation::observer::pack_angles`]): `theta`, the hall angle the angle
+/// path aligned (the angle the inverse Park used unless the observer was the source,
+/// [`OBSERVER_SOURCE`]), low half, the observer's angle high half. Written by the period ISR at each window
+/// boundary; 0 while the method is not FOC.
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_FOC_ANGLES: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
+/// The observer's verdict sums (`CTRL_OBS` word 53; [`commutation::observer::pack_track`]): the
+/// window's angle-error mean low half, its spread high half, both `i16` in angle units.
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_FOC_TRACK: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
+/// The observer's flux and tracking word (`CTRL_OBS` word 54;
+/// [`commutation::observer::pack_flux`]): the window's RMS flux magnitude in microvolt-seconds low
+/// half; the lock bin (bits 16..23), this window tracked (bit 24), the observer is the angle
+/// source (bit 25: the window's last period drove from it, [`OBSERVER_SOURCE`]) and the front end
+/// in its interpolation window at the close (bit 26) high half.
+#[cfg_attr(feature = "gd32f103rc", used)]
+pub static OBS_FOC_FLUX: [AtomicU32; COUNT] = [const { AtomicU32::new(0) }; COUNT];
+/// The observer's tracking table, per motor (`specs/flux-observer.md`, "Per speed bin"): the
+/// period ISR is its sole writer, crediting each judged window at the close and clearing it on a
+/// request ([`OBS_TRACK_RESET`]); the loop reads it for `FOC_TRACE`. Zero at boot.
+pub static OBS_TRACK_TABLE: [commutation::observer::TrackTable; COUNT] =
+    [const { commutation::observer::TrackTable::new() }; COUNT];
+/// A request to clear [`OBS_TRACK_TABLE`] at the motor's next window close, raised by the loop
+/// on a `TRACE_SET` with the reset bit and lowered by the period ISR when it clears the table.
+pub static OBS_TRACK_RESET: [AtomicBool; COUNT] = [const { AtomicBool::new(false) }; COUNT];
+/// The observer-source level, per motor (`specs/flux-observer.md`, "S4, first slice"): while set
+/// and the motor's method is FOC, the period ISR commutates from the flux observer's angle in
+/// place of the hall front end's. Written by the 250 Hz loop from the `INPUTS` mirror's bit 1
+/// (`orchestrator::LinkInbox::remote_observer_request`, fresh and owner scoped), read by the
+/// period ISR. Not a fault, not a gate: nothing else reads it.
+pub static OBSERVER_SOURCE: [AtomicBool; COUNT] = [const { AtomicBool::new(false) }; COUNT];
+/// The observer's bus scale ([`commutation::observer::BusScale`], packed): the 250 Hz loop is its
+/// writer, the period ISR applies it to the period's battery count ([`VBATT_RAW`]). Zero, which
+/// suspends the observer, until the loop has a bus voltage to give it.
+pub static OBS_BUS: AtomicU32 = AtomicU32::new(0);
 /// The battery-sense count (`specs/sensing-and-safety.md`, "The battery word", acquisition): the
 /// injected group's THIRD rank, reduced once to the 12-bit right-aligned count (`sample >> 3`, the
 /// left-aligned datum's unit, bring-up step 9's contract). Written by the period ISR every period,
@@ -1785,6 +1852,26 @@ pub struct BootFixed {
     /// re-taken. A board with no phase-current group never builds a `BootFixed` at all
     /// ([`MotorSkip::NoCurrentSense`]), which is how `current_sense = 0` reaches this gate.
     pub accepted_offsets: Option<commutation::foc::PhaseOffsets>,
+    /// The `motor.dead_time` DTG code the gate timer was programmed with (`store::MOTOR_DEAD_TIME`,
+    /// boot-read): the flux observer's dead-time compensation is taken from it
+    /// ([`dead_time_ticks`]), and it rides here for the floor's reason, so every re-derivation of
+    /// the observer's parameters uses the dead time the timer actually runs.
+    pub dead_time: u8,
+}
+
+/// The dead time a `motor.dead_time` DTG code programs, in gate-timer ticks: the BDTR `DTG`
+/// encoding (`specs/commutation.md`) in dead-time-generator ticks, each
+/// `board::DEAD_TIME_DTS_DIV` timer ticks. Codes `0..=127` count single generator ticks; `10x`
+/// `(64 + low 6 bits) * 2`; `110` `(32 + low 5) * 8`; `111` `(32 + low 5) * 16`.
+pub const fn dead_time_ticks(dtg: u8) -> u32 {
+    let d = dtg as u32;
+    let gen = match d >> 5 {
+        0..=3 => d,
+        4 | 5 => (64 + (d & 0x3F)) * 2,
+        6 => (32 + (d & 0x1F)) * 8,
+        _ => (32 + (d & 0x1F)) * 16,
+    };
+    gen * board::DEAD_TIME_DTS_DIV
 }
 
 /// What the boot reads from the store for one motor's bring-up beside its layout
@@ -2069,6 +2156,7 @@ pub mod hw {
     use super::*;
     use crate::layout::{Motor, Pair, Pin3, Sense};
     use commutation::foc::PhaseOffsets;
+    use commutation::observer::{self, FluxObserver, ObserverInput, ObserverParams};
     use commutation::Commutator;
     use core::ptr::addr_of_mut;
     use embedded_hal::digital::OutputPin;
@@ -2263,6 +2351,11 @@ pub mod hw {
         buzzer: Option<BuzzerPin>,
         /// The tone step's phase and the level last written (motor 0's alone is stepped).
         tone: ToneStep,
+        /// The flux observer in shadow (`specs/flux-observer.md`): its flux and its open window.
+        /// Not part of the method records, so an arm does not restart it.
+        observer: FluxObserver,
+        /// The observer's pre-scaled parameters, installed whole by [`install_observer`].
+        obs_params: ObserverParams,
     }
 
     /// The ISR's state. Written by the bring-up before the period vector is unmasked, and
@@ -2437,6 +2530,22 @@ pub mod hw {
                 }
             }
             motors[0].is_some()
+        })
+    }
+
+    /// Install the flux observer's parameters into the period ISR's record, every motor's in one
+    /// critical section (the [`MOTOR`] invariant, as [`install_rederived`]): the loop pass derives
+    /// them (`crate::observer`) at boot, at every arm and after a tune or a persisted write, and
+    /// never in the ISR. The observer's flux, its window and the tracking table are left alone.
+    pub fn install_observer(p: &[ObserverParams; COUNT]) {
+        cortex_m::interrupt::free(|_| {
+            // SAFETY: the period vector cannot fire inside this section (the `MOTOR` invariant).
+            let motors = unsafe { &mut *addr_of_mut!(MOTOR) };
+            for (slot, p) in motors.iter_mut().zip(p) {
+                if let Some(m) = slot.as_mut() {
+                    m.obs_params = *p;
+                }
+            }
         })
     }
 
@@ -3076,6 +3185,7 @@ pub mod hw {
             accepted_offsets: accepted,
             #[cfg(feature = "gd32f103rc")]
             dc_link,
+            dead_time: m.dead_time,
         };
         // Forward, offset 0, and the floor's limit until the arm row's install.
         let decode = commutation::sixstep::SixStep::new(commutation::Direction::Forward, 0);
@@ -3138,6 +3248,17 @@ pub mod hw {
                 causes: cal_bits,
                 buzzer,
                 tone: ToneStep::new(),
+                observer: FluxObserver::new(),
+                // The registered defaults until the boot's first `install_observer`, which follows
+                // this bring-up with the stored words.
+                obs_params: ObserverParams::derive(
+                    store::OBSERVER_MODEL.defaults(),
+                    store::OBSERVER_SHADOW.defaults(),
+                    store::MOTOR_CURRENT_CAL.default(),
+                    dead_time_ticks(m.dead_time),
+                    // The arm's install carries the stored direction; nothing drives before it.
+                    commutation::Direction::Forward,
+                ),
             });
         }
         // The sample hold's threshold for THIS motor (`specs/foc-torque.md` section 14): the bound
@@ -3450,12 +3571,20 @@ pub mod hw {
         if COUNT == 1 {
             VBATT_RAW.store((samples[2] >> 3) as u32, Ordering::Relaxed);
         }
+        // The flux observer's bus scale for this period: this period's battery count on a
+        // one-motor image (stored just above), the 250 Hz conversion on the two-motor one, through
+        // the loop's published scale; 0 suspends the observer (`specs/flux-observer.md`, "Voltage
+        // sensing").
+        let kv = observer::bus_kv(
+            VBATT_RAW.load(Ordering::Relaxed),
+            OBS_BUS.load(Ordering::Relaxed),
+        );
         // Motor `i`'s sensed pair is ranks `2i` and `2i + 1`.
-        motor_period(m0, 0, [samples[0], samples[1]], armed);
+        motor_period(m0, 0, [samples[0], samples[1]], armed, kv);
         for (k, slot) in rest.iter_mut().enumerate() {
             let i = k + 1;
             if let Some(m) = slot.as_mut() {
-                motor_period(m, i, [samples[2 * i], samples[2 * i + 1]], armed);
+                motor_period(m, i, [samples[2 * i], samples[2 * i + 1]], armed, kv);
             }
         }
         // LAST, after every motor's writes, so it never delays the commutation: the buzzer's tone
@@ -3474,7 +3603,7 @@ pub mod hw {
     /// motor, so the hot window carries no call. Every motor reads the one demand sequence and the
     /// one arm state (section 5.6), so a stalled 250 Hz task coasts both.
     #[inline(always)]
-    fn motor_period(m: &mut MotorRuntime, i: usize, raw: [u16; 2], armed: bool) {
+    fn motor_period(m: &mut MotorRuntime, i: usize, raw: [u16; 2], armed: bool, kv: i32) {
         // The two conditioned phase currents, this period, from the same two samples (the stock
         // unit, against the bring-up's measured zeros): the current limit's input, and the FOC
         // arm's, which takes this pair rather than computing it a second time. Where FOC runs the
@@ -3539,9 +3668,28 @@ pub mod hw {
         m.coasted = m.coasted.wrapping_add(coast as u8);
         m.causes |= coast_causes(armed, stale, current.chop);
 
+        // The flux observer's input (`specs/flux-observer.md`, "Design (S1)"): the vector the LAST
+        // period computed, read before the step overwrites it, and this period's hall `theta`,
+        // read after it. FOC periods only: the other arms hand it no voltage vector.
+        let applied_before = m.commutator.foc_applied();
+        // The angle source ("S4, first slice"): with the rider's level held, the FOC arm takes the
+        // observer's angle as the last period's step left it (the integrator's angle at the start
+        // of this period, one period behind the rotor) in place of the hall angle; the other arms
+        // ignore it. One load and one select: `applied_before` is `Some` on FOC alone, the test
+        // the line above already made, so six-step and sine never see the level (and word 54's
+        // bit 9 and the hall-fault mask below follow it).
+        let source = observer_drives(
+            OBSERVER_SOURCE[i].load(Ordering::Relaxed),
+            applied_before.is_some(),
+        );
+        let obs_angle = if source {
+            Some(m.observer.source_angle(&m.obs_params))
+        } else {
+            None
+        };
         let out = m
             .commutator
-            .step(levels, (ia, ib), demand, !coast, hold || rail);
+            .step(levels, (ia, ib), demand, !coast, hold || rail, obs_angle);
         let (duties, enables) = out.to_duties_enables();
         // Flag, for the coming period, the sensed phases these duties drive above the threshold
         // (section 14, step 13 of the chain): decided on the duties as computed, since a coasted
@@ -3577,6 +3725,26 @@ pub mod hw {
             enables
         };
         m.sample_enables = applied_enables;
+        // The observer steps AFTER the duties and enables are written: its cycles are then off
+        // the period's critical path, where they pushed the duty write past the timer's load
+        // point on some periods and that period's duty landed a period late, a torque tick
+        // (offroad 2026-11-04: clicks on the halls with the observer in shadow, none on the
+        // base image, no period skipped). Its inputs are this period's, read before the step.
+        if let Some(before) = applied_before {
+            let front = &m.commutator.front().comm;
+            m.observer.step(
+                &m.obs_params,
+                &ObserverInput {
+                    v: (before.alpha, before.beta),
+                    i: (ia, ib),
+                    theta: m.commutator.theta(),
+                    kv,
+                    speed: front.speed,
+                    hall_fault: front.hall_fault,
+                    drive: !coast,
+                },
+            );
+        }
         // Re-arm the ADC trigger compare so the next period samples at the same instant: motor 0's
         // timer, TIMER0, carries the trigger for the board.
         if i == 0 {
@@ -3621,13 +3789,33 @@ pub mod hw {
                 m.dc_sum = 0;
             }
             m.causes &= HOLD_CAL_PAIRS_MASK | HOLD_CAL_DISAGREED;
+            // The observer's window (`specs/flux-observer.md`, "Per window"): its verdict, the
+            // table credited with a judged window at the bin of the speed latched now, the lock
+            // bin over the table, and the three words. A window the observer did not run in (not
+            // FOC) reads zero and credits nothing.
+            let table = &OBS_TRACK_TABLE[i];
+            if OBS_TRACK_RESET[i].load(Ordering::Relaxed) {
+                table.clear();
+                OBS_TRACK_RESET[i].store(false, Ordering::Relaxed);
+            }
+            let w = m.observer.close(&m.obs_params);
+            let front = &m.commutator.front().comm;
+            if w.judged {
+                table.credit(observer::bin(front.speed), w.tracked);
+            }
+            let p = &m.obs_params;
+            let lock = table.lock_bin(p.min_windows, p.ratio);
+            OBS_FOC_ANGLES[i].store(observer::pack_angles(&w), Ordering::Relaxed);
+            OBS_FOC_TRACK[i].store(observer::pack_track(&w), Ordering::Relaxed);
+            OBS_FOC_FLUX[i].store(
+                observer::pack_flux(&w, lock, source, front.in_window),
+                Ordering::Relaxed,
+            );
         }
         // The front end's words, borrowed after the window branch: closing the FOC window takes
         // the commutator mutably.
         let comm = &m.commutator.front().comm;
-        if comm.hall_fault {
-            m.faults |= FAULT_HALL;
-        }
+        m.faults |= hall_fault_bits(comm.hall_fault, source);
         ANGLE[i].store(comm.angle as u32, Ordering::Relaxed);
         SPEED[i].store(comm.speed, Ordering::Relaxed);
         WHEEL_RATE_Q12[i].store(comm.rate_q, Ordering::Relaxed);
@@ -4037,7 +4225,7 @@ mod tests {
                 16_000,
                 DECODE,
             );
-            c.step(halls, (0, 0), 0, true, false).phases
+            c.step(halls, (0, 0), 0, true, false, None).phases
         };
         assert_eq!(
             step(0),
@@ -4235,6 +4423,7 @@ mod tests {
         noise_floor: FLOOR,
         accepted_offsets: None,
         dc_link: None,
+        dead_time: 28,
     };
 
     /// A six-step decode as an arm would have re-read it: Forward, align offset 2.
@@ -4812,11 +5001,57 @@ mod tests {
         // duty left the outputs untouched. Both stay observable in the motor block.
         assert_eq!(motor_fault_level(true, FAULT_DEMAND_STALE, false, false), 0);
         assert_eq!(motor_fault_level(true, FAULT_DUTY_RANGE, false, false), 0);
+        // The decoded hall fault is the trace's, not a producer: [`FAULT_HALL`] is the latch.
+        assert_eq!(motor_fault_level(true, FAULT_HALL_DECODED, false, false), 0);
         // Nothing configured: nothing produced, whatever the words say.
         assert_eq!(
             motor_fault_level(false, FAULT_HALL | FAULT_INIT_CAL, true, true),
             0
         );
+    }
+
+    /// The observer source (`specs/flux-observer.md`, "S4, first slice"): the level drives a FOC
+    /// motor only, and while it does the hall fault reaches the trace and not the latch; once the
+    /// level clears, the same decoded fault latches on the next period and the motor-side level
+    /// shuts the board down as before.
+    #[test]
+    fn the_observer_level_masks_the_hall_latch_on_foc_only() {
+        let foc =
+            |method: commutation::CommutationMethod| method == commutation::CommutationMethod::Foc;
+        use commutation::CommutationMethod as M;
+        for method in [M::SixStep, M::Sine, M::Foc] {
+            assert!(!observer_drives(false, foc(method)), "{method:?}: no level");
+            assert_eq!(observer_drives(true, foc(method)), method == M::Foc);
+        }
+
+        // No fault: nothing raised either way.
+        assert_eq!(hall_fault_bits(false, false), 0);
+        assert_eq!(hall_fault_bits(false, true), 0);
+
+        // The ISR's accumulation over a held level, then the release, with the plug out.
+        let mut faults = 0u32;
+        for _ in 0..1000 {
+            faults |= hall_fault_bits(true, observer_drives(true, true));
+        }
+        assert_eq!(
+            faults & FAULT_HALL,
+            0,
+            "the latch does not take it while held"
+        );
+        assert_ne!(faults & FAULT_HALL_DECODED, 0, "the trace still says so");
+        assert_eq!(motor_fault_level(true, faults, false, false), 0);
+        faults |= hall_fault_bits(true, observer_drives(false, true));
+        assert_ne!(faults & FAULT_HALL, 0, "the release latches it");
+        assert_eq!(motor_fault_level(true, faults, false, false), EV_MOTOR_HALL);
+        // Sticky: pressing the button again does not clear a latched fault.
+        faults |= hall_fault_bits(true, observer_drives(true, true));
+        assert_ne!(faults & FAULT_HALL, 0);
+
+        // Six-step and sine latch it with the level held: the level never reaches them.
+        for method in [M::SixStep, M::Sine] {
+            let bits = hall_fault_bits(true, observer_drives(true, foc(method)));
+            assert_eq!(bits, FAULT_HALL | FAULT_HALL_DECODED, "{method:?}");
+        }
     }
 
     /// The balance law's torque-mode flag is the published method byte of a CONFIGURED motor:

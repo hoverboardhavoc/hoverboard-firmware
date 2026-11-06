@@ -99,6 +99,87 @@ pub fn lookup_sincos(theta: u16) -> (i16, i16) {
 }
 
 // ============================================================================================
+// The inverse of the lookup: `atan2` in angle units, and the integer square root
+// (`specs/flux-observer.md`, "`atan2` in Q15, and the square root")
+// ============================================================================================
+
+/// The largest component [`atan2_u16`] folds without a shared right shift: `y << 15` must fit a
+/// `u32`, so both components stay under `2^17`.
+pub const ATAN2_MAX_COMPONENT: u32 = 1 << 17;
+
+/// `atan(r)` for `r` in `[0, 1]` (Q15, `0..=32768`), in angle units (`0..=8192`, a quarter of
+/// [`ANGLE_90`] per unit of `r`): `r * (pi/4 + 0.2733 * (1 - r))`, scaled by `65536 / (2 pi)`, so
+/// the two constants are 8192 (`pi/4` in angle units) and 2851 (`0.2733 * 65536 / (2 pi)`). Worst
+/// error about 0.22 degrees; exact at both ends (`0 -> 0`, `32768 -> 8192`), and increasing.
+#[inline(always)]
+fn atan_octant(r: u32) -> u32 {
+    let k = 8192 + ((2851 * (32768 - r)) >> 15);
+    (r * k) >> 15
+}
+
+/// The angle of the vector `(x, y)` in the front end's units (65536 per revolution, counter-
+/// clockwise from `+x`), the angle [`lookup_sincos`] takes: `lookup_sincos(atan2_u16(y, x))` points
+/// along `(x, y)`.
+///
+/// Octant fold to `0 <= small <= big`, one `UDIV` for `r = (small << 15) / big`, the polynomial of
+/// [`atan_octant`], then unfolded. `(0, 0)` returns 0, and the axes and the four diagonals are
+/// exact. Components at or above [`ATAN2_MAX_COMPONENT`] shift right together until they fit,
+/// which leaves the angle unchanged. Defined for every input (`specs/panic-free.md`): the
+/// magnitudes are `unsigned_abs`, so `i32::MIN` folds, and the divisor is the larger magnitude.
+#[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
+#[inline(never)]
+pub fn atan2_u16(y: i32, x: i32) -> u16 {
+    let mut ax = x.unsigned_abs();
+    let mut ay = y.unsigned_abs();
+    let big = ax.max(ay);
+    if big == 0 {
+        return 0;
+    }
+    // The shared shift: the bits of `big` above the fold's 17.
+    let s = (32 - big.leading_zeros()).saturating_sub(17);
+    ax >>= s;
+    ay >>= s;
+    // The divisor is the larger magnitude, nonzero once the origin has returned; `max(1)` says so
+    // to the compiler, which cannot see it through the shift, so no divide-by-zero panic is
+    // reachable from the ISR.
+    let a = if ay <= ax {
+        atan_octant((ay << 15) / ax.max(1))
+    } else {
+        ANGLE_90 as u32 - atan_octant((ax << 15) / ay.max(1))
+    } as u16;
+    match (x >= 0, y >= 0) {
+        (true, true) => a,
+        (false, true) => 0x8000u16.wrapping_sub(a),
+        (false, false) => 0x8000u16.wrapping_add(a),
+        (true, false) => 0u16.wrapping_sub(a),
+    }
+}
+
+/// `floor(sqrt(v))`, exact over the whole `u64` range: the shift-and-subtract form, one result
+/// bit per round, 32 rounds. Used at the observer's window close, once per 64 periods, which runs
+/// in the period ISR, so it is placed with the ISR.
+#[cfg_attr(target_arch = "arm", link_section = ".hotcode")]
+#[inline(never)]
+pub fn isqrt_u64(v: u64) -> u32 {
+    let mut rem = v;
+    let mut root: u64 = 0;
+    let mut bit: u64 = 1 << 62;
+    while bit > rem {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if rem >= root + bit {
+            rem -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    root as u32
+}
+
+// ============================================================================================
 // Section 8: phase-current zero-offset calibration and per-period current
 // ============================================================================================
 
@@ -1189,6 +1270,24 @@ pub struct FocState {
     lp_d: Lowpass,
     /// Consecutive floated periods so far, against [`FLOAT_HOLD_MAX`]; 0 on a driven period.
     float_run: u16,
+    /// The last period's applied voltage vector and the angle it was built at
+    /// ([`FocState::applied`]), the flux observer's input (`specs/flux-observer.md`, "Units").
+    applied: FocApplied,
+}
+
+/// What one FOC period applied (`specs/foc-torque.md` section 2, step 10): the stator-frame
+/// voltage vector `(alpha, beta)` out of [`park_inverse`], in voltage counts in the crate's
+/// numeric frame, and `theta`, the angle the inverse Park used (the front end's angle plus the
+/// motor's alignment). The flux observer integrates the vector and compares its angle against
+/// `theta` (`specs/flux-observer.md`, "The angle to compare against").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FocApplied {
+    /// The angle the inverse Park used.
+    pub theta: u16,
+    /// The applied `alpha`, voltage counts.
+    pub alpha: i16,
+    /// The applied `beta`, voltage counts, in the stock frame (the negative of the textbook beta).
+    pub beta: i16,
 }
 
 impl FocState {
@@ -1209,7 +1308,18 @@ impl FocState {
             lp_q: Lowpass::new(),
             lp_d: Lowpass::new(),
             float_run: 0,
+            applied: FocApplied {
+                theta: 0,
+                alpha: 0,
+                beta: 0,
+            },
         }
+    }
+
+    /// The last period's applied voltage vector and its angle.
+    #[inline]
+    pub fn applied(&self) -> FocApplied {
+        self.applied
     }
 
     /// The rotor-frame pair of the last period with both sensed phases fresh.
@@ -1375,6 +1485,7 @@ pub fn foc_step(
 
     let (vq, vd) = circular_limit(vq, vd);
     let (alpha, beta) = park_inverse(vq, vd, theta);
+    st.applied = FocApplied { theta, alpha, beta };
     let duties = st.duty_order.apply(svpwm(alpha, beta));
 
     st.sums.iq = st.sums.iq.wrapping_add(iq as i32);

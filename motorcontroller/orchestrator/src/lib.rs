@@ -367,6 +367,9 @@ impl<const M: usize> LinkInbox<M> {
                 self.remote_src = Some(src);
                 self.remote_age = 0;
             }
+            // Not the control block's: the firmware's loop takes `TRACE_SET` before the inbox
+            // (`specs/link-control.md`, "`TRACE_SET`").
+            Payload::TraceSet(_) => {}
         }
     }
 
@@ -542,6 +545,16 @@ impl<const M: usize> LinkInbox<M> {
     /// A stale mirror reads RELEASED, so the horn stops when the controller goes quiet.
     pub fn remote_horn(&self) -> bool {
         self.fresh_remote().map(|i| i.horn()).unwrap_or(false)
+    }
+
+    /// The remote observer-source mirror bit (`INPUTS.buttons` bit 2, level,
+    /// `specs/flux-observer.md`, "S4, first slice"): while set, the FOC commutates from the flux
+    /// observer's angle. The power bit's shape and scoping: a stale mirror reads RELEASED, so a
+    /// dead controller leaves the halls driving.
+    pub fn remote_observer_request(&self) -> bool {
+        self.fresh_remote()
+            .map(|i| i.observer_request())
+            .unwrap_or(false)
     }
 
     /// The remote rider-present mirror bit (`INPUTS.rider` bit 0, level). A stale mirror reads

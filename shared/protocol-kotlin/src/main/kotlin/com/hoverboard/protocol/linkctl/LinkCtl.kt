@@ -56,6 +56,12 @@ const val OP_DRIVE_CMD: Int = 0x11
 /** `INPUTS`: controller/peer -> board input mirror. `shared/linkctl/src/lib.rs`, `OP_INPUTS`. */
 const val OP_INPUTS: Int = 0x12
 
+/** `FOC_TRACE`: board -> controller, one window a frame. `shared/linkctl/src/lib.rs`, `OP_FOC_TRACE`. */
+const val OP_FOC_TRACE: Int = 0x15
+
+/** `TRACE_SET`: controller -> board, the trace subscription. `shared/linkctl/src/lib.rs`, `OP_TRACE_SET`. */
+const val OP_TRACE_SET: Int = 0x16
+
 /**
  * Peer-staleness trip in 250 Hz ticks (100 ms). `shared/linkctl/src/lib.rs`, `CYCLIC_TIMEOUT_TICKS`.
  *
@@ -81,6 +87,12 @@ const val DRIVE_TIMEOUT_TICKS: Int = 50
  * outlasts the remote app's keepalive period by the stated margin, so moving either side fails.
  */
 const val INPUTS_TIMEOUT_TICKS: Int = 375
+
+/**
+ * The trace subscription's expiry in 250 Hz ticks (1.5 s): a subscriber renews its [TraceSet] at
+ * 2 Hz to keep the [FocTrace] stream. `shared/linkctl/src/lib.rs`, `TRACE_TIMEOUT_TICKS`.
+ */
+const val TRACE_TIMEOUT_TICKS: Int = 375
 
 // --- little-endian helpers ----------------------------------------------------------------------
 
@@ -699,7 +711,7 @@ data class DriveCmd(val kind: DriveKind, val value: Int, val steer: Int, val mot
  *
  * Wire layout, 2 bytes (`shared/linkctl/src/lib.rs`, `Inputs::encode`):
  * ```
- * off 0      u8      buttons   bit0 power request, bit1 horn
+ * off 0      u8      buttons   bit0 power request, bit1 horn, bit2 observer source request
  * off 1      u8      rider     bit0 rider present
  * ```
  *
@@ -714,6 +726,12 @@ data class Inputs(val buttons: Int, val rider: Int) {
 
     /** Horn level, `buttons` bit1. `shared/linkctl/src/lib.rs`, `Inputs::horn`. */
     fun horn(): Boolean = buttons and BUTTON_HORN != 0
+
+    /**
+     * Observer-source level, `buttons` bit2. `shared/linkctl/src/lib.rs`,
+     * `Inputs::observer_request`.
+     */
+    fun observerRequest(): Boolean = buttons and BUTTON_OBSERVER != 0
 
     /** Rider-present level, `rider` bit0. `shared/linkctl/src/lib.rs`, `Inputs::rider_present`. */
     fun riderPresent(): Boolean = rider and RIDER_PRESENT != 0
@@ -739,6 +757,12 @@ data class Inputs(val buttons: Int, val rider: Int) {
          */
         const val BUTTON_HORN = 1 shl 1
 
+        /**
+         * `buttons` bit2: observer source request (`specs/flux-observer.md`, "S4, first slice").
+         * `shared/linkctl/src/lib.rs`, `Inputs::BUTTON_OBSERVER`.
+         */
+        const val BUTTON_OBSERVER = 1 shl 2
+
         /** `rider` bit0: rider present. `shared/linkctl/src/lib.rs`, `Inputs::RIDER_PRESENT`. */
         const val RIDER_PRESENT = 1 shl 0
 
@@ -753,6 +777,135 @@ data class Inputs(val buttons: Int, val rider: Int) {
     }
 }
 
+// --- FOC_TRACE (46 B) and TRACE_SET (2 B) -------------------------------------------------------
+
+/**
+ * One closed 64-period window of one motor's FOC loop and flux observer, board -> controller.
+ * Mirror of `shared/linkctl/src/lib.rs`, `FocTrace`; angles in units of 65536 a revolution, the
+ * flux in microvolt-seconds, [track] one byte per speed bin (tracked over seen in 0.4 percent
+ * steps, 255 while the bin is not measured). The app's FOC scope screen draws it.
+ */
+data class FocTrace(
+    val window: Int,
+    val id: Int,
+    val iq: Int,
+    val iqRef: Int,
+    val vq: Int,
+    val hallAngle: Int,
+    val obsAngle: Int,
+    val errMean: Int,
+    val errSpread: Int,
+    val fluxMag: Int,
+    val speed: Int,
+    val heldA: Int,
+    val heldB: Int,
+    val coasted: Int,
+    val cause: Int,
+    val flags: Int,
+    val method: Int,
+    val lockBin: Int,
+    val motor: Int,
+    val track: List<Int>,
+) {
+    companion object {
+        /** On-wire length of the committed prefix. `shared/linkctl/src/lib.rs`, `FocTrace::LEN`. */
+        const val LEN = 46
+
+        /** `flags` bit 0: the hall fault. `shared/linkctl/src/lib.rs`, `FocTrace::FLAG_HALL_FAULT`. */
+        const val FLAG_HALL_FAULT = 1 shl 0
+
+        /** `flags` bit 1: this window tracked. `shared/linkctl/src/lib.rs`, `FocTrace::FLAG_TRACKED`. */
+        const val FLAG_TRACKED = 1 shl 1
+
+        /**
+         * `flags` bit 2: the observer is the angle source (the window's last period drove from it).
+         * `shared/linkctl/src/lib.rs`, `FocTrace::FLAG_OBSERVER_SOURCE`.
+         */
+        const val FLAG_OBSERVER_SOURCE = 1 shl 2
+
+        /**
+         * `flags` bit 3: the front end in its interpolation window at the close.
+         * `shared/linkctl/src/lib.rs`, `FocTrace::FLAG_IN_WINDOW`.
+         */
+        const val FLAG_IN_WINDOW = 1 shl 3
+
+        /** The [track] bytes. */
+        private const val BINS = 16
+
+        /** Where [track] starts. */
+        private const val TRACK_OFF = 30
+
+        /**
+         * Decode the committed prefix, ignoring trailing bytes; null when shorter than [LEN].
+         * `shared/linkctl/src/lib.rs`, `FocTrace::decode`.
+         */
+        fun decode(b: ByteArray): FocTrace? {
+            if (b.size < LEN) return null
+            return FocTrace(
+                window = rdU16(b, 0),
+                id = rdI16(b, 2),
+                iq = rdI16(b, 4),
+                iqRef = rdI16(b, 6),
+                vq = rdI16(b, 8),
+                hallAngle = rdU16(b, 10),
+                obsAngle = rdU16(b, 12),
+                errMean = rdI16(b, 14),
+                errSpread = rdI16(b, 16),
+                fluxMag = rdU16(b, 18),
+                speed = rdI16(b, 20),
+                heldA = rdU8(b, 22),
+                heldB = rdU8(b, 23),
+                coasted = rdU8(b, 24),
+                cause = rdU8(b, 25),
+                flags = rdU8(b, 26),
+                method = rdU8(b, 27),
+                lockBin = rdU8(b, 28),
+                motor = rdU8(b, 29),
+                track = List(BINS) { rdU8(b, TRACK_OFF + it) },
+            )
+        }
+    }
+}
+
+/**
+ * The trace subscription and its keepalive, controller -> board. Mirror of
+ * `shared/linkctl/src/lib.rs`, `TraceSet`: [divisor] bits 0..6 emit every this many window closes
+ * (0 off; the board reads 1 to 4 as [DIVISOR_MIN]), bit 7 ([RESET]) clears the motor's tracking
+ * table first; [motor] the motor traced. Renew within [TRACE_TIMEOUT_TICKS].
+ */
+data class TraceSet(val divisor: Int, val motor: Int) {
+    /** Encode the committed prefix. `shared/linkctl/src/lib.rs`, `TraceSet::encode`. */
+    fun encode(): ByteArray {
+        val out = ByteArray(LEN)
+        out[0] = divisor.toByte()
+        out[1] = motor.toByte()
+        return out
+    }
+
+    companion object {
+        /** On-wire length of the committed prefix. `shared/linkctl/src/lib.rs`, `TraceSet::LEN`. */
+        const val LEN = 2
+
+        /** `divisor` bit 7: clear the tracking table first. `shared/linkctl/src/lib.rs`, `TraceSet::RESET`. */
+        const val RESET = 1 shl 7
+
+        /** `divisor` bits 0..6. `shared/linkctl/src/lib.rs`, `TraceSet::DIVISOR_MASK`. */
+        const val DIVISOR_MASK = 0x7F
+
+        /** The smallest divisor the board runs. `shared/linkctl/src/lib.rs`, `TraceSet::DIVISOR_MIN`. */
+        const val DIVISOR_MIN = 5
+
+        /**
+         * Decode the committed prefix, ignoring trailing bytes; null when shorter than [LEN].
+         * `shared/linkctl/src/lib.rs`, `TraceSet::decode`.
+         */
+        fun decode(b: ByteArray): TraceSet? {
+            if (b.size < LEN) return null
+            return TraceSet(divisor = rdU8(b, 0), motor = rdU8(b, 1))
+        }
+    }
+}
+
 // --- Dispatch -----------------------------------------------------------------------------------
 
 /** A decoded control-block payload, tagged by family. `shared/linkctl/src/lib.rs`, `Payload`. */
@@ -762,6 +915,8 @@ sealed class ControlPayload {
     data class Drive(val cmd: DriveCmd) : ControlPayload()
 
     data class Input(val inputs: Inputs) : ControlPayload()
+
+    data class Trace(val set: TraceSet) : ControlPayload()
 }
 
 /**
@@ -769,11 +924,14 @@ sealed class ControlPayload {
  * `shared/linkctl/src/lib.rs`, `decode`.
  *
  * Returns null for an opcode this file does not allocate, or a payload shorter than the family's
- * committed prefix: the delivery class is best-effort, so the PDU is simply dropped.
+ * committed prefix: the delivery class is best-effort, so the PDU is simply dropped. A
+ * [FocTrace] is a board's to send, so the Rust dispatch carries no decoder for it and a controller
+ * reads it with [FocTrace.decode].
  */
 fun decodeControl(opcode: Int, payload: ByteArray): ControlPayload? = when (opcode) {
     OP_CYCLIC_STATE -> CyclicState.decode(payload)?.let { ControlPayload.Cyclic(it) }
     OP_DRIVE_CMD -> DriveCmd.decode(payload)?.let { ControlPayload.Drive(it) }
     OP_INPUTS -> Inputs.decode(payload)?.let { ControlPayload.Input(it) }
+    OP_TRACE_SET -> TraceSet.decode(payload)?.let { ControlPayload.Trace(it) }
     else -> null
 }

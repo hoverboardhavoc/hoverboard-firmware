@@ -181,6 +181,18 @@ impl FileReader<'_> {
                     }
                     None => self.stop(format!("{path} takes an object of {}", names.join(", "))),
                 },
+                // Motor `m`'s list of `n`: index `m * n + e`.
+                Index::MotorArray(n) => match (v.as_array(), elem) {
+                    (Some(items), Some((_, m))) if items.len() <= n as usize => {
+                        for (e, item) in items.iter().enumerate() {
+                            match m.checked_mul(n).and_then(|b| b.checked_add(e as u8)) {
+                                Some(i) => self.add(at(i), item),
+                                None => self.stop(format!("motors[{m}] is past the key space")),
+                            }
+                        }
+                    }
+                    _ => self.stop(format!("{path} takes a list of {n} values")),
+                },
                 _ => self.add(at(elem.map_or(0, |(_, i)| i)), v),
             }
             return;
@@ -377,6 +389,18 @@ pub fn to_file(reads: &Reads, remaps: bool) -> Json {
                 }
                 let name = row.index.name(key.index).expect("a table key's name");
                 s[name] = v;
+            }
+            Index::MotorArray(n) => {
+                let elems = arrays.entry("motors").or_default();
+                let (m, e) = ((key.index / n) as usize, (key.index % n) as usize);
+                if elems.len() <= m {
+                    elems.resize_with(m + 1, Map::new);
+                }
+                let s = slot(&mut elems[m], row.path);
+                if !s.is_array() {
+                    *s = Json::Array(vec![Json::Null; n as usize]);
+                }
+                s[e] = v;
             }
             Index::Single => *slot(&mut top, row.path) = v,
         }
@@ -1146,6 +1170,36 @@ mod tests {
         assert!(!plan.changes());
         assert_eq!(lp.writes, before, "nothing written");
         assert_eq!(lines, ["rover-left: 0 changed, 0 pinned, 11 unchanged"]);
+    }
+
+    /// `specs/flux-observer.md`, "Fields": a per-motor family is a list inside each motor's object,
+    /// motor `m`'s element `e` at key `m * n + e`, from a file to the board and back to the same
+    /// file.
+    #[test]
+    fn a_per_motor_family_round_trips_as_a_list_in_each_motor() {
+        let layout = json!({
+            "motors": [
+                { "observer": { "model": [300, null, null, null] } },
+                { "observer": { "shadow": [null, null, null, null, -300, 12, null] } },
+            ],
+        });
+        let mut lp = Loop::new();
+        let f = files(&[("layout.json", layout.clone())]);
+        let (plan, _) = run(&mut lp, &f, false).unwrap();
+        let mut keys: Vec<Key> = plan.steps.iter().map(|s| s.key).collect();
+        keys.sort_by_key(|k| (k.field_id, k.index));
+        assert_eq!(keys, [k(0x60, 0), k(0x61, 11), k(0x61, 12)]);
+        let r = nodes::read(lp.board_wire(), 0x80, 0x01, k(0x61, 11)).unwrap();
+        assert_eq!(r.bytes, (-300i16).to_le_bytes());
+        let mut b = board(&mut lp);
+        let dumped = to_file(&read_board(&mut b, &dump_keys()).unwrap().0, false);
+        assert_eq!(dumped, layout);
+        // A list longer than the family is refused.
+        let f = files(&[(
+            "long.json",
+            json!({ "motors": [{ "observer": { "model": [1, 2, 3, 4, 5] } }] }),
+        )]);
+        assert!(!f.problems.is_empty());
     }
 
     /// `specs/machine-settings.md` sections 3.1 and 6.2: the regrouped node paths, `links` as an

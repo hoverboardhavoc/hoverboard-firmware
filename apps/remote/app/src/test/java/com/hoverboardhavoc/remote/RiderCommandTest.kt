@@ -52,6 +52,19 @@ class RiderCommandTest {
         assertTrue(inputs.powerRequest(), "armed asserts the power-request level")
     }
 
+    /** The OBS button's bit (`specs/flux-observer.md`, "S4, first slice"): bit 1 of `buttons`. */
+    @Test
+    fun `the observer request is buttons bit 1 and survives the per-wheel mix`() {
+        val on = RiderCommand.armed(demand = 2_000, observer = true)
+        val inputs = checkNotNull(Inputs.decode(pdusOf(on).single { it.opcode == OP_INPUTS }.payload))
+        assertEquals(Inputs.BUTTON_POWER or Inputs.BUTTON_OBSERVER, inputs.buttons)
+        assertTrue(inputs.observerRequest())
+        assertTrue(on.withDemand(-500).inputs.observerRequest(), "the mix keeps it")
+        assertTrue(on.withTurn(100).inputs.observerRequest())
+        assertFalse(RiderCommand.armed(demand = 2_000).inputs.observerRequest(), "off by default")
+        assertFalse(RiderCommand.DISARMED.inputs.observerRequest())
+    }
+
     @Test
     fun `the demand is on the DRIVE_CMD full scale, not the firmware's thousand-domain`() {
         // The frame-in adapter maps value onto +-CMD_LIMIT by `value * 1000 / FULL_SCALE`

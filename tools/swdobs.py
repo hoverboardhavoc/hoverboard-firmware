@@ -26,11 +26,11 @@ PI = os.environ.get("PI_HOST", "pi@192.168.0.248")
 FLASH_SH = os.path.join(REPO, "tools", "flash.sh")
 
 # --------------------------------------------------------------------------------------------------
-# The CTRL_OBS word map: `struct CtrlObs` in motorcontroller/firmware/src/main.rs (#[repr(C)], 52 words; the
+# The CTRL_OBS word map: `struct CtrlObs` in motorcontroller/firmware/src/main.rs (#[repr(C)], 55 words; the
 # compile-time offset pins there are the authority, these indices mirror them).
 # --------------------------------------------------------------------------------------------------
 CTRL_MAGIC = 0x4C525443  # "CTRL", little-endian in memory
-CTRL_OBS_WORDS = 52
+CTRL_OBS_WORDS = 55
 W_BOOT_COUNT = 1
 W_TICK_COUNT = 2
 W_CONTROL_TICKS = 4
@@ -131,6 +131,16 @@ W_IMU_RETRIES = 51      # low byte: the boot's IMU probe-and-init attempts (spec
 #                         0 the first answered, 1 the second answered after a bus clear, 2 the IMU
 #                         did not come up. Also 0 on a board that never probed: read it beside the
 #                         flags byte's b0 and b6 (word 12). Bytes 1-3 are zero.
+# Words 52-54: the flux observer in shadow (specs/flux-observer.md, "What it publishes"), motor 0's,
+# closed at the same 64-period window as words 47-50. 0 unless FOC.
+W_FOC_ANGLES = 52       # theta u16 (the hall angle the inverse Park used: front end + alignment) |
+#                         the observer's angle u16 << 16, 65536 a revolution.
+W_FOC_TRACK = 53        # the window's angle-error mean i16 | its spread i16 << 16, angle units
+#                         (observer minus hall, less the offset and the bin's leak lead).
+W_FOC_FLUX = 54         # the window's RMS flux magnitude u16, microvolt-seconds | the tracking
+#                         word << 16: bits 16-23 the lock bin (255 none), 24 this window tracked,
+#                         25 the observer is the angle source (the OBS button), 26 the front end in its
+#                         interpolation window at the close.
 # CTRL_OBS word 31, motor_current: peak phase-current magnitude over the last 64-period window
 # (i16, stock current counts) | chopped periods << 16 | trip count low byte << 24.
 MOTOR_CURRENT_OFFSET = 4 * W_MOTOR_CURRENT

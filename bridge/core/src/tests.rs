@@ -2334,6 +2334,22 @@ fn both_console_carriers_are_served_at_once_and_replies_go_back_where_they_came_
     assert_eq!(received(&mut router, Port::Usb).len(), 1);
     assert_eq!(received(&mut router, Port::Tcp).len(), 1);
 
+    // The board's streams to "the attached host" (dst 0): the cyclic sample and the FOC trace go
+    // out on both carriers (`specs/link-control.md`, "`FOC_TRACE` (0x15)"); any other opcode to
+    // dst 0 is not a stream and is dropped.
+    let mut trace = vec![linkctl::OP_FOC_TRACE, 0x01, NO_ADDRESS];
+    trace.extend_from_slice(&[0u8; linkctl::FocTrace::LEN]);
+    fw.link.send(&trace).unwrap();
+    node.pump(&mut router, &mut port, &mut svc);
+    assert_eq!(received(&mut router, Port::Usb), vec![trace.clone()]);
+    assert_eq!(received(&mut router, Port::Tcp), vec![trace]);
+    fw.link
+        .send(&[linkctl::OP_TRACE_SET, 0x01, NO_ADDRESS, 5, 0])
+        .unwrap();
+    node.pump(&mut router, &mut port, &mut svc);
+    assert!(received(&mut router, Port::Usb).is_empty());
+    assert!(received(&mut router, Port::Tcp).is_empty());
+
     // The TCP client hangs up; the next one starts on a clean stream, even after a partial frame.
     let info = stream(&[encode(&Msg::InfoReq, 0x82)]);
     router.on_bytes(Port::Tcp, &info[..info.len() - 2]);

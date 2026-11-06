@@ -27,7 +27,7 @@
 
 use espsvc::WifiState;
 use heapless::{String, Vec};
-use linkctl::OP_CYCLIC_STATE;
+use linkctl::{OP_CYCLIC_STATE, OP_FOC_TRACE};
 use net::pdu::{Pdu, NO_ADDRESS};
 pub use net::walk::BRIDGE_NAME_MAX;
 use net::walk::{
@@ -399,7 +399,13 @@ impl<'f, F: Flash> Node<'f, F> {
             let mut replies = Replies::new();
             svc.handle(&pdu, me, port, &mut |to, m| replies.push(me.addr, to, m));
             replies.send(from, router, port);
-        } else if from == Carrier::Mailbox && dst == NO_ADDRESS && d.opcode == OP_CYCLIC_STATE {
+        } else if from == Carrier::Mailbox
+            && dst == NO_ADDRESS
+            && (d.opcode == OP_CYCLIC_STATE || d.opcode == OP_FOC_TRACE)
+        {
+            // The board's streams to "the attached host": the cyclic sample and the FOC trace
+            // (`specs/link-control.md`, "`FOC_TRACE` (0x15)": the bridge relays it to every attached
+            // controller link) go out on every link.
             for link in PORTS {
                 router.send(link, pkt);
             }

@@ -352,8 +352,8 @@ pub const INPUTS_PERIOD: Duration = Duration::from_millis(500);
 pub const STOP_REPEATS: usize = 3;
 
 /// `drive`'s schedule: `DRIVE_CMD` (throttle, `value`, steer 0) to each wheel every
-/// [`DRIVE_PERIOD`] and `INPUTS` (power 1) to each wheel's node every [`INPUTS_PERIOD`], from
-/// `src`. Arming is per node, because each board runs one mode machine for its motors. Times are
+/// [`DRIVE_PERIOD`] and `INPUTS` (power 1, and the observer source request with `--observer`) to
+/// each wheel's node every [`INPUTS_PERIOD`], from `src`. Arming is per node, because each board runs one mode machine for its motors. Times are
 /// offsets from the start of the run.
 pub struct Drive {
     src: u8,
@@ -361,13 +361,34 @@ pub struct Drive {
     /// The wheels' nodes, each once, in the wheels' order.
     nodes: Vec<u8>,
     value: i16,
+    /// `INPUTS.buttons` while driving: power, and the observer request with `--observer`.
+    buttons: u8,
+    /// `--observer-after`: the observer request joins `buttons` once the run has been going this
+    /// long, so the request lands on a wheel the halls have already brought to speed and the
+    /// observer has converged on (`specs/flux-observer.md`, "S4, first slice": at rest its angle
+    /// is noise). `None` with `--observer` sets it from the first frame.
+    observer_after: Option<Duration>,
     next_drive: Duration,
     next_inputs: Duration,
 }
 
 impl Drive {
-    /// A schedule whose first frames are due at once.
-    pub fn new(src: u8, wheels: Vec<Wheel>, value: i16) -> Self {
+    /// A schedule whose first frames are due at once. `observer` sets `INPUTS.buttons` bit 2 (the
+    /// observer source request, `specs/flux-observer.md`, "S4, first slice") in every `INPUTS`
+    /// while driving; the stop frames clear it with the power bit.
+    pub fn new(src: u8, wheels: Vec<Wheel>, value: i16, observer: bool) -> Self {
+        Self::with_observer_after(src, wheels, value, observer, None)
+    }
+
+    /// [`Drive::new`] with the observer request delayed by `after` (`--observer-after`), which
+    /// implies the request.
+    pub fn with_observer_after(
+        src: u8,
+        wheels: Vec<Wheel>,
+        value: i16,
+        observer: bool,
+        after: Option<Duration>,
+    ) -> Self {
         let mut nodes: Vec<u8> = Vec::new();
         for w in &wheels {
             if !nodes.contains(&w.node) {
@@ -379,6 +400,13 @@ impl Drive {
             wheels,
             nodes,
             value,
+            buttons: Inputs::BUTTON_POWER
+                | if observer && after.is_none() {
+                    Inputs::BUTTON_OBSERVER
+                } else {
+                    0
+                },
+            observer_after: if observer { after } else { None },
             next_drive: Duration::ZERO,
             next_inputs: Duration::ZERO,
         }
@@ -393,9 +421,12 @@ impl Drive {
     /// the cadence from `at`, rather than bursting the missed ones.
     pub fn due(&mut self, at: Duration) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
+        if self.observer_after.is_some_and(|d| at >= d) {
+            self.buttons |= Inputs::BUTTON_OBSERVER;
+        }
         if at >= self.next_inputs {
             let i = Inputs {
-                buttons: Inputs::BUTTON_POWER,
+                buttons: self.buttons,
                 rider: 0,
             };
             out.extend(self.nodes.iter().map(|&n| inputs_pdu(self.src, n, &i)));

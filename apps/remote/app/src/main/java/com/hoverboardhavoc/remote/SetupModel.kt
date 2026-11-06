@@ -1052,7 +1052,7 @@ class SetupModel(
         val r = awaitSlot { transport.readConfig(MOTOR_ONE, board) } as? ReadValue ?: return
         if (r.isDefault) return update(node) { it.copy(motors = 1) }
         update(node) { it.copy(motors = 2) }
-        for (key in listOf(SIDE_ONE, LIMIT_ONE)) {
+        for (key in listOf(SIDE_ONE, LIMIT_ONE, METHOD_ONE)) {
             val v = awaitSlot { transport.readConfig(key, board) } as? ReadValue ?: continue
             update(node) { b -> b.copy(values = b.values + (key to v.value)) }
         }
@@ -1687,6 +1687,9 @@ class SetupModel(
         /** Motor 1's `current.limit`, read with [SIDE_ONE] on a board with two motors. */
         val LIMIT_ONE: Key = Fields.MOTOR_CURRENT_LIMIT.key(1)
 
+        /** Motor 1's `motor.method`, read with [SIDE_ONE]: whether the OBS button applies to it. */
+        val METHOD_ONE: Key = Fields.MOTOR_METHOD.key(1)
+
         /** The bus `imu.model` switches on: its group's pins and instance key ([Checks.GROUPS]). */
         val IMU_BUS: List<Key> = Checks.GROUPS.first { it.switch == SetupFields.IMU_MODEL.key }
             .let { g -> g.pins.map { it.first.key } + listOfNotNull(g.instance?.first) }
@@ -1707,3 +1710,17 @@ class SetupModel(
         const val REWALK_INTERVAL_MS = 3_000L
     }
 }
+
+/**
+ * Whether every motor of [boards] reads `motor.method` FOC, which is what the Ride screen's OBS
+ * button needs (`specs/remote-ui.md` 3.1, "The observer button"): the observer is the angle
+ * source of a FOC motor only. False while any of those motors' methods is unread, and for no
+ * boards.
+ */
+fun SetupState.focMachine(boards: List<Int>): Boolean =
+    boards.isNotEmpty() && boards.all { a ->
+        (0 until (setupOf(a).motors ?: 1)).all { m ->
+            setupOf(a).values[SetupFields.MOTOR_METHOD.def.key(m)]?.asLong()?.toInt() ==
+                Fields.MotorMethod.FOC
+        }
+    }

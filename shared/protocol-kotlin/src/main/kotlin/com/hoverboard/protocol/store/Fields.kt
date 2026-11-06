@@ -94,7 +94,7 @@ const val NO_PORT = 0xFF
 /**
  * The registered store fields (`shared/store/src/field.rs`, `REGISTRY`), plus the value vocabularies the
  * firmware gives the byte-valued ones. The ids sit in the blocks of `specs/machine-settings.md`
- * section 3: node `0x01..=0x1F`, machine `0x20..=0x2C`, wheel `0x40..=0x56`.
+ * section 3: node `0x01..=0x1F`, machine `0x20..=0x2C`, wheel `0x40..=0x61`.
  *
  * Every registered field is here but the store-test fields. The live tune lane's keys, ranges and
  * ramp are in [Gains].
@@ -376,6 +376,27 @@ object Fields {
     val MOTOR_BREAK_ENABLE = FieldDef(0x5F, Type.U8, Value.U8(0), Effect.BOOT)
 
     /**
+     * The flux observer's motor model, per motor (`shared/store/src/field.rs`, `OBSERVER_MODEL`;
+     * `specs/flux-observer.md`, "Fields"): 0 `r_mohm`, 1 `l_uh`, 2 `flux_uvs` (0 unknown), 3 spare.
+     * Per motor AND indexed: motor m's element e is key index `m * 4 + e`
+     * ([Names.IndexKind.MOTOR_ARRAY]). `r_mohm` and `l_uh` are on the live tune lane.
+     */
+    val OBSERVER_MODEL = IndexedFieldDef(0x60, Type.I16, listOf(240, 500, 0, 0).map { Value.I16(it) }, Effect.LIVE)
+
+    /**
+     * The flux observer's shadow-mode words, per motor (`shared/store/src/field.rs`,
+     * `OBSERVER_SHADOW`): 0 `band`, 1 `spread`, 2 `min_windows`, 3 `ratio` (of 256), 4 `offset`,
+     * 5 `leak_shift` (6..=14), 6 `dt_comp` (0 or 1); angles in units of 65536 a revolution. Motor
+     * m's element e is key index `m * 7 + e`. All seven on the live tune lane.
+     */
+    val OBSERVER_SHADOW = IndexedFieldDef(
+        0x61,
+        Type.I16,
+        listOf(2730, 1820, 64, 243, 0, 10, 1).map { Value.I16(it) },
+        Effect.LIVE,
+    )
+
+    /**
      * What the pack IS: the number of cells in series (`shared/store/src/field.rs`,
      * `BOARD_BATTERY_CELLS`). 0 = not stated, which is the default and is not a guess at eight.
      *
@@ -654,6 +675,8 @@ object Fields {
 
     /** Every indexed field above by its Rust handle name: the set the drift gate pins. */
     val INDEXED: Map<String, IndexedFieldDef> = mapOf(
+        "OBSERVER_MODEL" to OBSERVER_MODEL,
+        "OBSERVER_SHADOW" to OBSERVER_SHADOW,
         "BOARD_BATTERY_CAL" to BOARD_BATTERY_CAL,
         "CONTROL_DRIVE_TURN" to CONTROL_DRIVE_TURN,
         "CONTROL_SF_GAINS" to CONTROL_SF_GAINS,

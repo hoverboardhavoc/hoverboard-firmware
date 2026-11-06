@@ -1268,6 +1268,7 @@ mod tests {
         noise_floor: store::MOTOR_NOISE_FLOOR.default(),
         accepted_offsets: None,
         dc_link: None,
+        dead_time: 28,
     };
 
     /// **`control.leader` is read stored and unstored** (`specs/rigid-leader.md` section 9): an

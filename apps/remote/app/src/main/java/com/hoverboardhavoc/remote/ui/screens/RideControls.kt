@@ -29,6 +29,7 @@ import com.hoverboardhavoc.remote.model.FaultLamp
 import com.hoverboardhavoc.remote.model.MissingSetting
 import com.hoverboardhavoc.remote.ui.components.ArmToggle
 import com.hoverboardhavoc.remote.ui.components.JoystickPad
+import com.hoverboardhavoc.remote.ui.components.ObserverToggle
 import com.hoverboardhavoc.remote.ui.components.ThrottlePad
 import com.hoverboardhavoc.remote.ui.theme.Primary
 import com.hoverboardhavoc.remote.ui.theme.Tone
@@ -57,6 +58,7 @@ import com.hoverboardhavoc.remote.ui.theme.ToneText
  *   caller releases the drive first: the sheet's scrim covers the pad.
  * @param onOpenSetup open Setup on a board, scrolled to a row, which a missing setting's statement
  *   does when tapped (3.1, "Missing settings, in plain words").
+ * @param onObserverToggle the OBS button beside the arm control (3.1, "The observer button").
  */
 @Composable
 internal fun RideControls(
@@ -71,6 +73,7 @@ internal fun RideControls(
     statementsHeight: Dp? = null,
     onOpenLamp: (FaultLamp) -> Unit = {},
     onOpenSetup: (board: Int, row: Key) -> Unit = { _, _ -> },
+    onObserverToggle: () -> Unit = {},
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         if (padShown) {
@@ -86,7 +89,23 @@ internal fun RideControls(
             }
             Spacer(modifier = Modifier.height(SLOT_GAP))
         }
-        ArmToggle(armed = state.armed, enabled = state.canArm, onToggle = onArmToggle)
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            ArmToggle(
+                armed = state.armed,
+                enabled = state.canArm,
+                onToggle = onArmToggle,
+                modifier = Modifier.weight(1f),
+            )
+            // Only on a FOC machine, the one place it can act; elsewhere ARM keeps the full row.
+            if (state.focMachine) {
+                Spacer(modifier = Modifier.width(OBSERVER_GAP))
+                ObserverToggle(
+                    on = state.observer,
+                    enabled = state.canObserve,
+                    onToggle = onObserverToggle,
+                )
+            }
+        }
         val shown = if (grid != null || !padShown) emptyList() else statements(state).take(MAX_STATEMENTS)
         if (statementsHeight != null) {
             Spacer(modifier = Modifier.height(STATEMENTS_GAP))
@@ -328,6 +347,9 @@ internal val PAD_HEIGHT = 280.dp
 
 /** The gap between the Ride column's fixed slots. */
 internal val SLOT_GAP = 12.dp
+
+/** The gap between the arm control and the OBS button beside it (3.1). */
+private val OBSERVER_GAP = 8.dp
 
 /** The statements shown at once. */
 private const val MAX_STATEMENTS = 2

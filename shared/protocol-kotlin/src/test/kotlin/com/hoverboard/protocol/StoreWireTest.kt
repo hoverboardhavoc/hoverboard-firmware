@@ -1,5 +1,7 @@
 package com.hoverboard.protocol
 
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Names
 import com.hoverboard.protocol.store.Type
 import com.hoverboard.protocol.store.Value
 import org.junit.jupiter.api.Assertions.assertArrayEquals
@@ -77,5 +79,16 @@ class StoreWireTest {
         assertNull(Value.decode(Type.Str, byteArrayOf(0xFF.toByte(), 0xFE.toByte()))) // invalid UTF-8
         // A Blob accepts any bytes.
         assertEquals(Value.Bytes(byteArrayOf(0xFF.toByte(), 0xFE.toByte())), Value.decode(Type.Blob, byteArrayOf(0xFF.toByte(), 0xFE.toByte())))
+    }
+
+    /**
+     * A per-motor family's path (`specs/flux-observer.md`, "Fields"), the CLI's `path_of`: motor
+     * m's element e is key index `m * n + e`, printed under that motor.
+     */
+    @Test
+    fun aPerMotorFamilyPrintsUnderItsMotor() {
+        assertEquals("motors[1].observer.shadow[4]", Names.pathOf(Key(0x61, 11)))
+        assertEquals("motors[0].observer.model[1]", Names.pathOf(Key(0x60, 1)))
+        assertEquals("motors[1].observer.model[0]", Names.pathOf(Key(0x60, 4)))
     }
 }

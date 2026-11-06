@@ -36,7 +36,11 @@ tools/swdobs.py word map, which owns the indices):
 - words 47 to 49, the FOC observation, every one a 64-period window mean (specs/foc-torque.md
   section 7): `ia`, `ib` (every method), `id`, `iq`, `iq_ref` and `vq` (0 unless FOC), in counts
   and, for the currents, in amps at the board's own `motors[0].current.cal` (0x4C), read off it at
-  stand-up with `hoverboard-cli board get` (or given with --cal, and then said so).
+  stand-up with `hoverboard-cli board get` (or given with --cal, and then said so);
+- words 52 to 54, the flux observer in shadow (specs/flux-observer.md, "What it publishes"):
+  `theta` and the observer's angle at the window close, the window's angle-error mean and spread
+  (degrees), the RMS flux magnitude in microvolt-seconds, this window tracked, and the lock bin
+  (255 none). `hoverboard-cli trace` streams the same quantities without an ELF.
 
 The CSV adds word 11's mode byte.
 
@@ -64,8 +68,8 @@ import subprocess
 import sys
 
 from swdobs import (
-    CTRL_MAGIC, CTRL_OBS_WORDS, REPO, add_image_args, image_elf, W_DUTY2_ANGLE, W_FOC_DQ_MEAN, W_FOC_HOLD,
-    W_FOC_PHASE_MEAN, W_FOC_REF_VQ, W_MOTOR_CURRENT, W_MOTOR_FAULT, W_MOTOR_RATE_Q, W_MOTOR_SPEED, W_MOTOR_STATE,
+    CTRL_MAGIC, CTRL_OBS_WORDS, REPO, add_image_args, image_elf, W_DUTY2_ANGLE, W_FOC_ANGLES, W_FOC_DQ_MEAN,
+    W_FOC_FLUX, W_FOC_HOLD, W_FOC_PHASE_MEAN, W_FOC_REF_VQ, W_FOC_TRACK, W_MOTOR_CURRENT, W_MOTOR_FAULT, W_MOTOR_RATE_Q, W_MOTOR_SPEED, W_MOTOR_STATE,
     W_TORQUE_MODE, CURRENT_CAL_FIELD, clamp_current_cal, i16_pair, resolve_symbols_sized, s16, s32,
 )
 
@@ -212,6 +216,8 @@ def decode(w, cal, frame=None):
     fid, fiq = i16_pair(w[W_FOC_DQ_MEAN])
     iq_ref, vq = i16_pair(w[W_FOC_REF_VQ])
     hold = w[W_FOC_HOLD]
+    angles, flux = w[W_FOC_ANGLES], w[W_FOC_FLUX]
+    err_mean, err_spread = i16_pair(w[W_FOC_TRACK])
     r = {
         "torque": torque,
         "mode": (w[W_TORQUE_MODE] >> 16) & 0xFF,
@@ -230,12 +236,16 @@ def decode(w, cal, frame=None):
         # 0x40 its refusal, 0x80 the rail skip, specs/optional-protections.md section 6.4).
         "held_a": hold & 0xFF, "held_b": (hold >> 8) & 0xFF, "coasted": (hold >> 16) & 0xFF,
         "cause": (hold >> 24) & 0xFF,
+        # The flux observer (words 52 to 54): angles in units, error in degrees, flux in uV.s.
+        "theta": angles & 0xFFFF, "obs_angle": (angles >> 16) & 0xFFFF,
+        "err_mean": err_mean * 360.0 / 65536.0, "err_spread": err_spread * 360.0 / 65536.0,
+        "flux": flux & 0xFFFF, "tracked": (flux >> 24) & 1, "lock": (flux >> 16) & 0xFF,
     }
     for k in ("ia", "ib", "id", "iq", "iq_ref"):
         r[k + "_a"] = r[k] / cal
     if frame is not None:
         theta, hiq, hid, mag = host_frame(ia, ib, r["angle"], *frame)
-        r.update(theta=theta, hiq=hiq, hid=hid, hmag=mag,
+        r.update(htheta=theta, hiq=hiq, hid=hid, hmag=mag,
                  hiq_frac=hiq / mag if mag else 0.0, hid_frac=abs(hid) / mag if mag else 0.0)
     return r
 
@@ -323,8 +333,9 @@ def gains_text(addr, words):
 
 
 COLUMNS = ("t torque mode method fault angle speed rate peak chopped trips "
-           "ia ib id iq iq_ref vq ia_a ib_a id_a iq_a iq_ref_a held_a held_b coasted cause").split()
-FRAME_COLUMNS = "theta hiq hid hmag hiq_frac hid_frac".split()
+           "ia ib id iq iq_ref vq ia_a ib_a id_a iq_a iq_ref_a held_a held_b coasted cause "
+           "theta obs_angle err_mean err_spread flux tracked lock").split()
+FRAME_COLUMNS = "htheta hiq hid hmag hiq_frac hid_frac".split()
 
 
 def row_text(t, r):
@@ -332,9 +343,11 @@ def row_text(t, r):
          f"{r['rate']:7.2f} {r['peak']:6d} {r['chopped']:4d} {r['trips']:4d}  "
          f"{r['ia']:6d} {r['ib']:6d} {r['id']:6d} {r['iq']:6d} {r['iq_ref']:6d} {r['vq']:6d}  "
          f"{r['ia_a']:6.2f} {r['ib_a']:6.2f} {r['id_a']:6.2f} {r['iq_a']:6.2f} {r['iq_ref_a']:6.2f}  "
-         f"{r['held_a']:3d} {r['held_b']:3d} {r['coasted']:3d} {r['cause']:02x}")
-    if "theta" in r:
-        s += (f"  {r['theta']:5d} {r['hiq']:6d} {r['hid']:6d} {r['hmag']:7.1f} "
+         f"{r['held_a']:3d} {r['held_b']:3d} {r['coasted']:3d} {r['cause']:02x}  "
+         f"{r['theta']:5d} {r['obs_angle']:5d} {r['err_mean']:6.1f} {r['err_spread']:5.1f} "
+         f"{r['flux']:5d} {r['tracked']:1d} {r['lock']:3d}")
+    if "htheta" in r:
+        s += (f"  {r['htheta']:5d} {r['hiq']:6d} {r['hid']:6d} {r['hmag']:7.1f} "
               f"{r['hiq_frac']:5.2f} {r['hid_frac']:5.2f}")
     return s
 
@@ -343,9 +356,10 @@ def header(frame):
     h = (f"{'t':>6} {'torque':>6} {'me':>2} {'fault':>5} {'angle':>5} {'speed':>6} {'rate':>7} "
          f"{'peak':>6} {'chop':>4} {'trip':>4}  {'ia':>6} {'ib':>6} {'id':>6} {'iq':>6} {'iqref':>6} "
          f"{'vq':>6}  {'iaA':>6} {'ibA':>6} {'idA':>6} {'iqA':>6} {'refA':>6}  "
-         f"{'hdA':>3} {'hdB':>3} {'cst':>3} {'cz':>2}")
+         f"{'hdA':>3} {'hdB':>3} {'cst':>3} {'cz':>2}  {'theta':>5} {'obs':>5} {'errM':>6} "
+         f"{'errS':>5} {'flux':>5} {'t':>1} {'lck':>3}")
     if frame:
-        h += f"  {'theta':>5} {'hiq':>6} {'hid':>6} {'hmag':>7} {'iq/m':>5} {'id/m':>5}"
+        h += f"  {'hth':>5} {'hiq':>6} {'hid':>6} {'hmag':>7} {'iq/m':>5} {'id/m':>5}"
     return h
 
 
@@ -407,6 +421,9 @@ def main(argv=None):
     print("  ia ib = word 47, the mean phase currents (every method); id iq = word 48 and iqref vq =")
     print("  word 49, the FOC loops' window means and closing reference (0 unless FOC). vq in voltage")
     print("  counts. A nonzero chop while FOC drives is a finding, not a limiter at work.")
+    print("  theta obs = word 52, the hall angle the inverse Park used and the flux observer's;")
+    print("  errM errS = word 53 in degrees; flux = word 54 in uV.s, t this window tracked, lck the")
+    print("  lock bin (255 none).")
     frame = tuple(args.frame) if args.frame else None
     if frame:
         print(f"  --frame direction {frame[0]}, align offset {frame[1]}: theta = angle + "
