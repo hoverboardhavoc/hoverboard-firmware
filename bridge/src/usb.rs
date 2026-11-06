@@ -36,7 +36,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_io_async::Read;
-use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
+use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
 use esp_hal::Async;
 use heapless09::Vec;
 
