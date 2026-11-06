@@ -820,7 +820,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: firmware-bundle
-          path: hoverboard-firmware/target/bundle/firmware-*.hbfw
+          path: hoverboard-firmware/target/bundle/hoverboard-firmware-*.hbfw
           if-no-files-found: error
 
   # On a tag, attach the firmware bundle and the CLI binaries to the GitHub release named after it

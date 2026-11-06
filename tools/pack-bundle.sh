@@ -7,7 +7,7 @@
 # workspace's rust-toolchain.toml picks the compiler: the three board images in motorcontroller/
 # (`cargo image-f103`, `cargo image-f130`, `cargo image-f103rc`), the bridge in bridge/ with its two
 # images made by espflash, and hoverboard-cli in tools/. It stages them in target/images/ by image
-# name and packs target/bundle/firmware-<commit>.hbfw.
+# name and packs target/bundle/hoverboard-firmware-<commit>.hbfw.
 #
 # --images DIR  skip the builds and pack the images already in DIR, named as target/images/ names
 #               them. CI's pack job uses this with the images its build and bridge jobs made.
@@ -73,7 +73,7 @@ cd "$ROOT"
 mkdir -p target/bundle
 commit="$(git rev-parse --short=7 HEAD)"
 git diff --quiet HEAD || commit="$commit-dirty"
-bundle="target/bundle/firmware-$commit.hbfw"
+bundle="target/bundle/hoverboard-firmware-$commit.hbfw"
 args=()
 for chip in "${CHIPS[@]}"; do
     args+=("motorcontroller/firmware:mainboard-$chip=$IMAGES/mainboard-$chip.elf")

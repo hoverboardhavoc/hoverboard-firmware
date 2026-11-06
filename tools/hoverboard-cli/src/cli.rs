@@ -961,19 +961,19 @@ mod tests {
             ),
             (
                 "update-esp",
-                "bridge update rover-l firmware-1a2b3c4.hbfw --yes",
+                "bridge update rover-l hoverboard-firmware-1a2b3c4.hbfw --yes",
                 Command::BridgeUpdate {
                     target: s("rover-l"),
-                    file: s("firmware-1a2b3c4.hbfw"),
+                    file: s("hoverboard-firmware-1a2b3c4.hbfw"),
                     yes: true,
                     no_confirm: false,
                 },
             ),
             (
                 "none",
-                "machine update firmware-1a2b3c4.hbfw --yes",
+                "machine update hoverboard-firmware-1a2b3c4.hbfw --yes",
                 Command::MachineUpdate {
-                    bundle: s("firmware-1a2b3c4.hbfw"),
+                    bundle: s("hoverboard-firmware-1a2b3c4.hbfw"),
                     yes: true,
                 },
             ),
@@ -1132,13 +1132,13 @@ mod tests {
             Ok(Command::Swd {
                 target: s("offroad-master"),
                 op: Swd::Update {
-                    bundle: s("firmware-adab056.hbfw"),
+                    bundle: s("hoverboard-firmware-adab056.hbfw"),
                     image: image.map(s),
                     yes,
                 },
             })
         };
-        let line = "board update offroad-master firmware-adab056.hbfw";
+        let line = "board update offroad-master hoverboard-firmware-adab056.hbfw";
         assert_eq!(cmd(line), update(None, false));
         assert_eq!(cmd(&format!("{line} --yes")), update(None, true));
         assert_eq!(
