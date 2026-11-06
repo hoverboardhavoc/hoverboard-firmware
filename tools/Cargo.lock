@@ -1483,7 +1483,7 @@ dependencies = [
  "link",
  "linkctl",
  "net",
- "sha2 0.10.9",
+ "sha2 0.11.1",
  "store",
  "swd-bridge-core",
  "swd-mailbox",
