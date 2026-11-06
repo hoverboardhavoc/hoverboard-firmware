@@ -7,7 +7,7 @@ use net::walk::{CLASS_MOTOR, UID_LEN};
 use serde_json::{Map, Value as Json};
 use store::{Key, Scope};
 
-use crate::config::{read_files, shown, to_file, Files, Reads};
+use crate::config::{read_files, shown, to_file, Files, Pins, Reads};
 use crate::names::{path_of, row_of, table_keys, Problem};
 use crate::nodes::uid_hex;
 
@@ -375,13 +375,13 @@ pub fn get_lines(key: Key, copies: &[(String, crate::nodes::ConfigResp)]) -> Vec
 }
 
 /// The machine file `machine dump` writes: the machine section of copy `from`, and each board's
-/// file without it, filed under its `uid`. Each board comes with whether its chip remaps
-/// ([`to_file`]).
-pub fn dump_file(boards: &[(Uid, Reads, bool)], from: usize) -> Json {
+/// file without it, filed under its `uid`. Each board comes with how its pins are written
+/// ([`Pins`]).
+pub fn dump_file(boards: &[(Uid, Reads, Pins)], from: usize) -> Json {
     let mut out = Map::new();
     let mut entries = Map::new();
-    for (i, (uid, reads, remaps)) in boards.iter().enumerate() {
-        let Json::Object(mut file) = to_file(reads, *remaps) else {
+    for (i, (uid, reads, pins)) in boards.iter().enumerate() {
+        let Json::Object(mut file) = to_file(reads, *pins) else {
             unreachable!("a board's file is an object")
         };
         let machine = file.remove("machine");
@@ -541,7 +541,7 @@ mod tests {
         let f = read_machine_file("m", &bad).unwrap();
         assert_eq!(
             f.problems()[0].msg,
-            format!("m: boards.{L}: leds.green: a pin object, {{\"port\": \"A\", \"pin\": 8, ...}}, not \"PZ9\"")
+            format!("m: boards.{L}: leds.green: a pin token (PA2) or a pin object, not \"PZ9\"")
         );
         // A machine section holding a board field names it as unknown under machine.
         let f = read_machine_file(
@@ -807,8 +807,16 @@ mod tests {
             .collect()
         };
         let boards = [
-            (uid(L), reads(1, b"rover-left"), false),
-            (uid(R), reads(0, b"rover-right"), false),
+            (
+                uid(L),
+                reads(1, b"rover-left"),
+                Pins::Objects { remaps: false },
+            ),
+            (
+                uid(R),
+                reads(0, b"rover-right"),
+                Pins::Objects { remaps: false },
+            ),
         ];
         assert_eq!(
             dump_file(&boards, 1),
