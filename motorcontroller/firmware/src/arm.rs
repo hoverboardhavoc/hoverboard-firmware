@@ -1902,6 +1902,41 @@ mod tests {
         assert!(armed < moe, "ARMED must go false before MOE clears");
     }
 
+    /// `specs/arm-confirmed.md` section 5, test 1 (the firmware half). `FLAG_MOE` is the arm
+    /// layer's record and nothing else: the control task copies [`hw::armed`] into the
+    /// orchestrator before the pass that builds the cyclic, and [`hw::armed`] is `ARMED`, which the
+    /// arm stores true only after the MOE write and the shutdown stores false before it clears
+    /// MOE. `EV_NO_MOTOR` is every motor's bring-up fact, folded the same way.
+    #[test]
+    fn flag_moe_and_no_motor_are_written_before_the_pass() {
+        let src = include_str!("main.rs");
+        let cb = &src[src.find(concat!("fn control_task_", "cb()")).unwrap()..];
+        let pass = cb
+            .find(concat!("control_task(&mut ", "shell.orch"))
+            .unwrap();
+        let moe = cb
+            .find(concat!("shell.orch.moe = ", "arm::hw::armed();"))
+            .unwrap();
+        let none = cb
+            .find(concat!("shell.orch.no_motor = ", "!motor::OBS_STATE"))
+            .unwrap();
+        assert!(
+            moe < pass && none < pass,
+            "both are written before the pass reads them"
+        );
+        assert!(
+            cb[none..pass].contains(concat!(".any(|state| motor::", "obs_configured(")),
+            "no motor: no motor of the board was brought up"
+        );
+
+        let arm_src = include_str!("arm.rs");
+        let body = &arm_src[arm_src.find(concat!("ArmStep::", "SetMoe => {")).unwrap()..];
+        let write = body.find(concat!("set_moe(g, ", "true)")).unwrap();
+        let record = body.find(concat!("ARMED.store(", "true")).unwrap();
+        assert!(write < record, "the record follows the MOE write");
+        assert!(arm_src.contains(concat!("ARMED.load(", "Ordering::Relaxed)")));
+    }
+
     #[test]
     fn the_arming_surface_is_confined_to_this_file() {
         let strip = |src: &str| -> std::string::String {

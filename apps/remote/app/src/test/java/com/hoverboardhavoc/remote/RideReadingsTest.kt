@@ -1,6 +1,7 @@
 package com.hoverboardhavoc.remote
 
 import com.hoverboard.protocol.store.Fields
+import com.hoverboardhavoc.remote.model.ArmPhase
 import com.hoverboardhavoc.remote.model.BatteryReading
 import com.hoverboardhavoc.remote.model.CurrentReading
 import com.hoverboardhavoc.remote.model.MachineTravel
@@ -279,20 +280,25 @@ class RideReadingsTest {
         assertEquals(0.5f, ringScale(170f), 1e-6f)
     }
 
-    /** Can-arm is outlined in Primary with a Primary label; cannot-arm a Border outline and a faint label. */
+    /**
+     * Can-arm is outlined in Primary with a Primary label; cannot-arm a Border outline and a faint
+     * label. ARMING draws as can-arm and DISARMING as cannot-arm (`specs/arm-confirmed.md` section 3).
+     */
     @Test
     fun `the ARM control's three states`() {
-        val armed = armLook(armed = true, enabled = false)
+        val armed = armLook(ArmPhase.ARMED, enabled = false)
         assertEquals(Primary, armed.fill)
         assertEquals(OnPrimary, armed.label)
-        val can = armLook(armed = false, enabled = true)
+        val can = armLook(ArmPhase.IDLE, enabled = true)
         assertEquals(Primary, can.outline)
         assertEquals(2.dp, can.outlineWidth)
         assertEquals(Primary, can.label)
-        val cannot = armLook(armed = false, enabled = false)
+        assertEquals(can, armLook(ArmPhase.ARMING, enabled = false))
+        val cannot = armLook(ArmPhase.IDLE, enabled = false)
         assertEquals(Border, cannot.outline)
         assertEquals(1.dp, cannot.outlineWidth)
         assertEquals(FgFaint, cannot.label)
+        assertEquals(cannot, armLook(ArmPhase.DISARMING, enabled = true))
     }
 }
 

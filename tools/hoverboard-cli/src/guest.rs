@@ -138,6 +138,7 @@ impl Tally {
             "mode": s.mode,
             "fault": s.fault,
             "flags": s.flags,
+            "moe": s.moe(),
             "boot_tag": s.obs.boot_tag,
             "wheel_speed": s.wheel_speed,
             "wheel_rate": s.wheel_rate,

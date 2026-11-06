@@ -3497,8 +3497,9 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
     );
     assert_eq!(
         EV_MOTOR_BITS, 0x0F00,
-        "the four motor causes are bits 8 to 11 and bit 3 is retired"
+        "the four motor causes are bits 8 to 11, and bit 3 is no longer their union"
     );
+    assert_eq!(EV_NO_MOTOR, 1 << 3);
     for bit in 0..16 {
         let ev = 1u16 << bit;
         let levels = events::Levels {
@@ -3514,9 +3515,10 @@ fn fault_a_bits_is_exactly_the_fault_a_group() {
             tilt: ev == EV_STOP_ALL,
             config: ev == EV_CONFIG,
             machine: ev == EV_MACHINE,
+            no_motor: ev == EV_NO_MOTOR,
         };
-        // Bit 3 and bits 14..15 have no producer: nothing can set them.
-        let producer = bit != 3 && bit < 14;
+        // Bits 14..15 have no producer: nothing can set them.
+        let producer = bit < 14;
         let want = if producer { ev } else { 0 };
         assert_eq!(levels.mask(), want, "bit {bit}: one producer, one bit");
         assert_eq!(levels.own_mask(), want, "and the wire word says the same");
@@ -7038,4 +7040,62 @@ fn the_motor1_block_carries_motor_1s_words_and_the_base_motor_0s() {
             wheel_rate: -3 * 4096,
         }
     );
+}
+
+/// `specs/arm-confirmed.md` section 5, test 1 (the orchestrator half): a board that brought up no
+/// motor reports `EV_NO_MOTOR` from its first pass, and a power request leaves the mode machine
+/// in OFF with `EV_NO_MOTOR` and `EV_POWER_REQUEST` both on the wire; a board with a motor never
+/// sets it and arms.
+#[test]
+fn a_board_with_no_motor_refuses_to_leave_off() {
+    let mut s = fresh();
+    s.no_motor = true;
+    run_ticks(&mut s, 2);
+    let c = cyclic_tx(&s, true).unwrap();
+    assert_eq!(c.fault & EV_NO_MOTOR, EV_NO_MOTOR, "set from boot");
+    assert!(c.no_motor());
+    assert_eq!(request_on(&mut s, 10), Mode::Off);
+    let c = cyclic_tx(&s, true).unwrap();
+    assert_eq!(
+        c.fault & (EV_NO_MOTOR | EV_POWER_REQUEST),
+        EV_NO_MOTOR | EV_POWER_REQUEST
+    );
+    assert_eq!(c.fault & FAULT_A_BITS, 0, "a refusal, not a fault");
+    // A boot level never moves, so it costs the O1 counters nothing.
+    assert_eq!(s.events.count(EV_NO_MOTOR), 0);
+    assert_eq!(counted(EV_NO_MOTOR), 0);
+
+    let mut with_motor = fresh();
+    run_ticks(&mut with_motor, 2);
+    assert_eq!(cyclic_tx(&with_motor, true).unwrap().fault & EV_NO_MOTOR, 0);
+    assert_ne!(request_on(&mut with_motor, 10), Mode::Off);
+    assert_eq!(
+        cyclic_tx(&with_motor, true).unwrap().fault & EV_NO_MOTOR,
+        0,
+        "never set on a board with a motor"
+    );
+    assert_eq!(EV_NO_MOTOR, CyclicState::FAULT_NO_MOTOR);
+}
+
+/// `specs/arm-confirmed.md` section 1: `FLAG_MOE` is the arm layer's record as the firmware writes
+/// it before the pass, and nothing else. The mode machine reaching RUN does not set it.
+#[test]
+fn flag_moe_follows_the_arm_layers_record() {
+    let moe = |s: &OrchestratorState| cyclic_tx(s, true).unwrap().moe();
+    let mut s = fresh();
+    run_ticks(&mut s, 2);
+    assert!(!moe(&s));
+    // RUN with no MOE written (an arm the arm layer refused): the flag stays clear.
+    assert_eq!(request_on(&mut s, 10), Mode::Run);
+    run_ticks(&mut s, 2);
+    assert!(!moe(&s), "the mode is not the fact");
+    // The arm wrote MOE and read it back.
+    s.moe = true;
+    run_ticks(&mut s, 2);
+    assert!(moe(&s));
+    // The shutdown cleared it.
+    s.moe = false;
+    run_ticks(&mut s, 2);
+    assert!(!moe(&s));
+    assert_eq!(CyclicState::FLAG_MOE, 1 << 6);
 }

@@ -78,26 +78,32 @@ class FaultLampTest {
     @Test
     fun `the lamps keep the grid's order`() {
         assertEquals(
-            FaultLamp.entries.filter { it != FaultLamp.LATCH_2 && it != FaultLamp.MACHINE && it != FaultLamp.CONFIG },
+            FaultLamp.entries.filter {
+                it != FaultLamp.LATCH_2 && it != FaultLamp.MACHINE && it != FaultLamp.NO_MOTOR && it != FaultLamp.CONFIG
+            },
             shownLamps(two(1), emptyMap()),
         )
     }
 
     /**
-     * Four columns for up to eight lamps, five for nine or ten and six for eleven, so the grid is
-     * never more than two rows.
+     * Four columns for up to eight lamps, five for nine or ten and six for eleven or twelve, so the
+     * grid is never more than two rows.
      */
     @Test
-    fun `four columns, five for nine or ten lamps, six for eleven`() {
+    fun `four columns, five for nine or ten lamps, six for eleven or twelve`() {
         for (n in 1..8) assertEquals(4, lampColumns(n), "$n lamps")
         assertEquals(5, lampColumns(9))
         assertEquals(5, lampColumns(10))
         assertEquals(6, lampColumns(11))
+        assertEquals(6, lampColumns(12))
         val all = shownLamps(
             two(1),
-            mapOf(0x01 to (CyclicState.EV_LATCH_B or CyclicState.EV_MACHINE), 0x02 to CyclicState.EV_CONFIG),
+            mapOf(
+                0x01 to (CyclicState.EV_LATCH_B or CyclicState.EV_MACHINE or CyclicState.EV_NO_MOTOR),
+                0x02 to CyclicState.EV_CONFIG,
+            ),
         )
-        assertEquals(11, all.size)
+        assertEquals(12, all.size)
         assertTrue((all.size + lampColumns(all.size) - 1) / lampColumns(all.size) <= 2)
     }
 
@@ -110,9 +116,14 @@ class FaultLampTest {
     @Test
     fun `every lamp bit is exactly one lamp with its sheet`() {
         assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS)
-        assertEquals(CyclicState.ARM_BLOCKING_BITS or CyclicState.EV_MACHINE, FaultLamp.REFUSING_BITS)
+        assertEquals(
+            CyclicState.ARM_BLOCKING_BITS or CyclicState.EV_MACHINE or CyclicState.EV_NO_MOTOR,
+            FaultLamp.REFUSING_BITS,
+        )
         assertEquals(FaultLamp.REFUSING_BITS or CyclicState.EV_CONFIG, FaultLamp.LAMP_BITS)
         assertTrue(FaultLamp.MACHINE.blocksArm)
+        assertTrue(FaultLamp.NO_MOTOR.blocksArm)
+        assertEquals("F3", FaultLamp.NO_MOTOR.code)
         assertFalse(FaultLamp.CONFIG.blocksArm)
         val blocking = (0 until 16).filter { FaultLamp.LAMP_BITS and (1 shl it) != 0 }
         assertEquals(blocking.size, FaultLamp.entries.size)
@@ -126,7 +137,7 @@ class FaultLampTest {
             strings.forEach { assertNotEquals(0, it) }
         }
         assertEquals(FaultLamp.LAMP_BITS, FaultLamp.entries.fold(0) { acc, l -> acc or l.bit })
-        for (n in listOf(3, 6, 7, 14, 15)) assertNull(FaultLamp.of(1 shl n), "bit $n is not a lamp")
+        for (n in listOf(6, 7, 14, 15)) assertNull(FaultLamp.of(1 shl n), "bit $n is not a lamp")
     }
 
     /**

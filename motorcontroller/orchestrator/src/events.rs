@@ -38,10 +38,13 @@
 //! is never consulted in RUN, so it can delay a re-arm but cannot produce the cycle O1 is.
 //!
 //! The motor-side level is four causes on bits 8 to 11 of the `u16` level mask ([`EV_MOTOR_HALL`]
-//! .. [`EV_MOTOR_ARM`]); bit 3, which carried their union as `EV_MOTOR_FAULT`, is retired and not
-//! reused (`specs/link-control.md`, "`fault` widens to u16"). The counters stay eight: counter 3
-//! counts transitions of the motor union ([`counted`]), so `CTRL_OBS`'s level byte and its eight
-//! counts keep their layout, and the four-way split is read off the cyclic `fault` word.
+//! .. [`EV_MOTOR_ARM`]); bit 3, which carried their union as `EV_MOTOR_FAULT`, was retired
+//! (`specs/link-control.md`, "`fault` widens to u16") and is now [`EV_NO_MOTOR`] on the wire
+//! (`specs/arm-confirmed.md` section 2). The counters stay eight: counter 3 counts transitions of
+//! the motor union ([`counted`]), so `CTRL_OBS`'s level byte and its eight counts keep their
+//! layout, and the four-way split is read off the cyclic `fault` word. [`EV_NO_MOTOR`] is a boot
+//! level that never moves, so it is not counted: [`counted`] drops it before folding the motor
+//! union onto slot 3.
 //!
 //! A further level, the rigid frame's `peer_down` ([`Levels::peer_down`]), SHARES
 //! [`EV_COMMS_LOSS`]'s bit, because the two levels mean the same thing to the mode machine. The peer's own `fault` word in the
@@ -62,6 +65,12 @@ pub const EV_COMMS_LOSS: u16 = 1 << 0;
 pub const EV_STOP_ALL: u16 = 1 << 1;
 /// `imu_loss`: `IMU_LOSS_THRESHOLD` consecutive failed reads on a configured IMU (`fault_a`).
 pub const EV_IMU_LOSS: u16 = 1 << 2;
+/// The board brought up no motor (`motor::OBS_CONFIGURED` clear on every motor; `specs/arm-confirmed.md`
+/// section 2). A level from boot. Not in [`FAULT_A_BITS`]: it refuses the arm through the mode
+/// machine's OFF-inhibit, as [`EV_MACHINE`] does, so a power request on such a board leaves it in
+/// OFF with this and [`EV_POWER_REQUEST`] both set. The wire owns the bit
+/// (`linkctl::CyclicState::FAULT_NO_MOTOR`).
+pub const EV_NO_MOTOR: u16 = linkctl::CyclicState::FAULT_NO_MOTOR;
 /// Motor 0's fault latch (`fault_a`).
 pub const EV_LATCH_A: u16 = 1 << 4;
 /// Motor 1's fault latch (the sole `fault_b` input).
@@ -99,13 +108,14 @@ pub const EV_MOTOR_BITS: u16 = EV_MOTOR_HALL | EV_MOTOR_CAL | EV_MOTOR_PERIOD | 
 pub const N_EVENT_PRODUCERS: usize = 8;
 
 /// The counter slot the motor union is counted in: bit 3, the retired `EV_MOTOR_FAULT` bit. Only
-/// the `CTRL_OBS` byte and the counters use it; the wire keeps bit 3 zero.
+/// the `CTRL_OBS` byte and the counters read it as the motor union; on the wire bit 3 is
+/// [`EV_NO_MOTOR`].
 pub const COUNTED_MOTOR: u8 = 1 << 3;
 
 /// The level mask folded into the eight-counter domain `CTRL_OBS` publishes: bits 0..=7 as they
-/// are (bit 3 is always clear in a level mask), and the motor causes onto [`COUNTED_MOTOR`].
+/// are with [`EV_NO_MOTOR`] dropped, and the motor causes onto [`COUNTED_MOTOR`].
 pub const fn counted(mask: u16) -> u8 {
-    let low = (mask & 0xFF) as u8;
+    let low = ((mask & !EV_NO_MOTOR) & 0xFF) as u8;
     if mask & EV_MOTOR_BITS != 0 {
         low | COUNTED_MOTOR
     } else {
@@ -166,6 +176,8 @@ pub struct Levels {
     pub config: bool,
     /// [`EV_MACHINE`]: the boards do not agree on the machine.
     pub machine: bool,
+    /// [`EV_NO_MOTOR`]: the board brought up no motor. A level for the whole run.
+    pub no_motor: bool,
 }
 
 impl Levels {
@@ -191,6 +203,7 @@ impl Levels {
             | bit(self.tilt, EV_STOP_ALL)
             | bit(self.config, EV_CONFIG)
             | bit(self.machine, EV_MACHINE)
+            | bit(self.no_motor, EV_NO_MOTOR)
     }
 
     /// The GATING mask this tick: [`own_mask`](Self::own_mask) with [`peer_down`](Self::peer_down)

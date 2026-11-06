@@ -331,7 +331,8 @@ data class CyclicMotor(
  * arm-effect field written since it last armed, a boot-effect field written since it booted.
  * [FLAG_PEER_SILENT] says which of [EV_MACHINE]'s causes holds (`specs/board-route.md` section
  * 4): set, a configured link has heard nothing since the board booted; clear, a peer's digest
- * differs.
+ * differs. [FLAG_MOE] says the board's bridge is live (`specs/arm-confirmed.md` section 1): the
+ * board's own record that MOE is set, which the app's arm control shows as armed.
  *
  * [wheelSpeed] is the RAW hall edge count per 320-period window, in the motor ISR's own unit with
  * no rescaling: the `SPEED` cell saturated into an i16 (`motorcontroller/firmware/src/motor.rs`,
@@ -344,8 +345,8 @@ data class CyclicMotor(
  * (`motorcontroller/orchestrator/src/dispatch.rs`, `cyclic_state`, from `motorcontroller/orchestrator/src/events.rs`,
  * `Levels`): one bit per producer, so a reader sees which producers are asserted right now rather
  * than a code it could miss between emissions. Not every bit is a fault: the mask also carries the
- * mode fault, the power request, the configuration bit ([EV_CONFIG]) and the machine bit
- * ([EV_MACHINE]), and [FAULT_A_BITS] is the group that is. [faultA] applies it.
+ * mode fault, the power request, the configuration bit ([EV_CONFIG]), the machine bit
+ * ([EV_MACHINE]) and the no-motor bit ([EV_NO_MOTOR]), and [FAULT_A_BITS] is the group that is. [faultA] applies it.
  *
  * [peerDemand] is the +-28500 stock-native torque a rigid-frame LEADER commands its peer to apply
  * (`shared/linkctl/src/lib.rs`, `CyclicState::peer_demand`), and 0 from every other board; [leader]
@@ -400,6 +401,12 @@ data class CyclicState(
 
     /** Peer-silent flag, bit5: a configured link has heard nothing since boot. `CyclicState::peer_silent`. */
     fun peerSilent(): Boolean = flags and FLAG_PEER_SILENT != 0
+
+    /** MOE flag, bit6: the board's bridge is live. `CyclicState::moe`. */
+    fun moe(): Boolean = flags and FLAG_MOE != 0
+
+    /** The no-motor bit, [fault] bit 3: the board brought up no motor. `CyclicState::no_motor`. */
+    fun noMotor(): Boolean = fault and EV_NO_MOTOR != 0
 
     /**
      * Whether any FAULT-A producer is asserted: [fault] masked by [FAULT_A_BITS], which is what
@@ -488,6 +495,12 @@ data class CyclicState(
          */
         const val FLAG_PEER_SILENT = 1 shl 5
 
+        /**
+         * `flags` bit6: MOE is set on a motor of the board, by the board's own arm record
+         * (`specs/arm-confirmed.md` section 1). `CyclicState::FLAG_MOE`.
+         */
+        const val FLAG_MOE = 1 shl 6
+
         /** [fault] bit 0: comms loss. `motorcontroller/orchestrator/src/events.rs`, `EV_COMMS_LOSS`. */
         const val EV_COMMS_LOSS = 1 shl 0
 
@@ -496,6 +509,13 @@ data class CyclicState(
 
         /** [fault] bit 2: IMU loss. `events.rs`, `EV_IMU_LOSS`. */
         const val EV_IMU_LOSS = 1 shl 2
+
+        /**
+         * [fault] bit 3: the board brought up no motor (`specs/arm-confirmed.md` section 2). Set
+         * from boot; it refuses the arm through the mode machine's off-inhibit and is not in
+         * [FAULT_A_BITS] nor [ARM_BLOCKING_BITS]. `events.rs`, `EV_NO_MOTOR`.
+         */
+        const val EV_NO_MOTOR = 1 shl 3
 
         /** [fault] bit 4: motor 0's fault latch. `events.rs`, `EV_LATCH_A`. */
         const val EV_LATCH_A = 1 shl 4
@@ -540,7 +560,7 @@ data class CyclicState(
         /**
          * The FAULT-A group of the [fault] mask: comms loss, the tilt cutout, IMU loss, motor 0's
          * latch and the four motor-side causes. `motorcontroller/orchestrator/src/events.rs`, `FAULT_A_BITS`
-         * (bits 0, 1, 2, 4 and 8 to 11; bit 3 is retired).
+         * (bits 0, 1, 2, 4 and 8 to 11).
          */
         const val FAULT_A_BITS =
             EV_COMMS_LOSS or EV_STOP_ALL or EV_IMU_LOSS or EV_LATCH_A or
@@ -548,8 +568,8 @@ data class CyclicState(
 
         /**
          * The bits of a board's own [fault] word that stop that board arming AND disengage it: Fault
-         * A and motor 1's latch, which is Fault B alone. [EV_MACHINE] also refuses an arm, through
-         * the off-inhibit, and is not here because it never disengages. The mode machine holds a board in OFF while either is
+         * A and motor 1's latch, which is Fault B alone. [EV_MACHINE] and [EV_NO_MOTOR] also refuse
+         * an arm, through the off-inhibit, and are not here because they never disengage. The mode machine holds a board in OFF while either is
          * asserted (`motorcontroller/state/src/mode.rs`, `ModeMachine::tick`; `motorcontroller/orchestrator/src/events.rs`,
          * `Levels::fault_a` and `Levels::fault_b`), so this is [FAULT_A_BITS] or [EV_LATCH_B]: bits
          * 0, 1, 2, 4, 5 and 8 to 11. The remote app's fault lamps and its fault disarm read this and

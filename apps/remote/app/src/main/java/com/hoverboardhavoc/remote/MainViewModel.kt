@@ -14,6 +14,9 @@ import com.hoverboardhavoc.remote.ble.LinkSettings
 import com.hoverboardhavoc.remote.ble.ScanCandidate
 import com.hoverboardhavoc.remote.ble.ScanList
 import com.hoverboardhavoc.remote.ble.SelectedBoard
+import com.hoverboardhavoc.remote.model.ArmPhase
+import com.hoverboardhavoc.remote.model.ArmRefusal
+import com.hoverboardhavoc.remote.model.BoardDisarm
 import com.hoverboardhavoc.remote.model.BatteryReading
 import com.hoverboardhavoc.remote.model.ConnectionState
 import com.hoverboardhavoc.remote.model.CurrentReading
@@ -40,10 +43,12 @@ import com.hoverboardhavoc.remote.model.Throttle
 import com.hoverboardhavoc.remote.model.TripBaseline
 import com.hoverboardhavoc.remote.model.Wheel
 import com.hoverboardhavoc.remote.model.WheelGeometry
+import com.hoverboardhavoc.remote.model.allReportMoe
 import com.hoverboardhavoc.remote.model.asLong
 import com.hoverboardhavoc.remote.model.batteryLow
 import com.hoverboardhavoc.remote.model.batteryReading
 import com.hoverboardhavoc.remote.model.currentReading
+import com.hoverboardhavoc.remote.model.firstDroppedMoe
 import com.hoverboardhavoc.remote.model.machineOdometer
 import com.hoverboardhavoc.remote.model.machineSpeed
 import com.hoverboardhavoc.remote.model.missingSettings
@@ -73,8 +78,12 @@ import kotlinx.coroutines.launch
  * UI state surfaced to Compose.
  *
  * @param connectionState BLE link state.
- * @param armed whether the arm control is currently held, i.e. whether the app is asserting
- *   `power_request` and the boards' motors are enabled.
+ * @param armPhase where the arm control is ([ArmPhase]): what it reads and what a tap does.
+ *   [UiState.armed] is its ARMED.
+ * @param armRefused why the last arm was dropped unconfirmed, kept until the next ARM tap.
+ * @param boardDisarm a board that dropped `FLAG_MOE` while armed, kept until the next ARM tap.
+ * @param disarmUnconfirmed the latched boards that had not reported `FLAG_MOE` clear 1 s into a
+ *   disarm, while the disarm is still unconfirmed.
  * @param throttleSpeed current commanded demand (-MAX..MAX), 0 whenever not armed. In DIFFERENTIAL
  *   this is the mix's `v`, the stick's forward axis, and not what either wheel is told.
  * @param steer current commanded turn (-MAX..MAX), 0 whenever not armed and 0 in the two modes
@@ -150,7 +159,10 @@ import kotlinx.coroutines.launch
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
-    val armed: Boolean = false,
+    val armPhase: ArmPhase = ArmPhase.IDLE,
+    val armRefused: ArmRefusal? = null,
+    val boardDisarm: BoardDisarm? = null,
+    val disarmUnconfirmed: List<Int> = emptyList(),
     val throttleSpeed: Int = 0,
     val steer: Int = 0,
     val engaged: Boolean = false,
@@ -192,6 +204,13 @@ data class UiState(
     val notTurning: Set<Wheel> = emptySet(),
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
+
+    /**
+     * Whether every board the arm latched has confirmed it with `FLAG_MOE` ([ArmPhase.ARMED],
+     * `specs/arm-confirmed.md` section 3): the boards' bridges are live. The throttle is live only
+     * then.
+     */
+    val armed: Boolean get() = armPhase == ArmPhase.ARMED
 
     /** The motor controllers this session found, in address order. Never a bridge. */
     val motorControllers: List<NodeInfo> get() = nodes.filter { it.isMotorController }
@@ -352,11 +371,12 @@ data class UiState(
      * while the drive mode in force addresses no motor controller at all (no node has answered that
      * it is one, or the app refuses the stored mode, [DriveInForce.refusal]), and while a board the
      * arm would arm reports an arm-blocking bit ([armBlocked]), and while no motor controller is
-     * reporting at all ([boardsOff]).
+     * reporting at all ([boardsOff]). And while a disarm is still unconfirmed ([ArmPhase.DISARMING]):
+     * the next arm starts from a machine every board says is off.
      */
     val canArm: Boolean
-        get() = isConnected && !engaged && !disconnecting && !machineArm.refuses &&
-            drive.targets.boards.isNotEmpty() && !armBlocked && !boardsOff
+        get() = armPhase != ArmPhase.DISARMING && isConnected && !engaged && !disconnecting &&
+            !machineArm.refuses && drive.targets.boards.isNotEmpty() && !armBlocked && !boardsOff
 
     /**
      * The name of what the phone is connected to, for the motor-controller-off card: the picked
@@ -551,6 +571,13 @@ class MainViewModel(
      * cancelled the moment either stops being so.
      */
     private val notTurning = MutableStateFlow<Set<Wheel>>(emptySet())
+
+    /**
+     * The arm control's 1 s confirmation window ([ARM_CONFIRM_MS]) and the phase it was started
+     * for ([startWindowOnEntry]).
+     */
+    private var armWindow: Job? = null
+    private var windowPhase: ArmPhase = ArmPhase.IDLE
     private val turningWaits = mutableMapOf<Wheel, Job>()
 
     /**
@@ -603,7 +630,10 @@ class MainViewModel(
         ) { conn, l, name, leaving ->
             UiState(
                 connectionState = conn,
-                armed = l.armed,
+                armPhase = l.phase,
+                armRefused = l.armRefused,
+                boardDisarm = l.boardDisarm,
+                disarmUnconfirmed = l.disarmUnconfirmed,
                 throttleSpeed = l.throttleSpeed,
                 steer = l.steer,
                 engaged = l.engaged,
@@ -616,7 +646,7 @@ class MainViewModel(
                 latchHeld = l.latchHeld,
             )
         }.combine(boards) { ui, b ->
-            val driving = if (ui.armed) ui.driving else b.drive.targets
+            val driving = if (ui.armPhase.holdsLevel) ui.driving else b.drive.targets
             val mcs = b.nodes.filter { it.isMotorController }.map { it.address }
             val counts = mcs.mapNotNull { a -> b.setup.setupOf(a).motors?.let { a to it } }.toMap()
             val wheels = mcs.flatMap { a -> (0 until (counts[a] ?: 1)).map { Wheel(a, it) } }
@@ -680,6 +710,9 @@ class MainViewModel(
         transport.connectionState
             .onEach {
                 if (it != ConnectionState.CONNECTED) {
+                    armWindow?.cancel()
+                    armWindow = null
+                    windowPhase = ArmPhase.IDLE
                     local.value = LocalState()
                     endLampTest()
                     lampTestDone = false
@@ -729,6 +762,7 @@ class MainViewModel(
         combine(setup.state, transport.telemetry, settings.turnAxis) { st, byBoard, _ -> st to byBoard }
             .onEach { (_, byBoard) ->
                 onFaultWords(byBoard)
+                settleArm(byBoard)
                 sendCurrent()
             }
             .launchIn(viewModelScope)
@@ -760,6 +794,91 @@ class MainViewModel(
             val next = if (cause == null) l else l.disarmed(selfDisarm = false).copy(faultDisarm = cause)
             next.copy(latchHeld = held)
         }
+        startWindowOnEntry()
+    }
+
+    /**
+     * The arm control's confirmation (`specs/arm-confirmed.md` section 3), against each latched
+     * board's last `FLAG_MOE`. Called on every telemetry change and after every transition.
+     *
+     * - **ARMING** becomes ARMED once every latched board reports `FLAG_MOE`.
+     * - **ARMED**: a latched board that reports `FLAG_MOE` clear disarmed itself. The app drops the
+     *   arm level, as the fault disarm does, and keeps the cause as [LocalState.boardDisarm]. A
+     *   board that stops reporting changes nothing here: the link lamp says so, and its own
+     *   comms-loss supervision disarms it.
+     * - **DISARMING** becomes IDLE once every latched board reports `FLAG_MOE` clear.
+     */
+    private fun settleArm(byBoard: Map<Int, TelemetryUi>) {
+        local.update { l ->
+            when (l.phase) {
+                ArmPhase.ARMING -> if (allReportMoe(l.confirmBoards, byBoard, moe = true)) {
+                    l.copy(phase = ArmPhase.ARMED)
+                } else {
+                    l
+                }
+                ArmPhase.ARMED -> firstDroppedMoe(l.confirmBoards, byBoard)?.let { board ->
+                    val lamp = FaultLamp.lit((byBoard[board]?.cyclic?.fault ?: 0) and FaultLamp.LAMP_BITS).firstOrNull()
+                    l.disarmed(selfDisarm = false).copy(boardDisarm = BoardDisarm(board, lamp))
+                } ?: l
+                ArmPhase.DISARMING -> if (allReportMoe(l.confirmBoards, byBoard, moe = false)) {
+                    l.copy(phase = ArmPhase.IDLE, confirmBoards = emptyList(), disarmUnconfirmed = emptyList())
+                } else {
+                    l
+                }
+                ArmPhase.IDLE -> l
+            }
+        }
+        startWindowOnEntry()
+    }
+
+    /**
+     * Start the 1 s confirmation window of the phase [local] has just entered, once per entry: an
+     * arm not confirmed in it is refused, and a disarm not confirmed in it is labelled. The window
+     * of a phase that has been left is cancelled.
+     */
+    private fun startWindowOnEntry() {
+        val phase = local.value.phase
+        if (phase == windowPhase) return
+        armWindow?.cancel()
+        armWindow = null
+        windowPhase = phase
+        armWindow = when (phase) {
+            ArmPhase.ARMING -> viewModelScope.launch {
+                delay(ARM_CONFIRM_MS)
+                refuseArm()
+            }
+            ArmPhase.DISARMING -> viewModelScope.launch {
+                delay(ARM_CONFIRM_MS)
+                local.update { l ->
+                    if (l.phase != ArmPhase.DISARMING) {
+                        l
+                    } else {
+                        val byBoard = transport.telemetry.value
+                        l.copy(disarmUnconfirmed = l.confirmBoards.filter { byBoard[it]?.cyclic?.moe() != false })
+                    }
+                }
+            }
+            ArmPhase.IDLE, ArmPhase.ARMED -> null
+        }
+    }
+
+    /**
+     * The arm window ran out with a latched board unconfirmed: drop the arm level and say which
+     * board refused it, with the first bit it reports that refuses an arm.
+     */
+    private fun refuseArm() {
+        if (local.value.phase != ArmPhase.ARMING) return
+        val byBoard = transport.telemetry.value
+        local.update { l ->
+            val board = l.confirmBoards.firstOrNull { byBoard[it]?.cyclic?.moe() != true }
+            val refusal = board?.let {
+                val word = (byBoard[it]?.cyclic?.fault ?: 0) and FaultLamp.REFUSING_BITS
+                ArmRefusal(it, FaultLamp.lit(word).firstOrNull())
+            }
+            l.disarmed(selfDisarm = false).copy(armRefused = refusal)
+        }
+        sendCurrent()
+        settleArm(transport.telemetry.value)
     }
 
     /** The first lamp lit on the first of [armed] that reports one, or null while none does. */
@@ -929,7 +1048,9 @@ class MainViewModel(
         // not the rendering's. So is a drive that addresses no motor controller: nothing to arm.
         val st = setup.state.value
         val targets = st.driveInForce(settings.turnAxis.value).targets
-        val refused = local.value.engaged || disconnecting.value || st.machine.armStatement.refuses
+        // A disarm not yet confirmed by every board refuses too: the next arm waits for it.
+        val refused = local.value.engaged || disconnecting.value || st.machine.armStatement.refuses ||
+            local.value.phase != ArmPhase.IDLE
         // A board the arm would arm reports a bit that refuses the arm: it would refuse the arm
         // itself (`specs/remote-ui.md` 3.1b). A lamp the app only holds lit refuses nothing.
         val telemetry = transport.telemetry.value
@@ -941,16 +1062,21 @@ class MainViewModel(
         if (boardsOff.value) return
         local.update {
             it.copy(
-                armed = true,
+                phase = ArmPhase.ARMING,
                 selfDisarmed = false,
                 faultDisarm = null,
+                armRefused = null,
+                boardDisarm = null,
+                disarmUnconfirmed = emptyList(),
                 latchHeld = emptyMap(),
                 armedTargets = targets,
+                confirmBoards = targets.boards,
             )
         }
         // The pad is back in its place as the machine arms (`specs/remote-ui.md` 3.1b).
         endLampTest()
         sendCurrent()
+        settleArm(transport.telemetry.value)
     }
 
     /**
@@ -962,7 +1088,8 @@ class MainViewModel(
      */
     fun onThrottleMove(y: Float, height: Float) {
         val engaged = Throttle.isEngaged(height)
-        val armed = local.value.armed
+        // Zero until every latched board has confirmed the arm (`specs/arm-confirmed.md` section 3).
+        val armed = local.value.phase == ArmPhase.ARMED
         val speed = if (engaged && armed) Throttle.speedFor(y, height, maxSpeed) else 0
         local.update { it.copy(throttleSpeed = speed, engaged = engaged) }
         sendCurrent()
@@ -997,7 +1124,7 @@ class MainViewModel(
      */
     fun onJoystickMove(x: Float, y: Float, width: Float, height: Float) {
         val engaged = Throttle.isEngaged(height)
-        val live = engaged && local.value.armed
+        val live = engaged && local.value.phase == ArmPhase.ARMED
         local.update {
             it.copy(
                 throttleSpeed = if (live) Throttle.speedFor(y, height, maxSpeed) else 0,
@@ -1062,6 +1189,7 @@ class MainViewModel(
     private fun forceDisarm(selfDisarm: Boolean) {
         local.update { it.disarmed(selfDisarm) }
         sendCurrent()
+        settleArm(transport.telemetry.value)
     }
 
     /**
@@ -1101,7 +1229,7 @@ class MainViewModel(
      * being so cancels the wait and clears the wheel. The app does not disarm for it.
      */
     private fun watchTurning(frame: DriveFrame, telemetry: Map<Int, TelemetryUi>) {
-        val suspects = if (!local.value.armed) {
+        val suspects = if (local.value.phase != ArmPhase.ARMED) {
             emptySet()
         } else {
             frame.commands.filter { (wheel, c) ->
@@ -1134,15 +1262,21 @@ class MainViewModel(
      * not something the rider is doing. It resets with the link, and so does [selfDisarmed],
      * because a link that went is its own explanation.
      *
+     * [phase] is the arm control's [ArmPhase]; [armed] is whether it holds the arm level.
      * [armedTargets] is the set of boards the arm latched, and part of the arm: it is null whenever
-     * [armed] is false.
+     * [armed] is false. [confirmBoards] are the boards whose `FLAG_MOE` confirms the phase: the
+     * latched ones, kept through the disarm until every one reports clear.
+     *
+     * [armRefused], [boardDisarm] and [disarmUnconfirmed] are what the arm control says about its
+     * last arm and disarm (`specs/arm-confirmed.md` section 3): the first two outlive the disarm
+     * and are cleared by the tap that arms, the third by the disarm's confirmation.
      *
      * [faultDisarm] and [latchHeld] are what the screen says about faults the app has seen this
      * session: both outlive a disarm and both are cleared by the tap that arms, and by the link
      * going, which resets everything here.
      */
     private data class LocalState(
-        val armed: Boolean = false,
+        val phase: ArmPhase = ArmPhase.IDLE,
         val throttleSpeed: Int = 0,
         val steer: Int = 0,
         val engaged: Boolean = false,
@@ -1152,19 +1286,35 @@ class MainViewModel(
         val faultDisarm: FaultDisarm? = null,
         val latchHeld: Map<Int, Int> = emptyMap(),
         val horn: Boolean = false,
+        val confirmBoards: List<Int> = emptyList(),
+        val armRefused: ArmRefusal? = null,
+        val boardDisarm: BoardDisarm? = null,
+        val disarmUnconfirmed: List<Int> = emptyList(),
     ) {
+        /** Whether the app puts the arm level on the wire: arming, or armed. */
+        val armed: Boolean get() = phase.holdsLevel
+
         /**
          * The all-stop state: no arm level, no demand, no touch. Operator settings and the fault
          * report survive, and [selfDisarm] records whether the app took the arm level by itself
          * rather than the rider asking for it, which is the one thing about a disarm the rider
          * cannot see for themselves.
+         *
+         * An arm level held is not the end of it: the phase goes to [ArmPhase.DISARMING], which
+         * keeps the boards whose `FLAG_MOE` confirms the disarm. A disarm from IDLE or DISARMING
+         * stays where it is.
          */
         fun disarmed(selfDisarm: Boolean): LocalState =
             LocalState(
+                phase = if (phase == ArmPhase.IDLE) ArmPhase.IDLE else ArmPhase.DISARMING,
+                confirmBoards = confirmBoards,
                 selfDisarmed = selfDisarm,
                 simulateRider = simulateRider,
                 faultDisarm = faultDisarm,
                 latchHeld = latchHeld,
+                armRefused = armRefused,
+                boardDisarm = boardDisarm,
+                disarmUnconfirmed = disarmUnconfirmed,
             )
     }
 
@@ -1178,6 +1328,12 @@ class MainViewModel(
          * correct if either the cadence or the burst length is retuned.
          */
         const val DISARM_SETTLE_MS: Long = (LinkConfig.INPUTS_CHANGE_REPEATS + 1) * LinkConfig.SEND_INTERVAL_MS
+
+        /**
+         * How long the arm control waits for every latched board's `FLAG_MOE` to confirm an arm or
+         * a disarm (`specs/arm-confirmed.md` section 3).
+         */
+        const val ARM_CONFIRM_MS: Long = 1_000L
 
         /** How long the lamp test lights every shown lamp (`specs/remote-ui.md` 3.1b). */
         const val LAMP_TEST_MS: Long = 2_000L

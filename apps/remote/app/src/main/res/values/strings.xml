@@ -60,6 +60,8 @@
     <!-- Arm control. The one tappable arm surface; there is no separate armed banner. -->
     <string name="arm_action">ARM</string>
     <string name="arm_disarm_action">ARMED · tap to disarm</string>
+    <string name="arm_arming">ARMING...</string>
+    <string name="arm_disarming">DISARMING...</string>
     <string name="horn_action">HORN</string>
     <!-- Shown on the arm control when the board runs with CONTROL_RIDER_REQUIRED at 0 (specs/control.md (i)). -->
     <string name="arm_rider_waived">Rider requirement waived: in balance mode, arming engages. Hold the frame upright when arming.</string>
@@ -676,6 +678,10 @@
     <string name="lamp_machine_when">This board has a link to another motor controller configured, and either it has not heard that board since it started, or that board holds different machine settings (the control mode, the frame, the method, the pack, the balance gains and limits).</string>
     <string name="lamp_machine_blocks">Arming. It never stops a machine that is already running.</string>
     <string name="lamp_machine_fix">Power the other board on. If both are on, Setup lists the machine settings that differ, board by board: set each one again under Setup, which writes every board.</string>
+    <string name="lamp_no_motor_title">No motor configured</string>
+    <string name="lamp_no_motor_when">This board brought up no motor when it started: its stored settings carry no motor, or the motor\'s bring-up failed. It has been lit since the board started.</string>
+    <string name="lamp_no_motor_blocks">Arming. The board stays off when the app asks it to arm.</string>
+    <string name="lamp_no_motor_fix">Store this board\'s motor settings with the host config tool, then power the board off and on. If they are stored, Setup lists under this board the step of the motor\'s bring-up that failed.</string>
     <string name="lamp_config_fix">Setup lists, under this board, what did not come up and why. Correct that setting, then power the board off and on.</string>
 
     <!-- The Ride screen, 8a (`specs/remote-ui.md` 3.1). -->
@@ -705,6 +711,12 @@
     <string name="ride_board_left_inline">left board</string>
     <string name="ride_board_right_inline">right board</string>
     <string name="ride_self_disarmed">Disarmed by the app when it left the screen.</string>
+    <!-- The arm control's confirmation statements (`specs/arm-confirmed.md` section 3). -->
+    <string name="ride_arm_refused_lamp">Arm refused: %1$s, %2$s.</string>
+    <string name="ride_arm_refused_silent">Arm refused: %1$s did not confirm.</string>
+    <string name="ride_board_disarmed">%1$s disarmed itself.</string>
+    <string name="ride_board_disarmed_lamp">%1$s disarmed itself: %2$s.</string>
+    <string name="ride_disarm_unconfirmed">Disarm not confirmed by %1$s.</string>
     <string name="ride_frames_differ">Cannot arm: the boards are set to different frames.</string>
     <string name="ride_no_board">No motor controller found yet.</string>
     <string name="ride_rider_waived">Rider waived: arming engages balance. Hold it upright.</string>

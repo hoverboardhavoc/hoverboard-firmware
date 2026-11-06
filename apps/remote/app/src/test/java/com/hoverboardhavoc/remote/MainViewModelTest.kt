@@ -476,6 +476,7 @@ class MainViewModelTest : RiderVmTest() {
     @Test
     fun `armed and engaged are both reflected in ui state`() = runTest(dispatcher) {
         transport.setConnectionState(ConnectionState.CONNECTED)
+        reporting(ONE_BOARD)
         viewModel.uiState.test {
             assertFalse(awaitItem().armed)
 

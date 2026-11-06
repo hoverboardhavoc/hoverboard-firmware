@@ -74,7 +74,7 @@ pub use dispatch::{
 pub use events::{
     counted, COUNTED_MOTOR, EV_COMMS_LOSS, EV_CONFIG, EV_IMU_LOSS, EV_LATCH_A, EV_LATCH_B,
     EV_MACHINE, EV_MODE_FAULT, EV_MOTOR_ARM, EV_MOTOR_BITS, EV_MOTOR_CAL, EV_MOTOR_HALL,
-    EV_MOTOR_PERIOD, EV_POWER_REQUEST, EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
+    EV_MOTOR_PERIOD, EV_NO_MOTOR, EV_POWER_REQUEST, EV_STOP_ALL, FAULT_A_BITS, N_EVENT_PRODUCERS,
 };
 pub use machine::{Digests, Machine, N_LINKS};
 
@@ -722,6 +722,18 @@ pub struct OrchestratorState<const M: usize> {
     /// shutdown, and a wheel spun by hand can never stop a fault from shutting the bridge down. A
     /// board with no motor brought up leaves it false, so the pre-motor boot posture is unchanged.
     pub motor_moving: bool,
+    /// [`events::EV_NO_MOTOR`]'s level (`specs/arm-confirmed.md` section 2): true while the board
+    /// brought up no motor (`motor::OBS_CONFIGURED` clear on every motor). Written by the firmware
+    /// BEFORE each pass, the [`Self::motor_fault`] pattern; it holds the mode machine in OFF and
+    /// goes on the wire in the `fault` word. Constructed false, so a host test that does not model
+    /// a motor sees the board it always saw.
+    pub no_motor: bool,
+    /// The arm layer's own record that MOE is set on a motor of this board (`arm::hw::armed` in the
+    /// firmware; `specs/arm-confirmed.md` section 1), written by the firmware BEFORE each pass, the
+    /// [`Self::motor_fault`] pattern. Its one reader is the cyclic builder, which puts it on the
+    /// wire as `linkctl::CyclicState::FLAG_MOE`. It is the fact, not the mode machine's allowance:
+    /// a board in RUN whose arm was refused reports it clear.
+    pub moe: bool,
     /// The local battery sense (`specs/sensing-and-safety.md`, "The battery word", source rule
     /// 1): `Some` exactly when the plan carries `board.battery.pin`, with the boot-read calibration and
     /// the 250 Hz filter. `None` = this board does not sense; its word comes from its peer or is
@@ -906,6 +918,8 @@ impl<const M: usize> OrchestratorState<M> {
             block,
             motor_fault: 0,
             motor_moving: false,
+            no_motor: false,
+            moe: false,
             vbatt: vbatt_cal.map(battery::LocalSense::new),
             vbatt_raw: 0,
             events: FaultEvents::default(),
@@ -1412,6 +1426,9 @@ pub fn control_task<const M: usize>(
         // The boards do not agree on the machine, or a configured link's peer is unheard: an
         // arm inhibit and nothing else (`specs/machine-settings.md` section 4.2).
         machine: state.machine.disagrees(),
+        // The board brought up no motor (`specs/arm-confirmed.md` section 2): an arm inhibit, as
+        // `machine` is, so the power request leaves it in OFF.
+        no_motor: state.no_motor,
     };
     state.events.tick(levels.mask());
     state.own_levels = levels.own_mask();
@@ -1420,9 +1437,11 @@ pub fn control_task<const M: usize>(
         fault_a: levels.fault_a(),
         fault_b: levels.fault_b(),
         // The OFF-inhibit producers: the wheel-motion level the firmware derived from the period
-        // ISR's SPEED word (`specs/motor-integration.md`, slice 5), and `EV_MACHINE`, which blocks
-        // arming and, being no fault, never ends a run (`specs/machine-settings.md` section 4.2).
-        off_inhibit: state.motor_moving || levels.machine,
+        // ISR's SPEED word (`specs/motor-integration.md`, slice 5), `EV_MACHINE`, which blocks
+        // arming and, being no fault, never ends a run (`specs/machine-settings.md` section 4.2),
+        // and `EV_NO_MOTOR`, which holds a board that brought up no motor in OFF
+        // (`specs/arm-confirmed.md` section 2).
+        off_inhibit: state.motor_moving || levels.machine || levels.no_motor,
     };
     let outcome = state.mode.tick(&mode_inputs);
 

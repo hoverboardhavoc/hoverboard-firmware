@@ -102,6 +102,41 @@ class FakeHoverboardTransport(
 
     override fun sendCommand(frame: DriveFrame) {
         frames.add(frame)
+        if (!boardsFollowArm) return
+        // Each board that has reported answers the arm level it is told with its own `FLAG_MOE`
+        // (`specs/arm-confirmed.md` section 1), as a configured board does: its next frame says so.
+        for (node in frame.boards) {
+            val armed = frame.wheelsOf(node).first().second.armed
+            if (armed == (node in moe)) continue
+            if (armed) moe += node else moe -= node
+            lastState[node]?.let { emitCyclicState(it, from = node) }
+        }
+    }
+
+    /**
+     * Whether each board answers the arm level the app sends it by setting or clearing `FLAG_MOE`
+     * in its frames, the way a board with a motor does (`specs/arm-confirmed.md` section 1). On by
+     * default, so a test about something else arms the way the bench does. A test about the
+     * confirmation itself turns it off and says what each board reports, through [setMoe].
+     *
+     * A board that has never reported stays silent: the fake never invents a frame.
+     */
+    var boardsFollowArm: Boolean = true
+
+    /** The boards whose frames carry `FLAG_MOE`, and each board's last frame as the test gave it. */
+    private val moe = mutableSetOf<Int>()
+    private val lastState = mutableMapOf<Int, CyclicState>()
+
+    /**
+     * [boards] report `FLAG_MOE` as [on] from now on, and send their last frame again (a quiet one
+     * if they have sent none) so the app hears it.
+     */
+    fun setMoe(on: Boolean, vararg boards: Int) {
+        for (b in boards) {
+            if (on) moe += b else moe -= b
+            emitCyclicState(lastState[b] ?: QUIET_STATE, from = b)
+        }
+        scheduler.runCurrent()
     }
 
     private val _attachedBoard = MutableStateFlow<Int?>(null)
@@ -428,7 +463,8 @@ class FakeHoverboardTransport(
 
     /**
      * Inject a `CYCLIC_STATE` as [from] sent it, folded in under that board's address the way the
-     * real transport folds it in. Latest-wins per board.
+     * real transport folds it in. Latest-wins per board. Its `FLAG_MOE` is the board's own, as the
+     * fake keeps it ([boardsFollowArm], [setMoe]), whatever [state] carries.
      *
      * [from] defaults to the attached board, which is what a one-board test means; a test about
      * the pair names the other address and gets a second board on the strip, which is what the
@@ -437,7 +473,10 @@ class FakeHoverboardTransport(
      * and asking the model what it shows.
      */
     fun emitCyclicState(state: CyclicState, from: Int? = null) {
-        inbox.cyclic(from ?: _attachedBoard.value ?: UNATTACHED_SRC, state, nowMs = 0)
+        val src = from ?: _attachedBoard.value ?: UNATTACHED_SRC
+        lastState[src] = state
+        val flags = if (src in moe) state.flags or CyclicState.FLAG_MOE else state.flags and CyclicState.FLAG_MOE.inv()
+        inbox.cyclic(src, state.copy(flags = flags), nowMs = 0)
     }
 }
 

@@ -1004,6 +1004,7 @@ class RustSourceDriftTest {
             "CyclicState::FLAG_REARM" to CyclicState.FLAG_REARM,
             "CyclicState::FLAG_REBOOT" to CyclicState.FLAG_REBOOT,
             "CyclicState::FLAG_PEER_SILENT" to CyclicState.FLAG_PEER_SILENT,
+            "CyclicState::FLAG_MOE" to CyclicState.FLAG_MOE,
             "CyclicState::FLAG_LOCKDOWN" to CyclicState.FLAG_LOCKDOWN,
             "Inputs::BUTTON_POWER" to Inputs.BUTTON_POWER,
             "Inputs::BUTTON_HORN" to Inputs.BUTTON_HORN,
@@ -2593,6 +2594,7 @@ class RustSourceDriftTest {
             "EV_COMMS_LOSS" to CyclicState.EV_COMMS_LOSS,
             "EV_STOP_ALL" to CyclicState.EV_STOP_ALL,
             "EV_IMU_LOSS" to CyclicState.EV_IMU_LOSS,
+            "EV_NO_MOTOR" to CyclicState.EV_NO_MOTOR,
             "EV_LATCH_A" to CyclicState.EV_LATCH_A,
             "EV_LATCH_B" to CyclicState.EV_LATCH_B,
             "EV_MODE_FAULT" to CyclicState.EV_MODE_FAULT,
@@ -2609,10 +2611,12 @@ class RustSourceDriftTest {
         // EV_MACHINE refuses an arm through the mode machine's off-inhibit and disengages nothing,
         // so it is outside both aggregates (`orchestrator::lib`, `off_inhibit: ... || levels.machine`).
         assertEquals(0, CyclicState.EV_MACHINE and CyclicState.ARM_BLOCKING_BITS, "EV_MACHINE never disengages")
+        // EV_NO_MOTOR likewise (`specs/arm-confirmed.md` section 2).
+        assertEquals(0, CyclicState.EV_NO_MOTOR and CyclicState.ARM_BLOCKING_BITS, "EV_NO_MOTOR never disengages")
         findOne(
             rust("motorcontroller/orchestrator/src/lib.rs"),
-            """off_inhibit:\s*state\.motor_moving\s*\|\|\s*levels\.machine""",
-            "EV_MACHINE as the off-inhibit",
+            """off_inhibit:\s*state\.motor_moving\s*\|\|\s*levels\.machine\s*\|\|\s*levels\.no_motor""",
+            "EV_MACHINE and EV_NO_MOTOR as the off-inhibit",
         )
     }
 

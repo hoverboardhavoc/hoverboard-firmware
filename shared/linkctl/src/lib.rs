@@ -327,7 +327,8 @@ pub struct CyclicState {
     pub fault: u16,
     /// Flag bits: [`Self::FLAG_RIDER`] (bit0), [`Self::FLAG_LEADER`] (bit1),
     /// [`Self::FLAG_FOLLOWER`] (bit2), [`Self::FLAG_REARM`] (bit3), [`Self::FLAG_REBOOT`] (bit4),
-    /// [`Self::FLAG_PEER_SILENT`] (bit5), [`Self::FLAG_LOCKDOWN`] (bit7).
+    /// [`Self::FLAG_PEER_SILENT`] (bit5), [`Self::FLAG_MOE`] (bit6), [`Self::FLAG_LOCKDOWN`]
+    /// (bit7).
     pub flags: u8,
     /// The torque this board commands its peer to apply, on the same +-28500 stock-native scale
     /// as every other demand in the system (`specs/rover-one-imu.md` section 4). **0 unless this
@@ -416,6 +417,18 @@ impl CyclicState {
     /// says which (`hoverboard-cli machine nodes`, the app's MACHINE lamp).
     pub const FLAG_PEER_SILENT: u8 = 1 << 5;
 
+    /// `flags` bit6: MOE is set on a motor of this board (`specs/arm-confirmed.md` section 1). The
+    /// arm layer's own record (`arm::hw::armed` in the firmware): set after the arm writes MOE and
+    /// reads it back, cleared when the shutdown clears it. The fact, not the request. Consumer: a
+    /// client, which shows a board armed only while this is set (the app's arm control,
+    /// `hoverboard-cli machine nodes`).
+    pub const FLAG_MOE: u8 = 1 << 6;
+
+    /// `fault` bit3, `EV_NO_MOTOR`: the board brought up no motor (`specs/arm-confirmed.md`
+    /// section 2). A level from boot; it refuses the arm (the mode machine's off-inhibit) and
+    /// does nothing else. Consumer: a client, which says "No motor configured".
+    pub const FAULT_NO_MOTOR: u16 = 1 << 3;
+
     /// `fault` bit13, `EV_MACHINE`: the board refuses to arm because a configured link's peer was
     /// not heard or reports another [`Self::machine`] digest (`specs/machine-settings.md` section
     /// 4.2); [`Self::FLAG_PEER_SILENT`] says which. It blocks arming and nothing else. Consumer: a
@@ -455,6 +468,16 @@ impl CyclicState {
     /// Peer-silent flag (bit5): a configured link has heard nothing since boot.
     pub const fn peer_silent(&self) -> bool {
         self.flags & Self::FLAG_PEER_SILENT != 0
+    }
+
+    /// MOE flag (bit6): the board's bridge is live.
+    pub const fn moe(&self) -> bool {
+        self.flags & Self::FLAG_MOE != 0
+    }
+
+    /// The no-motor fault (`fault` bit3): the board brought up no motor and refuses to arm.
+    pub const fn no_motor(&self) -> bool {
+        self.fault & Self::FAULT_NO_MOTOR != 0
     }
 
     /// The machine fault (`fault` bit13): the board refuses to arm until its peers agree.
@@ -1221,29 +1244,34 @@ mod tests {
         assert!(!c.peer_silent());
         c.flags = CyclicState::FLAG_PEER_SILENT;
         assert!(c.peer_silent() && !c.reboot() && !c.lockdown());
+        assert!(!c.moe());
+        c.flags = CyclicState::FLAG_MOE;
+        assert!(c.moe() && !c.peer_silent() && !c.lockdown());
         assert_eq!(
             (
                 CyclicState::FLAG_REARM,
                 CyclicState::FLAG_REBOOT,
-                CyclicState::FLAG_PEER_SILENT
+                CyclicState::FLAG_PEER_SILENT,
+                CyclicState::FLAG_MOE
             ),
-            (0x08, 0x10, 0x20)
+            (0x08, 0x10, 0x20, 0x40)
         );
-        // Foreign bits do not bleed into the defined flags.
-        c.flags = !(CyclicState::FLAG_RIDER
-            | CyclicState::FLAG_LEADER
-            | CyclicState::FLAG_FOLLOWER
-            | CyclicState::FLAG_REARM
-            | CyclicState::FLAG_REBOOT
-            | CyclicState::FLAG_PEER_SILENT
-            | CyclicState::FLAG_LOCKDOWN);
-        assert!(!c.rider_present());
-        assert!(!c.leader());
-        assert!(!c.follower());
-        assert!(!c.rearm());
-        assert!(!c.reboot());
-        assert!(!c.peer_silent());
-        assert!(!c.lockdown());
+        // Every `flags` bit is now named, so there is no foreign bit left to test against.
+        assert_eq!(
+            CyclicState::FLAG_RIDER
+                | CyclicState::FLAG_LEADER
+                | CyclicState::FLAG_FOLLOWER
+                | CyclicState::FLAG_REARM
+                | CyclicState::FLAG_REBOOT
+                | CyclicState::FLAG_PEER_SILENT
+                | CyclicState::FLAG_MOE
+                | CyclicState::FLAG_LOCKDOWN,
+            0xFF
+        );
+        c.fault = 0;
+        assert!(!c.no_motor());
+        c.fault = CyclicState::FAULT_NO_MOTOR;
+        assert!(c.no_motor() && !c.machine_mismatch());
     }
 
     #[test]

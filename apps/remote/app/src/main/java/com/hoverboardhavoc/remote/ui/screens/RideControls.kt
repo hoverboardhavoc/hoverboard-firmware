@@ -86,7 +86,7 @@ internal fun RideControls(
             }
             Spacer(modifier = Modifier.height(SLOT_GAP))
         }
-        ArmToggle(armed = state.armed, enabled = state.canArm, onToggle = onArmToggle)
+        ArmToggle(phase = state.armPhase, enabled = state.canArm, onToggle = onArmToggle)
         val shown = if (grid != null || !padShown) emptyList() else statements(state).take(MAX_STATEMENTS)
         if (statementsHeight != null) {
             Spacer(modifier = Modifier.height(STATEMENTS_GAP))
@@ -199,9 +199,35 @@ private fun missingStatements(state: UiState): List<Statement> = state.missing.m
     Statement(text, Tone.MUTED, setup = if (row != null && m.board != null) m.board to row.key else null)
 }
 
-/** Why the machine is not armed when the app took the level away: a fault, or leaving the screen. */
+/**
+ * Why the machine is not armed when the app took the level away: a fault, leaving the screen, an
+ * arm no board confirmed, a board that disarmed itself; and a disarm a board has not confirmed
+ * (`specs/arm-confirmed.md` section 3).
+ */
 @Composable
 private fun disarmStatements(state: UiState): List<Statement> = buildList {
+    for (board in state.disarmUnconfirmed) {
+        val text = stringResource(R.string.ride_disarm_unconfirmed, boardName(state, board, inline = true))
+        add(Statement(text, Tone.WARNING))
+    }
+    state.armRefused?.let { r ->
+        val name = boardName(state, r.address, inline = true)
+        val text = if (r.lamp != null) {
+            stringResource(R.string.ride_arm_refused_lamp, stringResource(r.lamp.title), name)
+        } else {
+            stringResource(R.string.ride_arm_refused_silent, name)
+        }
+        add(Statement(text, Tone.WARNING, r.lamp))
+    }
+    state.boardDisarm?.let { d ->
+        val name = boardName(state, d.address, inline = true)
+        val text = if (d.lamp != null) {
+            stringResource(R.string.ride_board_disarmed_lamp, name, stringResource(d.lamp.title))
+        } else {
+            stringResource(R.string.ride_board_disarmed, name)
+        }
+        add(Statement(text, Tone.WARNING, d.lamp))
+    }
     state.faultDisarm?.let {
         val text = stringResource(
             R.string.ride_disarmed_fault,

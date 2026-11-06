@@ -3,6 +3,7 @@ package com.hoverboardhavoc.remote
 import com.hoverboard.protocol.linkctl.CyclicMotor
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Value
+import com.hoverboardhavoc.remote.model.ArmPhase
 import com.hoverboardhavoc.remote.model.ConnectionState
 import com.hoverboardhavoc.remote.model.RiderCommand
 import com.hoverboardhavoc.remote.model.Throttle
@@ -102,16 +103,17 @@ class RideSessionTest : RiderVmTest() {
         transport.setConnectionState(ConnectionState.CONNECTED)
         viewModel.onArmToggle()
         runCurrent()
-        assertTrue(now().armed)
+        // No board reports, so none confirms: the app holds the level, ARMING.
+        assertEquals(ArmPhase.ARMING, now().armPhase)
 
         advanceTimeBy(MainViewModel.BOARDS_OFF_MS + 1)
         val state = now()
         assertTrue(state.boardsOff)
-        assertFalse(state.armed)
+        assertFalse(state.armPhase.holdsLevel)
         assertFalse(state.selfDisarmed, "no statement: the card says why")
         assertEquals(RiderCommand.DISARMED, transport.last)
         viewModel.onArmToggle()
-        assertFalse(now().armed, "ARM refuses while the card shows")
+        assertFalse(now().armPhase.holdsLevel, "ARM refuses while the card shows")
     }
 
     // --- boards that come up after the connect -------------------------------------------------

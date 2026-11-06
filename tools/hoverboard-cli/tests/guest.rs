@@ -116,7 +116,7 @@ fn the_tally_counts_each_source_with_its_rate_and_longest_gap() {
 fn a_counted_frame_is_one_json_line_with_every_word() {
     let mut s = state(3, -40, 3095);
     s.fault = 0x2000;
-    s.flags = CyclicState::FLAG_REBOOT;
+    s.flags = CyclicState::FLAG_REBOOT | CyclicState::FLAG_MOE;
     s.wheel_speed = -7;
     s.wheel_rate = -28_672;
     s.wheel_pos = 1234;
@@ -136,13 +136,20 @@ fn a_counted_frame_is_one_json_line_with_every_word() {
     assert_eq!(
         v,
         serde_json::json!({
-            "t": 1.5, "src": 3, "mode": 3, "fault": 0x2000, "flags": CyclicState::FLAG_REBOOT,
+            "t": 1.5, "src": 3, "mode": 3, "fault": 0x2000,
+            "flags": CyclicState::FLAG_REBOOT | CyclicState::FLAG_MOE, "moe": true,
             "boot_tag": 17, "wheel_speed": -7, "wheel_rate": -28_672, "wheel_pos": 1234,
             "phase_peak": 812, "phase_mean": 405, "duty_on": 900, "battery": 3095,
             "peer_demand": -40, "pitch": 0, "roll": 0, "odometer": 99_000, "machine": 0xBEEF,
             "motor1": null,
         })
     );
+    // `"moe"` is `FLAG_MOE` (`specs/arm-confirmed.md` section 4), false on a disarmed board.
+    s.flags = 0;
+    assert_eq!(t.feed_src(&cyclic(0x03, &s), ms(1700)), Some(0x03));
+    let v: serde_json::Value =
+        serde_json::from_str(&t.frame_json(0x03, ms(1700)).unwrap()).unwrap();
+    assert_eq!(v["moe"], false);
 }
 
 /// A two-motor board's 46 B frame: the board's part of the line ends in motor 1's peak, mean and

@@ -31,6 +31,7 @@ import com.hoverboard.protocol.linkctl.CyclicObs
 import com.hoverboard.protocol.linkctl.CyclicState
 import com.hoverboard.protocol.store.Fields
 import com.hoverboard.protocol.store.Key
+import com.hoverboardhavoc.remote.model.ArmPhase
 import com.hoverboardhavoc.remote.model.SetupFields
 import com.hoverboardhavoc.remote.model.SlotSide
 import com.hoverboardhavoc.remote.model.ConnectionState
@@ -795,7 +796,7 @@ class ControlScreenTest {
         }
         return UiState(
             connectionState = ConnectionState.CONNECTED,
-            armed = armed,
+            armPhase = if (armed) ArmPhase.ARMED else ArmPhase.IDLE,
             nodes = boards.map { NodeInfo(it, Walk.CLASS_MOTOR, BOARD_NAME) },
             attachedNode = 0x01,
             selected = 0x01,

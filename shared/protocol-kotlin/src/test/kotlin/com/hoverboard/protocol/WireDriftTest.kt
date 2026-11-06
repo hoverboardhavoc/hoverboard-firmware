@@ -422,6 +422,7 @@ class WireDriftTest {
         assertEquals(0x08, CyclicState.FLAG_REARM, "shared/linkctl/src/lib.rs, CyclicState::FLAG_REARM")
         assertEquals(0x10, CyclicState.FLAG_REBOOT, "shared/linkctl/src/lib.rs, CyclicState::FLAG_REBOOT")
         assertEquals(0x20, CyclicState.FLAG_PEER_SILENT, "shared/linkctl/src/lib.rs, CyclicState::FLAG_PEER_SILENT")
+        assertEquals(0x40, CyclicState.FLAG_MOE, "shared/linkctl/src/lib.rs, CyclicState::FLAG_MOE")
         assertEquals(0x0F17, CyclicState.FAULT_A_BITS, "motorcontroller/orchestrator/src/events.rs, FAULT_A_BITS")
         // FAULT_A_BITS | EV_LATCH_B: Fault A and Fault B, what holds a board in OFF.
         assertEquals(0x0F37, CyclicState.ARM_BLOCKING_BITS, "motorcontroller/orchestrator/src/events.rs, EV_LATCH_B")
@@ -430,6 +431,7 @@ class WireDriftTest {
         assertEquals(0x001, CyclicState.EV_COMMS_LOSS, "$ev, EV_COMMS_LOSS")
         assertEquals(0x002, CyclicState.EV_STOP_ALL, "$ev, EV_STOP_ALL")
         assertEquals(0x004, CyclicState.EV_IMU_LOSS, "$ev, EV_IMU_LOSS")
+        assertEquals(0x008, CyclicState.EV_NO_MOTOR, "$ev, EV_NO_MOTOR")
         assertEquals(0x010, CyclicState.EV_LATCH_A, "$ev, EV_LATCH_A")
         assertEquals(0x020, CyclicState.EV_LATCH_B, "$ev, EV_LATCH_B")
         assertEquals(0x040, CyclicState.EV_MODE_FAULT, "$ev, EV_MODE_FAULT")
