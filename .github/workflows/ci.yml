@@ -1720,12 +1720,17 @@ jobs:
       # Roborazzi records rather than compares here (`roborazzi.test.record=true` in
       # app/build.gradle.kts), so the captures it writes into the workspace are a by-product; this
       # job does not gate on pixels.
-      - name: Run the app's unit tests (debug and release) and detekt
+      #
+      # Android lint on both variants gates on lint errors (AGP's default abortOnError); warnings
+      # are reported and do not fail the job.
+      - name: Run the app's unit tests (debug and release), detekt and Android lint
         run: |
           ./gradlew --console=plain --continue --no-build-cache \
             :app:testDebugUnitTest --rerun \
             :app:testReleaseUnitTest --rerun \
-            detekt --rerun
+            detekt --rerun \
+            :app:lintDebug --rerun \
+            :app:lintRelease --rerun
 
       # The same belt-and-braces as the protocol gate, against the same failure mode and one more:
       # a suite that reports success having executed nothing, and a variant that quietly runs a
