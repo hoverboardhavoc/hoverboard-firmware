@@ -50,6 +50,14 @@ pub struct StreamSerial {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TxFull;
 
+impl core::fmt::Display for TxFull {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("the outbound buffer has no room for a whole frame")
+    }
+}
+
+impl core::error::Error for TxFull {}
+
 impl embedded_io::Error for TxFull {
     fn kind(&self) -> ErrorKind {
         ErrorKind::WriteZero

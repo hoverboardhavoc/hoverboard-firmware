@@ -11,7 +11,7 @@ description = "SWD RAM-mailbox L2 transport: two SPSC byte rings at a fixed RAM 
 
 [dependencies]
 link = { path = "../link" }
-embedded-io = "0.6"
+embedded-io = "0.7"
 # The store field REGISTRY, for one compile-time value: the registry fingerprint the mailbox header
 # publishes at attach (src/registry.rs). No store code is called at runtime, so this adds nothing to
 # an image that links `store` already (the firmware does); what it buys is that the firmware and the

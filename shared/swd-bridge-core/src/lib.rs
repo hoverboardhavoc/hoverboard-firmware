@@ -152,7 +152,7 @@ impl<E: fmt::Display> fmt::Display for BridgeError<E> {
 impl<E: fmt::Debug + fmt::Display> core::error::Error for BridgeError<E> {}
 
 // So `BridgeSerial` can be an `embedded-io` serial that `link::SerialTransport` drives.
-impl<E: fmt::Debug> embedded_io::Error for BridgeError<E> {
+impl<E: fmt::Debug + fmt::Display> embedded_io::Error for BridgeError<E> {
     fn kind(&self) -> ErrorKind {
         match self {
             // The kind the `Write` contract prescribes for "not able to accept more bytes".

@@ -12,7 +12,7 @@ description = "The hoverboard HAL (specs/hal.md): one source for the GD32F103C8,
 [dependencies]
 cortex-m = "0.7"
 embedded-hal = "1.0"
-embedded-io = "0.6"
+embedded-io = "0.7"
 # The bounded channel list `InjectedAdcConfig` and `AdcConfig` carry (the version the firmware
 # already links, so the config the firmware builds is the type the HAL takes).
 heapless = "0.8"
