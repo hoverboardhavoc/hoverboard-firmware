@@ -202,6 +202,35 @@ pub fn slot_name(i: &EspInfo) -> String {
     }
 }
 
+/// Whether a confirmed `bridge update` finished: `after`, read once the bridge was confirmed, runs
+/// the other app slot than `before` and no longer waits for verification. A bridge that names
+/// neither slot cannot know which slot its next update writes or mark the running one valid, so
+/// its next reset returns to the old image: the update failed even though the image booted.
+/// `None` for either (an `ESP_INFO` layout this CLI does not decode) is not judged.
+pub fn check_confirmed(before: Option<&EspInfo>, after: Option<&EspInfo>) -> Result<(), String> {
+    let Some(a) = after else { return Ok(()) };
+    if a.slot == SLOT_NONE {
+        return Err(
+            "the bridge booted the new image, but it names neither app slot, so it cannot mark \
+             the slot valid and its next reset returns to the old image"
+                .to_string(),
+        );
+    }
+    if a.pending {
+        return Err(format!(
+            "the bridge runs {}: the confirmation did not take",
+            slot_name(a)
+        ));
+    }
+    if before.is_some_and(|b| b.slot == a.slot) {
+        return Err(format!(
+            "the bridge did not boot the new image: it runs {}",
+            slot_name(a)
+        ));
+    }
+    Ok(())
+}
+
 /// The Wi-Fi state `ESP_INFO` reports, as `bridge info` prints it.
 pub fn wifi_text(i: &EspInfo) -> String {
     let [a, b, c, d] = i.ip;
@@ -298,6 +327,29 @@ pub const JOIN_WAIT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_confirmed_update_must_leave_the_bridge_on_the_other_slot_valid() {
+        let on = |slot, pending| EspInfo {
+            slot,
+            pending,
+            ..EspInfo::default()
+        };
+        let before = on(0, false);
+        // The other slot, valid: done.
+        assert_eq!(check_confirmed(Some(&before), Some(&on(1, false))), Ok(()));
+        // Neither slot (the bridge could not read its partition table): refused, though the image
+        // booted and the slot differs from before.
+        assert!(check_confirmed(Some(&before), Some(&on(SLOT_NONE, false))).is_err());
+        assert!(check_confirmed(None, Some(&on(SLOT_NONE, false))).is_err());
+        // Still waiting for verification: refused.
+        assert!(check_confirmed(Some(&before), Some(&on(1, true))).is_err());
+        // The old slot: refused.
+        assert!(check_confirmed(Some(&before), Some(&on(0, false))).is_err());
+        // A layout this CLI does not decode is not judged.
+        assert_eq!(check_confirmed(Some(&before), None), Ok(()));
+        assert_eq!(check_confirmed(None, Some(&on(1, false))), Ok(()));
+    }
 
     fn port(name: &str, usb: Option<(u16, u16)>) -> PortInfo {
         PortInfo {

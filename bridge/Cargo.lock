@@ -1555,7 +1555,7 @@ dependencies = [
  "embedded-io 0.7.1",
  "espsvc",
  "gdbstub",
- "heapless 0.8.0",
+ "heapless 0.9.3",
  "link",
  "linkctl",
  "net",

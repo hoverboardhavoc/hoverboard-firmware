@@ -140,6 +140,11 @@ async fn main(spawner: Spawner) {
     // The store, on the `keys` partition. The app slots' platform below has its own handle on the
     // flash: both are used from the service loop alone, never at once.
     let table = TABLE.take();
+    // Both handles are made before either reads the flash. `FlashStorage::new` (esp-storage 0.10)
+    // sizes the flash with the SPI1 read-ID command, and after the ROM's flash reads that command
+    // reads an ID that sizes the flash at 0, so a handle made later refuses every access as out of
+    // bounds (the platform's did: it named neither app slot and could not update).
+    let platform_flash = FlashStorage::new(p.FLASH);
     // SAFETY: `FLASH` is only a token for the ROM's SPI flash functions; this second handle and the
     // platform's are both used from the service loop, one call at a time.
     let keys_flash = FlashStorage::new(unsafe { esp_hal::peripherals::FLASH::steal() });
@@ -192,7 +197,7 @@ async fn main(spawner: Spawner) {
     // The service's state is placed in statics, not moved by value into the task: a task's
     // arguments pass through the stack of the spawning task, and with the update's sector buffer
     // that overran the 35 KB stack and stopped the boot silently.
-    let platform = EspPlatform::new(FlashStorage::new(p.FLASH), table);
+    let platform = EspPlatform::new(platform_flash, table);
     let build = build(khz);
     let fw_ver = u16::from_be_bytes([build.version[0], build.version[1]]);
     let node = NODE.init(Node::new(store, mounted, fw_ver, mac, default));
