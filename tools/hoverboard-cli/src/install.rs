@@ -20,13 +20,17 @@ pub const IMAGE_LEN: usize = 4 * 1024 * 1024;
 /// The first byte of an ESP image, the bootloader's header at `0x0`.
 pub const ESP_IMAGE_MAGIC: u8 = 0xE9;
 
-/// A serial port as the host lists it: its name and, for a USB port, its vendor and product ids.
+/// A serial port as the host lists it: its name and, for a USB port, its vendor and product ids
+/// and its USB serial number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortInfo {
     /// `/dev/cu.usbmodem101`, `/dev/ttyACM0`, `COM5`.
     pub name: String,
     /// The USB vendor and product ids, for a USB port.
     pub usb: Option<(u16, u16)>,
+    /// The USB serial number, for a USB port that has one; the C3's USB-Serial-JTAG gives its MAC
+    /// (`28:37:2F:54:BF:7C`).
+    pub serial: Option<String>,
 }
 
 /// The link the command line names, as `bridge install` sees it.
@@ -52,22 +56,43 @@ pub fn host_ports() -> Vec<PortInfo> {
     serialport::available_ports()
         .unwrap_or_default()
         .into_iter()
-        .map(|p| PortInfo {
-            name: p.port_name,
-            usb: match p.port_type {
-                SerialPortType::UsbPort(u) => Some((u.vid, u.pid)),
-                _ => None,
+        .map(|p| match p.port_type {
+            SerialPortType::UsbPort(u) => PortInfo {
+                name: p.port_name,
+                usb: Some((u.vid, u.pid)),
+                serial: u.serial_number,
+            },
+            _ => PortInfo {
+                name: p.port_name,
+                usb: None,
+                serial: None,
             },
         })
+        .collect()
+}
+
+/// Whether `name` is the `/dev/tty.*` twin of a `/dev/cu.*` port in `ports`: macOS lists each USB
+/// serial device twice, and the twin is the same device.
+fn is_twin(name: &str, ports: &[PortInfo]) -> bool {
+    name.strip_prefix("/dev/tty.")
+        .is_some_and(|rest| ports.iter().any(|p| p.name == format!("/dev/cu.{rest}")))
+}
+
+/// The ports in `ports` with the C3's USB ids ([`C3_USB`]), each device once (no `tty` twin), in
+/// the order listed.
+pub fn c3_ports(ports: &[PortInfo]) -> Vec<&PortInfo> {
+    ports
+        .iter()
+        .filter(|p| p.usb == Some(C3_USB) && !is_twin(&p.name, ports))
         .collect()
 }
 
 /// The port to install through, from the link `given` and the host's `ports`, and whether it was
 /// found rather than named (`specs/bridge-onboarding.md` section 3.1). `--serial` names it;
 /// without it, the one port with the C3's USB ids ([`C3_USB`]) is used, and none or several is a
-/// refusal listing them. `--tcp` and `--device` are refused: neither carries the control lines.
-/// macOS lists each USB serial device twice, as `/dev/cu.*` and `/dev/tty.*`; the `tty` twin of a
-/// listed `cu` port is the same device and is not counted.
+/// refusal listing them, several pointing at `usb scan`, which tells them apart. `--tcp` and
+/// `--device` are refused: neither carries the control lines. A `tty` twin ([`c3_ports`]) is not
+/// counted.
 pub fn choose_port(given: Given, ports: &[PortInfo]) -> Result<(String, bool), String> {
     match given {
         Given::Serial(p) => return Ok((p.to_string(), false)),
@@ -75,19 +100,11 @@ pub fn choose_port(given: Given, ports: &[PortInfo]) -> Result<(String, bool), S
         Given::Device => return Err(format!("{NEEDS_USB} BLE does not carry")),
         Given::Nothing => {}
     }
-    let twin = |name: &str| {
-        name.strip_prefix("/dev/tty.")
-            .is_some_and(|rest| ports.iter().any(|p| p.name == format!("/dev/cu.{rest}")))
-    };
-    let c3: Vec<&str> = ports
-        .iter()
-        .filter(|p| p.usb == Some(C3_USB) && !twin(&p.name))
-        .map(|p| p.name.as_str())
-        .collect();
+    let c3: Vec<&str> = c3_ports(ports).iter().map(|p| p.name.as_str()).collect();
     let listed = || {
         let all: Vec<String> = ports
             .iter()
-            .filter(|p| !twin(&p.name))
+            .filter(|p| !is_twin(&p.name, ports))
             .map(|p| match p.usb {
                 Some((v, d)) => format!("{} ({v:04x}:{d:04x})", p.name),
                 None => p.name.clone(),
@@ -107,9 +124,9 @@ pub fn choose_port(given: Given, ports: &[PortInfo]) -> Result<(String, bool), S
             listed()
         )),
         _ => Err(format!(
-            "{} ESP32-C3 USB ports ({v:04x}:{d:04x}): {}; give --serial PORT",
-            c3.len(),
-            c3.join(", ")
+            "{} ESP32-C3 USB ports ({v:04x}:{d:04x}); run \"hoverboard-cli usb scan\" and give \
+             --serial PORT",
+            c3.len()
         )),
     }
 }
@@ -303,6 +320,7 @@ mod tests {
         PortInfo {
             name: name.into(),
             usb,
+            serial: None,
         }
     }
 
@@ -335,11 +353,13 @@ mod tests {
         assert!(choose_port(Given::Nothing, &[])
             .unwrap_err()
             .ends_with("(ports: none)"));
-        // Several: refused, naming them.
+        // Several: refused, naming the command that tells them apart
+        // (`specs/cli-discovery.md` section 3).
         let two = [c3.clone(), port("/dev/ttyACM1", Some(C3_USB))];
         assert_eq!(
             choose_port(Given::Nothing, &two).unwrap_err(),
-            "2 ESP32-C3 USB ports (303a:1001): /dev/ttyACM0, /dev/ttyACM1; give --serial PORT"
+            "2 ESP32-C3 USB ports (303a:1001); run \"hoverboard-cli usb scan\" and give --serial \
+             PORT"
         );
         // --serial names it, whatever is listed.
         assert_eq!(
