@@ -430,9 +430,10 @@ pub fn digest_line(heard: &[(String, Option<u16>)]) -> String {
 }
 
 /// What `machine nodes` marks a node with (section 6.3): for a motor controller, `silent` when no
-/// `CYCLIC_STATE` of it was heard, else its `EV_MACHINE` by the cause `FLAG_PEER_SILENT` names
-/// (`specs/board-route.md` section 4), `FLAG_REARM` and `FLAG_REBOOT`; and the count of its boot
-/// report's entries.
+/// `CYCLIC_STATE` of it was heard, else `! armed` while it reports `FLAG_MOE` and `! no motor
+/// configured` while it reports `EV_NO_MOTOR` (`specs/arm-confirmed.md` section 4), its
+/// `EV_MACHINE` by the cause `FLAG_PEER_SILENT` names (`specs/board-route.md` section 4),
+/// `FLAG_REARM` and `FLAG_REBOOT`; and the count of its boot report's entries.
 pub fn marks(class: Option<u8>, heard: Option<&CyclicState>, status_entries: usize) -> Vec<String> {
     let mut out = Vec::new();
     if class != Some(CLASS_MOTOR) {
@@ -441,6 +442,12 @@ pub fn marks(class: Option<u8>, heard: Option<&CyclicState>, status_entries: usi
     match heard {
         None => out.push("silent".to_string()),
         Some(s) => {
+            if s.moe() {
+                out.push("! armed".into());
+            }
+            if s.no_motor() {
+                out.push("! no motor configured".into());
+            }
             if s.machine_mismatch() && s.peer_silent() {
                 out.push("a link peer not heard".into());
             } else if s.machine_mismatch() {
@@ -900,5 +907,24 @@ mod tests {
             ["a link peer not heard"]
         );
         assert!(marks(Some(net::walk::CLASS_BRIDGE), None, 0).is_empty());
+    }
+
+    /// `specs/arm-confirmed.md` section 5, test 4: `! armed` while `FLAG_MOE` is set, `! no motor
+    /// configured` while `EV_NO_MOTOR` is, and neither on a quiet board.
+    #[test]
+    fn the_marks_say_armed_and_no_motor() {
+        assert_eq!(
+            marks(Some(CLASS_MOTOR), Some(&frame(0, CyclicState::FLAG_MOE)), 0),
+            ["! armed"]
+        );
+        assert_eq!(
+            marks(
+                Some(CLASS_MOTOR),
+                Some(&frame(CyclicState::FAULT_NO_MOTOR, 0)),
+                0
+            ),
+            ["! no motor configured"]
+        );
+        assert!(marks(Some(CLASS_MOTOR), Some(&frame(0, 0)), 0).is_empty());
     }
 }
