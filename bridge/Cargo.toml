@@ -63,7 +63,7 @@ edge-nal = "0.6"
 # and smoltcp 0.12 then needs its own `alloc` for the `ManagedSlice::Owned` arms it matches on.
 # Nothing here builds an owned socket set; the line only keeps the two features in step.
 smoltcp = { version = "0.12", default-features = false, features = ["alloc"] }
-edge-nal-embassy = { version = "0.8", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "multicast"] }
+edge-nal-embassy = { version = "0.9", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "multicast"] }
 trouble-host = { git = "https://github.com/embassy-rs/trouble", rev = "94e15ffe139bc992c1a8b4c34c1fd6a6359356ef", features = ["default-packet-pool-mtu-255"] }
 static_cell = "2.1"
 # The GATT characteristic value type trouble-host implements (its heapless is 0.9; the shared
