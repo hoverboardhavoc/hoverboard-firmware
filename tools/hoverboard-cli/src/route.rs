@@ -11,10 +11,12 @@
 //!   the board.
 //! - `board recover` takes no target: it acts on the SWD header of the bridge the link reaches
 //!   (`specs/bridge-nrst.md` section 3, [`recover`]).
+//! - Any other SWD command given no target acts on the attached bridge's SWD target, and `board
+//!   erase` on the board on its mailbox (`specs/cli-onboarding.md` part B, [`attached`]).
 
 use espsvc::{Status, TargetId};
 use net::pdu::NO_ADDRESS;
-use net::walk::CLASS_BRIDGE;
+use net::walk::{Controller, CLASS_BRIDGE, PORT_SWD};
 use store::{Value, DEVICE_NAME};
 
 use crate::cli::Noun;
@@ -44,6 +46,9 @@ pub enum Via {
     /// The attached bridge's SWD target reports a `uid` that starts with the prefix. The board's
     /// address is not known.
     Uid,
+    /// No target was given: the attached bridge's SWD target, as its `TARGET_ID` reports it. The
+    /// board's address is not known.
+    Attached(TargetId),
     /// The attached bridge's `PROBE_PORTS` named the address `board` on its mailbox, port `port`;
     /// `bridge` is the attached bridge's address.
     Mailbox {
@@ -164,6 +169,70 @@ pub fn swd<W: Wire>(wire: &mut W, spec: &str, purpose: Purpose) -> Result<Route,
     })
 }
 
+/// Route an SWD command given no target (`specs/cli-onboarding.md` part B): straight through the
+/// attached bridge, with no walk. The attached node has to answer `IDENTIFY` as a bridge. `board
+/// erase` takes the board on that bridge's mailbox from its `PROBE_PORTS`, since the erase needs the
+/// board's address; every other command the bridge's SWD target, from its `TARGET_ID`.
+pub fn attached<W: Wire>(wire: &mut W, purpose: Purpose) -> Result<Route, String> {
+    let hello = nodes::hello(wire)?;
+    let src = hello.guest_addr();
+    if !attached_bridge(wire, src) {
+        return Err(format!(
+            "this link ends at a board ({}): name the board",
+            attached_name(wire, src, &hello, "the node")
+        ));
+    }
+    if purpose == Purpose::Erase {
+        let started = nodes::ports(wire, hello)?;
+        let on_mailbox = started.gateway_addr().and_then(|bridge| {
+            let port = started.port_of_kind(bridge, PORT_SWD)?;
+            Some((started.neighbour_on(bridge, port)?, bridge, port))
+        });
+        return match on_mailbox {
+            Some((board, bridge, port)) => Ok(Route {
+                src,
+                dst: NO_ADDRESS,
+                via: Via::Mailbox {
+                    board,
+                    bridge,
+                    port,
+                },
+            }),
+            None => Err(format!(
+                "no board on {}'s mailbox: is it running this firmware?",
+                attached_name(wire, src, &started, "the bridge")
+            )),
+        };
+    }
+    match Client::addressed(&mut *wire, src, NO_ADDRESS).target_id() {
+        Ok(id) => Ok(Route {
+            src,
+            dst: NO_ADDRESS,
+            via: Via::Attached(id),
+        }),
+        Err(ClientError::Status(Status::NoTarget)) => Err(with_recover_hint(format!(
+            "no board on {}'s SWD header: check its power and the SWCLK, SWDIO and GND leads",
+            attached_name(wire, src, &hello, "the bridge")
+        ))),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The attached node's `device.name`; its address, or `none`, when it has none.
+fn attached_name<W: Wire>(wire: &mut W, src: u8, hello: &Controller, none: &str) -> String {
+    nodes::read(wire, src, NO_ADDRESS, DEVICE_NAME.key())
+        .ok()
+        .and_then(|r| match r.value() {
+            Some(Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            hello
+                .gateway_addr()
+                .map_or_else(|| none.into(), |a| format!("{a:#04x}"))
+        })
+}
+
 /// The walk's miss `e`, with the SWD target of the bridge this link reaches added when it is a
 /// bridge and reads one (`read`, or one `TARGET_ID` now). A halted board answers no walk, but the
 /// tool does not guess that the two are the same board.
@@ -241,17 +310,7 @@ pub fn recover<W: Wire>(wire: &mut W) -> Result<Recovered, String> {
     if !attached_bridge(wire, src) {
         return Err(RECOVER_AT_BOARD.into());
     }
-    let bridge = nodes::read(wire, src, NO_ADDRESS, DEVICE_NAME.key())
-        .ok()
-        .and_then(|r| match r.value() {
-            Some(Value::Str(s)) => Some(String::from_utf8_lossy(s).into_owned()),
-            _ => None,
-        })
-        .unwrap_or_else(|| {
-            hello
-                .gateway_addr()
-                .map_or_else(|| "the bridge".into(), |a| format!("{a:#04x}"))
-        });
+    let bridge = attached_name(wire, src, &hello, "the bridge");
     match Client::addressed(wire, src, NO_ADDRESS).connect_under_reset() {
         Ok(id) => Ok(Recovered { bridge, id }),
         Err(ClientError::Status(Status::NoTarget)) => Err(RECOVER_NO_ANSWER.into()),
@@ -681,6 +740,92 @@ mod tests {
         assert_eq!(swd(&mut f, "0x03", Purpose::Other).unwrap_err(), refused);
         assert!(f.count(op(Opcode::ProbePorts)) > 1, "it walked");
         assert_eq!(f.first(op(Opcode::Identify)), Some(5), "{:02x?}", f.ops());
+    }
+
+    /// `specs/cli-onboarding.md` test B2: no target, attached to a bridge whose `TARGET_ID`
+    /// answers: first contact, `IDENTIFY`, `TARGET_ID`, and no walk or `PROBE_PORTS`, for every
+    /// purpose but the erase. Attached to a board: refused, naming it, with no `TARGET_ID`.
+    #[test]
+    fn no_target_goes_straight_through_the_attached_bridge() {
+        for purpose in [Purpose::Other, Purpose::Halt, Purpose::Identify] {
+            let mut f = Fleet::offroad(0x03);
+            let r = attached(&mut f, purpose).unwrap();
+            match r.via {
+                Via::Attached(id) => assert_eq!(id.uid, uid(MASTER)),
+                v => panic!("{v:?}"),
+            }
+            assert_eq!((r.src, r.dst), (GUEST, NO_ADDRESS));
+            assert_eq!(
+                f.ops(),
+                [HELLO, op(Opcode::Identify), OP_TARGET_ID_REQ],
+                "{purpose:?}"
+            );
+            assert!(f.sent.iter().all(|&(_, dst)| dst == NO_ADDRESS));
+        }
+        // A halted board: its bridge still reads it.
+        let mut f = Fleet::offroad(0x03).master_halted();
+        assert!(matches!(
+            attached(&mut f, Purpose::Other).unwrap().via,
+            Via::Attached(_)
+        ));
+        for purpose in [Purpose::Other, Purpose::Erase] {
+            let mut f = Fleet::offroad(0x01);
+            assert_eq!(
+                attached(&mut f, purpose).unwrap_err(),
+                "this link ends at a board (offroad-master): name the board"
+            );
+            assert_eq!(f.count(OP_TARGET_ID_REQ), 0);
+            assert_eq!(f.count(op(Opcode::ProbePorts)), 0);
+        }
+    }
+
+    /// `specs/cli-onboarding.md` test B3: no target, the bridge reads no SWD target: refused with
+    /// the wiring hint and the recover hint, for every purpose but the erase.
+    #[test]
+    fn no_target_and_no_swd_target_is_refused_with_the_wiring_hint() {
+        for purpose in [Purpose::Other, Purpose::Halt, Purpose::Identify] {
+            let mut f = master_blocks_swd();
+            assert_eq!(
+                attached(&mut f, purpose).unwrap_err(),
+                format!(
+                    "no board on offroad-master-bridge's SWD header: check its power and the \
+                     SWCLK, SWDIO and GND leads; {RECOVER_HINT}"
+                ),
+                "{purpose:?}"
+            );
+            assert_eq!(f.count(op(Opcode::ProbePorts)), 0);
+        }
+    }
+
+    /// `specs/cli-onboarding.md` test B4: `board erase` with no target takes the board on the
+    /// attached bridge's mailbox from its `PROBE_PORTS`, with no walk and no `TARGET_ID`; an empty
+    /// mailbox is refused.
+    #[test]
+    fn an_erase_with_no_target_takes_the_board_on_the_mailbox() {
+        let mut f = Fleet::offroad(0x03);
+        let r = attached(&mut f, Purpose::Erase).unwrap();
+        assert!(
+            matches!(
+                r.via,
+                Via::Mailbox {
+                    board: 0x01,
+                    bridge: 0x03,
+                    port: 1
+                }
+            ),
+            "{:?}",
+            r.via
+        );
+        assert_eq!(
+            f.ops(),
+            [HELLO, op(Opcode::Identify), op(Opcode::ProbePorts)]
+        );
+        let mut f = Fleet::offroad(0x03).master_halted();
+        assert_eq!(
+            attached(&mut f, Purpose::Erase).unwrap_err(),
+            "no board on offroad-master-bridge's mailbox: is it running this firmware?"
+        );
+        assert_eq!(f.count(OP_TARGET_ID_REQ), 0);
     }
 
     /// The master's firmware blocks SWD: it answers no walk, and its bridge reads no SWD target.

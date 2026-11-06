@@ -317,14 +317,14 @@ fn board_update_flashes_the_image_for_the_boards_chip_through_its_bridge() {
         image: None,
         yes: true,
     };
-    let (r, sides) = on_master(|link| board_swd(link, "03030303", &op));
+    // Named by its `uid` prefix, and with no target (`specs/cli-onboarding.md` part B): the board
+    // on the attached bridge's SWD header.
+    for target in [Some("03030303"), None] {
+        let (r, sides) = on_master(|link| board_swd(link, target, &op));
+        assert_eq!(r, Ok(()), "{target:?}");
+        let m = &sides[1];
+        assert_eq!(&m.flash[..f103_bin.len()], &f103_bin[..], "{target:?}");
+        assert!(m.booted, "{target:?}: its board booted");
+    }
     let _ = std::fs::remove_file(&path);
-    assert_eq!(r, Ok(()));
-    let m = &sides[1];
-    assert_eq!(
-        &m.flash[..f103_bin.len()],
-        &f103_bin[..],
-        "the GD32F103 image"
-    );
-    assert!(m.booted, "its board booted");
 }

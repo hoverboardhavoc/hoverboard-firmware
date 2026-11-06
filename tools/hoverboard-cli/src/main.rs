@@ -32,6 +32,9 @@
 //! address is on its mailbox, and found by the walk otherwise. `board erase` goes only through the
 //! board's own bridge, the one this link reaches, and `board halt` never over a route through the
 //! board it halts. `board read --hz` routes once and reads at that rate until interrupted.
+//! Given no board, an SWD command acts on the SWD target of the bridge this link reaches, with no
+//! walk, and `board erase` on the board on that bridge's mailbox (`specs/cli-onboarding.md` part B);
+//! a link that ends at a board is refused.
 //!
 //! The `machine` commands act on every motor controller the walk finds: `nodes` lists the walk and
 //! marks each board from its `CYCLIC_STATE` and boot report; `get` and `set` a machine field;
@@ -978,11 +981,25 @@ fn listen(wire: &mut impl Wire) -> Tally {
 
 /// The client to the bridge wired to the board `spec` names, for an SWD command for `purpose`, and
 /// the route it took ([`route::swd`]): by the `uid` the attached bridge reads over SWD, by the
-/// attached bridge's mailbox for an address, or by the walk.
-fn swd_route(link: &Link, spec: &str, purpose: Purpose) -> Result<(EspClient, Route), String> {
+/// attached bridge's mailbox for an address, or by the walk. With no `spec`, the attached bridge's
+/// SWD target, or for `board erase` the board on its mailbox ([`route::attached`]).
+fn swd_route(
+    link: &Link,
+    spec: Option<&str>,
+    purpose: Purpose,
+) -> Result<(EspClient, Route), String> {
     let mut wire = wire_on(link)?;
-    let r = route::swd(&mut wire, spec, purpose)?;
+    let r = match spec {
+        Some(spec) => route::swd(&mut wire, spec, purpose)?,
+        None => route::attached(&mut wire, purpose)?,
+    };
+    let spec = spec.unwrap_or_default();
     match &r.via {
+        Via::Attached(id) => eprintln!(
+            "{} is the SWD target of the bridge this link reaches, guest {:#04x}",
+            nodes::uid_hex(&id.uid),
+            r.src
+        ),
         Via::Uid => eprintln!(
             "{spec} is the SWD target of the bridge this link reaches, guest {:#04x}",
             r.src
@@ -1101,7 +1118,7 @@ fn remaps(f: &Found) -> bool {
 /// `board erase` (`specs/hoverboard-bridge.md`, "Erasing the store"): print what the erase loses
 /// that a dump leaves out, ask, send `STORE_ERASE` through the board's own bridge, wait for the
 /// board's mailbox, and give the board its old address back out the bridge's mailbox port.
-fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
+fn board_erase(link: &Link, spec: Option<&str>, yes: bool) -> Result<(), String> {
     let (mut c, r) = swd_route(link, spec, Purpose::Erase)?;
     let src = r.src;
     let (board, bridge, mailbox) = match r.via {
@@ -1120,7 +1137,7 @@ fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
             bridge,
             port,
         } => (target::at(&walked.found, board)?.clone(), bridge, port),
-        Via::Uid => unreachable!("board erase never routes by uid"),
+        Via::Uid | Via::Attached(_) => unreachable!("board erase never routes by uid"),
     };
     let name = node_name(&board);
     let mut on = Board {
@@ -1160,8 +1177,9 @@ fn board_erase(link: &Link, spec: &str, yes: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// A board's SWD command through the bridge wired to it.
-fn board_swd(link: &Link, spec: &str, op: &Swd) -> Result<(), String> {
+/// A board's SWD command through the bridge wired to it; with no `spec`, through the attached
+/// bridge to its SWD target.
+fn board_swd(link: &Link, spec: Option<&str>, op: &Swd) -> Result<(), String> {
     // Read the file before the link, so a refused image or a damaged bundle costs no connection.
     let file = match op {
         Swd::Flash { file } => Some(FlashFile::Bin(read_elf(file)?)),
@@ -1985,8 +2003,8 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
             config_outcome(status)?;
         }
         Command::Status { targets } => board_status_cmd(link, &targets)?,
-        Command::Erase { target, yes } => board_erase(link, &target, yes)?,
-        Command::Swd { target, op } => board_swd(link, &target, &op)?,
+        Command::Erase { target, yes } => board_erase(link, target.as_deref(), yes)?,
+        Command::Swd { target, op } => board_swd(link, target.as_deref(), &op)?,
         Command::Recover => board_recover(link)?,
         Command::Nodes => machine_nodes(link)?,
         Command::MachineGet { path } => machine_get(link, &path)?,
