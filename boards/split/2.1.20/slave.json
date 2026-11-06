@@ -1,0 +1,121 @@
+{
+  "power": {
+    "self_hold": {
+      "port": "B",
+      "pin": 12
+    }
+  },
+  "leds": {
+    "green": {
+      "port": "B",
+      "pin": 3
+    },
+    "orange": {
+      "port": "A",
+      "pin": 15
+    },
+    "red": {
+      "port": "B",
+      "pin": 4
+    }
+  },
+  "imu": {
+    "scl": {
+      "port": "B",
+      "pin": 6,
+      "af": 1
+    },
+    "sda": {
+      "port": "B",
+      "pin": 7,
+      "af": 1
+    },
+    "i2c": 0,
+    "model": 2,
+    "axis_sign": [
+      1,
+      1,
+      1
+    ]
+  },
+  "links": [
+    {
+      "tx": {
+        "port": "A",
+        "pin": 2,
+        "af": 1
+      },
+      "rx": {
+        "port": "A",
+        "pin": 3,
+        "af": 1
+      },
+      "usart": 1
+    }
+  ],
+  "motors": [
+    {
+      "current": {
+        "phase_a": {
+          "port": "A",
+          "pin": 0,
+          "adc": 0
+        },
+        "phase_b": {
+          "port": "B",
+          "pin": 0,
+          "adc": 8
+        }
+      },
+      "hall": {
+        "a": {
+          "port": "C",
+          "pin": 13
+        },
+        "b": {
+          "port": "A",
+          "pin": 1
+        },
+        "c": {
+          "port": "C",
+          "pin": 14
+        }
+      },
+      "gate": {
+        "hi_a": {
+          "port": "A",
+          "pin": 8,
+          "af": 2
+        },
+        "hi_b": {
+          "port": "A",
+          "pin": 9,
+          "af": 2
+        },
+        "hi_c": {
+          "port": "A",
+          "pin": 10,
+          "af": 2
+        },
+        "lo_a": {
+          "port": "B",
+          "pin": 13,
+          "af": 2
+        },
+        "lo_b": {
+          "port": "B",
+          "pin": 14,
+          "af": 2
+        },
+        "lo_c": {
+          "port": "B",
+          "pin": 15,
+          "af": 2
+        },
+        "dead_time": 28,
+        "timer": 0
+      },
+      "align_offset": 1
+    }
+  ]
+}
