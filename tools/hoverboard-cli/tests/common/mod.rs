@@ -58,6 +58,9 @@ pub struct Fixture {
     pub bss_syms: Vec<String>,
     /// A `.debug_info` section, which a strip removes.
     pub debug: bool,
+    /// `.text`'s declared alignment. The section sits at a 4-aligned file offset, so 8 gives the
+    /// offset-below-alignment layout cortex-m 0.7.10 images have.
+    pub text_align: u64,
 }
 
 impl Fixture {
@@ -72,6 +75,7 @@ impl Fixture {
             text_syms: names.0.into_iter().map(|n| (n, 0)).collect(),
             bss_syms: names.1,
             debug: false,
+            text_align: 4,
         }
     }
 
@@ -192,7 +196,7 @@ impl Fixture {
             sh_size: text.len() as u64,
             sh_link: 0,
             sh_info: 0,
-            sh_addralign: 4,
+            sh_addralign: self.text_align,
             sh_entsize: 0,
         });
         w.write_section_header(&SectionHeader {
