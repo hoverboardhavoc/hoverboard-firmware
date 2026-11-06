@@ -72,6 +72,37 @@ pub struct Files {
     pub problems: Vec<Problem>,
 }
 
+/// What a bridge would refuse among `entries` (`specs/bridge-name-limit.md` section 1): a
+/// `device.name` it cannot advertise ([`net::walk::bridge_name_usable`]). The bridge commands run
+/// it on their files and values before they open a link, so `bridge install` erases nothing for a
+/// file the bridge would refuse.
+pub fn bridge_problems(entries: &[Entry]) -> Vec<Problem> {
+    entries
+        .iter()
+        .filter(|e| e.key == store::DEVICE_NAME.key())
+        .filter_map(|e| e.value.as_str().map(|name| (e, name)))
+        .filter(|(_, name)| !net::walk::bridge_name_usable(name.as_bytes()))
+        .map(|(e, name)| {
+            Problem::stop(format!(
+                "{}: a bridge's {}, not {:?} ({} bytes)",
+                path_of(e.key),
+                nodes::bridge_name_rule(),
+                name,
+                name.len()
+            ))
+        })
+        .collect()
+}
+
+/// [`bridge_problems`] for `bridge set`'s one `key` and its value as given on the command line.
+pub fn bridge_set_problems(key: Key, text: &str) -> Vec<Problem> {
+    let Some(row) = row_of(key) else {
+        return Vec::new();
+    };
+    let value = crate::names::from_text(Some(row), row.storage, text);
+    bridge_problems(&[Entry { key, value }])
+}
+
 /// Read `files` (`(name, text)`) as one board's store (`specs/cli-config.md` sections 2 and 5):
 /// merged in order, a key in two files (or twice in one, by its path and its raw form) refused.
 pub fn read_files(files: &[(String, String)]) -> Files {
