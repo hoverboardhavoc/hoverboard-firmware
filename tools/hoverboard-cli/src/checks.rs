@@ -10,6 +10,10 @@
 //! table (`store::RANGES`), each motor's current limit against its noise floor by the firmware's
 //! own conversion (`board::limit`), and the IMU frame against `imu::Config::frame_error`.
 //!
+//! Before the checks, [`resolve`] turns a pin token (`"PA2"`) into the object the chip's table
+//! gives it for the field's function (`specs/cli-onboarding.md` part C), and [`token_of`] tells a
+//! dump which stored pins it may write as tokens.
+//!
 //! One check looks at the machine rather than at one board: [`check_leader`], the rigid frame's
 //! leader (`specs/rigid-leader.md` section 6.1), on every motor controller as the write would leave
 //! it, run only by a write that changes `machine.mode`, `machine.frame` or `control.leader`.
@@ -25,7 +29,7 @@ use serde_json::Value as Json;
 use store::{Key, PinField, Type, Value};
 
 use crate::config::Entry;
-use crate::names::{path_of, pin_text};
+use crate::names::{encode, path_of, pin_text, pin_token, row_of};
 
 /// One check of section 4, by the id the shared cases name it with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -685,6 +689,210 @@ pub fn check_pins(chip: Chip, state: &State) -> Vec<Refusal> {
         }
     }
     out
+}
+
+/// The group pin field `key` is in, and its role there.
+fn group_of(key: Key) -> Option<(Group, Role)> {
+    groups().into_iter().find_map(|g| {
+        let role = g.pins.iter().find(|(f, _)| f.key() == key)?.1;
+        Some((g, role))
+    })
+}
+
+/// The key naming the instance a group's functions are on: its own, or the one its `via` names.
+fn instance_key(g: &Group) -> Option<Key> {
+    g.instance.map(|(k, _)| k).or(g.via)
+}
+
+/// A pin as resolved for its field: the bytes its storage type holds, and on the GD32F10x the
+/// remap its function's route needs.
+struct Resolved {
+    bytes: Vec<u8>,
+    remap: Option<u8>,
+}
+
+/// What pin `port`/`pin` resolves to for the field `key` (role `role`) on `chip`, by its table `t`,
+/// its function on instance `n` (`specs/cli-onboarding.md` part C, "Resolution"). `Err` says why
+/// not, after the key's path; `inst` names the instance key a function needs.
+fn resolve_pin(
+    t: &Table,
+    chip: Chip,
+    key: Key,
+    role: Role,
+    (port, pin): (u8, u8),
+    inst: Option<Key>,
+    n: Option<u8>,
+) -> Result<Resolved, String> {
+    let at = pin_text(port, pin);
+    let storage = row_of(key).map(|r| r.storage);
+    let resolved = |third: Option<u8>, remap| {
+        let mut bytes = vec![port, pin];
+        bytes.extend(third);
+        Ok(Resolved { bytes, remap })
+    };
+    let two = |sels: &[u8], what: &str| {
+        let each: Vec<String> = sels.iter().map(|s| format!("{what}{s}")).collect();
+        format!(
+            "{at} has {} routes: give the pin as an object",
+            each.join(" and ")
+        )
+    };
+    match (storage, role) {
+        (Some(Type::Pin), _) => resolved(None, None),
+        (Some(Type::PinAdc), Role::Adc | Role::DcLink) => {
+            let chans: Vec<u8> = t
+                .adc
+                .iter()
+                .filter(|a| a.port == port && a.pin == pin && t.bonded(port, pin))
+                .map(|a| a.channel)
+                .collect();
+            match chans[..] {
+                [c] => resolved(Some(c), None),
+                [] => Err(format!("{at} is not an ADC input on the {}", chip.name())),
+                _ => Err(two(&chans, "ADC channel ")),
+            }
+        }
+        (Some(Type::PinAf), _) => {
+            let Some(n) = n else {
+                let inst = inst.map_or_else(|| "its instance".to_string(), path_of);
+                return Err(format!("give {inst} to resolve {at}"));
+            };
+            let func = role
+                .func(n)
+                .ok_or_else(|| format!("{at} carries no function"))?;
+            let sels: Vec<u8> = t
+                .routes
+                .iter()
+                .filter(|r| r.port == port && r.pin == pin && r.func == func)
+                .map(|r| r.sel)
+                .collect();
+            match (&sels[..], chip.remaps()) {
+                ([r], true) => resolved(Some(0), Some(*r)),
+                ([af], false) => resolved(Some(*af), None),
+                ([], _) => Err(format!("{at} cannot carry {func:?} on the {}", chip.name())),
+                (_, true) => Err(two(&sels, "remap ")),
+                (_, false) => Err(two(&sels, "AF")),
+            }
+        }
+        _ => Err(format!("{at} is not a pin this field takes")),
+    }
+}
+
+/// The pin object a file writes for `bytes` of `key` on `chip`: the store's object, without `af`
+/// on the GD32F10x, which routes by its remap (`specs/config-read-once.md` section 3).
+fn pin_object(chip: Chip, key: Key, bytes: &[u8]) -> Json {
+    let row = row_of(key);
+    let tag = row.map_or(Type::Pin, |r| r.storage).tag();
+    let mut v = crate::names::to_json(row, tag, bytes);
+    if chip.remaps() {
+        if let Json::Object(o) = &mut v {
+            o.remove("af");
+        }
+    }
+    v
+}
+
+/// Turn every pin token among `entries` into the object `chip`'s table gives it for its field
+/// (`specs/cli-onboarding.md` part C): a `PinAf`'s `af` for the field's function on its group's
+/// instance, a `PinAdc`'s channel; on the GD32F10x, a group whose pins are all tokens (none named
+/// as an object, none left stored) and whose `remap` the entries leave out gets the remap the table
+/// gives them all, added as an entry when it
+/// is not what `stored` already holds. The instance comes from the entries, else from `stored`, the
+/// board's values before the write. `Err` lists every token that does not resolve.
+pub fn resolve(chip: Chip, entries: &mut Vec<Entry>, stored: &State) -> Result<(), String> {
+    resolve_on(chip.table(), chip, entries, stored)
+}
+
+/// [`resolve`] by the table `t`.
+fn resolve_on(
+    t: &Table,
+    chip: Chip,
+    entries: &mut Vec<Entry>,
+    stored: &State,
+) -> Result<(), String> {
+    let given = |entries: &[Entry], key: Key| entries.iter().position(|e| e.key == key);
+    let mut errors = Vec::new();
+    // Each remap key the tokens set, with the pin that set it first.
+    let mut remaps: Vec<(Key, u8, String)> = Vec::new();
+    for g in groups() {
+        let inst = instance_key(&g);
+        let n = inst.and_then(|k| match given(entries, k) {
+            Some(i) => match encode(k, Type::U8, &entries[i].value) {
+                Ok((Some(b), _)) => b.first().copied(),
+                _ => None,
+            },
+            None => byte_of(stored, k),
+        });
+        let mut tokens = Vec::new();
+        let mut objects = false;
+        for (f, role) in &g.pins {
+            // A pin the entries leave out keeps what the board stores: not a token.
+            let Some(i) = given(entries, f.key()) else {
+                objects |= stored.contains_key(&f.key());
+                continue;
+            };
+            let Some(p) = entries[i].value.as_str().and_then(pin_token) else {
+                objects |= !entries[i].value.is_null();
+                continue;
+            };
+            match resolve_pin(t, chip, f.key(), *role, p, inst, n) {
+                Ok(r) => tokens.push((i, p, r)),
+                Err(e) => errors.push(format!("{}: {e}", path_of(f.key()))),
+            }
+        }
+        if let Some(rk) = g.remap.filter(|rk| {
+            chip.remaps() && !objects && !tokens.is_empty() && given(entries, *rk).is_none()
+        }) {
+            for (i, (port, pin), r) in &tokens {
+                let Some(r) = r.remap else { continue };
+                let this = format!(
+                    "{} {} at remap {r}",
+                    path_of(entries[*i].key),
+                    pin_text(*port, *pin)
+                );
+                match remaps.iter().find(|(k, _, _)| *k == rk) {
+                    Some((_, first, by)) if *first != r => errors.push(format!(
+                        "{}: the group's pins need different remaps: {by}, {this}",
+                        path_of(rk)
+                    )),
+                    Some(_) => {}
+                    None => remaps.push((rk, r, this)),
+                }
+            }
+        }
+        for (i, _, r) in tokens {
+            entries[i].value = pin_object(chip, entries[i].key, &r.bytes);
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("\nerror: "));
+    }
+    for (key, r, _) in remaps {
+        if byte_of(stored, key).unwrap_or(0) != r {
+            entries.push(Entry {
+                key,
+                value: Json::from(r),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The token a dump writes for the stored pin `bytes` of `key` on `chip`, the board's values
+/// `stored`: `Some` when resolving the token gives back exactly those bytes (and on the GD32F10x
+/// the remap its group stores), so a dump stays an exact copy (`specs/cli-onboarding.md` part C,
+/// "Output"); `None` for the object.
+pub fn token_of(chip: Chip, key: Key, bytes: &[u8], stored: &State) -> Option<String> {
+    let (g, role) = group_of(key)?;
+    let (port, pin) = (*bytes.first()?, *bytes.get(1)?);
+    let inst = instance_key(&g);
+    let n = inst.and_then(|k| byte_of(stored, k));
+    let r = resolve_pin(chip.table(), chip, key, role, (port, pin), inst, n).ok()?;
+    let remap_kept = match (r.remap, g.remap) {
+        (Some(want), Some(rk)) => byte_of(stored, rk).unwrap_or(0) == want,
+        _ => true,
+    };
+    (r.bytes == bytes && remap_kept).then(|| pin_text(port, pin))
 }
 
 /// The `af` rule of a file's `PinAf` values (`specs/config-read-once.md` section 3): given on a

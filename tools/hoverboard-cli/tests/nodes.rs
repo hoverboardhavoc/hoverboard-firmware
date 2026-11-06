@@ -469,7 +469,9 @@ fn a_boards_store_as_a_file_through_the_binary() {
         serde_json::json!({
             "device": { "name": "rover-left" },
             "machine": { "mode": "balance" },
-            "pads": { "a": { "port": "B", "pin": 5 } },
+            // A pin as its token, which resolves back to the stored bytes on the board's chip
+            // (`specs/cli-onboarding.md` part C).
+            "pads": { "a": "PB5" },
         })
     );
     let (code, out, err) = run(&["board", "diff", "rover-left", &file]);

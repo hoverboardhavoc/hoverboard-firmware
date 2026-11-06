@@ -826,7 +826,7 @@ fn files_command(
     force: bool,
     yes: bool,
 ) -> Result<bool, String> {
-    let files = load_files(paths, force)?;
+    let mut files = load_files(paths, force)?;
     let mut wire = wire_on(link)?;
     let (src, f) = reach(&mut wire, spec, noun)?;
     let mut b = Board {
@@ -837,11 +837,16 @@ fn files_command(
         class: class_of(noun),
     };
     let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
+    let chip = if noun == Noun::Board {
+        resolve_tokens(&mut *b.wire, f.addr, &mut files, &reads)?
+    } else {
+        None
+    };
     let replace = matches!(mode, Mode::Replace | Mode::Diff { replace: true });
     let plan = config::plan(&files, &reads, &unknown, replace).map_err(joined)?;
     let none = BTreeMap::new();
     if noun == Noun::Board && !matches!(mode, Mode::Diff { .. }) {
-        check_board(&mut *b.wire, f.addr, &files, &reads, &plan)?;
+        check_board(&mut *b.wire, f.addr, chip, &files, &reads, &plan)?;
         if plan_changes_leader(&plan) {
             let w = walk(&mut *b.wire)?;
             check_leader_on(&mut *b.wire, &w, &[(f.addr, &plan)])?;
@@ -1033,12 +1038,35 @@ fn chip_on(wire: &mut impl Wire, addr: u8) -> Result<hal::pincap::Chip, String> 
     })
 }
 
-/// The board checks of a plan (`specs/config-read-once.md` section 4), with the chip read when the
-/// plan changes a key the pin checks read or the files carry a pin, whose `af` form is checked
-/// whether or not it changes.
+/// Resolve the pin tokens `files` carry for the board at `addr` (`specs/cli-onboarding.md` part
+/// C), against its chip, read once there is a token, and the board's `reads` before the write.
+/// The chip when it was read.
+fn resolve_tokens(
+    wire: &mut impl Wire,
+    addr: u8,
+    files: &mut config::Files,
+    reads: &config::Reads,
+) -> Result<Option<hal::pincap::Chip>, String> {
+    if !files
+        .entries
+        .iter()
+        .any(|e| names::is_token(e.key, &e.value))
+    {
+        return Ok(None);
+    }
+    let chip = chip_on(wire, addr)?;
+    let stored = config::state_after(reads, &config::Plan::default());
+    checks::resolve(chip, &mut files.entries, &stored)?;
+    Ok(Some(chip))
+}
+
+/// The board checks of a plan (`specs/config-read-once.md` section 4), with the chip (`known`, or
+/// read now) when the plan changes a key the pin checks read or the files carry a pin, whose `af`
+/// form is checked whether or not it changes.
 fn check_board(
     wire: &mut impl Wire,
     addr: u8,
+    known: Option<hal::pincap::Chip>,
     files: &config::Files,
     reads: &config::Reads,
     plan: &config::Plan,
@@ -1049,7 +1077,10 @@ fn check_board(
         .any(|s| hoverboard_cli::checks::needs_chip(s.key))
         || hoverboard_cli::checks::first_pin(&files.entries).is_some()
     {
-        Some(chip_on(wire, addr)?)
+        Some(match known {
+            Some(c) => c,
+            None => chip_on(wire, addr)?,
+        })
     } else {
         None
     };
@@ -1107,6 +1138,19 @@ fn check_leader_on(
 /// Whether `plan` writes a key the leader check reads.
 fn plan_changes_leader(plan: &config::Plan) -> bool {
     plan.steps.iter().any(|s| checks::changes_leader(s.key))
+}
+
+/// How a dump of the board `f` writes its pins: as tokens where they resolve back, on the chip
+/// `TARGET_ID` through its bridge reports; as objects, with a note, when the chip cannot be read
+/// (`specs/cli-onboarding.md` part C, "Output").
+fn dump_pins(wire: &mut impl Wire, f: &Found) -> config::Pins {
+    match chip_on(wire, f.addr) {
+        Ok(chip) => config::Pins::Chip(chip),
+        Err(e) => {
+            eprintln!("{}: pins written as objects: {e}", node_name(f));
+            config::Pins::Objects { remaps: remaps(f) }
+        }
+    }
 }
 
 /// Whether a node's chip routes by the AFIO remap (the GD32F10x), from its `IDENTITY` family: its
@@ -1619,7 +1663,8 @@ fn machine_dump(link: &Link, out: &str, from: Option<&str>) -> Result<(), String
         for l in config::left_out(&node_name(f), reads) {
             eprintln!("{l}");
         }
-        boards.push((uid, reads.clone(), remaps(f)));
+        let pins = dump_pins(&mut wire, f);
+        boards.push((uid, reads.clone(), pins));
     }
     let copies: Vec<(String, config::Reads)> = each
         .iter()
@@ -1706,7 +1751,7 @@ fn machine_files(
             println!("{}: no entry in {path}; left alone", node_name(f));
             continue;
         }
-        let files = file.board_files(entry);
+        let mut files = file.board_files(entry);
         let mut b = Board {
             wire: &mut wire,
             src: w.src,
@@ -1715,12 +1760,14 @@ fn machine_files(
             class: CLASS_MOTOR,
         };
         let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
+        let chip = resolve_tokens(&mut *b.wire, f.addr, &mut files, &reads)
+            .map_err(|e| format!("{}: {e}", node_name(f)))?;
         // A board with no entry gets the machine section merged, never replaced, and its report
         // names only the machine fields it keeps.
         let replace = replace_all && entry.is_some();
         let mut plan = config::plan(&files, &reads, &unknown, replace).map_err(joined)?;
         if !diff {
-            check_board(&mut *b.wire, f.addr, &files, &reads, &plan)
+            check_board(&mut *b.wire, f.addr, chip, &files, &reads, &plan)
                 .map_err(|e| format!("{}: {e}", node_name(f)))?;
         }
         if entry.is_none() {
@@ -1971,7 +2018,11 @@ fn execute(inv: cli::Invocation) -> Result<u8, String> {
                 .values()
                 .filter(|r| r.status == net::walk::CFG_OK)
                 .count();
-            let text = serde_json::to_string_pretty(&config::to_file(&reads, remaps(&f)))
+            let pins = match noun {
+                Noun::Board => dump_pins(&mut *b.wire, &f),
+                _ => config::Pins::Objects { remaps: remaps(&f) },
+            };
+            let text = serde_json::to_string_pretty(&config::to_file(&reads, pins))
                 .map_err(|e| e.to_string())?
                 + "\n";
             match out {

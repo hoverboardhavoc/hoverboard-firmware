@@ -1,0 +1,52 @@
+{
+  "power": {
+    "self_hold": "PB12"
+  },
+  "leds": {
+    "green": "PB3",
+    "orange": "PA15",
+    "red": "PB4"
+  },
+  "imu": {
+    "scl": "PB6",
+    "sda": "PB7",
+    "i2c": 0,
+    "model": 2,
+    "axis_sign": [
+      1,
+      1,
+      1
+    ]
+  },
+  "links": [
+    {
+      "tx": "PA2",
+      "rx": "PA3",
+      "usart": 1
+    }
+  ],
+  "motors": [
+    {
+      "current": {
+        "phase_a": "PA0",
+        "phase_b": "PB0"
+      },
+      "hall": {
+        "a": "PC13",
+        "b": "PA1",
+        "c": "PC14"
+      },
+      "gate": {
+        "hi_a": "PA8",
+        "hi_b": "PA9",
+        "hi_c": "PA10",
+        "lo_a": "PB13",
+        "lo_b": "PB14",
+        "lo_c": "PB15",
+        "dead_time": 28,
+        "timer": 0
+      },
+      "align_offset": 1
+    }
+  ]
+}

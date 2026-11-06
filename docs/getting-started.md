@@ -159,14 +159,15 @@ A freshly flashed board drives nothing: it has no pins stored, so it brings up n
 (the gate, hall and current-sense pins, the dead time, the LEDs, the power latch and the link to the
 other board) comes from a board file in [`boards/`](../boards/), at
 `boards/<kind>/<layout>/<role>.json`: the folder names the board layout, and the file is `master`
-or `slave`. The master is the board with the battery connector and the power button. A file made
-for another chip is refused when it is applied.
+or `slave`. The master is the board with the battery connector and the power button. A file writes
+each pin as a token (`"PA2"`), which the CLI resolves for the board's chip, so one file serves
+every chip its layout is built with (the split 2.x.20 boards carry a GD32F103 or a GD32F130).
 
 Apply each file through the board's own bridge, then restart the board, since pins take effect at
 boot:
 
 ```
-hoverboard-cli --tcp hb-left.local:5333 board apply 0x02 boards/<layout>/<role>.json
+hoverboard-cli --tcp hb-left.local:5333 board apply 0x02 boards/<kind>/<layout>/<role>.json
 hoverboard-cli --tcp hb-left.local:5333 board reset 0x02
 ```
 

@@ -364,3 +364,231 @@ fn the_limit_floor_refusal_names_the_counts_and_the_lowest_passing_limit() {
         .unwrap()
         .ends_with("no limit passes a floor at the top of the limit window"));
 }
+
+/// The firmware repo's root.
+fn repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// A board file's entries with its tokens resolved on `chip`, on a board that stores nothing.
+fn resolved(chip: Chip, text: &str) -> Result<Vec<Entry>, String> {
+    let mut files = read_files(&[("file".into(), text.to_string())]);
+    assert!(files.problems.is_empty(), "{:?}", files.problems);
+    resolve(chip, &mut files.entries, &State::new())?;
+    Ok(files.entries)
+}
+
+/// Entries by key, for a comparison that does not depend on their order.
+fn by_key(entries: &[Entry]) -> BTreeMap<Key, Json> {
+    entries.iter().map(|e| (e.key, e.value.clone())).collect()
+}
+
+/// `specs/cli-onboarding.md` test C2, and on the host what bench gate G3 checks on the boards:
+/// every pin of the split 2.x.20 token files resolves, on each chip, to the object the per-chip
+/// files of 2026-11-06 held (`af` 1 for the link and IMU pins and 2 for the gates on the
+/// GD32F130, none on the GD32F103; `adc` 0, 8 and 4), and every other field is the same.
+#[test]
+fn the_split_token_files_resolve_to_the_per_chip_files() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/split-per-chip");
+    for role in ["master", "slave"] {
+        let text = std::fs::read_to_string(repo().join(format!("boards/split/2.x.20/{role}.json")))
+            .unwrap();
+        for (chip, old) in [(Chip::Gd32f130c8, "2.1.20"), (Chip::Gd32f103c8, "2.2.20")] {
+            let got = resolved(chip, &text).unwrap_or_else(|e| panic!("{role} {old}: {e}"));
+            let old_text =
+                std::fs::read_to_string(fixtures.join(format!("{old}-{role}.json"))).unwrap();
+            let want = read_files(&[("old".into(), old_text)]);
+            assert!(want.problems.is_empty(), "{:?}", want.problems);
+            assert_eq!(
+                by_key(&got),
+                by_key(&want.entries),
+                "{role} on {}",
+                chip.name()
+            );
+        }
+    }
+}
+
+/// `specs/cli-onboarding.md` test C5: every board file under `boards/` passes every check on
+/// every chip its kind lists, its tokens resolved there.
+#[test]
+fn every_board_file_passes_on_every_chip_of_its_kind() {
+    let kinds: &[(&str, &[Chip])] = &[("split", &[Chip::Gd32f103c8, Chip::Gd32f130c8])];
+    let mut files = Vec::new();
+    let mut dirs = vec![repo().join("boards")];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x == "json") {
+                files.push(p);
+            }
+        }
+    }
+    assert!(!files.is_empty());
+    for p in files {
+        let rel = p.strip_prefix(repo().join("boards")).unwrap().to_owned();
+        let kind = rel.iter().next().unwrap().to_str().unwrap();
+        let (_, chips) = kinds
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .unwrap_or_else(|| panic!("{}: a kind the test lists no chips for", rel.display()));
+        let text = std::fs::read_to_string(&p).unwrap();
+        for chip in *chips {
+            let entries = resolved(*chip, &text)
+                .unwrap_or_else(|e| panic!("{} on {}: {e}", rel.display(), chip.name()));
+            let files = crate::config::Files {
+                entries,
+                problems: Vec::new(),
+            };
+            let got = file_refusals(*chip, &files);
+            assert!(
+                got.is_empty(),
+                "{} on {}: {got:?}",
+                rel.display(),
+                chip.name()
+            );
+        }
+    }
+}
+
+/// `specs/cli-onboarding.md` test C3: a token is refused when its group's instance is in neither
+/// the file nor the store, when the pin has no route for the function or is no ADC input, when it
+/// has two routes, and on the GD32F10x when the group's pins need different remaps.
+#[test]
+fn a_token_that_does_not_resolve_is_refused() {
+    let refused = |chip: Chip, board: Json| resolved(chip, &board.to_string()).unwrap_err();
+    // No instance.
+    assert_eq!(
+        refused(
+            Chip::Gd32f130c8,
+            serde_json::json!({"links": [{"tx": "PA2", "rx": "PA3"}]})
+        ),
+        "links[0].tx: give links[0].usart to resolve PA2\nerror: links[0].rx: give links[0].usart \
+         to resolve PA3"
+    );
+    // The instance stored on the board resolves it.
+    let mut stored = State::new();
+    stored.insert(store::LINK_USART.at(0).key(), (Type::U8, vec![1]));
+    let mut entries = read_files(&[("f".into(), r#"{"links": [{"tx": "PA2"}]}"#.into())]).entries;
+    resolve(Chip::Gd32f130c8, &mut entries, &stored).unwrap();
+    assert_eq!(
+        entries[0].value,
+        serde_json::json!({"port": "A", "pin": 2, "af": 1})
+    );
+    // No route, no ADC input.
+    assert_eq!(
+        refused(
+            Chip::Gd32f130c8,
+            serde_json::json!({"links": [{"tx": "PB12", "rx": "PA3", "usart": 1}]})
+        ),
+        "links[0].tx: PB12 cannot carry Tx(1) on the gd32f130c8"
+    );
+    assert_eq!(
+        refused(
+            Chip::Gd32f103c8,
+            serde_json::json!({"battery_sense": {"pin": "PB12"}})
+        ),
+        "battery_sense.pin: PB12 is not an ADC input on the gd32f103c8"
+    );
+    // Two routes, and a group whose pins need different remaps: no fleet table has either, so a
+    // table that does.
+    static TWO: [hal::pincap::Route; 4] = [
+        hal::pincap::Route {
+            port: 0,
+            pin: 2,
+            func: Func::Tx(1),
+            sel: 0,
+        },
+        hal::pincap::Route {
+            port: 0,
+            pin: 2,
+            func: Func::Tx(1),
+            sel: 1,
+        },
+        hal::pincap::Route {
+            port: 0,
+            pin: 3,
+            func: Func::Rx(1),
+            sel: 1,
+        },
+        hal::pincap::Route {
+            port: 1,
+            pin: 2,
+            func: Func::Tx(1),
+            sel: 0,
+        },
+    ];
+    let base = Chip::Gd32f103c8.table();
+    let t = Table {
+        bonding: base.bonding,
+        routes: &TWO,
+        adc: base.adc,
+        sense_pairs: base.sense_pairs,
+        inputs: base.inputs,
+    };
+    let on = |board: Json| {
+        let mut e = read_files(&[("f".into(), board.to_string())]).entries;
+        resolve_on(&t, Chip::Gd32f103c8, &mut e, &State::new()).map(|_| e)
+    };
+    assert_eq!(
+        on(serde_json::json!({"links": [{"tx": "PA2", "rx": "PA3", "usart": 1}]})).unwrap_err(),
+        "links[0].tx: PA2 has remap 0 and remap 1 routes: give the pin as an object"
+    );
+    assert_eq!(
+        on(serde_json::json!({"links": [{"tx": "PB2", "rx": "PA3", "usart": 1}]})).unwrap_err(),
+        "links[0].remap: the group's pins need different remaps: links[0].tx PB2 at remap 0, \
+         links[0].rx PA3 at remap 1"
+    );
+    // A remap the file gives is kept, and checked by the checks as now.
+    let e = on(serde_json::json!({"links": [{"tx": "PB2", "rx": "PA3", "usart": 1, "remap": 1}]}))
+        .unwrap();
+    assert_eq!(e.len(), 4);
+}
+
+/// `specs/cli-onboarding.md` part C, the GD32F10x remap: a group of tokens all routed at remap 1
+/// stores that remap; at remap 0, nothing is added on a board that stores no remap.
+#[test]
+fn a_group_of_tokens_gets_its_remap_on_the_gd32f10x() {
+    let e = resolved(
+        Chip::Gd32f103c8,
+        &serde_json::json!({"links": [{"tx": "PB6", "rx": "PB7", "usart": 0}]}).to_string(),
+    )
+    .unwrap();
+    let got = by_key(&e);
+    assert_eq!(got[&store::LINK_REMAP.at(0).key()], Json::from(1));
+    assert_eq!(
+        got[&store::LINK_TX.at(0).key()],
+        serde_json::json!({"port": "B", "pin": 6})
+    );
+    let e = resolved(
+        Chip::Gd32f103c8,
+        &serde_json::json!({"links": [{"tx": "PA2", "rx": "PA3", "usart": 1}]}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(e.len(), 3, "no remap added at 0");
+    // A board storing remap 1 gets 0 written back.
+    let mut stored = State::new();
+    stored.insert(store::LINK_REMAP.at(0).key(), (Type::U8, vec![1]));
+    let mut entries = read_files(&[(
+        "f".into(),
+        r#"{"links": [{"tx": "PA2", "rx": "PA3", "usart": 1}]}"#.into(),
+    )])
+    .entries;
+    resolve(Chip::Gd32f103c8, &mut entries, &stored).unwrap();
+    assert_eq!(
+        by_key(&entries)[&store::LINK_REMAP.at(0).key()],
+        Json::from(0)
+    );
+    // One token beside a stored pin of its group: no remap inferred.
+    let mut stored = State::new();
+    stored.insert(store::LINK_RX.at(0).key(), (Type::PinAf, vec![1, 7, 0]));
+    let mut entries = read_files(&[(
+        "f".into(),
+        r#"{"links": [{"tx": "PB6", "usart": 0}]}"#.into(),
+    )])
+    .entries;
+    resolve(Chip::Gd32f103c8, &mut entries, &stored).unwrap();
+    assert_eq!(entries.len(), 2);
+}
