@@ -23,7 +23,7 @@ swd-bridge-core = { path = "../../shared/swd-bridge-core" }
 espsvc = { path = "../../shared/espsvc" }
 linkctl = { path = "../../shared/linkctl" }
 embedded-io = "0.7"
-heapless = "0.8"
+heapless = "0.9"
 sha2 = { version = "0.11", default-features = false }
 # The GDB remote serial protocol (src/gdb.rs). `alloc` for the per-session packet buffer: the
 # state machine owns it, so a new session needs a new one.

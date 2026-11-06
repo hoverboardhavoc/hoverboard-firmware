@@ -1037,7 +1037,7 @@ checksum = "59f50b6c32370067087b46087cd5333f2dfe678f0b01223fa70fde6f15449844"
 dependencies = [
  "csv",
  "deku 0.16.0",
- "heapless",
+ "heapless 0.8.0",
  "md5",
  "parse_int 0.6.0",
  "regex",
@@ -1367,7 +1367,7 @@ dependencies = [
  "cortex-m-rt",
  "embedded-hal 1.0.0",
  "embedded-io",
- "heapless",
+ "heapless 0.8.0",
 ]
 
 [[package]]
@@ -1433,6 +1433,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "heapless"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1479,7 +1489,7 @@ dependencies = [
  "embedded-io",
  "espsvc",
  "gdbstub",
- "heapless",
+ "heapless 0.9.3",
  "link",
  "linkctl",
  "net",
@@ -1870,7 +1880,7 @@ version = "0.1.0"
 dependencies = [
  "base",
  "embedded-io",
- "heapless",
+ "heapless 0.8.0",
 ]
 
 [[package]]
@@ -2025,7 +2035,7 @@ checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
 name = "net"
 version = "0.1.0"
 dependencies = [
- "heapless",
+ "heapless 0.8.0",
  "store",
 ]
 
