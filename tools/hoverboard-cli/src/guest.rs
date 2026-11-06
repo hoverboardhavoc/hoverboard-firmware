@@ -25,6 +25,11 @@ pub struct Attached {
     pub node: Option<u8>,
 }
 
+/// How many `NODE_HELLO`s an attach sends.
+pub const HELLO_TRIES: u32 = 3;
+/// How long an attach waits for each `NODE_HELLO` answer.
+pub const HELLO_WAIT: Duration = Duration::from_secs(1);
+
 /// Attach to the node at the other end of `wire` (the bridge, or a board's own BLE module): send
 /// `NODE_HELLO` (dst `0x00`, the one peer) up to `tries` times, `within` apart. Every other packet
 /// that arrives meanwhile is dropped.

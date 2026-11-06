@@ -87,7 +87,9 @@ use hoverboard_cli::config::{self, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::erase;
 use hoverboard_cli::fleet;
-use hoverboard_cli::guest::{self, Drive, Tally, Wheel, WheelTarget, STOP_REPEATS};
+use hoverboard_cli::guest::{
+    self, Drive, Tally, Wheel, WheelTarget, HELLO_TRIES, HELLO_WAIT, STOP_REPEATS,
+};
 use hoverboard_cli::install::{self, Answered, Given, Guard};
 use hoverboard_cli::machine::{self, MachineFile};
 use hoverboard_cli::names;
@@ -641,9 +643,6 @@ fn terminal() -> bool {
     std::io::stdin().is_terminal()
 }
 
-/// How many `NODE_HELLO`s an attach sends, and how long it waits for each answer.
-const HELLO_TRIES: u32 = 3;
-const HELLO_WAIT: Duration = Duration::from_secs(1);
 /// The gap between rounds of `drive`'s stop frames.
 const STOP_GAP: Duration = Duration::from_millis(50);
 /// The longest one wait for a packet, so a Ctrl-C is seen within it.
