@@ -577,13 +577,14 @@ object SetupFields {
      * pack's cell count and chemistry, the rider requirement, and what the Ride screen's
      * instruments read beside the telemetry (`specs/remote-ui.md` 3.1): the low-battery floor the
      * ring turns caution at, the IMU model that decides the attitude corner and the TILT and IMU
-     * lamps, and the current limit a phase bar is full at. Each is a fact a screen states before
-     * Setup has ever been opened. A machine field among them is read once and stands for every
-     * motor controller ([SetupField.machine]); the rest are read from each.
+     * lamps, the current limit a phase bar is full at, and the method the OBS button needs FOC in.
+     * Each is a fact a screen states before Setup has ever been opened. A machine field among them is
+     * read once and stands for every motor controller ([SetupField.machine]); the rest are read from
+     * each.
      */
     val MOTOR_FACTS: List<SetupField> =
         MACHINE + CONTROL_MODE + PACK_CELLS + BATTERY_CHEMISTRY + RIDER_REQUIRED + BATTERY_FLOOR + IMU_MODEL +
-            MOTOR_CURRENT_LIMIT
+            MOTOR_CURRENT_LIMIT + MOTOR_METHOD
 
 
     /**

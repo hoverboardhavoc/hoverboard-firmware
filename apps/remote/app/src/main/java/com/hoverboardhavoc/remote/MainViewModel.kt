@@ -147,6 +147,10 @@ import kotlinx.coroutines.launch
  *   the instruments and the pad (`specs/remote-ui.md` 3.1).
  * @param notTurning the wheels the app has asked for drive for 1 s that have reported no rotation
  *   all that time (`specs/remote-ui.md` 3.1, "A wheel that does not turn").
+ * @param observer whether the app is sending the observer source request, the OBS button lit
+ *   (`specs/remote-ui.md` 3.1, "The observer button"). Only ever true while [armed].
+ * @param focMachine whether every motor [driving] addresses reads `motor.method` FOC
+ *   ([SetupState.focMachine]), which the OBS button needs.
  */
 data class UiState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
@@ -190,6 +194,8 @@ data class UiState(
     val trip: TripBaseline = TripBaseline.NONE,
     val boardsOff: Boolean = false,
     val notTurning: Set<Wheel> = emptySet(),
+    val observer: Boolean = false,
+    val focMachine: Boolean = false,
 ) {
     val isConnected: Boolean get() = connectionState == ConnectionState.CONNECTED
 
@@ -357,6 +363,13 @@ data class UiState(
     val canArm: Boolean
         get() = isConnected && !engaged && !disconnecting && !machineArm.refuses &&
             drive.targets.boards.isNotEmpty() && !armBlocked && !boardsOff
+
+    /**
+     * Whether the OBS button is enabled (`specs/remote-ui.md` 3.1, "The observer button"): armed, on
+     * a machine whose driven motors all run FOC. Lit or not, it is drawn; disabled it neither sends
+     * nor lights.
+     */
+    val canObserve: Boolean get() = isConnected && armed && focMachine
 
     /**
      * The name of what the phone is connected to, for the motor-controller-off card: the picked
@@ -614,6 +627,7 @@ class MainViewModel(
                 driving = l.armedTargets ?: DriveTargets.NONE,
                 faultDisarm = l.faultDisarm,
                 latchHeld = l.latchHeld,
+                observer = l.observer,
             )
         }.combine(boards) { ui, b ->
             val driving = if (ui.armed) ui.driving else b.drive.targets
@@ -646,6 +660,7 @@ class MainViewModel(
                 boardStatus = mcs.mapNotNull { a -> b.setup.setupOf(a).status?.let { a to it } }.toMap(),
                 machineDifferences = b.setup.machineDifferences,
                 currentLimit = b.setup.wheelFacts(wheels, SetupFields.MOTOR_CURRENT_LIMIT),
+                focMachine = b.setup.focMachine(driving.boards),
             )
         }.combine(picker) { ui, p ->
             ui.copy(selectedBoard = p.selected, findingBoards = p.finding, boardsSeen = p.seen)
@@ -954,6 +969,22 @@ class MainViewModel(
     }
 
     /**
+     * The OBS button was tapped (`specs/remote-ui.md` 3.1, "The observer button"): while armed on a
+     * FOC machine, turn the observer source request on or off, and put it on the wire with the next
+     * `INPUTS`. Refused while disarmed or on a machine that is not FOC; a disarm and a disconnect
+     * clear it ([LocalState.disarmed], and the full reset when the link goes).
+     */
+    fun onObserverToggle() {
+        if (transport.connectionState.value != ConnectionState.CONNECTED) return
+        val l = local.value
+        val boards = l.armedTargets?.boards ?: return
+        // Turning it off is never refused; turning it on needs an armed FOC machine.
+        if (!l.observer && (!l.armed || !setup.state.value.focMachine(boards))) return
+        local.update { it.copy(observer = !it.observer) }
+        sendCurrent()
+    }
+
+    /**
      * Handle a throttle touch at [y] within a pad of [height] (pixels, y down). Call on touch-down
      * and on every move while held.
      *
@@ -1074,7 +1105,7 @@ class MainViewModel(
         if (transport.connectionState.value != ConnectionState.CONNECTED) return
         val l = local.value
         val command = if (l.armed) {
-            RiderCommand.armed(l.throttleSpeed, simulatingRider = l.simulateRider)
+            RiderCommand.armed(l.throttleSpeed, simulatingRider = l.simulateRider, observer = l.observer)
         } else {
             RiderCommand.DISARMED
         }.withHorn(l.horn)
@@ -1140,6 +1171,9 @@ class MainViewModel(
      * [faultDisarm] and [latchHeld] are what the screen says about faults the app has seen this
      * session: both outlive a disarm and both are cleared by the tap that arms, and by the link
      * going, which resets everything here.
+     *
+     * [observer] is the OBS button (`specs/remote-ui.md` 3.1): rider intent, so a disarm resets it
+     * like the demand.
      */
     private data class LocalState(
         val armed: Boolean = false,
@@ -1152,6 +1186,7 @@ class MainViewModel(
         val faultDisarm: FaultDisarm? = null,
         val latchHeld: Map<Int, Int> = emptyMap(),
         val horn: Boolean = false,
+        val observer: Boolean = false,
     ) {
         /**
          * The all-stop state: no arm level, no demand, no touch. Operator settings and the fault

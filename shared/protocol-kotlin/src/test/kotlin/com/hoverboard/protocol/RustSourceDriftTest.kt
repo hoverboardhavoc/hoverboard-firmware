@@ -28,9 +28,6 @@ import com.hoverboard.protocol.linkctl.OP_CYCLIC_STATE
 import com.hoverboard.protocol.linkctl.OP_DRIVE_CMD
 import com.hoverboard.protocol.linkctl.OP_FOC_TRACE
 import com.hoverboard.protocol.linkctl.OP_INPUTS
-import com.hoverboard.protocol.board.BoardStatus
-import com.hoverboard.protocol.board.CurrentLimit
-import com.hoverboard.protocol.board.DEAD_TIME_MIN_DTG
 import com.hoverboard.protocol.linkctl.OP_TRACE_SET
 import com.hoverboard.protocol.linkctl.TRACE_TIMEOUT_TICKS
 import com.hoverboard.protocol.linkctl.TraceSet

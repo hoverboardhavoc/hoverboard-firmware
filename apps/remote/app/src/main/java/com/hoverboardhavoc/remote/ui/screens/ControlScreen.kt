@@ -91,6 +91,7 @@ fun ControlScreen(
     onHorn: ((Boolean) -> Unit)? = null,
     showFrameStats: Boolean = false,
     onOpenSetup: (board: Int, row: Key) -> Unit = { _, _ -> },
+    onObserverToggle: () -> Unit = {},
 ) {
     var sheet by rememberSaveable { mutableStateOf<FaultLamp?>(null) }
     val open = { lamp: FaultLamp ->
@@ -123,6 +124,7 @@ fun ControlScreen(
         RideControls(
             state = state,
             onArmToggle = onArmToggle,
+            onObserverToggle = onObserverToggle,
             onThrottleMove = onThrottleMove,
             onJoystickMove = onJoystickMove,
             onThrottleRelease = onThrottleRelease,

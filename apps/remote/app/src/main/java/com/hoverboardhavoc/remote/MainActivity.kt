@@ -225,6 +225,9 @@ private fun HoverboardRoot() {
  * The connected app: Ride, and the Tune, Setup and Board layout destinations it pushes, over one
  * [MainViewModel].
  */
+// LongMethod (61 lines against 60): the one wiring of the session's callbacks into the four
+// destinations; the OBS button's callback on Ride and Tune is the line past the threshold.
+@Suppress("LongMethod")
 @Composable
 private fun Connected(
     viewModel: MainViewModel,
@@ -257,6 +260,7 @@ private fun Connected(
             ControlScreen(
                 state = state,
                 onArmToggle = viewModel::onArmToggle,
+                onObserverToggle = viewModel::onObserverToggle,
                 onThrottleMove = viewModel::onThrottleMove,
                 onJoystickMove = viewModel::onJoystickMove,
                 onThrottleRelease = viewModel::onThrottleRelease,
@@ -279,6 +283,7 @@ private fun Connected(
                     RideControls(
                         state = state,
                         onArmToggle = viewModel::onArmToggle,
+                        onObserverToggle = viewModel::onObserverToggle,
                         onThrottleMove = viewModel::onThrottleMove,
                         onJoystickMove = viewModel::onJoystickMove,
                         onThrottleRelease = viewModel::onThrottleRelease,

@@ -35,7 +35,7 @@ import com.hoverboard.protocol.linkctl.OP_INPUTS
  *
  * ## The invariant this type exists to hold
  *
- * A disarmed command **cannot** carry a demand, a turn, or a rider claim: the constructor is
+ * A disarmed command **cannot** carry a demand, a turn, a rider claim, or the observer request: the constructor is
  * private, [DISARMED] is the only disarmed value, and it is a constant. So there is no representable
  * state in which the app has let go of the arm control while still asking for motion, and disarming
  * can never be a two-frame sequence with a live demand in between: one tick carries both halves or
@@ -47,10 +47,13 @@ data class RiderCommand private constructor(
     val rider: Boolean,
     val steer: Int = 0,
     val horn: Boolean = false,
+    val observer: Boolean = false,
 ) {
 
     /**
-     * The `INPUTS` mirror: the arm level in `buttons` bit0, and the rider level in `rider` bit0.
+     * The `INPUTS` mirror: the arm level in `buttons` bit0, the observer request in `buttons` bit1
+     * (the Ride screen's OBS button, `specs/flux-observer.md`, "S4, first slice"), and the rider
+     * level in `rider` bit0.
      *
      * ## Why `rider` is not the arm level
      *
@@ -72,7 +75,8 @@ data class RiderCommand private constructor(
      */
     val inputs: Inputs
         get() = Inputs(
-            buttons = (if (armed) Inputs.BUTTON_POWER else 0) or (if (horn) Inputs.BUTTON_HORN else 0),
+            buttons = (if (armed) Inputs.BUTTON_POWER else 0) or (if (horn) Inputs.BUTTON_HORN else 0) or
+                (if (observer) Inputs.BUTTON_OBSERVER else 0),
             rider = if (rider) Inputs.RIDER_PRESENT else 0,
         )
 
@@ -106,7 +110,7 @@ data class RiderCommand private constructor(
      * also state one for the firmware to apply a second time.
      */
     fun withDemand(demand: Int): RiderCommand =
-        (if (armed) armed(demand, simulatingRider = rider) else DISARMED).withHorn(horn)
+        (if (armed) armed(demand, simulatingRider = rider, observer = observer) else DISARMED).withHorn(horn)
 
     /**
      * The same command with the horn held or not (`specs/tones.md` section 5): `INPUTS.buttons`
@@ -185,12 +189,16 @@ data class RiderCommand private constructor(
          *   mode (`control::fsm` requires rider present) and the profile never leaves B; this is
          *   how a bench operator stands in for the pads, and it is the same level
          *   `swd-mailbox-inputs --rider` asserts over SWD.
+         * @param observer assert `buttons` bit1, the observer source request: the FOC commutates
+         *   from the flux observer's angle while it is held (`specs/flux-observer.md`, "S4, first
+         *   slice"). Only an armed command carries it, so a disarm releases it in the same frame.
          */
-        fun armed(demand: Int, simulatingRider: Boolean = false): RiderCommand =
+        fun armed(demand: Int, simulatingRider: Boolean = false, observer: Boolean = false): RiderCommand =
             RiderCommand(
                 armed = true,
                 demand = demand.coerceIn(-DriveCmd.FULL_SCALE, DriveCmd.FULL_SCALE),
                 rider = simulatingRider,
+                observer = observer,
             )
     }
 }
