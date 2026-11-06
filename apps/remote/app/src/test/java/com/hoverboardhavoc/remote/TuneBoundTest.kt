@@ -1,8 +1,11 @@
 package com.hoverboardhavoc.remote
 
-import com.hoverboard.protocol.store.Value
-import com.hoverboardhavoc.remote.model.SetupFields
 import com.hoverboard.protocol.store.Effect
+import com.hoverboard.protocol.store.Fields
+import com.hoverboard.protocol.store.Key
+import com.hoverboard.protocol.store.Value
+import com.hoverboardhavoc.remote.model.Editor
+import com.hoverboardhavoc.remote.model.SetupFields
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -12,8 +15,9 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
- * The drive bounds on the Tune screen (`specs/remote-ui.md` 3.3b): the turn limit, its rate and the
- * position clamp (`specs/state-feedback.md` section 10), read with the gains, written
+ * The drive bounds on the Tune screen (`specs/remote-ui.md` 3.3b): the heading hold's turn limit
+ * and heading clamp (`specs/heading-hold.md` section 10) and the position clamp
+ * (`specs/state-feedback.md` section 10), read with the gains, written
  * to FLASH one value at a time, refused while armed, and taken up by the board at its next arm.
  *
  * They are not on the live tune lane, so none of the gains' staged/engaged machinery applies to
@@ -24,7 +28,7 @@ class TuneBoundTest {
 
     private val board = 0x01
     private val posClamp = SetupFields.POS_CLAMP.key
-    private val turnSlew = SetupFields.TURN_SLEW.key
+    private val headClamp = SetupFields.HEAD_CLAMP.key
 
     @Test
     fun `the read pass reads every bound from the board`() = runTest {
@@ -45,7 +49,7 @@ class TuneBoundTest {
         val rig = shownTune()
         rig.model.setBound(posClamp, 60)
         runCurrent()
-        rig.model.setBound(turnSlew, 240)
+        rig.model.setBound(headClamp, 30)
         runCurrent()
 
         // A drive bound is a machine field: it goes to every motor controller, the tuned board first.
@@ -53,13 +57,13 @@ class TuneBoundTest {
             listOf(
                 Triple(board, posClamp, Value.I16(60)),
                 Triple(0x02, posClamp, Value.I16(60)),
-                Triple(board, turnSlew, Value.I16(240)),
-                Triple(0x02, turnSlew, Value.I16(240)),
+                Triple(board, headClamp, Value.I16(30)),
+                Triple(0x02, headClamp, Value.I16(30)),
             ),
             rig.transport.writes,
         )
         assertEquals(60, rig.state.bound(posClamp))
-        assertEquals(240, rig.state.bound(turnSlew))
+        assertEquals(30, rig.state.bound(headClamp))
         assertNull(rig.state.notice)
     }
 
@@ -121,6 +125,28 @@ class TuneBoundTest {
         }
     }
 
+    /**
+     * The two heading-hold rows are `CONTROL_TURN_CLAMP` indices 0 and 1, over the seam's ranges
+     * mirrored in [com.hoverboard.protocol.store.Fields], with the retired 0x2B gone from the list
+     * (`specs/heading-hold.md` sections 6 and 10).
+     */
+    @Test
+    fun `the turn rows are the clamp row's two indices over the seam's ranges`() {
+        assertEquals(
+            listOf(
+                Key(Fields.CONTROL_TURN_CLAMP.id, 0),
+                Key(Fields.CONTROL_TURN_CLAMP.id, 1),
+                Fields.CONTROL_POS_CLAMP.key(),
+            ),
+            SetupFields.DRIVE_BOUNDS.map { it.key },
+        )
+        assertEquals(Fields.TURN_MAX, (SetupFields.TURN_MAX.editor as Editor.Range).range)
+        assertEquals(Fields.HEAD_CLAMP, (SetupFields.HEAD_CLAMP.editor as Editor.Range).range)
+        assertEquals(Value.I16(0), SetupFields.TURN_MAX.def.default)
+        assertEquals(Value.I16(45), SetupFields.HEAD_CLAMP.def.default)
+        assertTrue(SetupFields.DRIVE_BOUNDS.none { it.key.fieldId == 0x2B }, "the retired 0x2B is still a row")
+    }
+
     /** The bounds are the Tune screen's rows, so Setup neither lists nor reads them. */
     @Test
     fun `the drive bounds are not Setup rows`() {
@@ -140,7 +166,8 @@ class TuneBoundTest {
             assertEquals(Value.I16(v), SetupFields.TURN_MAX.parse("$v"))
         }
         assertNull(SetupFields.TURN_MAX.parse("28501"))
-        for (v in listOf(24, 240, 1_000)) assertEquals(Value.I16(v), SetupFields.TURN_SLEW.parse("$v"))
-        assertNull(SetupFields.TURN_SLEW.parse("1001"))
+        for (v in listOf(0, 45, 450)) assertEquals(Value.I16(v), SetupFields.HEAD_CLAMP.parse("$v"))
+        assertNull(SetupFields.HEAD_CLAMP.parse("451"))
+        assertNull(SetupFields.HEAD_CLAMP.parse("-1"))
     }
 }

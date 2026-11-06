@@ -780,8 +780,8 @@ mod tests {
             .iter()
             .all(|k| row_of(*k).unwrap().path.starts_with("machine.")));
         assert_eq!(
-            machine_key("machine.turn.1"),
-            Ok(store::CONTROL_DRIVE_TURN.at(1).key())
+            machine_key("machine.turn.clamp.1"),
+            Ok(store::CONTROL_TURN_CLAMP.at(1).key())
         );
         assert!(machine_key("leds.green")
             .unwrap_err()

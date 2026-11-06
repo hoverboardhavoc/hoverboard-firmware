@@ -963,25 +963,50 @@ pub const BOARD_INPUT_POLARITY: Field<u8> = Field::new(0x19, 0b110);
 /// per-unit trim on the fused roll, defaulting to 0.
 pub const ATTITUDE_LEVEL_TRIM: IndexedField<i16, 2> = IndexedField::new(0x17, [0, 0]);
 
-/// The rigid frame's turn input bound and rate (`specs/rover-one-imu.md` section 5), indexed
-/// `0 = turn_max` (the differential torque in stock counts at full stick) and `1 = turn_slew`
-/// (counts per control tick that the turn may move).
+/// The heading hold's three gains (`specs/heading-hold.md` sections 2 and 6), the differential
+/// half of the balance law on the rigid leader: indexed `0 = gh` (numerator counts per edge of
+/// heading error), `1 = ghv` (per sixteenth of a count of heading-rate error) and `2 = gff` (per
+/// sixteenth of a count of the stick's reference rate, the feedforward). The common half's units,
+/// so one numerator count is the same torque in both halves.
 ///
-/// **Default `turn_max` 0 = disabled**: the machine drives straight and a board is byte-identical
-/// in behaviour to one before the field existed; the rover stages 1000 to 3000 for first attempts.
-/// `turn_slew`'s 24 traverses a staged 3000 in 125 ticks (0.5 s), matching the lean's own traverse,
-/// because a step in differential torque is a yaw impulse and on a rigid frame a yaw impulse
-/// reaches the pitch loop as a disturbance through the steel.
+/// **Default `[0, 0, 0]` = no loop and no feedforward**: the differential is zero whatever the
+/// stick does. The defaults are `control::config::turn::GAINS_DEFAULT` (pinned by `store`'s tests).
 ///
-/// Read at boot and again at every arm (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`), so a write
-/// applies from the next arm and costs no power-cycle. NOT on the live tune lane: a bound on how
-/// much authority the stick has is not changed under a moving machine, and a config write is
-/// refused while armed. The remote app offers it on the Tune screen all the same
-/// (`specs/remote-ui.md` 3.3b).
-/// Range enforcement is NOT here (the store validates type only): the seam
-/// (`control::DriveTurn::new`) clamps `turn_max` to 0..28500 and `turn_slew` to 1..1000. An
-/// [`IndexedField`] because its two indices default differently.
-pub const CONTROL_DRIVE_TURN: IndexedField<i16, 2> = IndexedField::new(0x2B, [0, 24]);
+/// **ON the live tune lane** beside [`CONTROL_SF_GAINS`] and [`CONTROL_REFERENCE`]. Range
+/// enforcement is the lane's seam (`control::GainShadow`) against COMPILED maxima
+/// (`control::config::turn::GAIN_MAX`, `[2000, 10000, 10000]`), not a stored row like
+/// [`CONTROL_GAIN_MAX`]: [`CONTROL_TURN_CLAMP`]'s `turn_max` bounds the output whatever the gain.
+///
+/// A new id rather than a reshape of the retired 0x2B (`CONTROL_DRIVE_TURN`, the open-loop turn's
+/// `[turn_max, turn_slew]`): the rover's store holds `[12000, 600]` there at the old meanings,
+/// and records under a retired id are ignored because nothing registered names them.
+pub const CONTROL_TURN_GAINS: IndexedField<i16, 3> = IndexedField::new(0x2D, [0, 0, 0]);
+
+/// The heading hold's stick reference (`specs/heading-hold.md` section 4), indexed
+/// `0 = rate_max` (sixteenths of a count per wheel at full stick) and `1 = rate_slew` (1/4096
+/// count per control tick, the heading rate's acceleration and the stop ramp of a stale link).
+///
+/// **Default `[0, 41]`**: `rate_max` 0 keeps the steer axis dead, and the machine holds the
+/// heading it engaged with; `rate_slew` 41 is the common reference's. The defaults are
+/// `control::config::turn::REFERENCE_DEFAULT` (pinned by `store`'s tests).
+///
+/// **ON the live tune lane**, against the compiled bounds `control::config::turn::REFERENCE_MIN` /
+/// `REFERENCE_MAX` (`0..=512` and `1..=4096`, the common reference's).
+pub const CONTROL_TURN_REFERENCE: IndexedField<i16, 2> = IndexedField::new(0x2E, [0, 41]);
+
+/// The heading hold's bounds (`specs/heading-hold.md` section 6), indexed `0 = turn_max` (word
+/// counts, the differential's authority) and `1 = head_clamp` (hall edges, the bound on the
+/// heading error, so a held wheel winds `gh * head_clamp` numerator counts and no more).
+///
+/// **Default `[0, 45]`**: `turn_max` 0 is no differential at all, whatever the gains; 45 edges of
+/// heading is about 50 degrees on the rover.
+///
+/// Read at boot and again at every arm (`motorcontroller/firmware/src/arm.rs`, `ARM_ROW`), so a
+/// write applies from the next arm. NOT on the live tune lane: a bound on authority is not changed
+/// under a moving machine. Range enforcement is NOT here: the seam (`control::turn::clamp`) clamps
+/// `turn_max` to `0..=28500` and `head_clamp` to `0..=450`. An [`IndexedField`] because its two
+/// indices default differently.
+pub const CONTROL_TURN_CLAMP: IndexedField<i16, 2> = IndexedField::new(0x2F, [0, 45]);
 
 /// The low-battery warning threshold in centivolts (`specs/tones.md` section 4.4): the board plays
 /// [`TONE`]`.at(`[`TONE_BATTERY_LOW`]`)` while the effective battery word is known and below it. **`<= 0` = no
@@ -1005,7 +1030,8 @@ pub const BOARD_BATTERY_WARN: Field<i16> = Field::new(0x2C, 0);
 /// gains. Records under retired ids are ignored, because nothing registered names them.
 ///
 /// **ON the live tune lane** (`TUNE_WRITE`/`TUNE_READ`), whose allowlist is exactly this field's
-/// four indices and [`CONTROL_REFERENCE`]'s two. Range enforcement is NOT here (the store
+/// four indices, [`CONTROL_REFERENCE`]'s two, [`CONTROL_TURN_GAINS`]'s three and
+/// [`CONTROL_TURN_REFERENCE`]'s two. Range enforcement is NOT here (the store
 /// validates type only): it lives at the tune seam, `control::GainShadow`, which every writer goes
 /// through, against [`CONTROL_GAIN_MAX`]. In RUN the law ramps its live copy toward these under
 /// fixed per-pass caps (`control::config::sf::RAMP_CAPS`).
@@ -1186,8 +1212,10 @@ field_ids! {
     0x28, // CONTROL_GAIN_MAX
     0x29, // CONTROL_REFERENCE
     0x2A, // CONTROL_POS_CLAMP
-    0x2B, // CONTROL_DRIVE_TURN
     0x2C, // BOARD_BATTERY_WARN
+    0x2D, // CONTROL_TURN_GAINS
+    0x2E, // CONTROL_TURN_REFERENCE
+    0x2F, // CONTROL_TURN_CLAMP
     0x40, // MOTOR_HALL_A
     0x41, // MOTOR_HALL_B
     0x42, // MOTOR_HALL_C
@@ -1266,8 +1294,10 @@ field_ids! {
     0x28, // CONTROL_GAIN_MAX
     0x29, // CONTROL_REFERENCE
     0x2A, // CONTROL_POS_CLAMP
-    0x2B, // CONTROL_DRIVE_TURN
     0x2C, // BOARD_BATTERY_WARN
+    0x2D, // CONTROL_TURN_GAINS
+    0x2E, // CONTROL_TURN_REFERENCE
+    0x2F, // CONTROL_TURN_CLAMP
     0x40, // MOTOR_HALL_A
     0x41, // MOTOR_HALL_B
     0x42, // MOTOR_HALL_C
@@ -1385,12 +1415,13 @@ pub struct FieldDef {
 /// The number of ENTRIES in the registry: the declared field count plus the extra per-index
 /// entries the per-index families contribute (the link pins, USARTs and remaps, the IMU's bias,
 /// signs and roles, the level trim, the battery-sense calibration, the tunes, the gains and their
-/// maxima, the reference and the turn bound). Tracks the field set under each `test-fields` configuration.
+/// maxima, the reference, and the heading hold's gains, reference and clamp). Tracks the field set
+/// under each `test-fields` configuration.
 #[cfg(not(feature = "test-fields"))]
-pub const REGISTRY_LEN: usize = 76 + 21;
+pub const REGISTRY_LEN: usize = 78 + 24;
 /// The number of registry entries (with the reserved store-test fields); see the non-test twin.
 #[cfg(feature = "test-fields")]
-pub const REGISTRY_LEN: usize = 78 + 21;
+pub const REGISTRY_LEN: usize = 80 + 24;
 
 /// One registry ROW: the same five facts [`FieldDef`] carries, packed to 8 B.
 ///
@@ -1615,9 +1646,14 @@ pub static REGISTRY: [FieldEntry; REGISTRY_LEN] = [
     CONTROL_REFERENCE.at(0).entry(Live),
     CONTROL_REFERENCE.at(1).entry(Live),
     CONTROL_POS_CLAMP.entry(Arm),
-    CONTROL_DRIVE_TURN.at(0).entry(Arm),
-    CONTROL_DRIVE_TURN.at(1).entry(Arm),
     BOARD_BATTERY_WARN.entry(Boot),
+    CONTROL_TURN_GAINS.at(0).entry(Live),
+    CONTROL_TURN_GAINS.at(1).entry(Live),
+    CONTROL_TURN_GAINS.at(2).entry(Live),
+    CONTROL_TURN_REFERENCE.at(0).entry(Live),
+    CONTROL_TURN_REFERENCE.at(1).entry(Live),
+    CONTROL_TURN_CLAMP.at(0).entry(Arm),
+    CONTROL_TURN_CLAMP.at(1).entry(Arm),
     // Wheel (`0x40..=0x7F`), one row per field at motor 0.
     MOTOR_HALL_A.entry(Boot),
     MOTOR_HALL_B.entry(Boot),
@@ -1967,8 +2003,10 @@ pub mod names {
         FieldName::array(CONTROL_GAIN_MAX, "machine.balance.gain_max", Kind::Int),
         FieldName::array(CONTROL_REFERENCE, "machine.balance.reference", Kind::Int),
         FieldName::single(CONTROL_POS_CLAMP, "machine.balance.pos_clamp", Kind::Int),
-        FieldName::array(CONTROL_DRIVE_TURN, "machine.turn", Kind::Int),
         FieldName::single(BOARD_BATTERY_WARN, "machine.battery.warn", Kind::Int),
+        FieldName::array(CONTROL_TURN_GAINS, "machine.turn.gains", Kind::Int),
+        FieldName::array(CONTROL_TURN_REFERENCE, "machine.turn.reference", Kind::Int),
+        FieldName::array(CONTROL_TURN_CLAMP, "machine.turn.clamp", Kind::Int),
         // Wheel.
         FieldName::pin(MOTOR_HALL_A, "hall.a", Index::Motor),
         FieldName::pin(MOTOR_HALL_B, "hall.b", Index::Motor),
@@ -2074,10 +2112,17 @@ pub mod names {
         every(CONTROL_GAIN_MAX.id(), 0, i16::MAX as i64),
         // `machine.balance.pos_clamp`: `control::sf::pos_clamp`, 0..=POS_CLAMP_MAX.
         every(CONTROL_POS_CLAMP.id(), 0, 450),
-        // `machine.turn`: `control::DriveTurn::new`, turn_max 0..=TORQUE_FULL_SCALE, turn_slew
-        // TURN_SLEW_MIN..=TURN_SLEW_MAX.
-        at(CONTROL_DRIVE_TURN.id(), 0, 0, 28500),
-        at(CONTROL_DRIVE_TURN.id(), 1, 1, 1000),
+        // `machine.turn.gains`: `control::config::turn`'s GAIN_MIN..=GAIN_MAX, compiled.
+        at(CONTROL_TURN_GAINS.id(), 0, 0, 2000),
+        at(CONTROL_TURN_GAINS.id(), 1, 0, 10000),
+        at(CONTROL_TURN_GAINS.id(), 2, 0, 10000),
+        // `machine.turn.reference`: `control::config::turn`'s REFERENCE_MIN..=REFERENCE_MAX.
+        at(CONTROL_TURN_REFERENCE.id(), 0, 0, 512),
+        at(CONTROL_TURN_REFERENCE.id(), 1, 1, 4096),
+        // `machine.turn.clamp`: `control::turn::clamp`, turn_max 0..=TURN_MAX_MAX, head_clamp
+        // 0..=HEAD_CLAMP_MAX.
+        at(CONTROL_TURN_CLAMP.id(), 0, 0, 28500),
+        at(CONTROL_TURN_CLAMP.id(), 1, 0, 450),
         // `current.cal`: `board::limit`'s CURRENT_CAL_MIN..=CURRENT_CAL_MAX.
         every(MOTOR_CURRENT_CAL.id(), 100, 819),
         // `current.limit`, milliamps: `board::limit::LIMIT_REQUEST_CAP_MA`, the most the
@@ -2251,8 +2296,9 @@ pub mod names {
 
         /// The range table covers exactly the arm row, the calibration fields, the two boot-read
         /// protection settings (`current.dc_link.limit`, `gate.break.enable`,
-        /// `specs/optional-protections.md` section 4) and `wifi.tx_power`, each with a lower bound
-        /// below its upper one, inside its storage type.
+        /// `specs/optional-protections.md` section 4), the heading hold's two live rows
+        /// (`specs/heading-hold.md` section 6) and `wifi.tx_power`, each with a lower bound below
+        /// its upper one, inside its storage type.
         #[test]
         fn the_range_table_covers_the_arm_row_and_the_calibration() {
             let mut want: Vec<u8> = REGISTRY
@@ -2264,6 +2310,8 @@ pub mod names {
                     WIFI_TX_POWER.id(),
                     MOTOR_DC_LINK_LIMIT.id(),
                     MOTOR_BREAK_ENABLE.id(),
+                    CONTROL_TURN_GAINS.id(),
+                    CONTROL_TURN_REFERENCE.id(),
                 ])
                 .collect();
             want.sort_unstable();
@@ -2285,7 +2333,11 @@ pub mod names {
                 };
                 assert!(lo <= r.lo && r.hi <= hi, "{:#04x}", r.id);
             }
-            assert_eq!(range_of(CONTROL_DRIVE_TURN.at(1).key()), Some((1, 1000)));
+            assert_eq!(range_of(CONTROL_TURN_CLAMP.at(1).key()), Some((0, 450)));
+            assert_eq!(
+                range_of(CONTROL_TURN_REFERENCE.at(1).key()),
+                Some((1, 4096))
+            );
             assert_eq!(range_of(MOTOR_ALIGN_OFFSET.key()), Some((0, 5)));
             assert_eq!(range_of(DEVICE_NAME.key()), None);
         }
@@ -2455,8 +2507,10 @@ mod registry_tests {
             (0x28, CONTROL_GAIN_MAX.id()),
             (0x29, CONTROL_REFERENCE.id()),
             (0x2A, CONTROL_POS_CLAMP.id()),
-            (0x2B, CONTROL_DRIVE_TURN.id()),
             (0x2C, BOARD_BATTERY_WARN.id()),
+            (0x2D, CONTROL_TURN_GAINS.id()),
+            (0x2E, CONTROL_TURN_REFERENCE.id()),
+            (0x2F, CONTROL_TURN_CLAMP.id()),
             (0x40, MOTOR_HALL_A.id()),
             (0x41, MOTOR_HALL_B.id()),
             (0x42, MOTOR_HALL_C.id()),
@@ -2498,9 +2552,15 @@ mod registry_tests {
     }
 
     /// `specs/machine-settings.md` section 9, test 7: every registered id falls in the block of
-    /// its scope, and no block has a free id below its last registered one.
+    /// its scope, and no block has a free id below its last registered one except a RETIRED id.
+    ///
+    /// 0x2B (`CONTROL_DRIVE_TURN`, the open-loop turn) is the one retired id inside a block: the
+    /// heading hold (`specs/heading-hold.md` section 6) took new ids 0x2D..0x2F rather than reuse
+    /// it, because the rover's store holds `[12000, 600]` there at the old meanings and a reused
+    /// id would read 600 as a clamp in edges.
     #[test]
     fn scope_blocks_are_dense() {
+        const RETIRED: [u8; 1] = [0x2B];
         for (scope, first) in [
             (Scope::Node, 0x01u8),
             (Scope::Machine, 0x20),
@@ -2513,7 +2573,10 @@ mod registry_tests {
                 .collect();
             let last = *ids.iter().max().unwrap();
             for id in first..=last {
-                assert!(ids.contains(&id), "{scope:?} has a free id {id:#04x}");
+                assert!(
+                    ids.contains(&id) || RETIRED.contains(&id),
+                    "{scope:?} has a free id {id:#04x}"
+                );
             }
         }
         assert_eq!(Scope::of(0x1F), Some(Scope::Node));
@@ -2568,7 +2631,12 @@ mod registry_tests {
                 (0x27, 2),
                 (0x27, 3),
                 (0x29, 0),
-                (0x29, 1)
+                (0x29, 1),
+                (0x2D, 0),
+                (0x2D, 1),
+                (0x2D, 2),
+                (0x2E, 0),
+                (0x2E, 1)
             ]
         );
         assert_eq!(
@@ -2609,8 +2677,8 @@ mod registry_tests {
                 (0x28, 2),
                 (0x28, 3),
                 (0x2A, 0),
-                (0x2B, 0),
-                (0x2B, 1),
+                (0x2F, 0),
+                (0x2F, 1),
                 (0x4C, 0),
                 (0x4E, 0),
                 (0x4F, 0),
@@ -2630,8 +2698,9 @@ mod registry_tests {
     #[test]
     fn lookup_of_an_undeclared_id_is_none() {
         assert!(lookup(0x99).is_none());
-        // The retired ids are gone with their fields.
-        for id in [0x30u8, 0x66, 0x78] {
+        // The retired ids are gone with their fields, 0x2B (the open-loop turn,
+        // `specs/heading-hold.md` section 6) among them.
+        for id in [0x2Bu8, 0x30, 0x66, 0x78] {
             assert!(lookup(id).is_none(), "{id:#04x}");
         }
     }
@@ -2661,7 +2730,10 @@ mod registry_tests {
         assert_eq!(d(0x2A, 0), Value::I16(45));
         assert_eq!(d(0x18, 0), Value::I16(25200));
         assert_eq!(d(0x18, 1), Value::I16(-5));
-        assert_eq!(d(0x2B, 1), Value::I16(24));
+        assert_eq!(d(0x2D, 2), Value::I16(0));
+        assert_eq!(d(0x2E, 1), Value::I16(41));
+        assert_eq!(d(0x2F, 0), Value::I16(0));
+        assert_eq!(d(0x2F, 1), Value::I16(45));
         // Past the declared end: the base default.
         assert_eq!(d(0x28, 7), Value::I16(20000));
         assert_eq!(CONTROL_GAIN_MAX.at(7).key().index, 0);
@@ -2772,9 +2844,10 @@ mod registry_tests {
             Some(TONE_BATTERY_CRITICAL)
         );
         assert_eq!(row.index.count(), 3);
-        // The old machine ids are free.
+        // The tunes' old machine ids 0x2D..=0x2F are the heading hold's i16 rows now
+        // (`specs/heading-hold.md` section 6), not tunes.
         for id in 0x2D..=0x2F {
-            assert!(lookup(id).is_none(), "{id:#04x}");
+            assert_ne!(names::by_id(id).unwrap().path, "tone", "{id:#04x}");
         }
     }
 

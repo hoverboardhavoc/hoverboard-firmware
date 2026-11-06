@@ -14,17 +14,19 @@
     "refused": null
   },
   {
-    "name": "a turn slew of 0",
+    "name": "a heading clamp of 451",
     "chip": "gd32f130c8",
     "board": {
       "machine": {
-        "turn": [
-          0,
-          0
-        ]
+        "turn": {
+          "clamp": [
+            0,
+            451
+          ]
+        }
       }
     },
-    "refused": "machine.turn[1]"
+    "refused": "machine.turn.clamp[1]"
   },
   {
     "name": "an align offset of 6",

@@ -78,9 +78,11 @@ fun tuneSliderTag(index: Int): String = "tune_slider_$index"
  * One gain set: there are no profile chips and no rider-set line.
  *
  * Under the gains, on the same lane and inside the same Save, is the reference row ([Reference]):
- * `speed_max` and `speed_slew`, which shape what the stick asks for.
+ * `speed_max` and `speed_slew`, which shape what the stick asks for, and under that the heading
+ * hold's five words ([Turn], `specs/heading-hold.md` section 10).
  *
- * Below them are the DRIVE BOUNDS (section 3.3b: the turn limit, its rate, and the position clamp)
+ * Below them are the DRIVE BOUNDS (section 3.3b: the turn limit, the heading clamp and the position
+ * clamp)
  * and then the ride controls. The bounds are stored values rather than staged ones, so they are
  * written when a slider is released and the board takes them up at its next arm, and they are
  * disabled while armed; the ride controls are the Ride screen's own arm toggle and pad, here so that
@@ -122,6 +124,9 @@ fun TuneScreen(
             // The reference row is on the same RAM lane as the gains, so it sits inside the same
             // greying and above the Save button that persists both of them.
             Reference(state, armed, actions)
+            // The heading hold's five words are on the same lane and inside the same Save
+            // (`specs/heading-hold.md` section 10), so they sit here too, under the reference row.
+            Turn(state, armed, actions)
         }
         Buttons(state, armed, actions)
         Legend()

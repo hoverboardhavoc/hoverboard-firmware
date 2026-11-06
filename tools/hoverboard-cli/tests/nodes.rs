@@ -1392,7 +1392,7 @@ fn the_machine_commands_through_the_binary() {
     std::fs::write(
         &extra,
         serde_json::json!({
-            "machine": { "turn": [12000, 600] },
+            "machine": { "turn": { "clamp": [12000, 45] } },
             "boards": {
                 left: {}, right: {}, gone: { "device": { "name": "elsewhere" } },
             },
@@ -1409,7 +1409,7 @@ fn the_machine_commands_through_the_binary() {
         "{out}"
     );
     assert!(
-        out.contains("rover-new: machine.turn[0]: 0 (default) -> 12000"),
+        out.contains("rover-new: machine.turn.clamp[0]: 0 (default) -> 12000"),
         "{out}"
     );
 

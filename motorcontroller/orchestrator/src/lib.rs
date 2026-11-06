@@ -472,6 +472,15 @@ impl<const M: usize> LinkInbox<M> {
         self.peer.map(|_| self.peer_pos)
     }
 
+    /// The peer's period-based wheel rate (`CyclicState::wheel_rate`), 1/4096 count in its own
+    /// counter sense, unscaled: the last accepted frame's word, `None` when no peer has been seen.
+    /// The heading hold's peer-side heading rate (`specs/heading-hold.md` section 3). Not gated on
+    /// freshness, as [`Self::peer_wheel_pos`] is not: a tick with no new frame filters the last
+    /// rate, and a quiet link is the rigid freshness gate's to stop.
+    pub fn peer_wheel_rate(&self) -> Option<i32> {
+        self.peer.map(|p| p.wheel_rate)
+    }
+
     /// The address the latest peer cyclic arrived under, `None` when never seen.
     pub fn peer_src(&self) -> Option<u8> {
         self.peer_src
@@ -863,10 +872,10 @@ impl<const M: usize> OrchestratorState<M> {
             imu_configured,
             gains,
             store::CONTROL_POS_CLAMP.default(),
-            control::DriveTurn::new(
-                store::CONTROL_DRIVE_TURN.at(0).default(),
-                store::CONTROL_DRIVE_TURN.at(1).default(),
-            ),
+            [
+                store::CONTROL_TURN_CLAMP.at(0).default(),
+                store::CONTROL_TURN_CLAMP.at(1).default(),
+            ],
             store::CONTROL_RIDER_REQUIRED.default(),
             store::BOARD_BATTERY_FLOOR.default(),
         );
@@ -974,6 +983,14 @@ impl<const M: usize> OrchestratorState<M> {
                 moe_bits |= 1 << i;
             }
         }
+        let wheel_pos_own = control::wheel_forward(self.block.wheel_pos, self.block.role_right);
+        // The peer is the other wheel of the same machine, its mirror image, so its forward sense
+        // is the OPPOSITE side's (`specs/state-feedback.md` section 3).
+        let wheel_pos_peer = self
+            .inbox
+            .peer_wheel_pos()
+            .map(|p| control::wheel_forward(p, !self.block.role_right))
+            .unwrap_or(0);
         Obs {
             control_ticks: self.control_ticks,
             input_ticks: self.input_ticks,
@@ -1005,17 +1022,15 @@ impl<const M: usize> OrchestratorState<M> {
             rider_present: self.rider_present,
             pad_changes: self.pads.changes(),
             pad_held: self.pads.held(),
-            wheel_pos_own: control::wheel_forward(self.block.wheel_pos, self.block.role_right),
-            // The peer is the other wheel of the same machine, its mirror image, so its forward
-            // sense is the OPPOSITE side's (`specs/state-feedback.md` section 3).
-            wheel_pos_peer: self
-                .inbox
-                .peer_wheel_pos()
-                .map(|p| control::wheel_forward(p, !self.block.role_right))
-                .unwrap_or(0),
+            wheel_pos_own,
+            wheel_pos_peer,
             sf_terms: self.ctl.sf.terms,
             v_ref_q: sat_i16(self.ctl.sf.v_ref),
             e_x: sat_i16(self.ctl.sf.pos_err / control::config::sf::POS_Q),
+            turn_terms: self.ctl.sf.turn_terms,
+            heading: heading(wheel_pos_own, wheel_pos_peer, self.block.role_right),
+            v_href_q: sat_i16(self.ctl.sf.v_href),
+            e_h: sat_i16(self.ctl.sf.head_err / control::config::sf::POS_Q),
         }
     }
 }
@@ -1145,6 +1160,32 @@ pub struct Obs {
     /// The law's position error `x_ref - x`, whole hall edges (truncated toward zero), saturated to
     /// `i16`. Zero outside RUN.
     pub e_x: i16,
+    /// The heading hold's heading and heading-rate terms this pass, `[term_h, term_hv]`, each as a
+    /// torque word on its own (`control::SfState::turn_terms`; `specs/heading-hold.md` section 8).
+    /// Live on every leader pass, armed or not; 0 on the pivoting producer.
+    pub turn_terms: [i16; 2],
+    /// The machine's heading `H`, hall edges, RIGHT TURN POSITIVE: half the left wheel's forward
+    /// position less the right's, from [`Self::wheel_pos_own`] and [`Self::wheel_pos_peer`] by this
+    /// board's side. Never cleared, so a disarmed hand turn reads its sign and size.
+    pub heading: i32,
+    /// The heading hold's slewed heading-rate reference, 1/4096 count, saturated to `i16`. Zero
+    /// outside RUN.
+    pub v_href_q: i16,
+    /// The heading error `H_ref - H`, whole hall edges (truncated toward zero), saturated to
+    /// `i16`. Zero outside RUN.
+    pub e_h: i16,
+}
+
+/// The heading `H` (`specs/heading-hold.md` section 3), edges, right turn positive: half the left
+/// wheel's forward position less the right's, the left and right picked by this board's side.
+/// Wrapping, as the positions are; the half truncates toward zero.
+fn heading(own_fwd: i32, peer_fwd: i32, role_right: bool) -> i32 {
+    let (left, right) = if role_right {
+        (peer_fwd, own_fwd)
+    } else {
+        (own_fwd, peer_fwd)
+    };
+    left.wrapping_sub(right) / 2
 }
 
 /// An `i32` saturated into `i16`, for an observation word.

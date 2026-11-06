@@ -87,15 +87,17 @@ pub const DEFAULT_GAIN_MAX: [i16; sf::GAINS] = [20000, 20000, 2000, 10000];
 /// Why a [`GainShadow`] write was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TuneError {
-    /// The `(field_id, index)` names no live-tunable word: not [`SF_GAINS_FIELD`] index 0..3 or
-    /// [`REFERENCE_FIELD`] index 0..1. The tune lane's whole allowlist, in one place.
+    /// The `(field_id, index)` names no live-tunable word: not [`SF_GAINS_FIELD`] index 0..3,
+    /// [`REFERENCE_FIELD`] index 0..1, [`TURN_GAINS_FIELD`] index 0..2 or
+    /// [`TURN_REFERENCE_FIELD`] index 0..1. The tune lane's whole allowlist, in one place.
     UnknownKey,
     /// The value is outside this index's range (the shadow's minima and maxima).
     OutOfRange,
 }
 
-/// How many words the live shadow carries: the four gains, then the two reference words.
-pub const TUNED: usize = sf::GAINS + sf::REFERENCE_WORDS;
+/// How many words the live shadow carries: the four gains, the two reference words, then the
+/// heading hold's three gains and two reference words (`specs/heading-hold.md` section 6).
+pub const TUNED: usize = sf::GAINS + sf::REFERENCE_WORDS + turn::GAINS + turn::REFERENCE_WORDS;
 
 /// The `store::CONTROL_SF_GAINS` field id. Declared here as well because `control` does not depend
 /// on `store` (the law is pure math); `store`'s own tests pin the two together, along with the
@@ -103,12 +105,20 @@ pub const TUNED: usize = sf::GAINS + sf::REFERENCE_WORDS;
 pub const SF_GAINS_FIELD: u8 = 0x27;
 /// The `store::CONTROL_REFERENCE` field id; see [`SF_GAINS_FIELD`].
 pub const REFERENCE_FIELD: u8 = 0x29;
+/// The `store::CONTROL_TURN_GAINS` field id; see [`SF_GAINS_FIELD`].
+pub const TURN_GAINS_FIELD: u8 = 0x2D;
+/// The `store::CONTROL_TURN_REFERENCE` field id; see [`SF_GAINS_FIELD`].
+pub const TURN_REFERENCE_FIELD: u8 = 0x2E;
 
 /// The shadow index of [`REFERENCE_FIELD`]'s index 0.
 const REFERENCE_AT: usize = sf::GAINS;
+/// The shadow index of [`TURN_GAINS_FIELD`]'s index 0.
+const TURN_GAINS_AT: usize = REFERENCE_AT + sf::REFERENCE_WORDS;
+/// The shadow index of [`TURN_REFERENCE_FIELD`]'s index 0.
+const TURN_REFERENCE_AT: usize = TURN_GAINS_AT + turn::GAINS;
 
-/// The inclusive lower bound of each shadow word: [`GAIN_MIN`] for the four gains, the compiled
-/// [`sf::REFERENCE_MIN`] for the reference row.
+/// The inclusive lower bound of each shadow word: [`GAIN_MIN`] for the seven gains, the compiled
+/// [`sf::REFERENCE_MIN`] and [`turn::REFERENCE_MIN`] for the two reference rows.
 const MINIMA: [i16; TUNED] = [
     GAIN_MIN,
     GAIN_MIN,
@@ -116,10 +126,17 @@ const MINIMA: [i16; TUNED] = [
     GAIN_MIN,
     sf::REFERENCE_MIN[0],
     sf::REFERENCE_MIN[1],
+    GAIN_MIN,
+    GAIN_MIN,
+    GAIN_MIN,
+    turn::REFERENCE_MIN[0],
+    turn::REFERENCE_MIN[1],
 ];
 
 /// The live tunable words in RAM, as the running law sees them: the gain row (`CONTROL_SF_GAINS`,
-/// 0x27) and the reference row (`CONTROL_REFERENCE`, 0x29), flat in that order.
+/// 0x27), the reference row (`CONTROL_REFERENCE`, 0x29), the heading hold's gain row
+/// (`CONTROL_TURN_GAINS`, 0x2D) and its reference row (`CONTROL_TURN_REFERENCE`, 0x2E), flat in
+/// that order (`specs/heading-hold.md` section 6).
 ///
 /// **The write policy** (`specs/remote-ui.md` D3, the Betaflight model): a tune write changes the
 /// running value immediately and touches NO flash, so it is exempt from the armed refusal by
@@ -137,7 +154,8 @@ const MINIMA: [i16; TUNED] = [
 ///
 /// **`max`** is the per-word inclusive upper bound: the boot- and arm-read `CONTROL_GAIN_MAX`
 /// (0x28, each taken as `max(0, value)`) for the gain row, the compiled [`sf::REFERENCE_MAX`] for
-/// the reference row. Every range check here reads it, and the gain half is RE-READ at the next
+/// the reference row, and the compiled [`turn::GAIN_MAX`] and [`turn::REFERENCE_MAX`] for the
+/// heading hold's two rows. Every range check here reads it, and the gain half is RE-READ at the next
 /// arm ([`GainShadow::re_apply_max`]; `specs/integration.md`, "When a stored value takes effect:
 /// the arm-time re-read").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,7 +167,8 @@ pub struct GainShadow {
 
 impl GainShadow {
     /// The shadow of a board whose store carries `flash` (`CONTROL_SF_GAINS` indices 0..3, then
-    /// `CONTROL_REFERENCE` indices 0..1), bounded by the compiled maxima until the arm-row read
+    /// `CONTROL_REFERENCE` indices 0..1, `CONTROL_TURN_GAINS` indices 0..2 and
+    /// `CONTROL_TURN_REFERENCE` indices 0..1), bounded by the compiled maxima until the arm-row read
     /// installs the stored ones ([`GainShadow::re_apply_max`], at boot and at every arm;
     /// `specs/config-read-once.md` section 5); the boot then calls [`GainShadow::reconcile`] with
     /// the same words, so a stored gain above a compiled maximum and within its stored one runs as
@@ -172,6 +191,24 @@ impl GainShadow {
     /// The live reference row `[speed_max, speed_slew]`.
     pub const fn reference(&self) -> [i16; sf::REFERENCE_WORDS] {
         [self.live[REFERENCE_AT], self.live[REFERENCE_AT + 1]]
+    }
+
+    /// The live heading-hold gain row `[gh, ghv, gff]`: the targets the law's live turn gains
+    /// ramp toward in RUN.
+    pub const fn turn_gains(&self) -> [i16; turn::GAINS] {
+        [
+            self.live[TURN_GAINS_AT],
+            self.live[TURN_GAINS_AT + 1],
+            self.live[TURN_GAINS_AT + 2],
+        ]
+    }
+
+    /// The live heading-hold reference row `[rate_max, rate_slew]`.
+    pub const fn turn_reference(&self) -> [i16; turn::REFERENCE_WORDS] {
+        [
+            self.live[TURN_REFERENCE_AT],
+            self.live[TURN_REFERENCE_AT + 1],
+        ]
     }
 
     /// The live value of one word, or `None` if the key names no tunable word (the `TUNE_READ`
@@ -214,7 +251,8 @@ impl GainShadow {
     /// Closing it changes what the `stored()` readback means, which is the tune lane's model in
     /// `specs/remote-ui.md` section 4, so it is a spec-level decision and not this seam's to take.
     ///
-    /// The reference row is not in it: its maxima are compiled, so there is nothing to re-read.
+    /// The reference rows and the heading hold's gains are not in it: their maxima are compiled, so
+    /// there is nothing to re-read.
     /// `gain_max` is the four `CONTROL_GAIN_MAX` indices as read; a negative maximum reads as 0,
     /// since it would otherwise make the range empty.
     pub fn re_apply_max(&mut self, gain_max: [i16; sf::GAINS]) {
@@ -240,29 +278,35 @@ impl GainShadow {
 }
 
 impl Default for GainShadow {
-    /// The unstaged board: zero gains, [`sf::REFERENCE_DEFAULT`] and [`DEFAULT_GAIN_MAX`], which
-    /// are also the store's defaults. Inert: zero gains give a zero word.
+    /// The unstaged board: zero gains, [`sf::REFERENCE_DEFAULT`], [`turn::GAINS_DEFAULT`],
+    /// [`turn::REFERENCE_DEFAULT`] and [`DEFAULT_GAIN_MAX`], which are also the store's defaults.
+    /// Inert: zero gains give a zero word and a zero differential.
     fn default() -> Self {
         let r = sf::REFERENCE_DEFAULT;
-        Self::of_stored([0, 0, 0, 0, r[0], r[1]])
+        let g = turn::GAINS_DEFAULT;
+        let t = turn::REFERENCE_DEFAULT;
+        Self::of_stored([0, 0, 0, 0, r[0], r[1], g[0], g[1], g[2], t[0], t[1]])
     }
 }
 
 /// The shadow word a `(field_id, index)` names, or `None` if it names none. The tune lane's
-/// allowlist lives here: exactly [`SF_GAINS_FIELD`] indices 0..3 and [`REFERENCE_FIELD`] indices
-/// 0..1.
+/// allowlist lives here: exactly [`SF_GAINS_FIELD`] indices 0..3, [`REFERENCE_FIELD`] indices
+/// 0..1, [`TURN_GAINS_FIELD`] indices 0..2 and [`TURN_REFERENCE_FIELD`] indices 0..1.
 const fn slot(field_id: u8, index: u8) -> Option<usize> {
     let i = index as usize;
     match field_id {
         SF_GAINS_FIELD if i < sf::GAINS => Some(i),
         REFERENCE_FIELD if i < sf::REFERENCE_WORDS => Some(REFERENCE_AT + i),
+        TURN_GAINS_FIELD if i < turn::GAINS => Some(TURN_GAINS_AT + i),
+        TURN_REFERENCE_FIELD if i < turn::REFERENCE_WORDS => Some(TURN_REFERENCE_AT + i),
         _ => None,
     }
 }
 
 /// The per-word maxima a stored `CONTROL_GAIN_MAX` makes: the gain row takes it with each index
-/// floored at [`GAIN_MIN`], the reference row takes the compiled [`sf::REFERENCE_MAX`]. The single
-/// owner of both, shared by [`GainShadow::of_stored`] and [`GainShadow::re_apply_max`].
+/// floored at [`GAIN_MIN`]; the reference row and the heading hold's two rows take their compiled
+/// maxima ([`sf::REFERENCE_MAX`], [`turn::GAIN_MAX`], [`turn::REFERENCE_MAX`]). The single owner
+/// of all of them, shared by [`GainShadow::of_stored`] and [`GainShadow::re_apply_max`].
 const fn maxima(gain_max: [i16; sf::GAINS]) -> [i16; TUNED] {
     let mut m = [
         gain_max[0],
@@ -271,6 +315,11 @@ const fn maxima(gain_max: [i16; sf::GAINS]) -> [i16; TUNED] {
         gain_max[3],
         sf::REFERENCE_MAX[0],
         sf::REFERENCE_MAX[1],
+        turn::GAIN_MAX[0],
+        turn::GAIN_MAX[1],
+        turn::GAIN_MAX[2],
+        turn::REFERENCE_MAX[0],
+        turn::REFERENCE_MAX[1],
     ];
     let mut i = 0;
     while i < sf::GAINS {
@@ -282,9 +331,8 @@ const fn maxima(gain_max: [i16; sf::GAINS]) -> [i16; TUNED] {
     m
 }
 
-/// Clamp every word into `MINIMA[i]..=max[i]`. A maximum below its minimum (a gain maximum is
-/// floored at 0, so only a reference word could, and its maxima are compiled above) is not
-/// reachable.
+/// Clamp every word into `MINIMA[i]..=max[i]`. A maximum below its minimum (a stored gain maximum
+/// is floored at 0, and every other maximum is compiled above its minimum) is not reachable.
 #[inline(never)]
 const fn clamp_all(mut t: [i16; TUNED], max: &[i16; TUNED]) -> [i16; TUNED] {
     let mut i = 0;
@@ -648,5 +696,54 @@ pub mod sf {
     /// The reference row's defaults, which are also `store::CONTROL_REFERENCE`'s (the store's
     /// tests pin the two): `speed_max` 0 keeps the stick dead until staged; `speed_slew` 41 is
     /// 0.01 count per tick, 0.72 m/s^2.
+    pub const REFERENCE_DEFAULT: [i16; REFERENCE_WORDS] = [0, 41];
+}
+
+/// The differential half of the balance law (`specs/heading-hold.md`, `crate::sf`): the heading
+/// hold's units, bounds and defaults. OURS, the common half's shape ([`sf`]) on the wheel
+/// DIFFERENCE; every constant is a unit choice or a derived bound.
+pub mod turn {
+    /// Index order of the three differential gains (`store::CONTROL_TURN_GAINS`, 0x2C): heading,
+    /// heading rate, stick feedforward.
+    pub const GAINS: usize = 3;
+
+    /// The divisor of each term (section 2's units table): `gh` per edge of a 1/[`super::sf::POS_Q`]-edge
+    /// heading error, `ghv` per sixteenth of a count of a 1/[`super::sf::Q`]-count rate error,
+    /// `gff` per sixteenth of a count of the reference rate. The common half's `gx` and `gv`
+    /// divisors, so one numerator count is the same torque in both halves.
+    pub const TERM_DIV: [i64; GAINS] = [super::sf::POS_Q as i64, 256, 256];
+
+    /// The compiled inclusive upper bound of each gain (section 6): `gx`'s and `gv`'s default
+    /// maxima, `gv`'s again for `gff`. Compiled and not a stored row like 0x28, because
+    /// `turn_max` bounds the differential's output whatever the gain, so a stored maximum would be
+    /// a second bound on the same thing. The lower bound is [`super::GAIN_MIN`].
+    pub const GAIN_MAX: [i16; GAINS] = [2000, 10000, 10000];
+
+    /// The gain row's defaults, which are also `store::CONTROL_TURN_GAINS`'s (the store's tests
+    /// pin the two): no loop and no feedforward.
+    pub const GAINS_DEFAULT: [i16; GAINS] = [0, 0, 0];
+
+    /// The live gain ramp's per-pass step cap toward the shadow, per gain (section 6), `gx`'s and
+    /// `gv`'s: at a 45-edge heading error, one count of rate error and one count of reference
+    /// rate, at a battery word of 2400 or more, one pass moves the differential by at most
+    /// `1 * 45 * 1.625 + 2 * 16 * 1.625 = 125` counts plus truncations, inside the 250-count
+    /// [`super::ramp::SLEW_LIMIT`].
+    pub const RAMP_CAPS: [i16; GAINS] = [1, 1, 1];
+
+    /// How many words the turn reference row carries (`store::CONTROL_TURN_REFERENCE`, 0x2D):
+    /// `0 = rate_max`, `1 = rate_slew`.
+    pub const REFERENCE_WORDS: usize = 2;
+
+    /// The turn reference row's compiled bounds, the common reference's ([`super::sf::REFERENCE_MIN`],
+    /// [`super::sf::REFERENCE_MAX`]) for the same reasons: `rate_max` 0 is a dead steer axis and
+    /// a machine holding its heading, `rate_slew` 1 keeps a staged `rate_max` from sitting dead
+    /// behind a zero rate, and `rate_max` 512 puts the full-stick target on the rate error's
+    /// clamp ([`super::sf::E_V_CLAMP`]).
+    pub const REFERENCE_MIN: [i16; REFERENCE_WORDS] = super::sf::REFERENCE_MIN;
+    /// See [`REFERENCE_MIN`].
+    pub const REFERENCE_MAX: [i16; REFERENCE_WORDS] = super::sf::REFERENCE_MAX;
+
+    /// The turn reference row's defaults, which are also `store::CONTROL_TURN_REFERENCE`'s:
+    /// `rate_max` 0 keeps the steer axis dead until staged; `rate_slew` 41, the common half's.
     pub const REFERENCE_DEFAULT: [i16; REFERENCE_WORDS] = [0, 41];
 }

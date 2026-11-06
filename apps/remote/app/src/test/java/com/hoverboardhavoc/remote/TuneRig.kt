@@ -18,13 +18,19 @@ internal class TuneRig(scope: TestScope) {
     var armed = false
 
     val transport = FakeHoverboardTransport(scope.testScheduler).apply {
-        // The live lane's two rows and the gain maxima, as a board that never staged any answers.
+        // The live lane's four rows and the gain maxima, as a board that never staged any answers.
         for (i in 0 until Gains.COUNT) {
             defaults[Gains.key(Gains.CONTROL_SF_GAINS, i)] = Fields.CONTROL_SF_GAINS.defaults[i]
             defaults[Fields.CONTROL_GAIN_MAX.at(i).key(i)] = Fields.CONTROL_GAIN_MAX.defaults[i]
         }
         for (i in Gains.REFERENCE_DEFAULT.indices) {
             defaults[Gains.key(Gains.CONTROL_REFERENCE, i)] = Fields.CONTROL_REFERENCE.defaults[i]
+        }
+        for (i in 0 until Gains.TURN_COUNT) {
+            defaults[Gains.key(Gains.CONTROL_TURN_GAINS, i)] = Fields.CONTROL_TURN_GAINS.defaults[i]
+        }
+        for (i in Gains.TURN_REFERENCE_DEFAULT.indices) {
+            defaults[Gains.key(Gains.CONTROL_TURN_REFERENCE, i)] = Fields.CONTROL_TURN_REFERENCE.defaults[i]
         }
         // The drive bounds the read pass also reads (`specs/remote-ui.md` 3.3b), each at the
         // default a board that never stored one answers with.
@@ -43,12 +49,14 @@ internal class TuneRig(scope: TestScope) {
 
     /**
      * Make [board] hold the start set in flash and in its shadow: the four gains of
-     * `specs/state-feedback.md` section 7 ([START_GAINS]) and the reference row [START_REFERENCE], the
-     * values a staged rover runs, so a test moves real numbers rather than the inert zeros.
+     * `specs/state-feedback.md` section 7 ([START_GAINS]), the reference row [START_REFERENCE] and
+     * the heading hold's starting set of `specs/heading-hold.md` section 7 ([START_TURN]), the values
+     * a staged rover runs, so a test moves real numbers rather than the inert zeros.
      */
     fun holdStart(board: Int) {
         for ((i, v) in START_GAINS.withIndex()) hold(board, Gains.key(Gains.CONTROL_SF_GAINS, i), v)
         for ((i, v) in START_REFERENCE.withIndex()) hold(board, Gains.key(Gains.CONTROL_REFERENCE, i), v)
+        for ((key, v) in TuneState().turnKeys.zip(START_TURN)) hold(board, key, v)
     }
 
     /** Make [board] hold [v] at live-lane [key] in flash and in its shadow. */
@@ -115,6 +123,12 @@ internal val START_GAINS = listOf(3491, 4002, 197, 926)
 
 /** The section-7 reference row, `[speed_max, speed_slew]`. */
 internal val START_REFERENCE = listOf(80, 41)
+
+/**
+ * The heading hold's starting set, `[gh, ghv, gff, rate_max, rate_slew]` (`specs/heading-hold.md`
+ * section 7: gains `[50, 60, 0]`, reference `[20, 41]`).
+ */
+internal val START_TURN = listOf(50, 60, 0, 20, 41)
 
 /**
  * A rig attached to [board] (with [other] found by the walk), both holding the start set

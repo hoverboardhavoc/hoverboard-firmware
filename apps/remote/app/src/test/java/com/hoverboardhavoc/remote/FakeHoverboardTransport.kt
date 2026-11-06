@@ -328,10 +328,13 @@ class FakeHoverboardTransport(
         tuneWrites.add(Triple(target, key, value))
         tuneWriteHook(key, value)?.let { return it }
         // The board refuses a gain against ITS maxima (`CONTROL_GAIN_MAX` as its store holds them)
-        // and a reference word against the compiled bounds, the way the firmware's shadow does.
+        // and a reference word or a turn word against the compiled bounds, the way the firmware's
+        // shadow does (`specs/heading-hold.md` section 6).
         val accepts = when (key.fieldId) {
             Gains.CONTROL_SF_GAINS -> Gains.inRange(key.index, value, tuneMax(target, key.index))
             Gains.CONTROL_REFERENCE -> Gains.referenceInRange(key.index, value)
+            Gains.CONTROL_TURN_GAINS -> Gains.turnInRange(key.index, value)
+            Gains.CONTROL_TURN_REFERENCE -> Gains.turnReferenceInRange(key.index, value)
             else -> false
         }
         val refusal = tuneRefusal ?: CfgRefusal.BAD.takeIf { !accepts }

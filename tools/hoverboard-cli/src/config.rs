@@ -1362,7 +1362,7 @@ mod tests {
     #[test]
     fn the_effect_line_counts_arm_and_boot_keys() {
         assert_eq!(
-            effect_line([k(0x20, 0), k(0x2B, 1), k(0x50, 0), k(0x40, 0)]),
+            effect_line([k(0x20, 0), k(0x2F, 1), k(0x50, 0), k(0x40, 0)]),
             Some("3 take effect at the next arm, 1 at the next boot".into())
         );
         assert_eq!(

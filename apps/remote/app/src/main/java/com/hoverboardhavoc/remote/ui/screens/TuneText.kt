@@ -70,6 +70,12 @@ internal fun gainStepped(value: Int, delta: Int, max: Int): Int =
 /** The reference row's two words in key-index order (`specs/state-feedback.md` section 4). */
 internal val REFERENCE_NAMES = listOf("speed_max", "speed_slew")
 
+/**
+ * The heading hold's five words in [com.hoverboardhavoc.remote.TuneState.turnKeys] order, the turn gains
+ * then the turn reference row (`specs/heading-hold.md` section 6).
+ */
+internal val TURN_NAMES = listOf("gh", "ghv", "gff", "rate_max", "rate_slew")
+
 @Composable
 internal fun tuneNoticeText(n: TuneNotice): String = when (n) {
     TuneNotice.SaveWhileArmed -> stringResource(R.string.tune_notice_save_armed)
@@ -96,8 +102,8 @@ internal fun tuneNoticeText(n: TuneNotice): String = when (n) {
 }
 
 /**
- * What the screen calls [key]: a drive bound by its own label, a gain or a reference word by its
- * name, or the raw key if it names none of them.
+ * What the screen calls [key]: a drive bound by its own label, a gain, a reference word or a turn
+ * word by its name, or the raw key if it names none of them.
  */
 @Composable
 private fun rowLabel(key: Key): String =
@@ -105,6 +111,8 @@ private fun rowLabel(key: Key): String =
         ?: when (key.fieldId) {
             Gains.CONTROL_SF_GAINS -> GAIN_NAMES.getOrNull(key.index)
             Gains.CONTROL_REFERENCE -> REFERENCE_NAMES.getOrNull(key.index)
+            Gains.CONTROL_TURN_GAINS -> TURN_NAMES.getOrNull(key.index)
+            Gains.CONTROL_TURN_REFERENCE -> TURN_NAMES.getOrNull(Gains.TURN_COUNT + key.index)
             else -> null
         }
         ?: key.toString()

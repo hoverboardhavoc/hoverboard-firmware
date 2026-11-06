@@ -123,7 +123,7 @@ private fun ReferenceRow(state: TuneState, index: Int, actions: TuneActions) {
                 color = Fg,
             )
         }
-        ReferenceSlider(state, key, index, staged, range, actions)
+        LiveSlider(state, key, tuneReferenceSliderTag(index), staged, range, actions)
         Caption(R.string.tune_reference_range, listOf(range.first.toString(), range.last.toString()))
         Caption(REFERENCE_NOTES[index])
         FlashLine(gains, key)
@@ -138,17 +138,19 @@ private fun ReferenceRow(state: TuneState, index: Int, actions: TuneActions) {
 }
 
 /**
- * The word's slider, over the COMPILED range (`control::config::sf::REFERENCE_MAX`, mirrored as
- * [Gains.REFERENCE_MAXIMA] and [Gains.REFERENCE_MINIMA]): there is no per-board maximum to read.
+ * A live word's slider over a COMPILED range (the reference row's `control::config::sf::REFERENCE_MAX`,
+ * mirrored as [Gains.REFERENCE_MAXIMA] and [Gains.REFERENCE_MINIMA], and the turn section's five,
+ * `control::config::turn`): there is no per-board maximum to read. The reference rows and the turn
+ * rows share it ([Turn]), tagged [tag].
  *
  * The thumb follows the finger during a drag and the staged value otherwise, which is the gain
  * slider's rule and the reason is the same: the staged value comes back a cadence later.
  */
 @Composable
-private fun ReferenceSlider(
+internal fun LiveSlider(
     state: TuneState,
     key: Key,
-    index: Int,
+    tag: String,
     staged: Int?,
     range: IntRange,
     actions: TuneActions,
@@ -171,7 +173,7 @@ private fun ReferenceSlider(
         },
         modifier = Modifier
             .fillMaxWidth()
-            .testTag(tuneReferenceSliderTag(index)),
+            .testTag(tag),
     )
 }
 

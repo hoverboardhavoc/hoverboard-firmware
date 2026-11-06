@@ -120,7 +120,7 @@ mod firmware {
     use scheduler::{systick_load, Scheduler};
     use store::{
         FmcFlash, Store, ATTITUDE_LEVEL_TRIM, BOARD_BATTERY_CAL, CONTROL_REFERENCE,
-        CONTROL_SF_GAINS, IMU_GYRO_BIAS,
+        CONTROL_SF_GAINS, CONTROL_TURN_GAINS, CONTROL_TURN_REFERENCE, IMU_GYRO_BIAS,
     };
     use swd_mailbox::{EpochWatch, Mailbox, MailboxSerial, MAILBOX_BASE};
 
@@ -1131,6 +1131,22 @@ mod firmware {
         imu_retries: u8,
         /// The rest of word 51, published zero so the word reads clean out of `.uninit`.
         pad_51: [u8; 3],
+        /// The heading hold's terms (`specs/heading-hold.md` section 8), each as a torque word on
+        /// its own: `term_h` low half, `term_hv` high half. Appended LAST, offset-preserving, at
+        /// word 52; the common half's words 44 and 45 for the differential. Live every balance
+        /// pass, armed or not: gate 1 turns the disarmed machine right by hand and reads `term_hv`
+        /// NEGATIVE. The feedforward is not published on its own: it is `gff` times word 54's low
+        /// half.
+        term_h: i16,
+        term_hv: i16,
+        /// Word 53: the heading `H`, hall edges, RIGHT TURN POSITIVE, the live half-difference of
+        /// the two forward positions (words 42 and 43 by this board's side), never cleared. A
+        /// quarter turn in place is about +70 on the rover.
+        heading: i32,
+        /// Word 54: the slewed heading-rate reference, 1/4096 count saturated to i16, low half;
+        /// the heading error `H_ref - H` in whole edges, high half. Both zero outside RUN.
+        v_href_q: i16,
+        e_h: i16,
     }
 
     /// Pin every byte offset the SWD readers key on (`tools/imu-tilt.py`'s word map, the bench
@@ -1236,8 +1252,14 @@ mod firmware {
         // Word 51: the IMU bring-up's attempt count, low byte.
         assert!(offset_of!(CtrlObs, imu_retries) == 0xCC);
         assert!(offset_of!(CtrlObs, pad_51) == 0xCD);
-        // And no tail padding hiding a mis-sized field: 52 words (208 B) exactly.
-        assert!(core::mem::size_of::<CtrlObs>() == 52 * 4);
+        // The heading hold (`specs/heading-hold.md` section 8): words 52 to 54.
+        assert!(offset_of!(CtrlObs, term_h) == 0xD0);
+        assert!(offset_of!(CtrlObs, term_hv) == 0xD2);
+        assert!(offset_of!(CtrlObs, heading) == 0xD4);
+        assert!(offset_of!(CtrlObs, v_href_q) == 0xD8);
+        assert!(offset_of!(CtrlObs, e_h) == 0xDA);
+        // And no tail padding hiding a mis-sized field: 55 words (220 B) exactly.
+        assert!(core::mem::size_of::<CtrlObs>() == 55 * 4);
     };
 
     /// `"CTRL"` little-endian.
@@ -1386,6 +1408,11 @@ mod firmware {
                 .write_volatile(motor::OBS_FOC_HOLD[0].load(Ordering::Relaxed));
             addr_of_mut!((*p).imu_retries).write_volatile(IMU_RETRIES.load(Ordering::Relaxed));
             addr_of_mut!((*p).pad_51).write_volatile([0; 3]);
+            addr_of_mut!((*p).term_h).write_volatile(o.turn_terms[0]);
+            addr_of_mut!((*p).term_hv).write_volatile(o.turn_terms[1]);
+            addr_of_mut!((*p).heading).write_volatile(o.heading);
+            addr_of_mut!((*p).v_href_q).write_volatile(o.v_href_q);
+            addr_of_mut!((*p).e_h).write_volatile(o.e_h);
         }
     }
 
@@ -1707,9 +1734,10 @@ mod firmware {
     /// Build the orchestrator shell into its static (`specs/integration.md` boot delta step 2:
     /// the `ControlDispatch` boot seam rides the [`OrchestratorState`] constructor).
     ///
-    /// The live-lane words as the STORE holds them (`specs/state-feedback.md` section 6): the four
-    /// `CONTROL_SF_GAINS` indices, then the two `CONTROL_REFERENCE` indices, the
-    /// `control::GainShadow` row order.
+    /// The live-lane words as the STORE holds them (`specs/state-feedback.md` section 6,
+    /// `specs/heading-hold.md` section 6): the four `CONTROL_SF_GAINS` indices, the two
+    /// `CONTROL_REFERENCE` indices, the three `CONTROL_TURN_GAINS` indices and the two
+    /// `CONTROL_TURN_REFERENCE` indices, the `control::GainShadow` row order.
     ///
     /// The registry's per-index defaults are the inert board (zero gains, a dead stick). Range
     /// enforcement is not here: every value goes into `control::GainShadow`, which clamps on the
@@ -1727,15 +1755,20 @@ mod firmware {
             s.get(CONTROL_SF_GAINS.at(3)),
             s.get(CONTROL_REFERENCE.at(0)),
             s.get(CONTROL_REFERENCE.at(1)),
+            s.get(CONTROL_TURN_GAINS.at(0)),
+            s.get(CONTROL_TURN_GAINS.at(1)),
+            s.get(CONTROL_TURN_GAINS.at(2)),
+            s.get(CONTROL_TURN_REFERENCE.at(0)),
+            s.get(CONTROL_TURN_REFERENCE.at(1)),
         ]
     }
 
     /// The arm-row function (`specs/config-read-once.md` section 5): read the arm row in one store
     /// pass, convert it, and install it into its five owners: the period ISR's record
     /// (`motor::hw::install_rederived`), the IMU's axis frame (`imu::Imu::set_config`), the control
-    /// section's mode, rider requirement, battery floor and position clamp
-    /// (`orchestrator::re_apply_control_values`, which also replaces the balance producer record
-    /// when the active mode changed), the turn bound and rate, and the gain shadow's maxima. The
+    /// section's mode, rider requirement, battery floor, position clamp and the heading hold's
+    /// bounds (`orchestrator::re_apply_control_values`, which also replaces the balance producer
+    /// record when the active mode changed), and the gain shadow's maxima. The
     /// boot calls it once, after the bring-ups; the arm sequence calls it as its first step. It
     /// refuses nothing: the row is checked before it is written.
     ///
@@ -1790,10 +1823,9 @@ mod firmware {
             r.rider_required_byte,
             r.battery_floor,
             r.pos_clamp,
+            r.turn_clamp,
         );
-        let ctl = &mut shell.orch.ctl;
-        ctl.drive_turn = r.drive_turn;
-        ctl.gains.re_apply_max(r.gain_max);
+        shell.orch.ctl.gains.re_apply_max(r.gain_max);
         // The board now runs the stored arm-effect values: `FLAG_REARM` clears
         // (`specs/machine-settings.md` section 5).
         shell.orch.machine.armed();
