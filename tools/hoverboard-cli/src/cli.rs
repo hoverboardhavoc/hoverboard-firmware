@@ -86,7 +86,8 @@ pub enum Swd {
         file: String,
     },
     /// `board update`: the image a firmware bundle has for the board's chip
-    /// (`specs/firmware-bundle.md` section 4.1).
+    /// (`specs/firmware-bundle.md` section 4.1), then a store erase on a board that was not running
+    /// this firmware (`specs/board-update-store.md`).
     Update {
         /// A bundle; an ELF is refused (it takes `board flash`).
         bundle: String,

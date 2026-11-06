@@ -191,6 +191,11 @@ impl<W: Wire> Client<W> {
         &mut self.wire
     }
 
+    /// The wire, given back.
+    pub fn into_wire(self) -> W {
+        self.wire
+    }
+
     fn send(&mut self, m: &Msg) {
         let p = encode(m, self.src, self.dst);
         self.wire.send(&p);

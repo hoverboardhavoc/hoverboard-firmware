@@ -142,18 +142,20 @@ hoverboard-cli --tcp hb-left.local:5333 board update 511e3936 hoverboard-firmwar
 ```
 
 `board update` reads the chip on the bridge's SWD header and flashes the bundle's image built for
-it.
+it. A board that was not running this firmware also has its settings store erased after the flash,
+since the stock firmware left its own data there:
 
-**Erase its settings store.** The flash rewrites only the firmware image; the settings area still
-holds what the stock firmware left there, and the board refuses settings writes until it is
-erased. The board now answers a walk, so `machine nodes` gives its address:
+```
+511e39363734360a30313337: was not running this firmware; its store was erased
+```
+
+The board now answers a walk, so `machine nodes` gives its address:
 
 ```
 $ hoverboard-cli --tcp hb-left.local:5333 machine nodes
 address  class             uid                       name
 0x01     bridge            1463937736f0000000000000  hb-left
 0x02     motor controller  511e39363734360a30313337  Hoverboard
-$ hoverboard-cli --tcp hb-left.local:5333 board erase 0x02
 ```
 
 A stock board may have its flash read-protected. `board clear-protection <board>` removes the

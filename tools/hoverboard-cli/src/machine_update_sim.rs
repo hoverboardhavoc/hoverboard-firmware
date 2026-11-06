@@ -7,6 +7,10 @@
 //! given link, each pair over its own bridge's port with the given link's pair last, the bridge's
 //! update and reboot (its connection ends and the CLI reconnects), the board's flash routed by its
 //! `uid`, its `STATUS_READ`, and the report.
+//!
+//! The same machine runs `board update` and `board flash` over the master's bridge
+//! (`specs/board-update-store.md` section 2): the store erase after an update of a board no walk
+//! finds by its `uid`, and none otherwise.
 
 use std::io::{ErrorKind, Read};
 use std::net::{TcpListener, TcpStream};
@@ -228,6 +232,8 @@ struct After {
     selected: Option<(u8, OtaState)>,
     flash: Vec<u8>,
     booted: bool,
+    /// Store-page erases and writes on its board.
+    store_writes: u32,
 }
 
 impl Side {
@@ -236,6 +242,7 @@ impl Side {
         let (slot1, selected) = (p.slots[1].clone(), p.selected);
         let g = self.gd32();
         let (flash, booted) = (g.flash_bytes(), g.mailbox().magic() == swd_mailbox::MAGIC);
+        let store_writes = g.store_writes;
         After {
             name: self.name,
             connections: self.connections,
@@ -245,6 +252,7 @@ impl Side {
             selected,
             flash,
             booted,
+            store_writes,
         }
     }
 }
@@ -289,13 +297,19 @@ fn app_image() -> Vec<u8> {
     img
 }
 
+/// The GD32F103C8 mainboard image's ELF, passing its guards.
+fn f103_elf() -> Vec<u8> {
+    let g103 = elf::guards_for(common::GUARD_FILE, "mainboard-gd32f103c8").unwrap();
+    common::Fixture::new(&[0x66; 8], g103.code_floor, common::names_of(&g103)).build()
+}
+
 /// A bundle of both mainboard images and the bridge's app image, written to a file.
-fn bundle_file(app: &[u8]) -> (String, Vec<u8>, Vec<u8>) {
+fn bundle_file(app: &[u8], tag: &str) -> (String, Vec<u8>, Vec<u8>) {
     let firmware = include_str!("../../../motorcontroller/firmware/Cargo.toml");
     let bridge = include_str!("../../../bridge/Cargo.toml");
     let f130 = common::flashable_elf(&[0x11, 0x22, 0x33, 0x44]);
     let g103 = elf::guards_for(common::GUARD_FILE, "mainboard-gd32f103c8").unwrap();
-    let f103 = common::Fixture::new(&[0x66; 8], g103.code_floor, common::names_of(&g103)).build();
+    let f103 = f103_elf();
     let z = pack(
         &[
             PackEntry {
@@ -321,7 +335,7 @@ fn bundle_file(app: &[u8]) -> (String, Vec<u8>, Vec<u8>) {
         "2026-11-02T08:00:00Z",
     )
     .unwrap();
-    let path = std::env::temp_dir().join(format!("machine-update-sim-{}.hbfw", std::process::id()));
+    let path = std::env::temp_dir().join(format!("{tag}-{}.hbfw", std::process::id()));
     std::fs::write(&path, z).unwrap();
     (
         path.to_str().unwrap().to_string(),
@@ -333,7 +347,7 @@ fn bundle_file(app: &[u8]) -> (String, Vec<u8>, Vec<u8>) {
 #[test]
 fn machine_update_takes_each_pair_over_its_own_bridge_and_the_given_link_last() {
     let app = app_image();
-    let (path, f103_bin, f130_bin) = bundle_file(&app);
+    let (path, f103_bin, f130_bin) = bundle_file(&app, "machine-update-sim");
     let listeners = [
         TcpListener::bind("127.0.0.1:0").unwrap(),
         TcpListener::bind("127.0.0.1:0").unwrap(),
@@ -402,4 +416,143 @@ fn machine_update_takes_each_pair_over_its_own_bridge_and_the_given_link_last() 
     // Each board got the image for its chip, through its own bridge.
     assert_eq!(&sides[0].flash[..f130_bin.len()], &f130_bin[..]);
     assert_eq!(&sides[1].flash[..f103_bin.len()], &f103_bin[..]);
+}
+
+/// How the master's board is set up before a `board` command runs over the master's bridge.
+#[derive(Clone, Copy, Default)]
+struct Master {
+    /// The `uid` its SWD target reports, when not the one its walk responder reports: a board no
+    /// walk finds by that `uid`.
+    uid: Option<[u8; 12]>,
+    /// A store word that does not read back erased, so a store erase fails its verify.
+    bad_store: bool,
+}
+
+/// Run `command` over the rover's master bridge (the layout of the test above), with its board
+/// set up as `master` says; the command's outcome and the two sides after it.
+fn on_master(
+    master: Master,
+    command: impl FnOnce(&Link) -> Result<(), String>,
+) -> (Result<(), String>, [After; 2]) {
+    let listeners = [
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+    ];
+    let port = listeners[1].local_addr().unwrap().to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let server = std::thread::spawn(move || {
+        let mut sides = [
+            Side::new("rover-slave", 0x01, 0x02, 0x01, Family::F1x0),
+            Side::new("rover-master", 0x02, 0x04, 0x03, Family::F10x),
+        ];
+        let g = sides[1].gd32();
+        if let Some(uid) = master.uid {
+            g.uid = uid;
+        }
+        if master.bad_store {
+            g.bad_cell = Some(g.part.store_start() + g.part.page + 0x10);
+        }
+        serve(&mut sides, &listeners, &flag);
+        sides.map(Side::after)
+    });
+    let r = command(&Link::Tcp(port));
+    stop.store(true, Ordering::Relaxed);
+    (r, server.join().unwrap())
+}
+
+/// `board update` of the master's board, named by `target`, from a fresh bundle.
+fn update(link: &Link, target: &str, tag: &str) -> (Result<(), String>, Vec<u8>) {
+    let (path, f103_bin, _) = bundle_file(&app_image(), tag);
+    let op = Swd::Update {
+        bundle: path.clone(),
+        image: None,
+        yes: true,
+    };
+    let r = board_swd(link, target, &op);
+    let _ = std::fs::remove_file(&path);
+    (r, f103_bin)
+}
+
+#[test]
+fn board_update_erases_the_store_of_a_board_no_walk_found_by_its_uid() {
+    let mut image = Vec::new();
+    let (r, sides) = on_master(
+        Master {
+            uid: Some([0x77; 12]),
+            ..Master::default()
+        },
+        |link| {
+            let (r, bin) = update(link, "77777777", "board-update-foreign");
+            image = bin;
+            r
+        },
+    );
+    assert_eq!(r, Ok(()));
+    let m = &sides[1];
+    assert_eq!(&m.flash[..image.len()], &image[..], "flashed");
+    assert_eq!(m.store_writes, 2, "both store pages erased after the flash");
+    assert!(m.booted, "its board booted");
+}
+
+#[test]
+fn board_update_keeps_the_store_of_a_board_running_this_firmware() {
+    // By the `uid` its walk responder also reports, and by its address on the bridge's mailbox.
+    for target in ["03030303", "0x03"] {
+        let mut image = Vec::new();
+        let tag = format!("board-update-ours-{}", target.len());
+        let (r, sides) = on_master(Master::default(), |link| {
+            let (r, bin) = update(link, target, &tag);
+            image = bin;
+            r
+        });
+        assert_eq!(r, Ok(()), "{target}");
+        let m = &sides[1];
+        assert_eq!(&m.flash[..image.len()], &image[..], "{target}: flashed");
+        assert_eq!(m.store_writes, 0, "{target}: the store kept");
+    }
+}
+
+#[test]
+fn board_flash_never_erases_the_store() {
+    let elf = f103_elf();
+    let path = std::env::temp_dir().join(format!("board-flash-sim-{}.elf", std::process::id()));
+    std::fs::write(&path, &elf).unwrap();
+    let file = path.to_str().unwrap().to_string();
+    let (r, sides) = on_master(
+        Master {
+            uid: Some([0x77; 12]),
+            ..Master::default()
+        },
+        |link| board_swd(link, "77777777", &Swd::Flash { file }),
+    );
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r, Ok(()));
+    let bin = elf::to_bin(&elf).unwrap();
+    assert_eq!(&sides[1].flash[..bin.len()], &bin[..], "flashed");
+    assert_eq!(sides[1].store_writes, 0, "no store erase");
+}
+
+#[test]
+fn a_failed_store_erase_after_board_update_reports_the_flash_done_and_fails() {
+    let mut image = Vec::new();
+    let (r, sides) = on_master(
+        Master {
+            uid: Some([0x77; 12]),
+            bad_store: true,
+        },
+        |link| {
+            let (r, bin) = update(link, "77777777", "board-update-bad-store");
+            image = bin;
+            r
+        },
+    );
+    let e = r.expect_err("the update fails");
+    assert!(
+        e.starts_with("777777777777777777777777: flashed, but the store erase failed: "),
+        "{e}"
+    );
+    let m = &sides[1];
+    assert_eq!(&m.flash[..image.len()], &image[..], "the flash is done");
+    assert_eq!(m.store_writes, 2, "the erase ran and failed its verify");
 }
