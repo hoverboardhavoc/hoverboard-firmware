@@ -1403,7 +1403,7 @@ name = "hoverboard-bridge-core"
 version = "0.1.0"
 dependencies = [
  "base",
- "embedded-io 0.6.1",
+ "embedded-io 0.7.1",
  "espsvc",
  "gdbstub",
  "heapless 0.8.0",
@@ -1529,7 +1529,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "base",
- "embedded-io 0.6.1",
+ "embedded-io 0.7.1",
  "heapless 0.8.0",
 ]
 
@@ -1997,7 +1997,7 @@ dependencies = [
 name = "swd-bridge-core"
 version = "0.1.0"
 dependencies = [
- "embedded-io 0.6.1",
+ "embedded-io 0.7.1",
  "swd-mailbox",
 ]
 
@@ -2006,7 +2006,7 @@ name = "swd-mailbox"
 version = "0.1.0"
 dependencies = [
  "cortex-m",
- "embedded-io 0.6.1",
+ "embedded-io 0.7.1",
  "link",
  "store",
 ]

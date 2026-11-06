@@ -21,7 +21,7 @@ link = { path = "../../shared/link" }
 # control-block opcode constants (the swd-mailbox-inputs tool encodes its INPUTS payload through it,
 # never hand-rolls the bytes).
 linkctl = { path = "../../shared/linkctl" }
-embedded-io = "0.6"
+embedded-io = "0.7"
 # POSIX signals, for one thing only: `swd-mailbox-inputs --hold` installs a SIGINT handler so Ctrl-C
 # releases an armed board through the tool's own all-clear instead of dying mid-sleep and leaving the
 # release to the firmware's 1.5 s mirror timeout. std has no signal API, and the handler must be the

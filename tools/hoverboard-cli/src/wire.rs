@@ -76,6 +76,14 @@ struct Bytes {
 #[derive(Debug)]
 struct Never;
 
+impl std::fmt::Display for Never {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("never")
+    }
+}
+
+impl std::error::Error for Never {}
+
 impl embedded_io::Error for Never {
     fn kind(&self) -> ErrorKind {
         ErrorKind::Other

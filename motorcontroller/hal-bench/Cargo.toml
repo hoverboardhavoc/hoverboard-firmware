@@ -9,7 +9,7 @@ description = "The hal crate's bench validators (specs/hal.md section 8.4), one 
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 panic-halt = "1"
-embedded-io = "0.6"
+embedded-io = "0.7"
 embedded-hal = "1.0"
 heapless = "0.8"
 

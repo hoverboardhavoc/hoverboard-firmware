@@ -13,7 +13,7 @@ description = "The bridge end of the SWD RAM mailbox: SPSC ring producer/consume
 # The mailbox ABI (layout offsets, MAGIC/VERSION, RING_CAP, the registry fingerprint) and the
 # `placed_whole` write decision both ends of the ring share.
 swd-mailbox = { path = "../swd-mailbox" }
-embedded-io = "0.6"
+embedded-io = "0.7"
 
 [dev-dependencies]
 # The firmware end runs the L2 stream framer over the rings in the round-trip test.

@@ -36,6 +36,17 @@ pub enum MailboxError {
     NotAttached,
 }
 
+impl core::fmt::Display for MailboxError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            MailboxError::RingFull => "the outbound ring has no room for the frame",
+            MailboxError::NotAttached => "nothing has attached to this mailbox this boot",
+        })
+    }
+}
+
+impl core::error::Error for MailboxError {}
+
 impl embedded_io::Error for MailboxError {
     fn kind(&self) -> ErrorKind {
         match self {

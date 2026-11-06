@@ -32,7 +32,7 @@ hal = { path = "../../motorcontroller/hal", default-features = false, features =
 # The IMU frame rule (`imu::Config::frame_error`), the check before an axis frame is written.
 imu = { path = "../../motorcontroller/imu" }
 espsvc = { path = "../../shared/espsvc" }
-embedded-io = "0.6"
+embedded-io = "0.7"
 # The BLE link and `scan` (the `ble` feature).
 btleplug = { version = "0.11", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"], optional = true }
