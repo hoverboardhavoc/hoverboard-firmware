@@ -3841,12 +3841,12 @@ fn the_boot_name_falls_back_for_a_stored_name_it_cannot_advertise() {
         let s = store::Store::mount(flash).unwrap();
         let mut buf = [0; BRIDGE_NAME_MAX];
         let n = advertised_name(&s, &SIM_NAME, &mut buf);
-        buf[..n].to_vec()
+        (buf[..n.len].to_vec(), n.refused)
     };
 
     // Nothing written: the default is advertised, and the store is left without a name.
     let mut flash = RamFlash::erased(4096);
-    assert_eq!(boot(&mut flash), b"hb-bridge-ab12");
+    assert_eq!(boot(&mut flash), (b"hb-bridge-ab12".to_vec(), None));
     assert_eq!(name_records(&mut flash), 0);
 
     // A usable name is advertised.
@@ -3854,14 +3854,29 @@ fn the_boot_name_falls_back_for_a_stored_name_it_cannot_advertise() {
         .unwrap()
         .set_str(store::DEVICE_NAME, "rover-esp")
         .unwrap();
-    assert_eq!(boot(&mut flash), b"rover-esp");
+    assert_eq!(boot(&mut flash), (b"rover-esp".to_vec(), None));
+
+    // The longest name the BLE host holds is advertised.
+    store::Store::mount(&mut flash)
+        .unwrap()
+        .set_str(store::DEVICE_NAME, "hoverboard-bridge-left")
+        .unwrap();
+    assert_eq!(boot(&mut flash), (b"hoverboard-bridge-left".to_vec(), None));
+
+    // A name one byte longer, stored by an image with the old 26-byte limit
+    // (`specs/bridge-name-limit.md` section 2): the default is advertised and the refusal reported.
+    store::Store::mount(&mut flash)
+        .unwrap()
+        .set_str(store::DEVICE_NAME, "hoverboard-bridge-right")
+        .unwrap();
+    assert_eq!(boot(&mut flash), (b"hb-bridge-ab12".to_vec(), Some(23)));
 
     // A store written before the refusal existed: the default is advertised, the store keeps it.
     store::Store::mount(&mut flash)
         .unwrap()
         .set_str(store::DEVICE_NAME, "Offroad master")
         .unwrap();
-    assert_eq!(boot(&mut flash), b"hb-bridge-ab12");
+    assert_eq!(boot(&mut flash), (b"hb-bridge-ab12".to_vec(), Some(14)));
     assert_eq!(
         store::Store::mount(&mut flash)
             .unwrap()

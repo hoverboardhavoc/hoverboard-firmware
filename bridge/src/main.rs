@@ -105,11 +105,21 @@ fn build(swd_khz: u32) -> Build {
     }
 }
 
-/// The name, from `device.name` in the store or the default ([`advertised_name`]).
+/// The name, from `device.name` in the store or the default ([`advertised_name`]). A stored name
+/// the bridge cannot use is logged, with the default that stands in for it.
 fn name(store: &store::Store<'_, KeysFlash>, default: &[u8]) -> &'static str {
     let buf = NAME.init([0; BRIDGE_NAME_MAX]);
     let n = advertised_name(store, default, buf);
-    core::str::from_utf8(&buf[..n]).unwrap_or("hb-bridge")
+    let name = core::str::from_utf8(&buf[..n.len]).unwrap_or("hb-bridge");
+    if let Some(_stored) = n.refused {
+        boot!(
+            "the stored device.name ({} B) is not 1 to {} letters, digits or '-': using {}",
+            _stored,
+            BRIDGE_NAME_MAX,
+            name
+        );
+    }
+    name
 }
 
 #[esp_rtos::main]
