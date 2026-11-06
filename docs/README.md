@@ -6,6 +6,8 @@ deliberately implementation-agnostic and contain no third-party firmware interna
 
 ## Contents
 
+- [Getting started](getting-started.md): from a stock motor controller to driving: wire and install
+  the bridge, flash the boards, apply a board file from [`boards/`](../boards/).
 - [Onboard BLE module](onboard-ble-module.md) — the observable interface of the onboard CC2541-class
   transparent UART-to-BLE module found on these GD32 hoverboard mainboards: its AT bring-up sequence, its
   quirks, and the GATT layout a central sees once it is in transparent data mode.
