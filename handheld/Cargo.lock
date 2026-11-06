@@ -21,27 +21,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
 
 [[package]]
-name = "bare-metal"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5deb64efa5bd81e31fcd1938615a6d98c82eafcbcd787162b6f63b91d6bac5b3"
-dependencies = [
- "rustc_version",
-]
-
-[[package]]
 name = "base"
 version = "0.1.0"
 dependencies = [
  "cordic",
  "fixed",
 ]
-
-[[package]]
-name = "bitfield"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46afbd2983a5d5a7bd740ccb198caf5b82f45c40c09c0eed36052d91cb92e719"
 
 [[package]]
 name = "bitfield"
@@ -153,32 +138,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ed0a176c0b8c5c95fa0523177530364c5b68a8895d9745730dbfa692a7412d0"
 dependencies = [
  "fixed",
-]
-
-[[package]]
-name = "cortex-m"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "408ca8c6d703a196b73219fdb68fd8914d4fda90c34e2bd6859d4842f761bd5f"
-dependencies = [
- "bare-metal",
- "bitfield 0.13.2",
- "cortex-m-macros",
- "critical-section",
- "embedded-hal 0.2.7",
- "embedded-hal 1.0.0",
- "volatile-register",
-]
-
-[[package]]
-name = "cortex-m-macros"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d1922be58519ad40368fc4ca595a2cefa51a7abf947be3b0c90586dc7dbd0e2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -738,7 +697,7 @@ name = "esp-hal"
 version = "1.0.0"
 source = "git+https://github.com/lulf/esp-hal.git?rev=49ba429e34266bcac867b968e0a55b433d5a7c37#49ba429e34266bcac867b968e0a55b433d5a7c37"
 dependencies = [
- "bitfield 0.19.5",
+ "bitfield",
  "bitflags 2.13.2",
  "bytemuck",
  "cfg-if",
@@ -1168,7 +1127,7 @@ dependencies = [
  "embedded-graphics",
  "embedded-hal 1.0.0",
  "embedded-hal-bus",
- "embedded-io 0.6.1",
+ "embedded-io 0.7.1",
  "embedded-storage",
  "esp-alloc",
  "esp-backtrace",
@@ -1196,7 +1155,7 @@ version = "0.1.0"
 dependencies = [
  "base",
  "embedded-graphics",
- "embedded-io 0.6.1",
+ "embedded-io 0.7.1",
  "heapless 0.8.0",
  "libm",
  "link",
@@ -1356,7 +1315,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "base",
- "embedded-io 0.6.1",
+ "embedded-io 0.7.1",
  "heapless 0.8.0",
 ]
 
@@ -1616,26 +1575,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtime-hal"
-version = "0.1.0"
-source = "git+https://github.com/hoverboardhavoc/runtime-hal?branch=main#71c39e3aa374abd4652402e08b84658208946eff"
-dependencies = [
- "cortex-m",
- "embedded-hal 1.0.0",
- "embedded-io 0.6.1",
- "heapless 0.8.0",
-]
-
-[[package]]
-name = "rustc_version"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "138e3e0acb6c9fb258b19b67cb8abd63c00679d2851805ea151465464fe9030a"
-dependencies = [
- "semver",
-]
-
-[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1658,21 +1597,6 @@ name = "semihosting"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8e4abf97879f4e80db69a9fba7bd64998e9bdad25f58ef045a778e191172fd4"
-
-[[package]]
-name = "semver"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d7eb9ef2c18661902cc47e535f9bc51b78acd254da71d375c2f6720d9a40403"
-dependencies = [
- "semver-parser",
-]
-
-[[package]]
-name = "semver-parser"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 
 [[package]]
 name = "serde"
@@ -1780,7 +1704,6 @@ name = "store"
 version = "0.1.0"
 dependencies = [
  "base",
- "runtime-hal",
 ]
 
 [[package]]
@@ -1989,15 +1912,6 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
-
-[[package]]
-name = "volatile-register"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de437e2a6208b014ab52972a27e59b33fa2920d3e00fe05026167a1c509d19cc"
-dependencies = [
- "vcell",
-]
 
 [[package]]
 name = "wasm-bindgen"

@@ -140,7 +140,9 @@ fn int(v: Value) -> Option<i64> {
         Value::I32(x) => x.into(),
         Value::I64(x) => x,
         Value::Bool(b) => b.into(),
-        Value::Str(_) | Value::Bytes(_) => return None,
+        Value::Str(_) | Value::Bytes(_) | Value::Pin(_) | Value::PinAf(_) | Value::PinAdc(_) => {
+            return None
+        }
     })
 }
 

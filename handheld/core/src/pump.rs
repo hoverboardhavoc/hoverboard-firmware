@@ -54,19 +54,22 @@ impl Command {
 
     /// The `DRIVE_CMD` this command sends to `dst`: Throttle with its demand while armed (zero
     /// included), Neutral 0 while disarmed. Steer is always 0: the turn is in the per-board
-    /// demands (section 4.8), and the firmware's own steer mixer stays inert.
+    /// demands (section 4.8), and the firmware's own steer mixer stays inert. Motor 0: one demand
+    /// per board, so a two-motor board (the 12-FET) drives its first motor only.
     pub fn drive(&self, dst: u8) -> DriveCmd {
         if self.armed {
             DriveCmd {
                 kind: DriveKind::Throttle,
                 value: self.demand_of(dst),
                 steer: 0,
+                motor: 0,
             }
         } else {
             DriveCmd {
                 kind: DriveKind::Neutral,
                 value: 0,
                 steer: 0,
+                motor: 0,
             }
         }
     }

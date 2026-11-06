@@ -13,7 +13,7 @@ store = { path = "../../shared/store" }
 base = { path = "../../shared/base" }
 heapless = "0.8"
 libm = "0.2"
-embedded-io = "0.6"
+embedded-io = "0.7"
 
 # The redraw measurement (`tests/redraw.rs`) compiles the binary's `src/panel.rs` for the host.
 [dev-dependencies]

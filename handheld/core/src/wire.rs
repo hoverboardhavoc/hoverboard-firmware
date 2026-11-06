@@ -30,6 +30,14 @@ pub struct Bytes {
 #[derive(Debug)]
 pub struct Never;
 
+impl core::fmt::Display for Never {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("never")
+    }
+}
+
+impl core::error::Error for Never {}
+
 impl embedded_io::Error for Never {
     fn kind(&self) -> ErrorKind {
         ErrorKind::Other
