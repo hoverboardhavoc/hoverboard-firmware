@@ -235,6 +235,14 @@ pub fn strip_debug(elf: &[u8]) -> Result<Vec<u8>, ElfError> {
         if s.name.starts_with(b".debug_") {
             s.delete = true;
         }
+        // The writer places a loaded section at its file offset rounded up to its alignment and
+        // refuses one whose offset is not already there. A linker may leave a section at an offset
+        // less aligned than its address (cortex-m 0.7.10's `.text`: 8-aligned, at a 4-aligned
+        // offset); the address is fixed by then, so the declared alignment can drop to what the
+        // offset has without moving a byte.
+        if s.sh_addralign > 1 && s.sh_offset % s.sh_addralign != 0 {
+            s.sh_addralign = 1 << s.sh_offset.trailing_zeros();
+        }
     }
     let mut out = Vec::new();
     b.write(&mut out)
