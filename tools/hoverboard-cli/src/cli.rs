@@ -165,15 +165,17 @@ pub enum Command {
     },
     /// `board erase`: `STORE_ERASE`, then the address restore.
     Erase {
-        /// The board.
-        target: String,
+        /// The board; without one, the board on the attached bridge's mailbox
+        /// (`specs/cli-onboarding.md` part B).
+        target: Option<String>,
         /// `--yes`.
         yes: bool,
     },
     /// A board command that goes to its bridge over SWD.
     Swd {
-        /// The board.
-        target: String,
+        /// The board; without one, the attached bridge's SWD target (`specs/cli-onboarding.md`
+        /// part B).
+        target: Option<String>,
         /// What to do.
         op: Swd,
     },
@@ -294,10 +296,10 @@ pub const USAGE: &str =
   board get <board> <path> | set <board> <path> <value> [--force] | dump <board> [<file>]
   board apply <board> <file>... [--force] | replace <board> <file>... [--yes] [--force]
   board diff [--replace] <board> <file>... [--force] | status [<board>...] | compact <board>
-  board fields --json | erase <board> [--yes] | clear-protection <board>
-  board update <board> <bundle> [--image NAME] [--yes] | flash <board> <elf>
-  board disarm|halt|resume|reset|reset-halt <board> | target-id <board> | recover
-  board read <board> <addr> <len> [--hz N] | write <board> <addr> <hex>
+  board fields --json | erase [<board>] [--yes] | clear-protection [<board>]
+  board update [<board>] <bundle> [--image NAME] [--yes] | flash [<board>] <elf>
+  board disarm|halt|resume|reset|reset-halt [<board>] | target-id [<board>] | recover
+  board read [<board>] <addr> <len> [--hz N] | write [<board>] <addr> <hex>
   machine nodes | get <path> | set <path> <value> [--force] | dump <file> [--from <board>]
   machine apply <file> [--map <uid>=<board>]... [--force]
   machine replace <file> [--yes] [--map <uid>=<board>]... [--force]
@@ -307,7 +309,8 @@ pub const USAGE: &str =
   bridge install <bundle|image> [<file>...] [--yes]
   bridge get|set|dump|apply|replace|diff, as under board
   firmware info <bundle> | pack <out.hbfw> <crate-dir>:<image-name>=<elf>... [--dirty]
-a board or bridge is an address (0x02), a device.name, or a uid prefix of 4 to 24 hex digits";
+a board or bridge is an address (0x02), a device.name, or a uid prefix of 4 to 24 hex digits;
+an SWD command with no <board> acts on the board on the attached bridge's SWD header";
 
 /// The options a command may take, wherever they stand after the link options.
 const FLAGS: &[&str] = &[
@@ -588,12 +591,12 @@ fn node_command(
 ) -> Result<Command, String> {
     let board = noun == Noun::Board;
     let target = |t: &str| t.to_string();
-    let swd = |t: &str, op: Swd| {
+    // An SWD command's target is optional: told apart by the number of arguments, `t` is the one
+    // before the command's own, or none (`specs/cli-onboarding.md` part B).
+    let one = |t: &[&str]| t.first().map(|t| target(t));
+    let swd = |t: &[&str], op: Swd| {
         ok(&[])?;
-        Ok(Command::Swd {
-            target: target(t),
-            op,
-        })
+        Ok(Command::Swd { target: one(t), op })
     };
     let ctrl = |c| match c {
         "disarm" => Some(Ctrl::Disarm),
@@ -655,23 +658,23 @@ fn node_command(
             ok(&["--json"])?;
             Ok(Command::Fields)
         }
-        ("erase", [t]) if board => {
+        ("erase", t) if board && t.len() <= 1 => {
             ok(&["--yes"])?;
             Ok(Command::Erase {
-                target: target(t),
+                target: one(t),
                 yes: o.has("--yes"),
             })
         }
-        ("flash", [t, file]) if board => swd(
+        ("flash", [t @ .., file]) if board && t.len() <= 1 => swd(
             t,
             Swd::Flash {
                 file: file.to_string(),
             },
         ),
-        ("update", [t, bundle]) if board => {
+        ("update", [t @ .., bundle]) if board && t.len() <= 1 => {
             ok(&["--image", "--yes"])?;
             Ok(Command::Swd {
-                target: target(t),
+                target: one(t),
                 op: Swd::Update {
                     bundle: bundle.to_string(),
                     image: o.image.map(str::to_string),
@@ -679,17 +682,19 @@ fn node_command(
                 },
             })
         }
-        ("clear-protection", [t]) if board => swd(t, Swd::ClearProtection),
-        ("target-id", [t]) if board => swd(t, Swd::TargetId),
+        ("clear-protection", t) if board && t.len() <= 1 => swd(t, Swd::ClearProtection),
+        ("target-id", t) if board && t.len() <= 1 => swd(t, Swd::TargetId),
         ("recover", []) if board => {
             ok(&[])?;
             Ok(Command::Recover)
         }
-        (c, [t]) if board && ctrl(c).is_some() => swd(t, Swd::Ctrl(ctrl(c).expect("matched"))),
-        ("read", [t, addr, len]) if board => {
+        (c, t) if board && t.len() <= 1 && ctrl(c).is_some() => {
+            swd(t, Swd::Ctrl(ctrl(c).expect("matched")))
+        }
+        ("read", [t @ .., addr, len]) if board && t.len() <= 1 => {
             ok(&["--hz"])?;
             Ok(Command::Swd {
-                target: target(t),
+                target: one(t),
                 op: Swd::Read {
                     addr: parse_u32(addr)?,
                     len: parse_u32(len)?,
@@ -697,7 +702,7 @@ fn node_command(
                 },
             })
         }
-        ("write", [t, addr, hex]) if board => {
+        ("write", [t @ .., addr, hex]) if board && t.len() <= 1 => {
             let (addr, data) = (parse_u32(addr)?, parse_hex(hex)?);
             if addr % 4 != 0 || data.len() % 4 != 0 {
                 return Err("write takes a word-aligned address and whole words".into());
@@ -767,7 +772,7 @@ mod tests {
             yes,
         };
         let swd = |op| Command::Swd {
-            target: s("rover-left"),
+            target: Some(s("rover-left")),
             op,
         };
         let table: Vec<(&str, &str, Command)> = vec![
@@ -855,7 +860,7 @@ mod tests {
                 "erase-store",
                 "board erase rover-left --yes",
                 Command::Erase {
-                    target: s("rover-left"),
+                    target: Some(s("rover-left")),
                     yes: true,
                 },
             ),
@@ -1052,7 +1057,7 @@ mod tests {
     fn board_read_takes_a_rate() {
         let read = |every| {
             Ok(Command::Swd {
-                target: s("0x01"),
+                target: Some(s("0x01")),
                 op: Swd::Read {
                     addr: 0x2000_0920,
                     len: 204,
@@ -1107,6 +1112,81 @@ mod tests {
         assert!(!USAGE.contains("machine update"));
     }
 
+    /// `specs/cli-onboarding.md` part B, test B1: every SWD command parses with a target and
+    /// without one, told apart by the number of arguments; one argument more is refused.
+    #[test]
+    fn an_swd_command_takes_its_target_or_none() {
+        let op = |line: &str| match cmd(line) {
+            Ok(Command::Swd { target, op }) => Ok((target, op)),
+            Ok(c) => panic!("{line}: {c:?}"),
+            Err(e) => Err(e),
+        };
+        let update = Swd::Update {
+            bundle: s("b.hbfw"),
+            image: None,
+            yes: false,
+        };
+        let read = Swd::Read {
+            addr: 0x2000_0000,
+            len: 4,
+            every: None,
+        };
+        let write = Swd::Write {
+            addr: 0x2000_0000,
+            data: vec![1, 2, 3, 4],
+        };
+        // (the arguments after the target, the op)
+        let table: Vec<(&str, &str, Swd)> = vec![
+            ("update", "b.hbfw", update),
+            ("flash", "fw.elf", Swd::Flash { file: s("fw.elf") }),
+            ("read", "0x20000000 4", read),
+            ("write", "0x20000000 01020304", write),
+            ("target-id", "", Swd::TargetId),
+            ("clear-protection", "", Swd::ClearProtection),
+            ("disarm", "", Swd::Ctrl(Ctrl::Disarm)),
+            ("halt", "", Swd::Ctrl(Ctrl::Halt)),
+            ("resume", "", Swd::Ctrl(Ctrl::Resume)),
+            ("reset", "", Swd::Ctrl(Ctrl::Reset)),
+            ("reset-halt", "", Swd::Ctrl(Ctrl::ResetHalt)),
+        ];
+        for (verb, args, want) in table {
+            let with = format!("board {verb} hb-left {args}");
+            let without = format!("board {verb} {args}");
+            assert_eq!(op(&with), Ok((Some(s("hb-left")), want.clone())), "{with}");
+            assert_eq!(op(&without), Ok((None, want)), "{without}");
+            let extra = format!("board {verb} hb-left {args} stray");
+            assert_eq!(op(&extra), Err(USAGE.into()), "{extra}");
+        }
+        assert_eq!(
+            cmd("board erase --yes"),
+            Ok(Command::Erase {
+                target: None,
+                yes: true
+            })
+        );
+        assert_eq!(
+            cmd("board erase 0x02"),
+            Ok(Command::Erase {
+                target: Some(s("0x02")),
+                yes: false
+            })
+        );
+        assert_eq!(cmd("board erase 0x02 stray"), Err(USAGE.into()));
+        // Too few arguments for even the no-target form.
+        for line in [
+            "board update",
+            "board flash",
+            "board read 0x0",
+            "board write",
+        ] {
+            assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
+        }
+        // The config commands keep their target.
+        for line in ["board get machine.mode", "board dump", "board apply a.json"] {
+            assert_eq!(cmd(line), Err(USAGE.into()), "{line}");
+        }
+    }
+
     #[test]
     fn an_option_the_command_does_not_take_is_a_usage_error() {
         for line in [
@@ -1139,7 +1219,7 @@ mod tests {
     fn board_update_takes_a_bundle_board_flash_an_elf_and_firmware_reads_bundles() {
         let update = |image: Option<&str>, yes| {
             Ok(Command::Swd {
-                target: s("offroad-master"),
+                target: Some(s("offroad-master")),
                 op: Swd::Update {
                     bundle: s("hoverboard-firmware-adab056.hbfw"),
                     image: image.map(s),
@@ -1161,7 +1241,7 @@ mod tests {
         assert_eq!(
             cmd("board flash offroad-master fw.elf"),
             Ok(Command::Swd {
-                target: s("offroad-master"),
+                target: Some(s("offroad-master")),
                 op: Swd::Flash { file: s("fw.elf") },
             })
         );
