@@ -63,7 +63,7 @@ rand_core = { version = "0.10", default-features = false }
 # gdbstub's `alloc` (the GDB session's packet buffer, core/src/gdb.rs) turns on `managed/alloc`,
 # and smoltcp 0.12 then needs its own `alloc` for the `ManagedSlice::Owned` arms it matches on.
 # Nothing here builds an owned socket set; the line only keeps the two features in step.
-smoltcp = { version = "0.13", default-features = false, features = ["alloc"] }
+smoltcp = { version = "0.14", default-features = false, features = ["alloc"] }
 edge-nal-embassy = { version = "0.9", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "multicast"] }
 trouble-host = { version = "0.7", features = ["default-packet-pool-mtu-255"] }
 static_cell = "2.1"
