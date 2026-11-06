@@ -49,6 +49,13 @@ on the board with the tuning.
 - **Settings change over the board's link** (Bluetooth, UART or SWD). The board refuses writes while
   armed. A change takes effect at the next arm.
 
+## Documentation
+
+- [Getting started](docs/getting-started.md): from a stock motor controller to driving.
+- [hoverboard-cli reference](docs/cli-reference.md): every command.
+- [Building](docs/building.md): build the images, the CLI and the app, and run the tests.
+- [Board files](boards/README.md): the layouts in `boards/` and how to apply one.
+
 ## Licence
 
 GPL-3.0-or-later; see [LICENSE](LICENSE). `third_party/gd32-spl/` holds GigaDevice's peripheral
