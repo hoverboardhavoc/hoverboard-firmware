@@ -12,3 +12,6 @@ d01e2db    mainboard-mm32spin05   232   0         0           current.sense and 
 3b82f46    mainboard-gd32f103c8   1264  400       64          the buzzer's tone step, the player and the battery alarm (tones.md 1, 2, 4)
 3b82f46    mainboard-gd32f130c8   1432  400       64          the buzzer's tone step, the player and the battery alarm (tones.md 1, 2, 4)
 3b82f46    mainboard-mm32spin05   1184  232       64          the buzzer's tone step, the player and the battery alarm (tones.md 1, 2, 4)
+1e1cdd12   mainboard-gd32f103c8   1120  896       64          the heading hold (heading-hold.md 11)
+1e1cdd12   mainboard-gd32f130c8   1016  896       64          the heading hold (heading-hold.md 11)
+1e1cdd12   mainboard-mm32spin05   1248  968       64          the heading hold (heading-hold.md 11)
