@@ -33,7 +33,7 @@ use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::usb_serial_jtag::UsbSerialJtag;
+use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
 use static_cell::{ConstStaticCell, StaticCell};
@@ -125,15 +125,17 @@ async fn main(spawner: Spawner) {
     // Wi-Fi and BLE together need more heap than BLE alone; the RAM the second-stage bootloader
     // used is free once the app runs.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
-    // 62 KiB: 10 KiB of the 72 this region had went to the image buffer (`part::IMAGE_BUFFER`).
-    esp_alloc::heap_allocator!(size: 62 * 1024);
+    // 56 KiB: 10 KiB of the 72 this region had went to the image buffer (`part::IMAGE_BUFFER`),
+    // and 6 KiB to the main stack, which esp-radio 1.0's larger RAM-resident code would otherwise
+    // have cut from 13 KiB to 7 KiB (esp-hal 1.2 refuses to link one under 8 KiB).
+    esp_alloc::heap_allocator!(size: 56 * 1024);
 
     let timg0 = TimerGroup::new(p.TIMG0);
-    let sw_int = esp_hal::interrupt::software::SoftwareInterruptControl::new(p.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+    esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
     boot!("scheduler started, heap {} B free", esp_alloc::HEAP.free());
 
-    let mac = esp_hal::efuse::Efuse::read_base_mac_address();
+    let mut mac = [0u8; 6];
+    mac.copy_from_slice(esp_hal::efuse::base_mac_address().as_bytes());
 
     // The store, on the `keys` partition. The app slots' platform below has its own handle on the
     // flash: both are used from the service loop alone, never at once.
@@ -201,8 +203,8 @@ async fn main(spawner: Spawner) {
         platform,
     ));
     let port = PORT.init(MailboxPort::new(swd));
-    spawner.must_spawn(service(port, svc, ROUTER.init(Router::new()), node));
-    spawner.must_spawn(usb::run(UsbSerialJtag::new(p.USB_DEVICE).into_async()));
+    spawner.spawn(service(port, svc, ROUTER.init(Router::new()), node).unwrap());
+    spawner.spawn(usb::run(UsbSerialJtag::new(p.USB_DEVICE).into_async()).unwrap());
     // Let them start before the radio's blocking initialisation.
     Timer::after(Duration::from_millis(1)).await;
 
@@ -216,15 +218,13 @@ async fn main(spawner: Spawner) {
         }
     };
     // The station only for a network in the store: with none, the Wi-Fi driver is not started and
-    // `ESP_INFO` reads not configured.
+    // `ESP_INFO` reads not configured. A network the driver refuses (a password of 1 to 7 bytes)
+    // is not joined either, and `ESP_INFO` reads down, as for a wrong password.
     if let Station::Join { ssid, pass, power } = &wifi_station {
-        start_wifi(
-            spawner,
-            p.WIFI,
-            wifi::config(ssid, pass),
-            power.applied,
-            name,
-        );
+        match wifi::config(ssid, pass) {
+            Some(config) => start_wifi(spawner, p.WIFI, config, power.applied, name),
+            None => boot!("radio: Wi-Fi network refused by the driver"),
+        }
     }
 
     match connector {
@@ -247,22 +247,22 @@ fn start_wifi(
     name: &'static str,
 ) {
     boot!("radio: Wi-Fi driver");
-    match esp_radio::wifi::new(wifi, Default::default()) {
-        Ok((wifi, interfaces)) => {
+    match esp_radio::wifi::WifiController::new(wifi, Default::default()) {
+        Ok(wifi) => {
             let rng = Rng::new();
             let seed = u64::from(rng.random()) << 32 | u64::from(rng.random());
             let (stack, runner) = embassy_net::new(
-                interfaces.station,
+                esp_radio::wifi::Interface::station(),
                 embassy_net::Config::dhcpv4(Default::default()),
                 NET.init(StackResources::new()),
                 seed,
             );
-            spawner.must_spawn(wifi::watch(stack));
-            spawner.must_spawn(wifi::station(wifi, config, power));
-            spawner.must_spawn(wifi::net(runner));
-            spawner.must_spawn(wifi::console(stack));
-            spawner.must_spawn(wifi::gdb(stack));
-            spawner.must_spawn(wifi::mdns(stack, name, rng));
+            spawner.spawn(wifi::watch(stack).unwrap());
+            spawner.spawn(wifi::station(wifi, config, power).unwrap());
+            spawner.spawn(wifi::net(runner).unwrap());
+            spawner.spawn(wifi::console(stack).unwrap());
+            spawner.spawn(wifi::gdb(stack).unwrap());
+            spawner.spawn(wifi::mdns(stack, name, rng).unwrap());
             boot!(
                 "radio: Wi-Fi tasks started, heap {} B free",
                 esp_alloc::HEAP.free()

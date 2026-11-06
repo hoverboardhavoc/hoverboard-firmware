@@ -9,7 +9,6 @@
 //! default name, `ESP_INFO` reports the store as not mounted, and nothing written survives a reset.
 
 use base::error::FlashError;
-use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_bootloader_esp_idf::partitions::{read_partition_table, PARTITION_TABLE_MAX_LEN};
 use esp_storage::FlashStorage;
 use store::Flash;
@@ -50,7 +49,7 @@ impl KeysFlash {
             base,
         };
         match keys.base {
-            Some(at) if keys.flash.read(at, &mut keys.mirror[..]).is_ok() => {}
+            Some(at) if keys.flash.read_nor(at, &mut keys.mirror[..]).is_ok() => {}
             _ => keys.ram_only(),
         }
         keys
@@ -124,7 +123,7 @@ impl Flash for KeysFlash {
                     }
                 }
                 self.flash
-                    .write(base + at as u32, &buf[..n])
+                    .write_nor(base + at as u32, &buf[..n])
                     .map_err(|_| FlashError::ProgramFailed)?;
                 at += n;
             }
