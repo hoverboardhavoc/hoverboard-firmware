@@ -54,7 +54,7 @@ embassy-executor = "0.9"
 embassy-time = "0.5"
 embassy-sync = "0.7"
 embassy-futures = "0.1"
-embedded-io-async = "0.6"
+embedded-io-async = "0.7"
 # The Wi-Fi station's IP stack, the TCP console and the mDNS responder (src/wifi.rs).
 embassy-net = { version = "0.8", features = ["dhcpv4", "medium-ethernet", "proto-ipv4", "tcp", "udp", "multicast"] }
 edge-mdns = { version = "0.7", default-features = false, features = ["io"] }
