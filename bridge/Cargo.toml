@@ -57,7 +57,7 @@ embassy-futures = "0.1"
 embedded-io-async = "0.7"
 # The Wi-Fi station's IP stack, the TCP console and the mDNS responder (src/wifi.rs).
 embassy-net = { version = "0.8", features = ["dhcpv4", "medium-ethernet", "proto-ipv4", "tcp", "udp", "multicast"] }
-edge-mdns = { version = "0.7", default-features = false, features = ["io"] }
+edge-mdns = { version = "0.8", default-features = false, features = ["io"] }
 edge-nal = "0.6"
 # gdbstub's `alloc` (the GDB session's packet buffer, core/src/gdb.rs) turns on `managed/alloc`,
 # and smoltcp 0.12 then needs its own `alloc` for the `ManagedSlice::Owned` arms it matches on.
