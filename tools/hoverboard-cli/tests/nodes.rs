@@ -93,7 +93,7 @@ fn serve_heard(
         let mut tap = hoverboard_cli::wire::Framed::new(Tap::default());
         let mut sent = Vec::new();
         let (mut sock, _) = listener.accept().unwrap();
-        m.router.connect(Port::Tcp);
+        m.router.connect(Port::Tcp(0));
         sock.set_read_timeout(Some(Duration::from_millis(1)))
             .unwrap();
         let mut buf = [0u8; 256];
@@ -102,7 +102,7 @@ fn serve_heard(
             match sock.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    m.router.on_bytes(Port::Tcp, &buf[..n]);
+                    m.router.on_bytes(Port::Tcp(0), &buf[..n]);
                     tap.inner().0.extend_from_slice(&buf[..n]);
                     while let Some(p) = tap.recv(Duration::ZERO) {
                         sent.push(p[0]);
@@ -119,7 +119,7 @@ fn serve_heard(
             }
             let moved = m.step();
             loop {
-                let k = m.router.next_out(Port::Tcp, &mut out);
+                let k = m.router.next_out(Port::Tcp(0), &mut out);
                 if k == 0 {
                     break;
                 }
@@ -129,7 +129,7 @@ fn serve_heard(
                 m.tick();
             }
         }
-        m.router.disconnect(Port::Tcp);
+        m.node.disconnect(&mut m.router, Port::Tcp(0));
         ops.push(sent);
     }
     let drives = |got: &[(u8, u8)]| {

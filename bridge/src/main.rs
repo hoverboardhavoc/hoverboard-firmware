@@ -88,9 +88,9 @@ static ROUTER: StaticCell<Router> = StaticCell::new();
 static SERVICE: StaticCell<Service<'static, EspPlatform>> = StaticCell::new();
 /// The mailbox port, with the SWD engine.
 static PORT: StaticCell<MailboxPort<EspPins>> = StaticCell::new();
-/// The IP stack's sockets: DHCP, the TCP console's two and the GDB listener's two (one serving
-/// while the other listens), mDNS.
-static NET: StaticCell<StackResources<6>> = StaticCell::new();
+/// The IP stack's sockets: DHCP, the TCP console's one per client, the GDB listener's two (one
+/// serving while the other listens), mDNS.
+static NET: StaticCell<StackResources<{ 4 + wifi::TCP_CLIENTS }>> = StaticCell::new();
 
 fn build(swd_khz: u32) -> Build {
     let v = |s: &str| s.parse::<u8>().unwrap_or(0);
@@ -128,10 +128,11 @@ async fn main(spawner: Spawner) {
     // Wi-Fi and BLE together need more heap than BLE alone; the RAM the second-stage bootloader
     // used is free once the app runs.
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
-    // 56 KiB: 10 KiB of the 72 this region had went to the image buffer (`part::IMAGE_BUFFER`),
-    // and 6 KiB to the main stack, which esp-radio 1.0's larger RAM-resident code would otherwise
-    // have cut from 13 KiB to 7 KiB (esp-hal 1.2 refuses to link one under 8 KiB).
-    esp_alloc::heap_allocator!(size: 56 * 1024);
+    // 30 KiB: 10 KiB of the 72 this region had went to the image buffer (`part::IMAGE_BUFFER`),
+    // 6 KiB to the main stack, which esp-radio 1.0's larger RAM-resident code would otherwise
+    // have cut from 13 KiB to 7 KiB (esp-hal 1.2 refuses to link one under 8 KiB), and 26 KiB to
+    // the console's four clients, their sockets and streams (`specs/bridge-clients.md` section 3.7).
+    esp_alloc::heap_allocator!(size: 30 * 1024);
 
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
@@ -206,7 +207,7 @@ async fn main(spawner: Spawner) {
         platform,
     ));
     let port = PORT.init(MailboxPort::new(swd));
-    spawner.spawn(service(port, svc, ROUTER.init(Router::new()), node).unwrap());
+    spawner.spawn(service(port, svc, ROUTER.init_with(Router::new), node).unwrap());
     spawner.spawn(usb::run(UsbSerialJtag::new(p.USB_DEVICE).into_async()).unwrap());
     // Let them start before the radio's blocking initialisation.
     Timer::after(Duration::from_millis(1)).await;
@@ -325,7 +326,7 @@ async fn service(
         while let Ok(ev) = EVENTS.try_receive() {
             match ev {
                 BleEvent::Connected => router.connect(Port::Ble),
-                BleEvent::Disconnected => router.disconnect(Port::Ble),
+                BleEvent::Disconnected => node.disconnect(router, Port::Ble),
                 BleEvent::Data(d) => router.on_bytes(Port::Ble, &d),
             }
         }
@@ -341,14 +342,18 @@ async fn service(
                 UsbEvent::Resync => router.drop_partial(Port::Usb),
             }
         }
-        while router.room(Port::Tcp) >= wifi::PACKET {
-            let Ok(ev) = wifi::EVENTS.try_receive() else {
+        // The TCP clients' events in order, each client's bytes only while its port has room:
+        // the next event is looked at before it is taken.
+        while let Ok((i, ev)) = wifi::EVENTS.try_peek() {
+            let link = Port::Tcp(i);
+            if matches!(ev, TcpEvent::Data(_)) && router.room(link) < wifi::PACKET {
                 break;
-            };
+            }
+            let _ = wifi::EVENTS.try_receive();
             match ev {
-                TcpEvent::Open => router.connect(Port::Tcp),
-                TcpEvent::Data(d) => router.on_bytes(Port::Tcp, &d),
-                TcpEvent::Gone => router.disconnect(Port::Tcp),
+                TcpEvent::Open => router.connect(link),
+                TcpEvent::Data(d) => router.on_bytes(link, &d),
+                TcpEvent::Gone => node.disconnect(router, link),
             }
         }
         // GDB's bytes only as far as its queue has room: the rest wait in the channel.
@@ -395,14 +400,16 @@ async fn service(
                 let _ = usb::OUT.try_send(v);
             },
         );
-        drain::<{ wifi::PACKET }>(
-            router,
-            Port::Tcp,
-            || !wifi::OUT.is_full(),
-            |v| {
-                let _ = wifi::OUT.try_send(v);
-            },
-        );
+        for (i, out) in wifi::OUT.iter().enumerate() {
+            drain::<{ wifi::PACKET }>(
+                router,
+                Port::Tcp(i as u8),
+                || !out.is_full(),
+                |v| {
+                    let _ = out.try_send(v);
+                },
+            );
+        }
         // An update's slot is the next boot's: the loop runs on until the last replies are out,
         // then resets into it.
         if gdb.parts().1.reboot_requested() {

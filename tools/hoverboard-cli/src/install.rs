@@ -214,6 +214,18 @@ pub fn wifi_text(i: &EspInfo) -> String {
     }
 }
 
+/// The controllers `ESP_INFO` reports attached, as `bridge info` prints them
+/// (`specs/bridge-clients.md` section 3.5): `ble connected, usb seen, tcp 2`.
+pub fn controllers_text(i: &EspInfo) -> String {
+    let c = i.controllers;
+    format!(
+        "ble {}, usb {}, tcp {}",
+        if c.ble { "connected" } else { "not connected" },
+        if c.usb { "seen" } else { "not seen" },
+        c.tcp
+    )
+}
+
 /// `espflash`'s progress, printed in the form `board flash` prints its own: the stage, the blocks done
 /// and the time.
 struct Progress {
@@ -298,6 +310,21 @@ pub const JOIN_WAIT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_controllers_line_names_each_link() {
+        let mut i = EspInfo::default();
+        assert_eq!(
+            controllers_text(&i),
+            "ble not connected, usb not seen, tcp 0"
+        );
+        i.controllers = espsvc::Controllers {
+            ble: true,
+            usb: true,
+            tcp: 2,
+        };
+        assert_eq!(controllers_text(&i), "ble connected, usb seen, tcp 2");
+    }
 
     fn port(name: &str, usb: Option<(u16, u16)>) -> PortInfo {
         PortInfo {

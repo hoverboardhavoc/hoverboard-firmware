@@ -808,7 +808,7 @@ mod config_tests {
             let n = pdu.encode(&mut buf).unwrap();
             let mut store = Store::mount(&mut self.flash).unwrap();
             let mut emits = Emits::new();
-            self.resp.ingest(0, &buf[..n], &mut store, &mut emits);
+            self.resp.ingest(0, 0, &buf[..n], &mut store, &mut emits);
             let e = emits.iter().find(|e| {
                 Pdu::decode(&e.bytes)
                     .map(|p| p.known() == Some(Opcode::ConfigResp))

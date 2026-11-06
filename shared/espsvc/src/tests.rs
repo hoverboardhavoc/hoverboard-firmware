@@ -44,11 +44,21 @@ fn every_message_round_trips_inside_one_pdu() {
                 data: 0x1BA0_1476,
             }),
             no_ack: Some(0b111),
+            controllers: Controllers {
+                ble: true,
+                usb: false,
+                tcp: 3,
+            },
         }),
         Msg::Info(EspInfo {
             moe_clear_us: MOE_CLEAR_NONE,
             bad_read: None,
             no_ack: None,
+            controllers: Controllers {
+                ble: false,
+                usb: true,
+                tcp: 0,
+            },
             ..EspInfo::default()
         }),
         Msg::TargetIdReq,

@@ -167,7 +167,7 @@ impl Side {
             if let Ok((s, _)) = listener.accept() {
                 s.set_read_timeout(Some(Duration::from_millis(1))).unwrap();
                 s.set_nonblocking(false).unwrap();
-                self.router.connect(Port::Tcp);
+                self.router.connect(Port::Tcp(0));
                 self.sock = Some(s);
                 self.connections += 1;
             }
@@ -177,11 +177,11 @@ impl Side {
         };
         let mut buf = [0u8; 256];
         let mut closed = false;
-        if self.router.room(Port::Tcp) >= buf.len() {
+        if self.router.room(Port::Tcp(0)) >= buf.len() {
             match sock.read(&mut buf) {
                 Ok(0) => closed = true,
                 Ok(n) => {
-                    self.router.on_bytes(Port::Tcp, &buf[..n]);
+                    self.router.on_bytes(Port::Tcp(0), &buf[..n]);
                     moved = true;
                 }
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
@@ -190,7 +190,7 @@ impl Side {
         }
         let mut out = [0u8; 64];
         loop {
-            let k = self.router.next_out(Port::Tcp, &mut out);
+            let k = self.router.next_out(Port::Tcp(0), &mut out);
             if k == 0 {
                 break;
             }
@@ -210,7 +210,7 @@ impl Side {
         }
         if closed {
             self.sock = None;
-            self.router.disconnect(Port::Tcp);
+            self.node.disconnect(&mut self.router, Port::Tcp(0));
         }
         moved
     }

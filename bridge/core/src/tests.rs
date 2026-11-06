@@ -601,6 +601,7 @@ fn store_erase(port: &mut MailboxPort<SimPins<Gd32>>, svc: &mut Service<SimPlatf
     let me = Identity {
         addr: 0,
         store_mounted: true,
+        controllers: Default::default(),
     };
     let mut status = None;
     svc.handle(&Pdu::decode(&req).unwrap(), me, port, &mut |dst, m| {
@@ -874,6 +875,7 @@ fn an_unknown_m0_and_an_unknown_core_answer_target_id_and_everything_else_is_ref
         let me = Identity {
             addr: 0,
             store_mounted: true,
+            controllers: Default::default(),
         };
         let mut ask = |port: &mut MailboxPort<SimPins<Gd32>>, m: Msg| {
             let mut got = None;
@@ -1176,6 +1178,7 @@ fn an_image_larger_than_the_buffer_is_refused_on_the_rc_before_the_board_is_touc
     let me = Identity {
         addr: 0,
         store_mounted: true,
+        controllers: Default::default(),
     };
     let begin = Msg::FlashBegin {
         len: 73_729,
@@ -1470,7 +1473,7 @@ fn a_header_from_another_build_leaves_the_port_down() {
 fn out_size(port: Port) -> usize {
     match port {
         Port::Ble => NOTIFY_MAX,
-        Port::Usb | Port::Tcp => 64,
+        Port::Usb | Port::Tcp(_) => 64,
     }
 }
 
@@ -1545,7 +1548,7 @@ fn encode(m: &Msg, src: u8) -> Vec<u8> {
 
 #[test]
 fn a_stream_split_anywhere_reaches_the_mailbox_whole_and_esp_commands_never_do() {
-    for port_under_test in [Port::Ble, Port::Usb, Port::Tcp] {
+    for port_under_test in [Port::Ble, Port::Usb, Port::Tcp(0)] {
         let (mut port, mut fw) = booted(Family::F10x, Inject::default());
         attach(&mut port, &mut fw);
         let mut svc = service();
@@ -1768,9 +1771,9 @@ fn info_with(wifi: (espsvc::WifiState, [u8; 4])) -> espsvc::EspInfo {
     );
     let mut router = Router::new();
     let mut node = esp_node();
-    router.on_bytes(Port::Tcp, &stream(&[encode(&Msg::InfoReq, 0x80)]));
+    router.on_bytes(Port::Tcp(0), &stream(&[encode(&Msg::InfoReq, 0x80)]));
     node.pump(&mut router, &mut port, &mut svc);
-    let r = received(&mut router, Port::Tcp);
+    let r = received(&mut router, Port::Tcp(0));
     let Ok(Msg::Info(i)) = Msg::decode(&Pdu::decode(&r[0]).unwrap()) else {
         panic!("no ESP_INFO");
     };
@@ -1924,7 +1927,7 @@ impl UpdateRig {
             swd_khz: 1000,
         };
         let mut router = Router::new();
-        router.connect(Port::Tcp);
+        router.connect(Port::Tcp(0));
         UpdateRig {
             node: esp_node(),
             port,
@@ -1945,14 +1948,14 @@ impl UpdateRig {
         let mut rest = &bytes[..];
         let mut out = Vec::new();
         loop {
-            while !rest.is_empty() && self.router.room(Port::Tcp) >= 256 {
+            while !rest.is_empty() && self.router.room(Port::Tcp(0)) >= 256 {
                 let n = rest.len().min(256);
-                self.router.on_bytes(Port::Tcp, &rest[..n]);
+                self.router.on_bytes(Port::Tcp(0), &rest[..n]);
                 rest = &rest[n..];
             }
             self.node
                 .pump(&mut self.router, &mut self.port, &mut self.svc);
-            out.extend(received(&mut self.router, Port::Tcp));
+            out.extend(received(&mut self.router, Port::Tcp(0)));
             if rest.is_empty() {
                 break;
             }
@@ -2312,11 +2315,11 @@ fn both_console_carriers_are_served_at_once_and_replies_go_back_where_they_came_
     let mut node = esp_node();
     // A USB host that never reads still counts: nothing detects it leaving.
     router.on_bytes(Port::Usb, &stream(&[encode(&Msg::InfoReq, 0x80)]));
-    router.connect(Port::Tcp);
-    router.on_bytes(Port::Tcp, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
+    router.connect(Port::Tcp(0));
+    router.on_bytes(Port::Tcp(0), &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
     node.pump(&mut router, &mut port, &mut svc);
     let usb = received(&mut router, Port::Usb);
-    let tcp = received(&mut router, Port::Tcp);
+    let tcp = received(&mut router, Port::Tcp(0));
     assert_eq!(usb.len(), 1);
     assert!(matches!(
         Msg::decode(&Pdu::decode(&usb[0]).unwrap()),
@@ -2332,16 +2335,16 @@ fn both_console_carriers_are_served_at_once_and_replies_go_back_where_they_came_
     fw.link.send(&[0x32, 0x01, 0x80, 0x10, 0, 0, 1, 7]).unwrap();
     node.pump(&mut router, &mut port, &mut svc);
     assert_eq!(received(&mut router, Port::Usb).len(), 1);
-    assert_eq!(received(&mut router, Port::Tcp).len(), 1);
+    assert_eq!(received(&mut router, Port::Tcp(0)).len(), 1);
 
     // The TCP client hangs up; the next one starts on a clean stream, even after a partial frame.
     let info = stream(&[encode(&Msg::InfoReq, 0x82)]);
-    router.on_bytes(Port::Tcp, &info[..info.len() - 2]);
-    router.disconnect(Port::Tcp);
-    router.connect(Port::Tcp);
-    router.on_bytes(Port::Tcp, &info);
+    router.on_bytes(Port::Tcp(0), &info[..info.len() - 2]);
+    router.disconnect(Port::Tcp(0));
+    router.connect(Port::Tcp(0));
+    router.on_bytes(Port::Tcp(0), &info);
     node.pump(&mut router, &mut port, &mut svc);
-    assert_eq!(received(&mut router, Port::Tcp).len(), 1);
+    assert_eq!(received(&mut router, Port::Tcp(0)).len(), 1);
     assert!(received(&mut router, Port::Usb).is_empty());
 }
 
@@ -2455,6 +2458,51 @@ impl Rig<'_> {
             self.settle();
         }
         panic!("the walk did not complete");
+    }
+
+    /// Guests `gs` walk the machine at once: each sends its next request in the same pass, so
+    /// their probes overlap at every node.
+    fn walk_together(&mut self, gs: &[usize]) {
+        for _ in 0..200 {
+            if gs.iter().all(|&g| self.guests[g].ctrl.is_complete()) {
+                return;
+            }
+            for &g in gs {
+                if let Some(req) = self.guests[g].ctrl.next_request() {
+                    let link = self.guests[g].link;
+                    self.send(link, &req);
+                }
+            }
+            self.settle();
+        }
+        panic!("the walks did not complete");
+    }
+
+    /// A new controller on `link`, which sends its first-contact hello; its index.
+    fn attach(&mut self, link: Port) -> usize {
+        if link != Port::Usb {
+            self.m.router.connect(link);
+        }
+        self.guests.push(Guest::on(link));
+        let g = self.guests.len() - 1;
+        self.hello(g);
+        g
+    }
+
+    /// Guest `g` starts over on its link without a reconnect (a retried walk on the same
+    /// connection, or a new process on the USB console) and sends its first-contact hello; the
+    /// address granted.
+    fn hello_again(&mut self, g: usize) -> u8 {
+        self.guests[g] = Guest::on(self.guests[g].link);
+        self.hello(g);
+        self.guests[g].ctrl.granted().unwrap()
+    }
+
+    fn hello(&mut self, g: usize) {
+        let hello = self.guests[g].ctrl.next_request().unwrap();
+        let link = self.guests[g].link;
+        self.send(link, &hello);
+        self.settle();
     }
 
     /// Send `opcode` from guest `g` to `dst` and settle; what reached the guest meanwhile.
@@ -2582,9 +2630,9 @@ fn guests_on_ble_and_on_the_console_hold_different_addresses_and_both_hear_the_b
     let mut m = Rig::new(&mut flash);
     m.walk(0);
     m.router.connect(Port::Ble);
-    m.router.connect(Port::Tcp);
+    m.router.connect(Port::Tcp(0));
     m.guests.push(Guest::on(Port::Ble));
-    m.guests.push(Guest::on(Port::Tcp));
+    m.guests.push(Guest::on(Port::Tcp(0)));
 
     // Both attach at the bridge, now 0x03: each is granted an address from the bridge's slice, a
     // different one each. The console guest attached while the bridge was unassigned (slice 0).
@@ -2632,6 +2680,184 @@ fn guests_on_ble_and_on_the_console_hold_different_addresses_and_both_hear_the_b
     );
     assert_eq!(Pdu::decode(&r[0]).unwrap().dst, ble);
     assert!(m.guests[0].inbox.is_empty() && m.guests[2].inbox.is_empty());
+}
+
+// ---- several controllers on one bridge (`specs/bridge-clients.md`) ----
+
+#[test]
+fn two_tcp_clients_and_the_usb_console_walk_at_once_and_each_gets_its_own_answers() {
+    let mut flash = RamFlash::erased(4096);
+    let mut m = Rig::new(&mut flash);
+    m.walk(0);
+    // Three new controllers: a new process on the USB console and two TCP clients.
+    m.guests.clear();
+    for link in [Port::Usb, Port::Tcp(0), Port::Tcp(1)] {
+        if link != Port::Usb {
+            m.router.connect(link);
+        }
+        m.guests.push(Guest::on(link));
+    }
+    m.walk_together(&[0, 1, 2]);
+
+    let granted: Vec<u8> = m.guests.iter().map(|g| g.ctrl.granted().unwrap()).collect();
+    assert!(
+        granted.iter().all(|a| (0x98..=0x9F).contains(a)),
+        "{granted:02x?}"
+    );
+    assert!(granted[0] != granted[1] && granted[1] != granted[2] && granted[0] != granted[2]);
+    for g in &m.guests {
+        let mut found = g.ctrl.assigned_addrs().to_vec();
+        found.sort_unstable();
+        assert_eq!(found, [0x01, 0x02, 0x03], "{:?}", g.link);
+        assert_eq!(g.ctrl.gateway_addr(), Some(0x03), "{:?}", g.link);
+    }
+
+    // `PROBE_PORTS` and `IDENTIFY` from all three in one pass: one answer each, to each.
+    for op in [Opcode::ProbePorts, Opcode::Identify] {
+        for dst in [0x03, 0x01] {
+            for (g, &src) in granted.iter().enumerate() {
+                let link = m.guests[g].link;
+                m.send(link, &frame(op.to_u8(), src, dst, &[]));
+            }
+            m.settle();
+            let answer = if op == Opcode::ProbePorts {
+                Opcode::Ports
+            } else {
+                Opcode::Identity
+            };
+            for (g, guest) in m.guests.iter_mut().enumerate() {
+                let got: Vec<(u8, u8)> = std::mem::take(&mut guest.inbox)
+                    .iter()
+                    .map(|f| Pdu::decode(f).unwrap())
+                    .filter(|p| p.known() == Some(answer))
+                    .map(|p| (p.src, p.dst))
+                    .collect();
+                assert_eq!(got, [(dst, granted[g])], "{op:?} to {dst:#04x}, guest {g}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_frame_to_a_guest_goes_on_its_carrier_alone_and_one_to_no_holder_on_every_console_carrier() {
+    let mut flash = RamFlash::erased(4096);
+    let mut m = Rig::new(&mut flash);
+    m.walk(0);
+    let ble = m.attach(Port::Ble);
+    let tcp0 = m.attach(Port::Tcp(0));
+    let tcp1 = m.attach(Port::Tcp(1));
+    let addr = |m: &Rig, g: usize| m.guests[g].ctrl.granted().unwrap();
+    for g in [ble, tcp0, tcp1] {
+        assert_eq!(
+            m.node.responder().holder_of(addr(&m, g)),
+            Some(crate::node::Carrier::Link(m.guests[g].link).holder())
+        );
+    }
+
+    // A board reply to each guest, from the mailbox: on that guest's carrier and no other.
+    for g in [ble, tcp0, tcp1] {
+        let a = addr(&m, g);
+        m.fw.link
+            .send(&frame(Opcode::ConfigResp.to_u8(), 0x01, a, &[0, 0, 0, 0]))
+            .unwrap();
+        m.settle();
+        for (h, guest) in m.guests.iter_mut().enumerate() {
+            let got = std::mem::take(&mut guest.inbox);
+            let want = usize::from(h == g);
+            assert_eq!(
+                got.len(),
+                want,
+                "reply to {a:#04x}, guest {h} ({:?})",
+                guest.link
+            );
+        }
+    }
+
+    // To a guest address no carrier holds: every console carrier.
+    let unheld = 0x9F;
+    assert_eq!(m.node.responder().holder_of(unheld), None);
+    m.fw.link
+        .send(&frame(
+            Opcode::ConfigResp.to_u8(),
+            0x01,
+            unheld,
+            &[0, 0, 0, 0],
+        ))
+        .unwrap();
+    m.settle();
+    for guest in m.guests.iter_mut() {
+        let got = std::mem::take(&mut guest.inbox);
+        if guest.link != Port::Ble {
+            assert_eq!(got.len(), 1, "{:?}", guest.link);
+        }
+    }
+
+    // The board's telemetry for its one peer: every carrier of every controller link.
+    m.fw.link.send(&cyclic_state(0x01)).unwrap();
+    m.settle();
+    for guest in &m.guests {
+        assert_eq!(guest.heard.len(), 1, "{:?}", guest.link);
+    }
+}
+
+#[test]
+fn a_tcp_clients_gone_releases_its_address_and_the_next_client_on_that_index_gets_a_fresh_one() {
+    let mut flash = RamFlash::erased(4096);
+    let mut m = Rig::new(&mut flash);
+    m.walk(0);
+    let tcp = m.attach(Port::Tcp(2));
+    let a = m.guests[tcp].ctrl.granted().unwrap();
+    // A retried hello on the same connection gets the same address.
+    assert_eq!(m.hello_again(tcp), a);
+
+    m.m.node.disconnect(&mut m.m.router, Port::Tcp(2));
+    assert_eq!(m.node.responder().holder_of(a), None);
+    m.router.connect(Port::Tcp(2));
+    let b = m.hello_again(tcp);
+    assert_ne!(a, b);
+    assert_eq!(
+        m.node.responder().holder_of(b),
+        Some(crate::node::Carrier::Link(Port::Tcp(2)).holder())
+    );
+
+    // The USB console has no disconnect: a new process on it gets the address it had.
+    let u = m.hello_again(0);
+    assert_eq!(m.hello_again(0), u);
+
+    // A BLE central's disconnect releases its address too.
+    let ble = m.attach(Port::Ble);
+    let c = m.guests[ble].ctrl.granted().unwrap();
+    m.m.node.disconnect(&mut m.m.router, Port::Ble);
+    assert_eq!(m.node.responder().holder_of(c), None);
+    assert!(!m.router.attached(Port::Ble));
+}
+
+#[test]
+fn esp_info_reports_the_controllers_attached() {
+    let mut flash = RamFlash::erased(4096);
+    let mut m = Rig::new(&mut flash);
+    m.walk(0);
+    let me = m.node.addr();
+    let none = espsvc::Controllers {
+        ble: false,
+        usb: true,
+        tcp: 0,
+    };
+    assert_eq!(m.esp_info(0, me).controllers, none);
+    m.attach(Port::Ble);
+    m.attach(Port::Tcp(0));
+    m.attach(Port::Tcp(3));
+    let c = m.esp_info(0, me).controllers;
+    assert_eq!(
+        c,
+        espsvc::Controllers {
+            ble: true,
+            usb: true,
+            tcp: 2
+        }
+    );
+    m.m.node.disconnect(&mut m.m.router, Port::Tcp(0));
+    assert_eq!(m.esp_info(0, me).controllers.tcp, 1);
 }
 
 #[test]
@@ -3094,6 +3320,7 @@ fn a_breakpoint_hit_on_an_armed_board_clears_moe_records_the_time_and_stops_with
     let me = Identity {
         addr: 0x03,
         store_mounted: true,
+        controllers: Default::default(),
     };
     svc.handle(&Pdu::decode(&req).unwrap(), me, port, &mut |_, m| {
         if let Msg::Info(i) = m {
@@ -3268,6 +3495,7 @@ fn a_terminal_flash_is_refused_while_gdb_holds_the_core_halted() {
         let me = Identity {
             addr: 0,
             store_mounted: true,
+            controllers: Default::default(),
         };
         svc.handle(&Pdu::decode(&req).unwrap(), me, port, &mut |_, m| {
             if let Msg::Result { status: s, .. } = m {
@@ -3535,9 +3763,9 @@ impl NoTargetRig {
     /// `ESP_INFO` asked over the TCP console.
     fn esp_info(&mut self) -> espsvc::EspInfo {
         self.router
-            .on_bytes(Port::Tcp, &stream(&[encode(&Msg::InfoReq, 0x81)]));
+            .on_bytes(Port::Tcp(0), &stream(&[encode(&Msg::InfoReq, 0x81)]));
         self.pass();
-        let r = received(&mut self.router, Port::Tcp);
+        let r = received(&mut self.router, Port::Tcp(0));
         r.iter()
             .find_map(|f| match Msg::decode(&Pdu::decode(f).unwrap()) {
                 Ok(Msg::Info(i)) => Some(i),
@@ -3702,7 +3930,7 @@ fn a_commanded_connect_tries_for_500_ms_and_the_background_retry_makes_one_short
     assert_eq!(r.attempts.len(), 4);
     assert!(longest < 1_000, "a pass took {longest} us");
     r.router
-        .on_bytes(Port::Tcp, &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
+        .on_bytes(Port::Tcp(0), &stream(&[encode(&Msg::TargetIdReq, 0x81)]));
     let t = r.now();
     r.pass();
     let took = r.now() - t;
@@ -3710,7 +3938,7 @@ fn a_commanded_connect_tries_for_500_ms_and_the_background_retry_makes_one_short
         (500_000..520_000).contains(&took),
         "TARGET_ID took {took} us"
     );
-    let reply = received(&mut r.router, Port::Tcp);
+    let reply = received(&mut r.router, Port::Tcp(0));
     assert!(reply.iter().any(|f| matches!(
         Msg::decode(&Pdu::decode(f).unwrap()),
         Ok(Msg::Result { .. })
@@ -3889,6 +4117,7 @@ fn target_ctrl(
     let me = Identity {
         addr: 0,
         store_mounted: true,
+        controllers: Default::default(),
     };
     let mut got = Vec::new();
     svc.handle(&Pdu::decode(&req).unwrap(), me, port, &mut |dst, m| {

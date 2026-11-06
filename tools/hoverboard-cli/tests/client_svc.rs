@@ -489,18 +489,18 @@ fn a_protected_board_is_refused_at_begin_and_cleared_by_clear_protection() {
 fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usize) -> Esp {
     for _ in 0..connections {
         let (mut sock, _) = listener.accept().unwrap();
-        esp.router.connect(Port::Tcp);
+        esp.router.connect(Port::Tcp(0));
         sock.set_read_timeout(Some(Duration::from_millis(1)))
             .unwrap();
         let mut buf = [0u8; 256];
         let mut out = [0u8; 64];
         loop {
             // As the firmware's service loop: a read only while the port has room for it.
-            if esp.router.room(Port::Tcp) >= buf.len() {
+            if esp.router.room(Port::Tcp(0)) >= buf.len() {
                 match sock.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        esp.router.on_bytes(Port::Tcp, &buf[..n]);
+                        esp.router.on_bytes(Port::Tcp(0), &buf[..n]);
                     }
                     Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                     Err(_) => break,
@@ -508,7 +508,7 @@ fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usiz
             }
             esp.node.pump(&mut esp.router, &mut esp.port, &mut esp.svc);
             loop {
-                let k = esp.router.next_out(Port::Tcp, &mut out);
+                let k = esp.router.next_out(Port::Tcp(0), &mut out);
                 if k == 0 {
                     break;
                 }
@@ -517,7 +517,7 @@ fn serve_console_over_tcp(listener: TcpListener, mut esp: Esp, connections: usiz
                 }
             }
         }
-        esp.router.disconnect(Port::Tcp);
+        esp.node.disconnect(&mut esp.router, Port::Tcp(0));
         assert_eq!(esp.router.rx_overflow, 0);
     }
     esp
@@ -749,16 +749,16 @@ fn serve(
     prep(&mut m.port.swd().pins().bus);
     for _ in 0..connections {
         let (mut sock, _) = listener.accept().unwrap();
-        m.router.connect(Port::Tcp);
+        m.router.connect(Port::Tcp(0));
         sock.set_read_timeout(Some(Duration::from_millis(1)))
             .unwrap();
         let mut buf = [0u8; 256];
         let mut out = [0u8; 64];
         loop {
-            if m.router.room(Port::Tcp) >= buf.len() {
+            if m.router.room(Port::Tcp(0)) >= buf.len() {
                 match sock.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => m.router.on_bytes(Port::Tcp, &buf[..n]),
+                    Ok(n) => m.router.on_bytes(Port::Tcp(0), &buf[..n]),
                     Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                     Err(_) => break,
                 }
@@ -772,7 +772,7 @@ fn serve(
                 m.step()
             };
             loop {
-                let k = m.router.next_out(Port::Tcp, &mut out);
+                let k = m.router.next_out(Port::Tcp(0), &mut out);
                 if k == 0 {
                     break;
                 }
@@ -782,7 +782,7 @@ fn serve(
                 m.tick();
             }
         }
-        m.router.disconnect(Port::Tcp);
+        m.node.disconnect(&mut m.router, Port::Tcp(0));
     }
     let g = &mut m.port.swd().pins().bus;
     Master {
@@ -1086,17 +1086,17 @@ fn serve_console_resetting_info(
     for _ in 0..connections {
         let mut framer: StreamFramer = StreamFramer::new();
         let (mut sock, _) = listener.accept().unwrap();
-        esp.router.connect(Port::Tcp);
+        esp.router.connect(Port::Tcp(0));
         sock.set_read_timeout(Some(Duration::from_millis(1)))
             .unwrap();
         let mut buf = [0u8; 256];
         let mut out = [0u8; 64];
         loop {
-            if esp.router.room(Port::Tcp) >= buf.len() {
+            if esp.router.room(Port::Tcp(0)) >= buf.len() {
                 match sock.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        esp.router.on_bytes(Port::Tcp, &buf[..n]);
+                        esp.router.on_bytes(Port::Tcp(0), &buf[..n]);
                     }
                     Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                     Err(_) => break,
@@ -1104,7 +1104,7 @@ fn serve_console_resetting_info(
             }
             esp.node.pump(&mut esp.router, &mut esp.port, &mut esp.svc);
             loop {
-                let k = esp.router.next_out(Port::Tcp, &mut out);
+                let k = esp.router.next_out(Port::Tcp(0), &mut out);
                 if k == 0 {
                     break;
                 }
@@ -1135,7 +1135,7 @@ fn serve_console_resetting_info(
             drop(sock);
             esp = esp.reset();
         } else {
-            esp.router.disconnect(Port::Tcp);
+            esp.node.disconnect(&mut esp.router, Port::Tcp(0));
         }
     }
     esp

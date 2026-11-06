@@ -299,7 +299,9 @@ impl Mesh {
                         {
                             let board = &mut self.boards[bi];
                             let mut store = Store::mount(&mut board.flash).unwrap();
-                            board.resp.ingest(p as u8, &frame, &mut store, &mut emits);
+                            board
+                                .resp
+                                .ingest(p as u8, p as u8, &frame, &mut store, &mut emits);
                         }
                         self.send_emits(bi, &emits);
                     }
@@ -761,7 +763,7 @@ fn re_assigning_the_same_address_re_persists_and_re_acks_idempotently() {
     let ack1 = {
         let mut s = Store::mount(&mut flash).unwrap();
         let mut emits = Emits::new();
-        resp.ingest(0, &buf[..n], &mut s, &mut emits);
+        resp.ingest(0, 0, &buf[..n], &mut s, &mut emits);
         emits
     };
     assert_eq!(resp.addr(), 0x05);
@@ -771,7 +773,7 @@ fn re_assigning_the_same_address_re_persists_and_re_acks_idempotently() {
     let ack2 = {
         let mut s = Store::mount(&mut flash).unwrap();
         let mut emits = Emits::new();
-        resp.ingest(0, &buf[..n], &mut s, &mut emits);
+        resp.ingest(0, 0, &buf[..n], &mut s, &mut emits);
         emits
     };
     assert_eq!(resp.addr(), 0x05);
@@ -820,7 +822,7 @@ fn an_assign_that_fills_the_page_compacts_and_still_persists() {
     let ack = {
         let mut s = Store::mount(&mut flash).unwrap();
         let mut emits = Emits::new();
-        resp.ingest(0, &buf[..n], &mut s, &mut emits);
+        resp.ingest(0, 0, &buf[..n], &mut s, &mut emits);
         emits
     };
     assert_eq!(ack_status(&ack), Some((0x07, STATUS_OK)));
@@ -1069,7 +1071,7 @@ fn ingest_one(
 ) -> (Option<DeliveredPdu>, Emits) {
     let mut s = Store::mount(flash).unwrap();
     let mut emits = Emits::new();
-    let handed = resp.ingest(0, frame, &mut s, &mut emits);
+    let handed = resp.ingest(0, 0, frame, &mut s, &mut emits);
     (handed, emits)
 }
 
@@ -1880,9 +1882,9 @@ fn the_former_read_only_ids_are_ordinary_fields() {
 // Guest-address allocation (`specs/l3.md`, "Addressing"): the grant range and its wrap.
 // ---------------------------------------------------------------------------------------------------
 
-/// Drive one `NODE_HELLO(kind=CONTROLLER)` request into a lone responder and return the address it
-/// granted (`your_addr`, the reply's last payload byte).
-fn grant_guest(resp: &mut Responder, flash: &mut TestFlash) -> u8 {
+/// Drive one `NODE_HELLO(kind=CONTROLLER)` request from `holder` into a lone responder and return
+/// the address it granted (`your_addr`, the reply's last payload byte).
+fn grant_guest(resp: &mut Responder, flash: &mut TestFlash, holder: u8) -> u8 {
     let hello = Pdu::from_op(
         Opcode::NodeHello,
         NO_ADDRESS,
@@ -1891,7 +1893,9 @@ fn grant_guest(resp: &mut Responder, flash: &mut TestFlash) -> u8 {
     );
     let mut buf = [0u8; MAX_PDU];
     let n = hello.encode(&mut buf).unwrap();
-    let (_, emits) = ingest_one(resp, flash, &buf[..n]);
+    let mut s = Store::mount(flash).unwrap();
+    let mut emits = Emits::new();
+    resp.ingest(0, holder, &buf[..n], &mut s, &mut emits);
     let e = emits.first().expect("a hello request is answered");
     let reply = Pdu::decode(&e.bytes).expect("the hello reply decodes");
     assert_eq!(reply.payload.len(), HELLO_REPLY_LEN, "hello reply shape");
@@ -1908,9 +1912,9 @@ fn responder_at(addr: u8, flash: &mut TestFlash) -> Responder {
     resp
 }
 
-/// `n` consecutive grants from `resp`.
+/// `n` consecutive grants from `resp`, each to a new holder (holders `0..n`).
 fn grants(resp: &mut Responder, flash: &mut TestFlash, n: usize) -> StdVec<u8> {
-    (0..n).map(|_| grant_guest(resp, flash)).collect()
+    (0..n).map(|h| grant_guest(resp, flash, h as u8)).collect()
 }
 
 #[test]
@@ -1955,7 +1959,7 @@ fn the_top_slice_is_seven_addresses_and_never_reaches_broadcast() {
 fn an_assign_moves_the_allocator_to_the_new_slice() {
     let mut flash = TestFlash::erased(PS);
     let mut resp = Responder::new(1, [PORT_UART; MAX_PORTS], identity(MOTOR));
-    assert_eq!(grant_guest(&mut resp, &mut flash), 0x80);
+    assert_eq!(grant_guest(&mut resp, &mut flash, 0), 0x80);
 
     let assign = Pdu::from_op(Opcode::Assign, 0x80, NO_ADDRESS, &[EGRESS_SELF, 0x02]);
     let mut buf = [0u8; MAX_PDU];
@@ -1994,6 +1998,179 @@ fn every_grant_from_every_node_address_stays_inside_the_guest_range() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Guest leases (`specs/bridge-clients.md` section 3.2): one table of holders, owned by the responder.
+// ---------------------------------------------------------------------------------------------------
+
+#[test]
+fn a_second_hello_from_the_same_holder_gets_the_same_address() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = responder_at(0x01, &mut flash);
+    assert_eq!(grant_guest(&mut resp, &mut flash, 2), 0x88);
+    assert_eq!(
+        grant_guest(&mut resp, &mut flash, 2),
+        0x88,
+        "a retransmitted hello"
+    );
+    assert_eq!(
+        grant_guest(&mut resp, &mut flash, 3),
+        0x89,
+        "a new holder: the next free slot"
+    );
+    assert_eq!(grant_guest(&mut resp, &mut flash, 2), 0x88);
+    assert_eq!(resp.holder_of(0x88), Some(2));
+    assert_eq!(resp.holder_of(0x89), Some(3));
+    assert_eq!(resp.holder_of(0x8A), None);
+}
+
+#[test]
+fn a_released_slot_is_free_again_but_not_the_next_grant_while_another_is_unused() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = responder_at(0x01, &mut flash);
+    assert_eq!(grants(&mut resp, &mut flash, 3), [0x88, 0x89, 0x8A]);
+    resp.release(1);
+    assert_eq!(resp.holder_of(0x89), None);
+    // The round-robin goes on past the freed 0x89 to the slots never used.
+    let next: StdVec<u8> = (10..15)
+        .map(|h| grant_guest(&mut resp, &mut flash, h))
+        .collect();
+    assert_eq!(next, [0x8B, 0x8C, 0x8D, 0x8E, 0x8F]);
+    // Then it wraps and finds 0x89, the one free slot.
+    assert_eq!(grant_guest(&mut resp, &mut flash, 20), 0x89);
+    // A holder that released and comes back is a new holder.
+    resp.release(0);
+    assert_eq!(grant_guest(&mut resp, &mut flash, 1), 0x88);
+}
+
+#[test]
+fn six_holders_never_share_an_address_and_a_ninth_takes_the_oldest_grant() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = responder_at(0x01, &mut flash);
+    // The bridge's six carriers, each walking again and again: six addresses, none shared.
+    let mut seen = [0u8; 6];
+    for _round in 0..5 {
+        for (h, a) in seen.iter_mut().enumerate() {
+            let g = grant_guest(&mut resp, &mut flash, h as u8);
+            assert!(
+                *a == 0 || *a == g,
+                "holder {h} moved from {a:#04x} to {g:#04x}"
+            );
+            *a = g;
+        }
+    }
+    let mut sorted = seen;
+    sorted.sort();
+    assert_eq!(sorted, [0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D]);
+
+    // Eight held: holder 0's re-grant made it the newest, so holder 1's 0x89 is the oldest.
+    assert_eq!(grant_guest(&mut resp, &mut flash, 6), 0x8E);
+    assert_eq!(grant_guest(&mut resp, &mut flash, 7), 0x8F);
+    assert_eq!(grant_guest(&mut resp, &mut flash, 0), 0x88);
+    let ninth = grant_guest(&mut resp, &mut flash, 8);
+    assert_eq!(ninth, 0x89, "the slot granted longest ago");
+    assert_eq!(resp.holder_of(0x89), Some(8));
+    // Every grant stays inside the slice, however many holders ask.
+    for h in 9..40 {
+        let g = grant_guest(&mut resp, &mut flash, h);
+        assert!((0x88..=0x8F).contains(&g), "holder {h} got {g:#04x}");
+    }
+}
+
+#[test]
+fn an_address_change_to_another_slice_drops_the_leases_and_one_in_the_slice_keeps_them() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = responder_at(0x01, &mut flash);
+    assert_eq!(grant_guest(&mut resp, &mut flash, 4), 0x88);
+    // 0x11 grants from the same slice as 0x01: the lease stands.
+    let assign = |resp: &mut Responder, flash: &mut TestFlash, addr: u8| {
+        let payload = [EGRESS_SELF, addr];
+        let pdu = Pdu::from_op(Opcode::Assign, 0x88, NO_ADDRESS, &payload);
+        let mut buf = [0u8; MAX_PDU];
+        let n = pdu.encode(&mut buf).unwrap();
+        let (_, emits) = ingest_one(resp, flash, &buf[..n]);
+        assert_eq!(ack_status(&emits), Some((addr, STATUS_OK)));
+    };
+    assign(&mut resp, &mut flash, 0x11);
+    assert_eq!(resp.holder_of(0x88), Some(4));
+    assert_eq!(grant_guest(&mut resp, &mut flash, 4), 0x88);
+    // 0x02 grants from 0x90..=0x97: the old slice's lease is gone, and the holder's next grant is
+    // in the new slice.
+    assign(&mut resp, &mut flash, 0x02);
+    assert_eq!(resp.holder_of(0x88), None);
+    let g = grant_guest(&mut resp, &mut flash, 4);
+    assert!((0x90..=0x97).contains(&g), "{g:#04x}");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Overlapping probes (`specs/bridge-clients.md` section 3.4): one window, several requesters.
+// ---------------------------------------------------------------------------------------------------
+
+/// A `PROBE_PORTS` from `src` to the lone responder at `0x01`, and what it emitted.
+fn probe_from(resp: &mut Responder, flash: &mut TestFlash, src: u8) -> Emits {
+    let pdu = Pdu::from_op(Opcode::ProbePorts, src, 0x01, &[]);
+    let mut buf = [0u8; MAX_PDU];
+    let n = pdu.encode(&mut buf).unwrap();
+    ingest_one(resp, flash, &buf[..n]).1
+}
+
+/// The `PORTS` replies in `emits`, by destination.
+fn ports_to(emits: &Emits) -> StdVec<u8> {
+    emits
+        .iter()
+        .filter_map(|e| Pdu::decode(&e.bytes).ok())
+        .filter(|p| p.known() == Some(Opcode::Ports))
+        .map(|p| p.dst)
+        .collect()
+}
+
+/// The probe `NODE_HELLO`s in `emits`.
+fn probe_hellos(emits: &Emits) -> usize {
+    emits
+        .iter()
+        .filter_map(|e| Pdu::decode(&e.bytes).ok())
+        .filter(|p| p.known() == Some(Opcode::NodeHello) && p.payload == [KIND_PROBE])
+        .count()
+}
+
+#[test]
+fn two_probes_in_one_window_send_one_round_of_hellos_and_a_ports_to_each() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = Responder::new(2, [PORT_UART; MAX_PORTS], identity(MOTOR));
+    {
+        let mut s = Store::mount(&mut flash).unwrap();
+        s.set_value(NODE_ADDRESS.key(), Value::U8(0x01)).unwrap();
+        resp.restore_addr(&s);
+    }
+
+    assert_eq!(probe_hellos(&probe_from(&mut resp, &mut flash, 0x88)), 2);
+    let second = probe_from(&mut resp, &mut flash, 0x89);
+    assert!(second.is_empty(), "a joining probe sends nothing");
+    // The same requester again is not added twice.
+    assert!(probe_from(&mut resp, &mut flash, 0x88).is_empty());
+
+    let mut emits = Emits::new();
+    resp.poll_probe(&mut emits);
+    assert_eq!(ports_to(&emits), [0x88, 0x89]);
+    assert!(!resp.probing());
+}
+
+#[test]
+fn a_fifth_requester_in_one_window_is_dropped() {
+    let mut flash = TestFlash::erased(PS);
+    let mut resp = responder_at(0x01, &mut flash);
+    for src in [0x88, 0x89, 0x8A, 0x8B, 0x8C] {
+        probe_from(&mut resp, &mut flash, src);
+    }
+    let mut emits = Emits::new();
+    resp.poll_probe(&mut emits);
+    assert_eq!(ports_to(&emits), [0x88, 0x89, 0x8A, 0x8B]);
+    // The next window starts afresh.
+    assert_eq!(probe_hellos(&probe_from(&mut resp, &mut flash, 0x8C)), 1);
+    let mut emits = Emits::new();
+    resp.poll_probe(&mut emits);
+    assert_eq!(ports_to(&emits), [0x8C]);
 }
 
 /// A raw controller link on `(board, port)`: the controller end, for a second controller beside
@@ -2163,7 +2340,7 @@ fn a_board_never_sets_the_link_group_bit() {
     resp.restore_addr(&s);
     let mut feed = |resp: &mut Responder, port: u8, frame: StdVec<u8>| {
         let mut emits = Emits::new();
-        resp.ingest(port, &frame, &mut s, &mut emits);
+        resp.ingest(port, port, &frame, &mut s, &mut emits);
     };
     feed(
         &mut resp,

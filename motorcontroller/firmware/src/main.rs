@@ -2851,7 +2851,13 @@ mod firmware {
                 // impossible case out of the panic machinery.
                 // SAFETY: main-thread context, the `SHELL` discipline.
                 let handed = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
-                    Some(st) => responder.ingest(PORT_IDX_MAILBOX, &pdu[..n], st, &mut emits),
+                    Some(st) => responder.ingest(
+                        PORT_IDX_MAILBOX,
+                        PORT_IDX_MAILBOX,
+                        &pdu[..n],
+                        st,
+                        &mut emits,
+                    ),
                     None => None,
                 };
                 route_handback(handed, PORT_IDX_MAILBOX, responder, &mut emits);
@@ -2904,7 +2910,7 @@ mod firmware {
                     // SAFETY: main-thread context, the `SHELL` discipline.
                     let port = PORT_IDX_LINK0 + i as u8;
                     let handed = match unsafe { (*addr_of_mut!(STORE)).as_mut() } {
-                        Some(st) => responder.ingest(port, &pdu[..n], st, &mut emits),
+                        Some(st) => responder.ingest(port, port, &pdu[..n], st, &mut emits),
                         None => None,
                     };
                     route_handback(handed, port, responder, &mut emits);
