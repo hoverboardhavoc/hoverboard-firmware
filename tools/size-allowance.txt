@@ -15,3 +15,6 @@ d01e2db    mainboard-mm32spin05   232   0         0           current.sense and 
 1e1cdd12   mainboard-gd32f103c8   600   40        44          the battery gauge, its LED pins and the JTAG pins' release (battery-gauge.md 4)
 1e1cdd12   mainboard-gd32f130c8   488   40        40          the battery gauge and its LED pins (battery-gauge.md 4)
 1e1cdd12   mainboard-mm32spin05   728   120       40          the battery gauge and its LED pins (battery-gauge.md 4)
+e749adb1   mainboard-gd32f103c8   600   40        44          the battery gauge, its LED pins and the JTAG pins' release (battery-gauge.md 4)
+e749adb1   mainboard-gd32f130c8   488   40        40          the battery gauge and its LED pins (battery-gauge.md 4)
+e749adb1   mainboard-mm32spin05   728   120       40          the battery gauge and its LED pins (battery-gauge.md 4)
