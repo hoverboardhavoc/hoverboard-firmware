@@ -4,7 +4,7 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::wire::ByteLink;
 
@@ -16,9 +16,19 @@ fn at_least_1ms(t: Duration) -> Duration {
     t.max(Duration::from_millis(1))
 }
 
+/// How long a write to the USB console may take, the queue drained included: the attach's wait
+/// for an answer ([`crate::guest::HELLO_WAIT`]).
+pub const WRITE_WAIT: Duration = crate::guest::HELLO_WAIT;
+/// The interval at which a write checks that its bytes have left the queue.
+const DRAIN_POLL: Duration = Duration::from_millis(1);
+
 /// The USB console's CDC port. The rate is set for form: USB CDC ignores it.
 pub struct Serial {
     port: Box<dyn serialport::SerialPort>,
+    /// The port's name, for the link error.
+    name: String,
+    /// The link error of the last write, `None` while the device reads.
+    fault: Option<String>,
 }
 
 impl Serial {
@@ -29,14 +39,55 @@ impl Serial {
             .timeout(Duration::from_millis(100))
             .open()
             .map_err(|e| format!("{device}: {e}"))?;
-        Ok(Serial { port })
+        Ok(Serial::over(port, device))
+    }
+
+    /// The link over `port`, opened as `name`.
+    pub fn over(port: Box<dyn serialport::SerialPort>, name: &str) -> Self {
+        Serial {
+            port,
+            name: name.to_string(),
+            fault: None,
+        }
+    }
+
+    /// The link error of the last write: the device took nothing within [`WRITE_WAIT`].
+    pub fn fault(&self) -> Option<&str> {
+        self.fault.as_deref()
+    }
+
+    /// Write `bytes` and wait, up to [`WRITE_WAIT`], for the driver's queue to empty. The wait
+    /// is not `flush`: that is `tcdrain`, which waits for ever on a device that has stopped
+    /// reading (a C3 that panicked at boot keeps its USB-Serial-JTAG enumerated).
+    fn send(&mut self, bytes: &[u8]) -> Result<(), ()> {
+        let deadline = Instant::now() + WRITE_WAIT;
+        self.port.set_timeout(WRITE_WAIT).map_err(|_| ())?;
+        self.port.write_all(bytes).map_err(|_| ())?;
+        while self.port.bytes_to_write().map_err(|_| ())? > 0 {
+            if Instant::now() >= deadline {
+                return Err(());
+            }
+            std::thread::sleep(DRAIN_POLL);
+        }
+        Ok(())
     }
 }
 
 impl ByteLink for Serial {
+    /// A write the device does not take within [`WRITE_WAIT`] is a link error: what is queued is
+    /// dropped, so neither the next write nor the close waits on it, and the error is printed when
+    /// the device stops reading.
     fn write(&mut self, bytes: &[u8]) {
-        let _ = self.port.write_all(bytes);
-        let _ = self.port.flush();
+        if self.send(bytes).is_ok() {
+            self.fault = None;
+            return;
+        }
+        let _ = self.port.clear(serialport::ClearBuffer::Output);
+        if self.fault.is_none() {
+            let e = format!("the bridge on {} does not read: is it booting?", self.name);
+            eprintln!("hoverboard-cli: {e}");
+            self.fault = Some(e);
+        }
     }
 
     fn read(&mut self, timeout: Duration) -> Vec<u8> {

@@ -10,7 +10,16 @@ use espflash::connection::{Connection, ResetAfterOperation, ResetBeforeOperation
 use espflash::flasher::Flasher;
 use espflash::target::{Chip, ProgressCallbacks};
 use espsvc::{EspInfo, WifiState, SLOT_NONE};
+use net::pdu::NO_ADDRESS;
+use net::walk::CLASS_BRIDGE;
 use serialport::{FlowControl, SerialPortType, UsbPortInfo};
+
+use crate::client::Client;
+use crate::config;
+use crate::guest::{self, HELLO_WAIT};
+use crate::nodes;
+use crate::transport::Serial;
+use crate::wire::{ByteLink, Framed};
 
 /// The C3's USB-Serial-JTAG, as its USB vendor and product ids.
 pub const C3_USB: (u16, u16) = (0x303a, 0x1001);
@@ -171,13 +180,17 @@ pub enum Guard {
     Refuse(String),
 }
 
-/// The guard's decision: nothing answering (a blank chip, or other firmware) installs; a bridge
-/// that answered is asked about, unless `yes`; without a `terminal` on stdin, a bridge that
-/// answered is refused unless `yes`, as `replace` refuses.
-pub fn guard(answered: Option<&Answered>, yes: bool, terminal: bool) -> Guard {
+/// The guard's decision for `port`: a bridge that answered is asked about, unless `yes`; without a
+/// `terminal` on stdin, a bridge that answered is refused unless `yes`, as `replace` refuses.
+/// Nothing answering (a blank chip, other firmware, or a bridge that crashes at boot) is asked about
+/// at a terminal unless `yes`, and installs without one.
+pub fn guard(answered: Option<&Answered>, port: &str, yes: bool, terminal: bool) -> Guard {
     match answered {
-        None => Guard::Proceed,
-        Some(_) if yes => Guard::Proceed,
+        _ if yes => Guard::Proceed,
+        None if !terminal => Guard::Proceed,
+        None => Guard::Ask(format!(
+            "no bridge answers on {port}; erase it and install?"
+        )),
         Some(a) if !terminal => Guard::Refuse(format!(
             "{} answered on this port: give --yes to install over it without a terminal",
             a.name
@@ -294,6 +307,199 @@ pub fn reset(port: &str) -> Result<(), String> {
 pub const BOOT_WAIT: Duration = Duration::from_secs(15);
 /// How long the bridge may take to join the network after its reset (section 3.2, step 4).
 pub const JOIN_WAIT: Duration = Duration::from_secs(30);
+/// The interval between `ESP_INFO` requests while waiting for the bridge to join.
+const INFO_GAP: Duration = Duration::from_secs(2);
+/// The pause before the port is opened again while the chip resets.
+const REOPEN_GAP: Duration = Duration::from_millis(500);
+
+/// The C3's USB port as the install uses it: its console, its ROM loader and its reset.
+pub trait Port {
+    /// The port's name, for the lines the install prints.
+    fn name(&self) -> &str;
+    /// Open the console on the port.
+    fn open(&mut self) -> Result<Box<dyn ByteLink>, String>;
+    /// Write the image through the ROM loader and reset into it ([`write_image`]).
+    fn write_image(&mut self, image: &[u8]) -> Result<(), String>;
+    /// Hard-reset the chip ([`reset`]).
+    fn reset(&mut self) -> Result<(), String>;
+}
+
+/// The port the host lists, by its name.
+pub struct UsbPort(pub String);
+
+impl Port for UsbPort {
+    fn name(&self) -> &str {
+        &self.0
+    }
+
+    fn open(&mut self) -> Result<Box<dyn ByteLink>, String> {
+        Ok(Box::new(Serial::open(&self.0)?))
+    }
+
+    fn write_image(&mut self, image: &[u8]) -> Result<(), String> {
+        write_image(&self.0, image)
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        reset(&self.0)
+    }
+}
+
+/// A client to a bridge on the port's console.
+type OnPort = Client<Framed<Box<dyn ByteLink>>>;
+
+/// A bridge on `port` that answers an attach within [`HELLO_WAIT`]: the client to it, the guest
+/// address it granted, its `device.name`, and its `ESP_INFO` when that decodes. `None` when
+/// nothing answers (a blank chip, other firmware, a bridge that does not read, or a port that is not
+/// there yet).
+fn bridge_on(port: &mut impl Port) -> Option<(OnPort, u8, String, Option<EspInfo>)> {
+    let mut wire = Framed::new(port.open().ok()?);
+    let src = guest::attach(&mut wire, 1, HELLO_WAIT)?.guest;
+    let name = match nodes::read(&mut wire, src, NO_ADDRESS, store::DEVICE_NAME.key())
+        .ok()?
+        .value()
+    {
+        Some(store::Value::Str(s)) => String::from_utf8_lossy(s).into_owned(),
+        _ => "the bridge".to_string(),
+    };
+    let mut c = Client::addressed(wire, src, NO_ADDRESS);
+    let info = c.info_if_decodes().ok().flatten();
+    Some((c, src, name, info))
+}
+
+/// Wait up to `within` for the bridge on `port` to answer with an `ESP_INFO` that `done` accepts,
+/// opening the port again while the chip resets: the answer, accepted or not when time ran out
+/// while connected; `None` when nothing answered.
+fn wait_for_bridge(
+    port: &mut impl Port,
+    within: Duration,
+    done: impl Fn(&EspInfo) -> bool,
+) -> Option<(OnPort, u8, String, EspInfo)> {
+    let t0 = Instant::now();
+    while t0.elapsed() < within {
+        let Some((mut c, src, name, Some(mut info))) = bridge_on(port) else {
+            std::thread::sleep(REOPEN_GAP);
+            continue;
+        };
+        loop {
+            let left = within.saturating_sub(t0.elapsed());
+            if done(&info) || left.is_zero() {
+                return Some((c, src, name, info));
+            }
+            std::thread::sleep(INFO_GAP.min(left));
+            match c.info() {
+                Ok(i) => info = i,
+                Err(_) => break,
+            }
+        }
+    }
+    None
+}
+
+/// The install through `port` (`specs/bridge-onboarding.md` section 3.2): ask before erasing
+/// what is there (`ask` puts the question), write the image, wait for the first boot, apply the
+/// `files`, and when they set an SSID, reset the bridge and wait for it to join. A bridge that does
+/// not answer, a crashed one included, is installed over as a blank chip is
+/// (`specs/cli-serial-deadlines.md` section 2).
+pub fn install(
+    port: &mut impl Port,
+    image: &[u8],
+    files: Option<&config::Files>,
+    yes: bool,
+    terminal: bool,
+    ask: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    let name = port.name().to_string();
+
+    // 1. The guard.
+    let answered = bridge_on(port).map(|(_, _, name, info)| Answered {
+        name,
+        addr: info.map(|i| i.node),
+        commit: info.map(|i| i.commit),
+    });
+    if let Some(a) = &answered {
+        println!("bridge on {name}: {}", a.describe());
+    }
+    match guard(answered.as_ref(), &name, yes, terminal) {
+        Guard::Proceed => {}
+        Guard::Refuse(why) => return Err(why),
+        Guard::Ask(q) => {
+            if !ask(&q) {
+                return Err("nothing installed".into());
+            }
+        }
+    }
+
+    // 2. The install, ending in a hard reset into the new image.
+    let t0 = Instant::now();
+    port.write_image(image)?;
+    eprintln!(
+        "written and verified in {:.1} s; the chip is resetting into it",
+        t0.elapsed().as_secs_f32()
+    );
+
+    // 3. The first boot.
+    let (mut c, src, bridge, info) =
+        wait_for_bridge(port, BOOT_WAIT, |_| true).ok_or_else(|| {
+            format!(
+                "the bridge did not answer on {name} within {} s of the install",
+                BOOT_WAIT.as_secs()
+            )
+        })?;
+    println!(
+        "booted: {bridge}, slot {}, wifi {}",
+        slot_name(&info),
+        wifi_text(&info)
+    );
+
+    // 4. The files.
+    let Some(files) = files else {
+        return Ok(());
+    };
+    let mut b = config::Board {
+        wire: c.wire(),
+        src,
+        dst: NO_ADDRESS,
+        name: bridge,
+        class: CLASS_BRIDGE,
+    };
+    let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(files))?;
+    let plan = config::plan(files, &reads, &unknown, false).map_err(config::joined)?;
+    let after = config::execute(&mut b, &plan).map_err(|r| {
+        for l in config::written_lines(&b.name, &plan, &reads, &r) {
+            println!("{l}");
+        }
+        r.msg
+    })?;
+    for l in config::report(&b.name, &plan, &reads, &after) {
+        println!("{l}");
+    }
+    drop(c);
+    let ssid = files.entries.iter().find_map(|e| {
+        (e.key == store::WIFI_SSID.key())
+            .then(|| e.value.as_str())
+            .flatten()
+            .filter(|s| !s.is_empty())
+    });
+    let Some(ssid) = ssid else {
+        return Ok(());
+    };
+    port.reset()?;
+    eprintln!("reset; waiting for it to join {ssid}");
+    let up = |i: &EspInfo| i.wifi == WifiState::Up as u8;
+    match wait_for_bridge(port, JOIN_WAIT, up) {
+        Some((_, _, bridge, info)) if up(&info) => {
+            let [a, b, c, d] = info.ip;
+            println!("joined: {bridge}, {ssid}, {a}.{b}.{c}.{d}");
+            Ok(())
+        }
+        _ => Err(format!(
+            "did not join {ssid} in {} s; check the network name, the password and \
+             wifi.tx_power",
+            JOIN_WAIT.as_secs()
+        )),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -383,27 +589,37 @@ mod tests {
             found.describe(),
             "offroad-slave, address 0x03, commit 1a2b3c4d"
         );
-        // Nothing answered: install, terminal or not.
-        assert_eq!(guard(None, false, true), Guard::Proceed);
-        assert_eq!(guard(None, false, false), Guard::Proceed);
+        // Nothing answered: ask at a terminal, unless --yes; install without one.
+        assert_eq!(
+            guard(None, "/dev/ttyACM0", false, true),
+            Guard::Ask("no bridge answers on /dev/ttyACM0; erase it and install?".into())
+        );
+        assert_eq!(guard(None, "/dev/ttyACM0", false, false), Guard::Proceed);
+        assert_eq!(guard(None, "/dev/ttyACM0", true, true), Guard::Proceed);
         // A bridge answered: ask at a terminal, unless --yes.
         assert_eq!(
-            guard(Some(&found), false, true),
+            guard(Some(&found), "/dev/ttyACM0", false, true),
             Guard::Ask(
                 "Erase offroad-slave's name, address and Wi-Fi credentials and install?".into()
             )
         );
-        assert_eq!(guard(Some(&found), true, true), Guard::Proceed);
+        assert_eq!(
+            guard(Some(&found), "/dev/ttyACM0", true, true),
+            Guard::Proceed
+        );
         // Without a terminal: refused, unless --yes.
         assert_eq!(
-            guard(Some(&found), false, false),
+            guard(Some(&found), "/dev/ttyACM0", false, false),
             Guard::Refuse(
                 "offroad-slave answered on this port: give --yes to install over it without a \
                  terminal"
                     .into()
             )
         );
-        assert_eq!(guard(Some(&found), true, false), Guard::Proceed);
+        assert_eq!(
+            guard(Some(&found), "/dev/ttyACM0", true, false),
+            Guard::Proceed
+        );
         let unknown = Answered {
             addr: None,
             commit: None,

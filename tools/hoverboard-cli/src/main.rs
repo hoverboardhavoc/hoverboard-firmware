@@ -72,17 +72,19 @@ use std::time::{Duration, Instant};
 
 use espsvc::{Ctrl, Status};
 use net::pdu::NO_ADDRESS;
-use net::walk::{Controller, CLASS_BRIDGE};
+use net::walk::Controller;
 
 use hoverboard_cli::bundle::{self, Bundle, FileKind, ImageKind, TreeEntry};
 use hoverboard_cli::checks;
 use hoverboard_cli::cli::{self, Command, Link, Mode, Noun, Swd};
 use hoverboard_cli::client::{sample_line, Client, ClientError, Progress, StageTimes};
-use hoverboard_cli::config::{self, Board};
+use hoverboard_cli::config::{self, joined, Board};
 use hoverboard_cli::elf;
 use hoverboard_cli::erase;
-use hoverboard_cli::guest::{self, Drive, Tally, Wheel, WheelTarget, STOP_REPEATS};
-use hoverboard_cli::install::{self, Answered, Given, Guard};
+use hoverboard_cli::guest::{
+    self, Drive, Tally, Wheel, WheelTarget, HELLO_TRIES, HELLO_WAIT, STOP_REPEATS,
+};
+use hoverboard_cli::install::{self, Given, Guard};
 use hoverboard_cli::machine::{self, MachineFile};
 use hoverboard_cli::names;
 use hoverboard_cli::nodes::{self, class_name, Found, Walked, CLASS_MOTOR};
@@ -457,56 +459,6 @@ fn send_bridge_image(
     Ok(())
 }
 
-/// A bridge that answered on a port: the client to it, the guest address it granted, its
-/// `device.name`, and its `ESP_INFO` when that decodes.
-type OnPort = (EspClient, u8, String, Option<espsvc::EspInfo>);
-
-/// A bridge on `port` that answers an attach within `wait`; `None` when nothing answers (a blank
-/// chip, other firmware, or a port that is not there yet).
-fn bridge_on(port: &str, wait: Duration) -> Option<OnPort> {
-    let link: Box<dyn ByteLink> = Box::new(Serial::open(port).ok()?);
-    let mut wire = Framed::new(link);
-    let src = guest::attach(&mut wire, 1, wait)?.guest;
-    let name = match nodes::read(&mut wire, src, NO_ADDRESS, store::DEVICE_NAME.key())
-        .ok()?
-        .value()
-    {
-        Some(store::Value::Str(s)) => String::from_utf8_lossy(s).into_owned(),
-        _ => "the bridge".to_string(),
-    };
-    let mut c = Client::addressed(wire, src, NO_ADDRESS);
-    let info = c.info_if_decodes().ok().flatten();
-    Some((c, src, name, info))
-}
-
-/// Wait up to `within` for the bridge on `port` to answer with an `ESP_INFO` that `done` accepts,
-/// reopening the port while the chip resets: the answer, accepted or not when time ran out while
-/// connected; `None` when nothing answered.
-fn wait_for_bridge(
-    port: &str,
-    within: Duration,
-    done: impl Fn(&espsvc::EspInfo) -> bool,
-) -> Option<(EspClient, u8, String, espsvc::EspInfo)> {
-    let t0 = Instant::now();
-    while t0.elapsed() < within {
-        let Some((mut c, src, name, Some(mut info))) = bridge_on(port, HELLO_WAIT) else {
-            std::thread::sleep(Duration::from_millis(500));
-            continue;
-        };
-        loop {
-            if done(&info) || t0.elapsed() >= within {
-                return Some((c, src, name, info));
-            }
-            std::thread::sleep(RECONNECT_GAP);
-            match c.info() {
-                Ok(i) => info = i,
-                Err(_) => break,
-            }
-        }
-    }
-    None
-}
-
 /// `bridge install`'s image: from a bundle, its `bridge-install` image for the ESP32-C3, the only
 /// chip the install writes (`specs/firmware-bundle.md` section 4); otherwise the file, checked as a
 /// merged install image.
@@ -529,8 +481,7 @@ fn install_image(path: &str) -> Result<Vec<u8>, String> {
 }
 
 /// `bridge install` (`specs/bridge-onboarding.md` section 3.2): check the image and the files,
-/// choose the port, ask before erasing a bridge that answers there, write the image, wait for the
-/// first boot, apply the files, and when they set an SSID, reset the bridge and wait for it to join.
+/// choose the port, then install through it ([`install::install`]).
 fn bridge_install(
     given: Given,
     image_path: &str,
@@ -547,91 +498,14 @@ fn bridge_install(
     if found {
         eprintln!("using {port}, the one ESP32-C3 USB port");
     }
-
-    // 1. The guard.
-    let answered = bridge_on(&port, HELLO_WAIT).map(|(_, _, name, info)| Answered {
-        name,
-        addr: info.map(|i| i.node),
-        commit: info.map(|i| i.commit),
-    });
-    if let Some(a) = &answered {
-        println!("bridge on {port}: {}", a.describe());
-    }
-    match install::guard(answered.as_ref(), yes, std::io::stdin().is_terminal()) {
-        Guard::Proceed => {}
-        Guard::Refuse(why) => return Err(why),
-        Guard::Ask(q) => {
-            if !confirm(&q) {
-                return Err("nothing installed".into());
-            }
-        }
-    }
-
-    // 2. The install, ending in a hard reset into the new image.
-    let t0 = Instant::now();
-    install::write_image(&port, &image)?;
-    eprintln!(
-        "written and verified in {:.1} s; the chip is resetting into it",
-        t0.elapsed().as_secs_f32()
-    );
-
-    // 3. The first boot.
-    let (mut c, src, name, info) = wait_for_bridge(&port, install::BOOT_WAIT, |_| true)
-        .ok_or_else(|| {
-            format!(
-                "the bridge did not answer on {port} within {} s of the install",
-                install::BOOT_WAIT.as_secs()
-            )
-        })?;
-    println!(
-        "booted: {name}, slot {}, wifi {}",
-        slot_name(&info),
-        install::wifi_text(&info)
-    );
-
-    // 4. The files.
-    let Some(files) = files else {
-        return Ok(());
-    };
-    let mut b = Board {
-        wire: c.wire(),
-        src,
-        dst: NO_ADDRESS,
-        name,
-        class: CLASS_BRIDGE,
-    };
-    let (reads, unknown) = config::read_board(&mut b, &config::plan_keys(&files))?;
-    let plan = config::plan(&files, &reads, &unknown, false).map_err(joined)?;
-    let after = config::execute(&mut b, &plan).map_err(|r| {
-        for l in config::written_lines(&b.name, &plan, &reads, &r) {
-            println!("{l}");
-        }
-        r.msg
-    })?;
-    for l in config::report(&b.name, &plan, &reads, &after) {
-        println!("{l}");
-    }
-    drop(c);
-    let ssid = files.entries.iter().find_map(|e| {
-        (e.key == store::WIFI_SSID.key())
-            .then(|| e.value.as_str())
-            .flatten()
-            .filter(|s| !s.is_empty())
-    });
-    let Some(ssid) = ssid else {
-        return Ok(());
-    };
-    install::reset(&port)?;
-    eprintln!("reset; waiting for it to join {ssid}");
-    let up = |i: &espsvc::EspInfo| i.wifi == espsvc::WifiState::Up as u8;
-    match wait_for_bridge(&port, install::JOIN_WAIT, up) {
-        Some((_, _, name, info)) if up(&info) => {
-            let [a, b, c, d] = info.ip;
-            println!("joined: {name}, {ssid}, {a}.{b}.{c}.{d}");
-            Ok(())
-        }
-        _ => Err(format!("did not join {ssid}")),
-    }
+    install::install(
+        &mut install::UsbPort(port),
+        &image,
+        files.as_ref(),
+        yes,
+        terminal(),
+        confirm,
+    )
 }
 
 fn confirm(prompt: &str) -> bool {
@@ -647,9 +521,6 @@ fn terminal() -> bool {
     std::io::stdin().is_terminal()
 }
 
-/// How many `NODE_HELLO`s an attach sends, and how long it waits for each answer.
-const HELLO_TRIES: u32 = 3;
-const HELLO_WAIT: Duration = Duration::from_secs(1);
 /// The gap between rounds of `drive`'s stop frames.
 const STOP_GAP: Duration = Duration::from_millis(50);
 /// The longest one wait for a packet, so a Ctrl-C is seen within it.
@@ -754,12 +625,6 @@ fn bridge_client(link: &Link, spec: &str, check: bool) -> Result<EspClient, Stri
         }
     };
     Ok(Client::addressed(wire, src, dst))
-}
-
-/// Every problem of a refused plan, one per line.
-fn joined(p: Vec<names::Problem>) -> String {
-    let msgs: Vec<String> = p.into_iter().map(|p| p.msg).collect();
-    msgs.join("\nerror: ")
 }
 
 /// Print the problems `force` lets through as warnings, and stop on the others.
