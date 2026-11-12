@@ -162,7 +162,7 @@ fn cli(args: &[&str]) -> (bool, String, String) {
 fn the_noun_commands_by_target() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp = format!("--tcp={}", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || serve(listener, 10));
+    let server = std::thread::spawn(move || serve(listener, 9));
 
     // The walk: the fresh bridge ends at 0x03 and the boards keep theirs.
     let (ok, out, err) = cli(&[&tcp, "machine", "nodes"]);
@@ -188,7 +188,8 @@ fn the_noun_commands_by_target() {
         "0x03     bridge            00000000ab12000000000000  hb-bridge-ab12"
     );
 
-    // A name the bridge cannot advertise is refused with the rule, and the old one stays.
+    // A name the bridge cannot advertise is refused with the rule before the CLI connects (the
+    // bridge's own refusal of it is `net`'s test), and the old one stays.
     let (ok, out, err) = cli(&[
         &tcp,
         "bridge",
@@ -199,9 +200,11 @@ fn the_noun_commands_by_target() {
     ]);
     assert!(!ok);
     assert!(out.is_empty(), "{out}");
-    let rule = "name must be 1 to 26 letters, digits or '-'";
+    let rule = "name must be 1 to 22 letters, digits or '-'";
     assert!(
-        err.contains(&format!("hb-bridge-ab12: device.name: refused: {rule}")),
+        err.contains(&format!(
+            "device.name: a bridge's {rule}, not \"Offroad master\""
+        )),
         "{err}"
     );
 
@@ -649,6 +652,59 @@ fn a_value_one_pdu_cannot_carry_is_refused_before_any_link_or_install() {
     assert_eq!(code, Some(1));
     assert_eq!(err.trim(), refusal);
     assert!(out.is_empty(), "{out}");
+}
+
+/// `specs/bridge-name-limit.md` section 1: a bridge `device.name` longer than the 22 bytes its BLE
+/// host holds is refused by `bridge set`, `bridge apply` and `bridge install` before any link is
+/// opened, so the install erases nothing. A board's name is not held to it.
+#[test]
+fn a_bridge_name_the_ble_host_cannot_hold_is_refused_before_any_link_or_install() {
+    let name = "hoverboard-bridge-right";
+    let file = scratch("long-bridge-name.json");
+    std::fs::write(&file, format!(r#"{{ "device": {{ "name": "{name}" }} }}"#)).unwrap();
+    let refusal = format!(
+        "error: device.name: a bridge's name must be 1 to 22 letters, digits or '-', not \
+         \"{name}\" (23 bytes)"
+    );
+
+    let idle = TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = format!("--tcp={}", idle.local_addr().unwrap());
+    for args in [
+        vec![at.as_str(), "bridge", "apply", "0x03", &file],
+        vec![at.as_str(), "bridge", "set", "0x03", "device.name", name],
+    ] {
+        let (code, out, err) = cli_code(&args);
+        assert_eq!(code, Some(1), "{args:?}");
+        assert_eq!(err.trim(), refusal, "{args:?}");
+        assert!(out.is_empty(), "{out}");
+    }
+    idle.set_nonblocking(true).unwrap();
+    assert_eq!(
+        idle.accept().map(|_| ()).unwrap_err().kind(),
+        ErrorKind::WouldBlock,
+        "a bridge command connected"
+    );
+
+    // The port named here does not exist, so a run that reached it would fail on the port instead.
+    let image = scratch("install-long-name.bin");
+    let mut bytes = vec![0xFFu8; 4 * 1024 * 1024];
+    bytes[0] = 0xE9;
+    std::fs::write(&image, bytes).unwrap();
+    let port = scratch("no-such-port-long-name");
+    let (code, out, err) = cli_code(&[
+        "--serial", &port, "bridge", "install", &image, &file, "--yes",
+    ]);
+    assert_eq!(code, Some(1));
+    assert_eq!(err.trim(), refusal);
+    assert!(out.is_empty(), "{out}");
+
+    // A board takes the same name.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = format!("--tcp={}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || serve(listener, 1));
+    let (code, _, err) = cli_code(&[&tcp, "board", "set", "0x01", "device.name", name]);
+    assert_eq!(code, Some(0), "{err}");
+    server.join().unwrap();
 }
 
 #[test]

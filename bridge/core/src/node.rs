@@ -88,27 +88,47 @@ pub const fn uid(mac: [u8; 6]) -> [u8; UID_LEN] {
     uid
 }
 
-/// The name BLE advertises and mDNS answers for, copied into `buf`; returns its length: the
-/// `device.name` the store holds, or `default` when it holds none. A `CONFIG_WRITE` of a name that
-/// fails [`bridge_name_usable`] is refused, but a store written before that refusal existed may
-/// still hold one: it stays in the store and the default is used. Nothing is written: the default
-/// is answered by the node, not stored, so an un-stored name stays un-stored across a reboot.
+/// The name [`advertised_name`] chose: its length in the buffer, and the length of a stored
+/// `device.name` it refused in favour of the default, so the boot log can say so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdvertisedName {
+    /// The name's length in the buffer.
+    pub len: usize,
+    /// The length of the stored name the bridge cannot use, when the default stands in for one.
+    pub refused: Option<usize>,
+}
+
+/// The name BLE advertises and mDNS answers for, copied into `buf`: the `device.name` the store
+/// holds, or `default` when it holds none. A `CONFIG_WRITE` of a name that fails
+/// [`bridge_name_usable`] is refused, but a store written before that refusal existed (or by an
+/// image with a longer limit, `specs/bridge-name-limit.md` section 2) may still hold one: it stays
+/// in the store, the default is used and its length is reported as refused. Nothing is written:
+/// the default is answered by the node, not stored, so an un-stored name stays un-stored across a
+/// reboot.
 pub fn advertised_name<F: Flash>(
     store: &Store<'_, F>,
     default: &[u8],
     buf: &mut [u8; BRIDGE_NAME_MAX],
-) -> usize {
-    let mut usable: Option<usize> = None;
+) -> AdvertisedName {
+    let mut stored: Option<Result<usize, usize>> = None;
     store.for_each_in(&[DEVICE_NAME.key()], |_, tag, v| {
-        usable = (tag == Type::Str.tag() && bridge_name_usable(v)).then(|| {
+        stored = Some(if tag == Type::Str.tag() && bridge_name_usable(v) {
             buf[..v.len()].copy_from_slice(v);
-            v.len()
+            Ok(v.len())
+        } else {
+            Err(v.len())
         });
     });
-    usable.unwrap_or_else(|| {
-        buf[..default.len()].copy_from_slice(default);
-        default.len()
-    })
+    match stored {
+        Some(Ok(len)) => AdvertisedName { len, refused: None },
+        refused => {
+            buf[..default.len()].copy_from_slice(default);
+            AdvertisedName {
+                len: default.len(),
+                refused: refused.and_then(Result::err),
+            }
+        }
+    }
 }
 
 /// The bridge's Wi-Fi station as its store sets it up at boot (`specs/bridge-onboarding.md`
