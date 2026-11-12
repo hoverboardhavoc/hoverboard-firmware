@@ -24,7 +24,7 @@ This guide takes a hoverboard motor controller from stock to driving on this fir
 - **`hoverboard-cli`:** each CI run in
   [Actions](https://github.com/hoverboardhavoc/hoverboard-firmware/actions) has a
   `hoverboard-cli-<target>` artifact for Linux x86-64, macOS on Apple silicon, Windows and the
-  Raspberry Pi.
+  Raspberry Pi. Or build it yourself (see [Building](building.md)).
 
 `hoverboard-cli firmware info <bundle>` lists what a bundle holds.
 

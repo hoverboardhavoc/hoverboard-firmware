@@ -1,5 +1,10 @@
 # Onboard BLE module: observable interface
 
+> **Support for this module has been removed from the firmware** in
+> [`1e91cd21`](https://github.com/hoverboardhavoc/hoverboard-firmware/commit/1e91cd21a3a6587e5f7f807866aeb9292dcaea2a)
+> (2026-10-27). A phone reaches the board through the Bluetooth of the hoverboard bridge on the
+> board's SWD header. This page stays as the record of the module's interface.
+
 **RoboDurden-style ClassyWalk 2-1-20 / 2-2-20 GD32 hoverboard mainboards** carry, on some units, an onboard
 **CC2541-class transparent UART-to-BLE module** (a chip stamped **`TTC2541 F256`** has been observed). It is
 a "dumb" bridge: the MCU talks to it over a UART, a short AT command sequence puts it into transparent mode,
