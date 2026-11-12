@@ -292,3 +292,27 @@ fn the_binary_places_each_segment_at_its_load_address() {
     want.extend([9, 10, 11, 12]);
     assert_eq!(bin, want);
 }
+
+#[test]
+fn the_strip_takes_a_section_whose_offset_is_less_aligned_than_its_address() {
+    use object::{Object, ObjectSection};
+    // cortex-m 0.7.10 images declare `.text` 8-aligned at a file offset that is only 4-aligned.
+    let g = release_guards();
+    let mut f = Fixture::new(&[1, 2, 3, 4], g.code_floor, common::names_of(&g));
+    f.debug = true;
+    f.text_align = 8;
+    let full = f.build();
+    let text_offset = |b: &[u8]| {
+        let o = object::File::parse(b).unwrap();
+        let t = o.section_by_name(".text").unwrap();
+        (t.file_range().unwrap().0, t.data().unwrap().to_vec())
+    };
+    assert_ne!(
+        text_offset(&full).0 % 8,
+        0,
+        "the fixture places .text off its alignment"
+    );
+    let stripped = elf::strip_debug(&full).unwrap();
+    assert_eq!(text_offset(&stripped), text_offset(&full));
+    assert_eq!(elf::to_bin(&stripped), elf::to_bin(&full));
+}
